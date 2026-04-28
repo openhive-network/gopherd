@@ -189,16 +189,20 @@ var futureExtensionsTags = [][2]int{{0, 0}}
 // --- common nested types -------------------------------------------------
 
 // LegacyChainProperties mirrors hive::protocol::legacy_chain_properties used
-// by witness_update / pow / pow2.
+// by witness_update / pow / pow2. Note that account_creation_fee is a
+// legacy_hive_asset — six accepted symbol byte sequences exist in mainnet
+// history (witnesses at blocks 994240, 1021529, 3143833, 3208405, 3695672,
+// 4338089, 4626205, 4632595 set non-canonical encodings). See
+// internal/protocol/asset/asset.go for the full list.
 type LegacyChainProperties struct {
-	AccountCreationFee asset.Asset
+	AccountCreationFee asset.LegacyHiveAsset
 	MaximumBlockSize   uint32
 	HBDInterestRate    uint16
 }
 
 func readLegacyChainProperties(r *fcraw.Reader) (LegacyChainProperties, error) {
 	var p LegacyChainProperties
-	a, err := asset.ReadAsset(r)
+	a, err := asset.ReadLegacyHiveAsset(r)
 	if err != nil {
 		return p, fmt.Errorf("legacy_chain_properties.account_creation_fee: %w", err)
 	}
@@ -213,7 +217,7 @@ func readLegacyChainProperties(r *fcraw.Reader) (LegacyChainProperties, error) {
 }
 
 func appendLegacyChainProperties(dst []byte, p LegacyChainProperties) []byte {
-	dst = asset.AppendAsset(dst, p.AccountCreationFee)
+	dst = asset.AppendLegacyHiveAsset(dst, p.AccountCreationFee)
 	dst = binary.LittleEndian.AppendUint32(dst, p.MaximumBlockSize)
 	dst = binary.LittleEndian.AppendUint16(dst, p.HBDInterestRate)
 	return dst

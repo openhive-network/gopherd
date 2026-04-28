@@ -44,6 +44,8 @@ func main() {
 		os.Exit(cmdValidateMainnet(os.Args[2:]))
 	case "validate-blocklog":
 		os.Exit(cmdValidateBlocklog(os.Args[2:]))
+	case "debug-block":
+		os.Exit(cmdDebugBlock(os.Args[2:]))
 	case "version":
 		fmt.Println("ghive-tools 0.0.1 (P0)")
 	case "-h", "--help", "help":
