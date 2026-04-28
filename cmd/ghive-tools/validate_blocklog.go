@@ -113,7 +113,7 @@ func cmdValidateBlocklog(args []string) int {
 		}
 
 		gotRoot := tx.MerkleRoot(digests)
-		if gotRoot != hdr.TransactionMerkleRoot {
+		if !block.MerkleRootAccepted(n, gotRoot, hdr.TransactionMerkleRoot) {
 			merkleFails++
 			fmt.Fprintf(os.Stderr,
 				"block %d MERKLE MISMATCH:\n  computed: %s\n  expected: %s\n",
