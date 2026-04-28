@@ -39,11 +39,8 @@ func stub(name string, validate func(op.Operation) error) Evaluator {
 func noValidate(_ op.Operation) error { return nil }
 
 func init() {
-	// Vote / comment / content (need comment_object + comment_vote_object).
-	register(op.TagVote, stub("vote", noValidate))
-	register(op.TagComment, stub("comment", noValidate))
-	register(op.TagDeleteComment, stub("delete_comment", noValidate))
-	register(op.TagCommentOptions, stub("comment_options", noValidate))
+	// (vote, comment, delete_comment, comment_options are implemented in
+	// comment.go.)
 
 	// (witness_update, witness_set_properties, account_witness_vote, and
 	// account_witness_proxy are implemented in witness.go.)

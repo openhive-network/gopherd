@@ -116,15 +116,20 @@ func TestApplyBlockStubsRunWithoutError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// A vote op has only a stub registered — applying the block should
-	// succeed without ErrNotImplemented now that all 50 ops are covered.
-	voteOp := op.Vote{Voter: "initminer", Author: "initminer", Permlink: "x", Weight: 100}
-	st := tx.SignedTransaction{Transaction: tx.Transaction{Operations: []op.Operation{voteOp}}}
+	// A custom_json op is fully covered by a registered (no-op) stub
+	// — applying the block should succeed without ErrNotImplemented.
+	customOp := op.CustomJSON{
+		RequiredAuths:        nil,
+		RequiredPostingAuths: []string{"initminer"},
+		ID:                   "test",
+		JSON:                 `{"k":1}`,
+	}
+	st := tx.SignedTransaction{Transaction: tx.Transaction{Operations: []op.Operation{customOp}}}
 	raw := buildBlock(t, 1, "initminer", 1_700_000_000, []tx.SignedTransaction{st})
 
 	chain := New(db)
 	if _, err := chain.ApplyBlock(raw, 1, ApplyOptions{}, nil); err != nil {
-		t.Fatalf("ApplyBlock with stub vote: %v", err)
+		t.Fatalf("ApplyBlock with stub custom_json: %v", err)
 	}
 }
 
