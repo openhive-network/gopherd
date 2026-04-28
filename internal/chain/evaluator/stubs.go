@@ -57,10 +57,8 @@ func init() {
 	register(op.TagCustomJSON, stub("custom_json", noValidate))
 	register(op.TagCustomBinary, stub("custom_binary", noValidate))
 
-	// Market (need limit_order_object).
-	register(op.TagLimitOrderCreate, stub("limit_order_create", noValidate))
-	register(op.TagLimitOrderCreate2, stub("limit_order_create2", noValidate))
-	register(op.TagLimitOrderCancel, stub("limit_order_cancel", noValidate))
+	// (limit_order_create / limit_order_create2 / limit_order_cancel
+	// implemented in limit_order.go — matching engine still deferred.)
 
 	// Feed (need feed_history_object + price tracking).
 	register(op.TagFeedPublish, stub("feed_publish", noValidate))
