@@ -120,15 +120,39 @@ func readPow2Input(r *fcraw.Reader) (Pow2Input, error) {
 	return in, nil
 }
 
+// EquihashProof mirrors fc::equihash::proof:
+//
+//	n      uint32 LE
+//	k      uint32 LE
+//	seed   sha256 (32 raw bytes)
+//	inputs vector<uint32_t>      (varint count + count*4 bytes)
+type EquihashProof struct {
+	N, K   uint32
+	Seed   [32]byte
+	Inputs []uint32
+}
+
+// EquihashPow mirrors hive::protocol::equihash_pow:
+//
+//	input       pow2_input   (worker_account string + 20-byte prev_block + uint64 nonce)
+//	proof       equihash::proof
+//	prev_block  block_id_type (20 raw bytes)
+//	pow_summary uint32 LE
+type EquihashPow struct {
+	Input      Pow2Input
+	Proof      EquihashProof
+	PrevBlock  [20]byte
+	PowSummary uint32
+}
+
 type Pow2 struct {
 	// WorkVariantTag is 0 for pow2, 1 for equihash_pow.
 	WorkVariantTag uint8
-	// PowInput carries the pow2-variant input (when WorkVariantTag == 0).
+	// PowInput / PowSummary populated when WorkVariantTag == 0.
 	PowInput   Pow2Input
 	PowSummary uint32
-	// EquihashRaw captures the entire equihash_pow body verbatim when
-	// WorkVariantTag == 1. Operationally we don't need to inspect it.
-	EquihashRaw []byte
+	// EquihashWork populated when WorkVariantTag == 1.
+	EquihashWork EquihashPow
 
 	NewOwnerKey *crypto.PublicKey
 	Props       LegacyChainProperties
@@ -142,12 +166,51 @@ func (o Pow2) AppendFCBody(dst []byte) []byte {
 		dst = appendPow2Input(dst, o.PowInput)
 		dst = binary.LittleEndian.AppendUint32(dst, o.PowSummary)
 	case 1:
-		dst = append(dst, o.EquihashRaw...)
+		dst = appendPow2Input(dst, o.EquihashWork.Input)
+		dst = appendEquihashProof(dst, o.EquihashWork.Proof)
+		dst = append(dst, o.EquihashWork.PrevBlock[:]...)
+		dst = binary.LittleEndian.AppendUint32(dst, o.EquihashWork.PowSummary)
 	}
 	dst = appendOptional(dst, o.NewOwnerKey, func(dst []byte, k crypto.PublicKey) []byte {
 		return append(dst, k[:]...)
 	})
 	return appendLegacyChainProperties(dst, o.Props)
+}
+
+func appendEquihashProof(dst []byte, p EquihashProof) []byte {
+	dst = binary.LittleEndian.AppendUint32(dst, p.N)
+	dst = binary.LittleEndian.AppendUint32(dst, p.K)
+	dst = append(dst, p.Seed[:]...)
+	dst = fcraw.AppendVarUint(dst, uint32(len(p.Inputs)))
+	for _, v := range p.Inputs {
+		dst = binary.LittleEndian.AppendUint32(dst, v)
+	}
+	return dst
+}
+
+func readEquihashProof(r *fcraw.Reader) (EquihashProof, error) {
+	var p EquihashProof
+	var err error
+	if p.N, err = r.ReadUint32(); err != nil {
+		return p, fmt.Errorf("equihash.n: %w", err)
+	}
+	if p.K, err = r.ReadUint32(); err != nil {
+		return p, fmt.Errorf("equihash.k: %w", err)
+	}
+	if err := r.ReadInto(p.Seed[:]); err != nil {
+		return p, fmt.Errorf("equihash.seed: %w", err)
+	}
+	count, err := r.ReadVarUint()
+	if err != nil {
+		return p, fmt.Errorf("equihash.inputs count: %w", err)
+	}
+	p.Inputs = make([]uint32, count)
+	for i := range p.Inputs {
+		if p.Inputs[i], err = r.ReadUint32(); err != nil {
+			return p, fmt.Errorf("equihash.inputs[%d]: %w", i, err)
+		}
+	}
+	return p, nil
 }
 
 func readPow2(r *fcraw.Reader) (Operation, error) {
@@ -166,11 +229,20 @@ func readPow2(r *fcraw.Reader) (Operation, error) {
 			return nil, err
 		}
 	case 1:
-		// equihash_pow body is variable: input + equihash::proof + prev_block + uint32.
-		// equihash::proof contains n,k,seed,inputs which is fairly opaque without
-		// implementing the full struct. Until we hit one of these in real data,
-		// fail loudly so we know to extend.
-		return nil, fmt.Errorf("pow2.work: equihash_pow variant not yet implemented")
+		var ep EquihashPow
+		if ep.Input, err = readPow2Input(r); err != nil {
+			return nil, fmt.Errorf("equihash_pow.input: %w", err)
+		}
+		if ep.Proof, err = readEquihashProof(r); err != nil {
+			return nil, err
+		}
+		if err := r.ReadInto(ep.PrevBlock[:]); err != nil {
+			return nil, fmt.Errorf("equihash_pow.prev_block: %w", err)
+		}
+		if ep.PowSummary, err = r.ReadUint32(); err != nil {
+			return nil, fmt.Errorf("equihash_pow.pow_summary: %w", err)
+		}
+		o.EquihashWork = ep
 	default:
 		return nil, fmt.Errorf("pow2.work: unknown variant tag %d", tag)
 	}
