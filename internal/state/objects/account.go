@@ -42,6 +42,12 @@ type Account struct {
 	MemoKey [33]byte
 	// JSONMetadata is the account's published metadata blob.
 	JSONMetadata string
+	// Proxy is the account_witness_proxy target. Empty string ("" or
+	// HIVE_PROXY_TO_SELF_ACCOUNT in C++) means no proxy.
+	Proxy auth.AccountName
+	// WitnessesVotedFor counts how many witnesses this account has voted
+	// for directly. Capped at HIVE_MAX_ACCOUNT_WITNESS_VOTES (30).
+	WitnessesVotedFor uint16
 }
 
 // AppendAccount serializes a to dst using FC binary form. The field
@@ -61,6 +67,9 @@ func AppendAccount(dst []byte, a *Account) []byte {
 	dst = append(dst, a.MemoKey[:]...)
 	dst = fcraw.AppendVarUint(dst, uint32(len(a.JSONMetadata)))
 	dst = append(dst, a.JSONMetadata...)
+	dst = fcraw.AppendVarUint(dst, uint32(len(a.Proxy)))
+	dst = append(dst, a.Proxy...)
+	dst = append(dst, byte(a.WitnessesVotedFor), byte(a.WitnessesVotedFor>>8))
 	return dst
 }
 
@@ -99,6 +108,12 @@ func ReadAccount(src []byte) (Account, error) {
 	}
 	if a.JSONMetadata, err = r.ReadString(); err != nil {
 		return a, fmt.Errorf("account.json_metadata: %w", err)
+	}
+	if a.Proxy, err = r.ReadString(); err != nil {
+		return a, fmt.Errorf("account.proxy: %w", err)
+	}
+	if a.WitnessesVotedFor, err = r.ReadUint16(); err != nil {
+		return a, fmt.Errorf("account.witnesses_voted_for: %w", err)
 	}
 	if !r.AtEnd() {
 		return a, errors.New("account: trailing bytes after decode (schema mismatch?)")

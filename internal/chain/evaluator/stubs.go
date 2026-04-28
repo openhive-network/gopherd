@@ -45,14 +45,9 @@ func init() {
 	register(op.TagDeleteComment, stub("delete_comment", noValidate))
 	register(op.TagCommentOptions, stub("comment_options", noValidate))
 
-	// Witness (need witness_object).
-	register(op.TagWitnessUpdate, stub("witness_update", noValidate))
-	register(op.TagWitnessSetProperties, stub("witness_set_properties", noValidate))
+	// (witness_update, witness_set_properties, account_witness_vote, and
+	// account_witness_proxy are implemented in witness.go.)
 	register(op.TagWitnessBlockApprove, stub("witness_block_approve", noValidate))
-
-	// Witness-vote / proxy (need witness_vote_object + delegated state).
-	register(op.TagAccountWitnessVote, stub("account_witness_vote", noValidate))
-	register(op.TagAccountWitnessProxy, stub("account_witness_proxy", noValidate))
 	register(op.TagDeclineVotingRights, stub("decline_voting_rights", noValidate))
 
 	// (pow/pow2 are implemented in pow.go — they create the worker account
