@@ -150,11 +150,19 @@ func TestEvaluatorCoverageReportsTransfer(t *testing.T) {
 	t.Fatalf("transfer evaluator not in Coverage(): %v", tags)
 }
 
-func TestUnknownOpReportsErrNotImplemented(t *testing.T) {
-	_, s := seedAccounts(t, 0, 0, 0, 0)
-	// Use a vote op which has no evaluator registered yet.
-	err := Apply(&Context{DB: s}, op.Vote{Voter: "alice", Author: "bob", Permlink: "x", Weight: 1000})
-	if !errors.Is(err, ErrNotImplemented) {
-		t.Fatalf("expected ErrNotImplemented, got %v", err)
+// TestEveryRegularTagHasEvaluator confirms the full-coverage promise:
+// every op tag 0..TagFirstVirtual-1 must have a registered evaluator
+// (real or stub) so the apply pipeline never returns ErrNotImplemented
+// during replay. New ops added to internal/protocol/op MUST also be
+// registered here.
+func TestEveryRegularTagHasEvaluator(t *testing.T) {
+	covered := map[op.Tag]bool{}
+	for _, tag := range Coverage() {
+		covered[tag] = true
+	}
+	for tag := op.Tag(0); tag < op.TagFirstVirtual; tag++ {
+		if !covered[tag] {
+			t.Errorf("tag %d (%s) has no evaluator registered", tag, tag.Name())
+		}
 	}
 }

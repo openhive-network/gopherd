@@ -26,6 +26,8 @@ Commands:
   validate-blocklog <block_log_path>     parse every block + every transaction
                                          and validate computed merkle roots
                                          match each block header
+  replay <block_log_path>                apply every block through the
+                                         evaluator pipeline (state mutation)
   version                                print version
   help                                   show this message
 `
@@ -46,6 +48,8 @@ func main() {
 		os.Exit(cmdValidateBlocklog(os.Args[2:]))
 	case "debug-block":
 		os.Exit(cmdDebugBlock(os.Args[2:]))
+	case "replay":
+		os.Exit(cmdReplay(os.Args[2:]))
 	case "version":
 		fmt.Println("ghive-tools 0.0.1 (P0)")
 	case "-h", "--help", "help":

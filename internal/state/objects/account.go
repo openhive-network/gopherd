@@ -33,13 +33,21 @@ type Account struct {
 	HBDBalance int64
 	// VestingShares is the total VESTS held (1e-6 VESTS).
 	VestingShares int64
+	// Pending reward balances (claim_reward_balance moves these into the
+	// liquid Balance/HBDBalance/VestingShares fields).
+	RewardHive  int64
+	RewardHBD   int64
+	RewardVests int64
+	// MemoKey is the 33-byte compressed secp256k1 memo key.
+	MemoKey [33]byte
+	// JSONMetadata is the account's published metadata blob.
+	JSONMetadata string
 }
 
-// AppendAccount serializes a to dst using FC binary form. Field order
-// matches the AccountFCFields slice and must be preserved.
-//
-// The field order chosen here is internal to the state schema — it does
-// not need to match hived's account_object FC_REFLECT.
+// AppendAccount serializes a to dst using FC binary form. The field
+// order chosen here is internal to the state schema — it does not need
+// to match hived's account_object FC_REFLECT — but it MUST be preserved
+// across releases of the schema.
 func AppendAccount(dst []byte, a *Account) []byte {
 	dst = fcraw.AppendVarUint(dst, uint32(len(a.Name)))
 	dst = append(dst, a.Name...)
@@ -47,6 +55,12 @@ func AppendAccount(dst []byte, a *Account) []byte {
 	dst = appendI64LE(dst, a.Balance)
 	dst = appendI64LE(dst, a.HBDBalance)
 	dst = appendI64LE(dst, a.VestingShares)
+	dst = appendI64LE(dst, a.RewardHive)
+	dst = appendI64LE(dst, a.RewardHBD)
+	dst = appendI64LE(dst, a.RewardVests)
+	dst = append(dst, a.MemoKey[:]...)
+	dst = fcraw.AppendVarUint(dst, uint32(len(a.JSONMetadata)))
+	dst = append(dst, a.JSONMetadata...)
 	return dst
 }
 
@@ -70,6 +84,21 @@ func ReadAccount(src []byte) (Account, error) {
 	}
 	if a.VestingShares, err = r.ReadInt64(); err != nil {
 		return a, fmt.Errorf("account.vesting_shares: %w", err)
+	}
+	if a.RewardHive, err = r.ReadInt64(); err != nil {
+		return a, fmt.Errorf("account.reward_hive: %w", err)
+	}
+	if a.RewardHBD, err = r.ReadInt64(); err != nil {
+		return a, fmt.Errorf("account.reward_hbd: %w", err)
+	}
+	if a.RewardVests, err = r.ReadInt64(); err != nil {
+		return a, fmt.Errorf("account.reward_vests: %w", err)
+	}
+	if err := r.ReadInto(a.MemoKey[:]); err != nil {
+		return a, fmt.Errorf("account.memo_key: %w", err)
+	}
+	if a.JSONMetadata, err = r.ReadString(); err != nil {
+		return a, fmt.Errorf("account.json_metadata: %w", err)
 	}
 	if !r.AtEnd() {
 		return a, errors.New("account: trailing bytes after decode (schema mismatch?)")
