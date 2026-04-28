@@ -1,0 +1,116 @@
+package op
+
+import (
+	"encoding/binary"
+
+	"hived-go/internal/fcraw"
+	"hived-go/internal/protocol/asset"
+	"hived-go/internal/protocol/auth"
+)
+
+// ---- 27 escrow_transfer -------------------------------------------------
+
+type EscrowTransfer struct {
+	From, To, Agent      auth.AccountName
+	EscrowID             uint32
+	HbdAmount            asset.Asset
+	HiveAmount           asset.Asset
+	Fee                  asset.Asset
+	RatificationDeadline uint32
+	EscrowExpiration     uint32
+	JSONMeta             string
+}
+
+func (EscrowTransfer) OpTag() Tag { return TagEscrowTransfer }
+func (o EscrowTransfer) AppendFCBody(dst []byte) []byte {
+	dst = appendString(dst, o.From)
+	dst = appendString(dst, o.To)
+	dst = appendString(dst, o.Agent)
+	dst = binary.LittleEndian.AppendUint32(dst, o.EscrowID)
+	dst = asset.AppendAsset(dst, o.HbdAmount)
+	dst = asset.AppendAsset(dst, o.HiveAmount)
+	dst = asset.AppendAsset(dst, o.Fee)
+	dst = binary.LittleEndian.AppendUint32(dst, o.RatificationDeadline)
+	dst = binary.LittleEndian.AppendUint32(dst, o.EscrowExpiration)
+	return appendString(dst, o.JSONMeta)
+}
+
+func readEscrowTransfer(r *fcraw.Reader) (Operation, error) {
+	var o EscrowTransfer
+	var err error
+	for _, dst := range []*string{&o.From, &o.To, &o.Agent} {
+		if *dst, err = r.ReadString(); err != nil {
+			return nil, err
+		}
+	}
+	if o.EscrowID, err = r.ReadUint32(); err != nil {
+		return nil, err
+	}
+	if o.HbdAmount, err = asset.ReadAsset(r); err != nil {
+		return nil, err
+	}
+	if o.HiveAmount, err = asset.ReadAsset(r); err != nil {
+		return nil, err
+	}
+	if o.Fee, err = asset.ReadAsset(r); err != nil {
+		return nil, err
+	}
+	if o.RatificationDeadline, err = r.ReadUint32(); err != nil {
+		return nil, err
+	}
+	if o.EscrowExpiration, err = r.ReadUint32(); err != nil {
+		return nil, err
+	}
+	if o.JSONMeta, err = r.ReadString(); err != nil {
+		return nil, err
+	}
+	return o, nil
+}
+
+// ---- 29 escrow_release --------------------------------------------------
+
+type EscrowRelease struct {
+	From, To, Agent, Who, Receiver auth.AccountName
+	EscrowID                       uint32
+	HbdAmount                      asset.Asset
+	HiveAmount                     asset.Asset
+}
+
+func (EscrowRelease) OpTag() Tag { return TagEscrowRelease }
+func (o EscrowRelease) AppendFCBody(dst []byte) []byte {
+	dst = appendString(dst, o.From)
+	dst = appendString(dst, o.To)
+	dst = appendString(dst, o.Agent)
+	dst = appendString(dst, o.Who)
+	dst = appendString(dst, o.Receiver)
+	dst = binary.LittleEndian.AppendUint32(dst, o.EscrowID)
+	dst = asset.AppendAsset(dst, o.HbdAmount)
+	return asset.AppendAsset(dst, o.HiveAmount)
+}
+
+func readEscrowRelease(r *fcraw.Reader) (Operation, error) {
+	var o EscrowRelease
+	var err error
+	for _, dst := range []*string{&o.From, &o.To, &o.Agent, &o.Who, &o.Receiver} {
+		if *dst, err = r.ReadString(); err != nil {
+			return nil, err
+		}
+	}
+	if o.EscrowID, err = r.ReadUint32(); err != nil {
+		return nil, err
+	}
+	if o.HbdAmount, err = asset.ReadAsset(r); err != nil {
+		return nil, err
+	}
+	if o.HiveAmount, err = asset.ReadAsset(r); err != nil {
+		return nil, err
+	}
+	return o, nil
+}
+
+func init() {
+	register(TagEscrowTransfer, readEscrowTransfer)
+	register(TagEscrowRelease, readEscrowRelease)
+}
+
+var _ = fcraw.AppendVarUint

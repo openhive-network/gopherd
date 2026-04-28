@@ -42,6 +42,18 @@ func (r *Reader) Remaining() int { return len(r.src) - r.pos }
 // AtEnd reports whether the cursor has consumed all input.
 func (r *Reader) AtEnd() bool { return r.pos >= len(r.src) }
 
+// SourceRange returns the byte slice src[start:end], aliased into the
+// underlying source. The cursor is not affected. Callers must not mutate
+// the returned slice and must keep the source alive while it is in use.
+// Useful for capturing the raw byte range a parser consumed (e.g. for
+// hashing or round-trip preservation).
+func (r *Reader) SourceRange(start, end int) []byte {
+	if start < 0 || end > len(r.src) || end < start {
+		return nil
+	}
+	return r.src[start:end:end]
+}
+
 // ensure checks that at least n bytes remain.
 func (r *Reader) ensure(n int) error {
 	if r.pos+n > len(r.src) {
