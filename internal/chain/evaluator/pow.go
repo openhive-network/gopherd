@@ -54,7 +54,15 @@ func (pow2Evaluator) Apply(ctx *Context, o op.Operation) error {
 	return ensureMinerAccount(ctx, worker)
 }
 
-// ensureMinerAccount creates an account named worker if missing.
+// hiveMiningReward is HIVE_MINING_REWARD (libraries/protocol/include/hive/protocol/config.hpp):
+// `asset(1000, HIVE_SYMBOL)` — 1.000 HIVE per pow op. hived's mining flow
+// converts this to VESTS via create_vesting; we credit the liquid Balance
+// to keep subsequent transfers funded. CurrentSupply on the DGPO is
+// adjusted to track the inflation.
+const hiveMiningReward int64 = 1000
+
+// ensureMinerAccount creates an account named worker if missing AND
+// credits the standard mining reward to the worker's HIVE balance.
 func ensureMinerAccount(ctx *Context, worker string) error {
 	if worker == "" {
 		return fmt.Errorf("pow/pow2: empty worker_account")
@@ -63,23 +71,25 @@ func ensureMinerAccount(ctx *Context, worker string) error {
 	if err != nil {
 		return err
 	}
-	if has {
-		return nil
+	if !has {
+		objects.PutAccount(ctx.DB, &objects.Account{
+			Name:    worker,
+			Created: ctx.BlockTime,
+		})
 	}
-	if err := tryCreateMinerAccount(ctx, worker); err != nil {
-		if err == state.ErrNotFound {
-			return fmt.Errorf("ensureMinerAccount: %w", err)
-		}
+	a, err := objects.GetAccount(ctx.DB, worker)
+	if err != nil {
 		return err
 	}
-	return nil
-}
+	a.Balance += hiveMiningReward
+	objects.PutAccount(ctx.DB, &a)
 
-func tryCreateMinerAccount(ctx *Context, worker string) error {
-	objects.PutAccount(ctx.DB, &objects.Account{
-		Name:    worker,
-		Created: ctx.BlockTime,
-	})
+	dgpo, err := objects.GetDGPO(ctx.DB)
+	if err != nil && err != state.ErrNotFound {
+		return err
+	}
+	dgpo.CurrentSupply += hiveMiningReward
+	objects.PutDGPO(ctx.DB, &dgpo)
 	return nil
 }
 
