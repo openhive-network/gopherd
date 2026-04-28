@@ -1,8 +1,8 @@
 # Binaries
 /bin/
 /build/
-ghive
-ghive-tools
+/ghive
+/ghive-tools
 
 # Go cache
 *.test
