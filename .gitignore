@@ -1,0 +1,29 @@
+# Binaries
+/bin/
+/build/
+ghive
+ghive-tools
+
+# Go cache
+*.test
+*.out
+coverage.txt
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Generated FC codecs (committed, but allow override)
+# (none yet)
+
+# Local data
+data/
+*.log
+
+# block_log fixtures sit in the repo root for now; do NOT commit them
+/block_log
+/block_log.index
+/block_log.artifacts
+/block_log_part.*
