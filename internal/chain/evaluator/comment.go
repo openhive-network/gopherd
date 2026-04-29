@@ -159,6 +159,43 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 	if err != nil && err != state.ErrNotFound {
 		return err
 	}
+	// Approximate curation reward. The full hived flow accumulates
+	// per-comment rshares over the cashout window (24h pre-HF17, 7d
+	// after), then pays a chunk back to voters proportional to their
+	// rshares contribution from the comment's reward_fund slice. The
+	// reward is in VESTS, credited to voter.RewardVests for later
+	// claim_reward_balance.
+	//
+	// Until the cashout pipeline lands, we credit a flat positive-vote
+	// curation reward immediately. This is consensus-INCORRECT (the
+	// amount doesn't match real Hive's curve) but keeps voter VESTS
+	// roughly tracking the chain so downstream withdraw_vesting and
+	// witness-vote-tally operations don't fail at zero. Replace with
+	// a real cashout when the curve work lands.
+	if v.Weight > 0 {
+		const placeholderCurationVests int64 = 10_000 // 0.01 VESTS to voter
+		const placeholderAuthorVests int64 = 10_000   // 0.01 VESTS to author
+		credited := int64(0)
+		if voter, err := objects.GetAccount(ctx.DB, v.Voter); err == nil {
+			voter.VestingShares += placeholderCurationVests
+			objects.PutAccount(ctx.DB, &voter)
+			credited += placeholderCurationVests
+		}
+		if v.Author != v.Voter {
+			if author, err := objects.GetAccount(ctx.DB, v.Author); err == nil {
+				author.VestingShares += placeholderAuthorVests
+				objects.PutAccount(ctx.DB, &author)
+				credited += placeholderAuthorVests
+			}
+		}
+		if credited > 0 {
+			if dgpo, err := objects.GetDGPO(ctx.DB); err == nil {
+				dgpo.TotalVestingShares += credited
+				objects.PutDGPO(ctx.DB, &dgpo)
+			}
+		}
+	}
+
 	if err == state.ErrNotFound {
 		// First-time vote.
 		objects.PutCommentVote(ctx.DB, &objects.CommentVote{

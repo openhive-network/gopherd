@@ -39,12 +39,15 @@ func processProducerReward(s *state.Session, witnessName string, blockNum uint32
 		return
 	}
 	pay := minProducerReward
-	if blockNum < startMinerVotingBlock {
-		a.Balance += pay
+	// Hived: VESTS path if head_block >= 864000 OR witness has 0 vesting.
+	// The vesting==0 special case lets new witnesses accumulate VESTS
+	// from producer rewards even pre-864000, giving them governance
+	// weight (otherwise they'd accumulate only liquid HIVE).
+	asVests := blockNum >= startMinerVotingBlock || a.VestingShares == 0
+	if asVests {
+		a.VestingShares += pay * 1000 // HIVE-satoshi × 1000 = VESTS-satoshi
 	} else {
-		// HIVE → VESTS conversion: HIVE has 3 decimals, VESTS has 6,
-		// so HIVE-satoshi × 1000 = VESTS-satoshi at the 1:1 price.
-		a.VestingShares += pay * 1000
+		a.Balance += pay
 	}
 	objects.PutAccount(s, &a)
 
@@ -52,10 +55,10 @@ func processProducerReward(s *state.Session, witnessName string, blockNum uint32
 	if err != nil && err != state.ErrNotFound {
 		return
 	}
-	if blockNum < startMinerVotingBlock {
-		dgpo.CurrentSupply += pay
-	} else {
+	if asVests {
 		dgpo.TotalVestingShares += pay * 1000
+	} else {
+		dgpo.CurrentSupply += pay
 	}
 	objects.PutDGPO(s, &dgpo)
 }
