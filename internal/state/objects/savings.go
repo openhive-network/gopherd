@@ -24,8 +24,19 @@ type SavingsWithdraw struct {
 
 const SavingsWithdrawTable state.TableID = 7
 
+// SavingsWithdrawByCompleteIndex orders entries by complete time so the
+// per-block process_savings_withdraws can iterate matures in time order.
+// Key: [complete_BE_4][from_padded_16][request_id_BE_4].
+const SavingsWithdrawByCompleteIndex state.IndexID = 1
+
 func savingsWithdrawKey(from auth.AccountName, requestID uint32) []byte {
 	out := state.AppendAccountName(nil, from)
+	return state.AppendUint32BE(out, requestID)
+}
+
+func savingsWithdrawByCompleteKey(complete uint32, from auth.AccountName, requestID uint32) []byte {
+	out := state.AppendUint32BE(nil, complete)
+	out = state.AppendAccountName(out, from)
 	return state.AppendUint32BE(out, requestID)
 }
 
@@ -77,6 +88,7 @@ func ReadSavingsWithdraw(src []byte) (SavingsWithdraw, error) {
 
 func PutSavingsWithdraw(s *state.Session, w *SavingsWithdraw) {
 	s.Put(SavingsWithdrawTable, state.PrimaryIndex, savingsWithdrawKey(w.From, w.RequestID), AppendSavingsWithdraw(nil, w))
+	s.Put(SavingsWithdrawTable, SavingsWithdrawByCompleteIndex, savingsWithdrawByCompleteKey(w.Complete, w.From, w.RequestID), nil)
 }
 
 func GetSavingsWithdraw(s *state.Session, from auth.AccountName, requestID uint32) (SavingsWithdraw, error) {
@@ -93,4 +105,11 @@ func HasSavingsWithdraw(s *state.Session, from auth.AccountName, requestID uint3
 
 func DeleteSavingsWithdraw(s *state.Session, from auth.AccountName, requestID uint32) {
 	s.Delete(SavingsWithdrawTable, state.PrimaryIndex, savingsWithdrawKey(from, requestID))
+}
+
+// DeleteSavingsWithdrawFull removes the primary entry AND the secondary
+// by-complete entry. Use this when you have the full row available.
+func DeleteSavingsWithdrawFull(s *state.Session, w *SavingsWithdraw) {
+	s.Delete(SavingsWithdrawTable, state.PrimaryIndex, savingsWithdrawKey(w.From, w.RequestID))
+	s.Delete(SavingsWithdrawTable, SavingsWithdrawByCompleteIndex, savingsWithdrawByCompleteKey(w.Complete, w.From, w.RequestID))
 }

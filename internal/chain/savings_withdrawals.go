@@ -1,0 +1,60 @@
+package chain
+
+import (
+	"hived-go/internal/protocol/asset"
+	"hived-go/internal/state"
+	"hived-go/internal/state/objects"
+)
+
+// processSavingsWithdraws mirrors database::process_savings_withdraws
+// (libraries/chain/database_market.cpp:134). For every savings_withdraw
+// row whose `complete` time has passed, credit the recipient's matching
+// liquid balance and remove the row (and the by-complete index entry).
+// Iteration order is by-complete time, so we stop at the first
+// not-yet-mature row.
+func processSavingsWithdraws(s *state.Session, blockTime uint32) {
+	type pending struct {
+		complete  uint32
+		from      string
+		requestID uint32
+	}
+	var ready []pending
+
+	_ = s.Range(objects.SavingsWithdrawTable, objects.SavingsWithdrawByCompleteIndex, nil,
+		func(body, _ []byte) (bool, error) {
+			if len(body) < 4+state.AccountNameKeyLen+4 {
+				return true, nil
+			}
+			c := uint32(body[0])<<24 | uint32(body[1])<<16 | uint32(body[2])<<8 | uint32(body[3])
+			if c > blockTime {
+				return false, nil
+			}
+			fromBytes := body[4 : 4+state.AccountNameKeyLen]
+			n := state.AccountNameKeyLen
+			for n > 0 && fromBytes[n-1] == 0 {
+				n--
+			}
+			off := 4 + state.AccountNameKeyLen
+			rid := uint32(body[off])<<24 | uint32(body[off+1])<<16 | uint32(body[off+2])<<8 | uint32(body[off+3])
+			ready = append(ready, pending{complete: c, from: string(fromBytes[:n]), requestID: rid})
+			return true, nil
+		})
+
+	for _, p := range ready {
+		w, err := objects.GetSavingsWithdraw(s, p.from, p.requestID)
+		if err != nil {
+			continue
+		}
+		to, gerr := objects.GetAccount(s, w.To)
+		if gerr == nil {
+			switch asset.AssetNum(w.Symbol) {
+			case asset.HiveSymbol:
+				to.Balance += w.Amount
+			case asset.HbdSymbol:
+				to.HBDBalance += w.Amount
+			}
+			objects.PutAccount(s, &to)
+		}
+		objects.DeleteSavingsWithdrawFull(s, &w)
+	}
+}

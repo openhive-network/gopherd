@@ -151,7 +151,7 @@ func (cancelTransferFromSavingsEvaluator) Apply(ctx *Context, o op.Operation) er
 		from.SavingsHBDBalance += w.Amount
 	}
 	objects.PutAccount(ctx.DB, &from)
-	objects.DeleteSavingsWithdraw(ctx.DB, c.From, c.RequestID)
+	objects.DeleteSavingsWithdrawFull(ctx.DB, &w)
 	return nil
 }
 

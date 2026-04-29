@@ -195,6 +195,7 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	//   4. cash out any comments whose payout window closed
 	processProducerReward(session, hdr.Witness, blockNum)
 	processFunds(session, blockNum)
+	processSavingsWithdraws(session, hdr.Timestamp)
 	processVestingWithdrawals(session, hdr.Timestamp)
 	processCommentCashouts(session, hdr.Timestamp, blockNum)
 	clearExpiredOrders(session, hdr.Timestamp)
