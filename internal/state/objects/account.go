@@ -67,6 +67,14 @@ type Account struct {
 	NextVestingWithdrawal uint32
 	ToWithdraw            int64
 	Withdrawn             int64
+	// LastPost is the timestamp of the most recent comment_operation
+	// (root or reply) by this account; LastRootPost tracks the most
+	// recent root post specifically. Used by the comment evaluator to
+	// enforce HIVE_MIN_ROOT_COMMENT_INTERVAL (5 min) and
+	// HIVE_MIN_REPLY_INTERVAL (3 sec) — see hived
+	// hive_evaluator_social.cpp:204.
+	LastPost     uint32
+	LastRootPost uint32
 }
 
 // AppendAccount serializes a to dst using FC binary form. The field
@@ -98,6 +106,8 @@ func AppendAccount(dst []byte, a *Account) []byte {
 	dst = appendU32LE(dst, a.NextVestingWithdrawal)
 	dst = appendI64LE(dst, a.ToWithdraw)
 	dst = appendI64LE(dst, a.Withdrawn)
+	dst = appendU32LE(dst, a.LastPost)
+	dst = appendU32LE(dst, a.LastRootPost)
 	return dst
 }
 
@@ -169,6 +179,17 @@ func ReadAccount(src []byte) (Account, error) {
 	}
 	if a.Withdrawn, err = r.ReadInt64(); err != nil {
 		return a, fmt.Errorf("account.withdrawn: %w", err)
+	}
+	// LastPost / LastRootPost are a later schema addition. Treat EOF as
+	// zero so the on-disk format stays append-only across releases.
+	if r.AtEnd() {
+		return a, nil
+	}
+	if a.LastPost, err = r.ReadUint32(); err != nil {
+		return a, fmt.Errorf("account.last_post: %w", err)
+	}
+	if a.LastRootPost, err = r.ReadUint32(); err != nil {
+		return a, fmt.Errorf("account.last_root_post: %w", err)
 	}
 	if !r.AtEnd() {
 		return a, errors.New("account: trailing bytes after decode (schema mismatch?)")

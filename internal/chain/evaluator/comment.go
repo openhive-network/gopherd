@@ -64,10 +64,12 @@ func (commentEvaluator) Apply(ctx *Context, o op.Operation) error {
 		return fmt.Errorf("commentEvaluator: unexpected op type %T", o)
 	}
 	// The author must exist.
-	if has, err := objects.HasAccount(ctx.DB, c.Author); err != nil {
+	authorAcct, err := objects.GetAccount(ctx.DB, c.Author)
+	if err != nil {
+		if err == state.ErrNotFound {
+			return fmt.Errorf("%w: author=%q", ErrAccountNotFound, c.Author)
+		}
 		return err
-	} else if !has {
-		return fmt.Errorf("%w: author=%q", ErrAccountNotFound, c.Author)
 	}
 
 	// The parent must exist if this is a reply (parent_author non-empty).
@@ -75,7 +77,8 @@ func (commentEvaluator) Apply(ctx *Context, o op.Operation) error {
 	// calls _db.get_comment(parent_author, parent_permlink) which throws if
 	// not found. For root posts (parent_author == ""), the parent is the
 	// implicit "category" wrapper so we skip the check.
-	if c.ParentAuthor != "" {
+	hasParent := c.ParentAuthor != ""
+	if hasParent {
 		if has, err := objects.HasComment(ctx.DB, c.ParentAuthor, c.ParentPermlink); err != nil {
 			return err
 		} else if !has {
@@ -87,12 +90,42 @@ func (commentEvaluator) Apply(ctx *Context, o op.Operation) error {
 	if err != nil && err != state.ErrNotFound {
 		return err
 	}
+
+	// Per-author posting intervals (libraries/chain/hive_evaluator_social.cpp:204):
+	// pre-HF6: any post requires (now - last_post) > 60s
+	// post-HF6 root post:  (now - last_root_post) > HIVE_MIN_ROOT_COMMENT_INTERVAL (5 min)
+	// post-HF6 reply:      (now - last_post)      >= HIVE_MIN_REPLY_INTERVAL (3 sec)
+	// Only enforced on NEW comments, not edits.
+	if err == state.ErrNotFound {
+		if !ctx.Hardforks.Has(hardfork.HF6) {
+			if ctx.BlockTime-authorAcct.LastPost <= 60 {
+				return fmt.Errorf("comment: author %q must wait 60s between posts", c.Author)
+			}
+		} else {
+			if !hasParent {
+				if ctx.BlockTime-authorAcct.LastRootPost <= 5*60 {
+					return fmt.Errorf("comment: author %q must wait 5 minutes between root posts", c.Author)
+				}
+			} else {
+				if ctx.BlockTime-authorAcct.LastPost < 3 {
+					return fmt.Errorf("comment: author %q must wait 3 seconds between replies", c.Author)
+				}
+			}
+		}
+	}
 	if err == state.ErrNotFound {
 		// New comment — pre-HF12 comments are frozen (no cashout).
 		// HF12-HF17 only root posts cash out. HF17+ all comments do.
 		// commentCashoutTime returns 0 when the comment never cashes out.
-		hasParent := c.ParentAuthor != ""
 		cashoutTime := commentCashoutTime(ctx.Hardforks, ctx.BlockTime, hasParent)
+		// Update author's last-post timestamps so subsequent comments
+		// from this account hit the interval gate above.
+		authorAcct.LastPost = ctx.BlockTime
+		if !hasParent {
+			authorAcct.LastRootPost = ctx.BlockTime
+		}
+		objects.PutAccount(ctx.DB, &authorAcct)
+
 		objects.PutComment(ctx.DB, &objects.Comment{
 			Author:               c.Author,
 			Permlink:             c.Permlink,
