@@ -70,6 +70,19 @@ func (commentEvaluator) Apply(ctx *Context, o op.Operation) error {
 		return fmt.Errorf("%w: author=%q", ErrAccountNotFound, c.Author)
 	}
 
+	// The parent must exist if this is a reply (parent_author non-empty).
+	// hived's comment_evaluator (libraries/chain/hive_evaluator_social.cpp:184)
+	// calls _db.get_comment(parent_author, parent_permlink) which throws if
+	// not found. For root posts (parent_author == ""), the parent is the
+	// implicit "category" wrapper so we skip the check.
+	if c.ParentAuthor != "" {
+		if has, err := objects.HasComment(ctx.DB, c.ParentAuthor, c.ParentPermlink); err != nil {
+			return err
+		} else if !has {
+			return fmt.Errorf("%w: parent=%q/%q", ErrCommentNotFound, c.ParentAuthor, c.ParentPermlink)
+		}
+	}
+
 	existing, err := objects.GetComment(ctx.DB, c.Author, c.Permlink)
 	if err != nil && err != state.ErrNotFound {
 		return err
