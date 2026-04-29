@@ -67,11 +67,7 @@ func init() {
 	register(op.TagConvert, stub("convert", noValidate))
 	register(op.TagCollateralizedConvert, stub("collateralized_convert", noValidate))
 
-	// Escrow (need escrow_object).
-	register(op.TagEscrowTransfer, stub("escrow_transfer", noValidate))
-	register(op.TagEscrowApprove, stub("escrow_approve", noValidate))
-	register(op.TagEscrowDispute, stub("escrow_dispute", noValidate))
-	register(op.TagEscrowRelease, stub("escrow_release", noValidate))
+	// (escrow_transfer / approve / dispute / release implemented in escrow.go.)
 
 	// (transfer_to_savings, transfer_from_savings,
 	// cancel_transfer_from_savings implemented in savings.go.)
