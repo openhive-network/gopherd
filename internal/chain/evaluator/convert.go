@@ -5,13 +5,25 @@ import (
 	"fmt"
 
 	"hived-go/internal/protocol/asset"
+	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/op"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
 )
 
-// HIVE_CONVERSION_DELAY post-HF16 is 3.5 days; pre-HF16 it's 7 days.
-const conversionDelaySec = 60 * 60 * 24 * 7 / 2 // 3.5 days
+// HIVE_CONVERSION_DELAY: pre-HF16 it's 7 days; HF16+ is 3.5 days.
+// (libraries/protocol/include/hive/protocol/config.hpp)
+const (
+	conversionDelaySecPreHF16 uint32 = 60 * 60 * 24 * 7    // 7 days
+	conversionDelaySec        uint32 = 60 * 60 * 24 * 7 / 2 // 3.5 days
+)
+
+func conversionDelay(hf hardfork.Set) uint32 {
+	if hf.Has(hardfork.HF16) {
+		return conversionDelaySec
+	}
+	return conversionDelaySecPreHF16
+}
 
 // Errors specific to convert.
 var (
@@ -52,7 +64,7 @@ func (convertEvaluator) Apply(ctx *Context, o op.Operation) error {
 		Owner:      c.Owner,
 		RequestID:  c.RequestID,
 		Amount:     c.Amount.Amount,
-		Conversion: ctx.BlockTime + conversionDelaySec,
+		Conversion: ctx.BlockTime + conversionDelay(ctx.Hardforks),
 	})
 	return nil
 }
@@ -97,7 +109,7 @@ func (collateralizedConvertEvaluator) Apply(ctx *Context, o op.Operation) error 
 		RequestID:  c.RequestID,
 		Collateral: c.Amount.Amount,
 		HBDOut:     0,
-		Conversion: ctx.BlockTime + conversionDelaySec,
+		Conversion: ctx.BlockTime + conversionDelay(ctx.Hardforks),
 	})
 	return nil
 }
