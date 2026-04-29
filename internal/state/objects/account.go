@@ -48,6 +48,18 @@ type Account struct {
 	// WitnessesVotedFor counts how many witnesses this account has voted
 	// for directly. Capped at HIVE_MAX_ACCOUNT_WITNESS_VOTES (30).
 	WitnessesVotedFor uint16
+	// PendingClaimedAccounts is the count of paid-for-but-not-yet-used
+	// account claims (HF20+). claim_account increments;
+	// create_claimed_account decrements.
+	PendingClaimedAccounts uint16
+	// SavingsBalance / SavingsHBDBalance hold funds in the time-locked
+	// savings account.
+	SavingsBalance    int64
+	SavingsHBDBalance int64
+	// DelegatedVestingShares are VESTS this account has delegated out
+	// to others; ReceivedVestingShares are VESTS delegated in.
+	DelegatedVestingShares int64
+	ReceivedVestingShares  int64
 }
 
 // AppendAccount serializes a to dst using FC binary form. The field
@@ -70,6 +82,11 @@ func AppendAccount(dst []byte, a *Account) []byte {
 	dst = fcraw.AppendVarUint(dst, uint32(len(a.Proxy)))
 	dst = append(dst, a.Proxy...)
 	dst = append(dst, byte(a.WitnessesVotedFor), byte(a.WitnessesVotedFor>>8))
+	dst = append(dst, byte(a.PendingClaimedAccounts), byte(a.PendingClaimedAccounts>>8))
+	dst = appendI64LE(dst, a.SavingsBalance)
+	dst = appendI64LE(dst, a.SavingsHBDBalance)
+	dst = appendI64LE(dst, a.DelegatedVestingShares)
+	dst = appendI64LE(dst, a.ReceivedVestingShares)
 	return dst
 }
 
@@ -114,6 +131,21 @@ func ReadAccount(src []byte) (Account, error) {
 	}
 	if a.WitnessesVotedFor, err = r.ReadUint16(); err != nil {
 		return a, fmt.Errorf("account.witnesses_voted_for: %w", err)
+	}
+	if a.PendingClaimedAccounts, err = r.ReadUint16(); err != nil {
+		return a, fmt.Errorf("account.pending_claimed_accounts: %w", err)
+	}
+	if a.SavingsBalance, err = r.ReadInt64(); err != nil {
+		return a, fmt.Errorf("account.savings_balance: %w", err)
+	}
+	if a.SavingsHBDBalance, err = r.ReadInt64(); err != nil {
+		return a, fmt.Errorf("account.savings_hbd_balance: %w", err)
+	}
+	if a.DelegatedVestingShares, err = r.ReadInt64(); err != nil {
+		return a, fmt.Errorf("account.delegated_vesting_shares: %w", err)
+	}
+	if a.ReceivedVestingShares, err = r.ReadInt64(); err != nil {
+		return a, fmt.Errorf("account.received_vesting_shares: %w", err)
 	}
 	if !r.AtEnd() {
 		return a, errors.New("account: trailing bytes after decode (schema mismatch?)")

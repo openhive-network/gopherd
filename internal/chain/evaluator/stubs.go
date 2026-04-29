@@ -90,11 +90,9 @@ func init() {
 	register(op.TagResetAccount, stub("reset_account", noValidate))
 	register(op.TagSetResetAccount, stub("set_reset_account", noValidate))
 
-	// Account creation variants (need pending_claimed_account counter +
-	// authority objects).
-	register(op.TagClaimAccount, stub("claim_account", noValidate))
-	register(op.TagCreateClaimedAccount, stub("create_claimed_account", noValidate))
-	register(op.TagAccountCreateWithDelegation, stub("account_create_with_delegation", noValidate))
+	// (claim_account, create_claimed_account,
+	// account_create_with_delegation are implemented in
+	// account_create_variants.go.)
 
 	// DHF / proposals (post-HF24, need proposal_object + proposal_vote_object).
 	register(op.TagCreateProposal, stub("create_proposal", noValidate))
