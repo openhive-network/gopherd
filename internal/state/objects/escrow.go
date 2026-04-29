@@ -25,8 +25,19 @@ type Escrow struct {
 
 const EscrowTable state.TableID = 10
 
+// EscrowByRatificationIndex orders entries by ratification_deadline so
+// the per-block expire_escrow_ratification hook can iterate stale,
+// not-yet-approved escrows in time order.
+const EscrowByRatificationIndex state.IndexID = 1
+
 func escrowKey(from auth.AccountName, escrowID uint32) []byte {
 	out := state.AppendAccountName(nil, from)
+	return state.AppendUint32BE(out, escrowID)
+}
+
+func escrowByRatificationKey(deadline uint32, from auth.AccountName, escrowID uint32) []byte {
+	out := state.AppendUint32BE(nil, deadline)
+	out = state.AppendAccountName(out, from)
 	return state.AppendUint32BE(out, escrowID)
 }
 
@@ -109,6 +120,7 @@ func ReadEscrow(src []byte) (Escrow, error) {
 
 func PutEscrow(s *state.Session, e *Escrow) {
 	s.Put(EscrowTable, state.PrimaryIndex, escrowKey(e.From, e.EscrowID), AppendEscrow(nil, e))
+	s.Put(EscrowTable, EscrowByRatificationIndex, escrowByRatificationKey(e.RatificationDeadline, e.From, e.EscrowID), nil)
 }
 
 func GetEscrow(s *state.Session, from auth.AccountName, escrowID uint32) (Escrow, error) {
@@ -125,4 +137,10 @@ func HasEscrow(s *state.Session, from auth.AccountName, escrowID uint32) (bool, 
 
 func DeleteEscrow(s *state.Session, from auth.AccountName, escrowID uint32) {
 	s.Delete(EscrowTable, state.PrimaryIndex, escrowKey(from, escrowID))
+}
+
+// DeleteEscrowFull removes both primary and by-ratification entries.
+func DeleteEscrowFull(s *state.Session, e *Escrow) {
+	s.Delete(EscrowTable, state.PrimaryIndex, escrowKey(e.From, e.EscrowID))
+	s.Delete(EscrowTable, EscrowByRatificationIndex, escrowByRatificationKey(e.RatificationDeadline, e.From, e.EscrowID))
 }

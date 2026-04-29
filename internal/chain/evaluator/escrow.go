@@ -117,7 +117,7 @@ func (escrowApproveEvaluator) Apply(ctx *Context, o op.Operation) error {
 	from.Balance += esc.HiveAmount + esc.PendingFee
 	from.HBDBalance += esc.HBDAmount
 	objects.PutAccount(ctx.DB, &from)
-	objects.DeleteEscrow(ctx.DB, a.From, a.EscrowID)
+	objects.DeleteEscrowFull(ctx.DB, &esc)
 	return nil
 }
 
@@ -178,7 +178,7 @@ func (escrowReleaseEvaluator) Apply(ctx *Context, o op.Operation) error {
 	esc.HiveAmount -= r.HiveAmount.Amount
 	esc.HBDAmount -= r.HbdAmount.Amount
 	if esc.HiveAmount == 0 && esc.HBDAmount == 0 {
-		objects.DeleteEscrow(ctx.DB, r.From, r.EscrowID)
+		objects.DeleteEscrowFull(ctx.DB, &esc)
 	} else {
 		objects.PutEscrow(ctx.DB, &esc)
 	}
