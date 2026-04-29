@@ -117,6 +117,10 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 		}
 	}
 
+	// Per-block hooks: pay the producing witness, advance per-block
+	// schedules, etc. (process_funds in hived).
+	processProducerReward(session, hdr.Witness, blockNum)
+
 	// Roll forward the DGPO. We always have enough info here even if no
 	// evaluator touched it.
 	dgpo, err := objects.GetDGPO(session)
