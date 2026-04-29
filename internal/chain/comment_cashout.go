@@ -3,6 +3,7 @@ package chain
 import (
 	"math/big"
 
+	"hived-go/internal/protocol/asset"
 	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/reward"
 	"hived-go/internal/state"
@@ -158,20 +159,80 @@ func processOneCashout(s *state.Session, scheduledTime uint32, author, permlink 
 		distributeCuratorPool(s, c.Author, c.Permlink, curatorPool)
 	}
 
-	// Author payout: percent_hbd / 20000 share goes to liquid HIVE
-	// balance (hived's create_hbd path before the feed history is
-	// established), remainder via CreateVesting.
+	// Author payout. hived's create_hbd splits the HIVE-denominated
+	// reward into hbd_payout + hive_payout based on the median price
+	// feed; with no feed (early chain), the whole amount is HIVE
+	// balance. percent_hbd / 20000 of the author pool goes through
+	// create_hbd; the remainder is paid as VESTS via CreateVesting.
 	hbdHive := authorPool * int64(c.PercentHbd) / 20000
 	vestingHive := authorPool - hbdHive
 	if hbdHive > 0 {
 		if a, gerr := objects.GetAccount(s, author); gerr == nil {
-			a.Balance += hbdHive
+			payCreateHbd(s, &a, hbdHive)
 			objects.PutAccount(s, &a)
 		}
 	}
 	if vestingHive > 0 {
 		_, _ = CreateVesting_via_chain(s, author, vestingHive, false)
 	}
+}
+
+// payCreateHbd mirrors database::create_hbd in
+// libraries/chain/database.cpp:949. The hive_amount (denominated in
+// HIVE-satoshi) is split per the hbd_print_rate into a HBD portion (
+// stored as the account's hbd_balance) and a HIVE portion (left as
+// liquid balance). The HBD portion is computed by multiplying the
+// HIVE-denominated piece by the median feed price.
+//
+// Without a median feed (early chain), all of hive_amount becomes
+// liquid HIVE balance — same as hived's pre-feed branch.
+//
+// hbd_print_rate is not yet tracked; we use HIVE_100_PERCENT (10000),
+// the post-genesis default, until the HF14 hard-cap logic lands.
+func payCreateHbd(s *state.Session, a *objects.Account, hiveAmount int64) {
+	if hiveAmount <= 0 {
+		return
+	}
+	fh, err := objects.GetFeedHistory(s)
+	if err != nil || priceIsZero(fh.CurrentMedianHistory) {
+		// No feed → everything pays as liquid HIVE.
+		a.Balance += hiveAmount
+		return
+	}
+	// hbd_print_rate default = HIVE_100_PERCENT (10000); to_hbd = hive
+	// (entire HIVE amount converts to HBD via the feed). HF14 lowers
+	// this when the chain's HBD supply hits HIVE_HBD_HARD_LIMIT.
+	const hbdPrintRate int64 = 10000
+	toHbdHive := hiveAmount * hbdPrintRate / 10000
+	toHive := hiveAmount - toHbdHive
+
+	hbdAmount := convertHiveToHBD(toHbdHive, fh.CurrentMedianHistory)
+	a.HBDBalance += hbdAmount
+	a.Balance += toHive
+
+	// adjust_supply: -toHbdHive HIVE, +hbdAmount HBD.
+	if dgpo, derr := objects.GetDGPO(s); derr == nil {
+		dgpo.CurrentSupply -= toHbdHive
+		dgpo.CurrentHBDSupply += hbdAmount
+		objects.PutDGPO(s, &dgpo)
+	}
+}
+
+// convertHiveToHBD applies a HBD/HIVE feed price to convert a HIVE
+// amount into HBD. Mirror of convertHBDToHive but in the opposite
+// direction: hbd = hive × base / quote (when feed orientation is
+// HBD-base / HIVE-quote, the post-HF20 normalization).
+func convertHiveToHBD(hiveAmount int64, p asset.Price) int64 {
+	if p.Base.Amount <= 0 || p.Quote.Amount <= 0 {
+		return 0
+	}
+	if p.Base.Symbol.Num == asset.HbdSymbol && p.Quote.Symbol.Num == asset.HiveSymbol {
+		return mulDiv(hiveAmount, p.Base.Amount, p.Quote.Amount)
+	}
+	if p.Base.Symbol.Num == asset.HiveSymbol && p.Quote.Symbol.Num == asset.HbdSymbol {
+		return mulDiv(hiveAmount, p.Quote.Amount, p.Base.Amount)
+	}
+	return 0
 }
 
 // distributeCuratorPool walks every CommentVote on (author, permlink)
