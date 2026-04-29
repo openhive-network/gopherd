@@ -33,7 +33,13 @@ func (withdrawVestingEvaluator) Apply(ctx *Context, o op.Operation) error {
 		return fmt.Errorf("%w: withdraw_vesting requires VESTS", ErrUnsupportedSymbol)
 	}
 	if w.VestingShares.Amount < 0 {
-		return ErrTransferAmountNotPos
+		// Pre-HF20: hived silently returns on negative shares (see
+		// hive_evaluator_transfer.cpp:334 referencing block 23847548).
+		// HF20+: it's a hard error.
+		if ctx.Hardforks.Has(hardfork.HF20) {
+			return ErrTransferAmountNotPos
+		}
+		return nil
 	}
 
 	a, err := objects.GetAccount(ctx.DB, w.Account)
