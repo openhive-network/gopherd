@@ -86,14 +86,16 @@ func (escrowApproveEvaluator) Apply(ctx *Context, o op.Operation) error {
 		}
 		return err
 	}
+	// hived: matches who against to AND agent (a single who can only
+	// match one of them, but both branches are independent ifs in C++).
+	// approve=true marks the matching flag; approve=false (rejection)
+	// always refunds and removes regardless of who.
 	if a.Approve {
-		switch a.Who {
-		case esc.To:
+		if a.Who == esc.To {
 			esc.ToApproved = true
-		case esc.Agent:
+		}
+		if a.Who == esc.Agent {
 			esc.AgentApproved = true
-		default:
-			return fmt.Errorf("escrow_approve: %q is not to or agent", a.Who)
 		}
 		// On full approval the agent receives the fee.
 		if esc.ToApproved && esc.AgentApproved && esc.PendingFee > 0 {
