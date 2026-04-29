@@ -73,10 +73,8 @@ func init() {
 	register(op.TagEscrowDispute, stub("escrow_dispute", noValidate))
 	register(op.TagEscrowRelease, stub("escrow_release", noValidate))
 
-	// Savings (need savings_withdraw_object).
-	register(op.TagTransferToSavings, stub("transfer_to_savings", noValidate))
-	register(op.TagTransferFromSavings, stub("transfer_from_savings", noValidate))
-	register(op.TagCancelTransferFromSavings, stub("cancel_transfer_from_savings", noValidate))
+	// (transfer_to_savings, transfer_from_savings,
+	// cancel_transfer_from_savings implemented in savings.go.)
 
 	// Vesting (need vesting_withdraw schedule + vesting_delegation_object).
 	register(op.TagWithdrawVesting, stub("withdraw_vesting", noValidate))
