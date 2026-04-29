@@ -99,6 +99,22 @@ func (witnessSetPropertiesEvaluator) Apply(ctx *Context, o op.Operation) error {
 		return err
 	}
 
+	// hived: the "key" prop MUST match the witness's current signing
+	// key — it's a self-attestation that this op came from the holder
+	// of that key (libraries/chain/hive_evaluator.cpp:130). The op has
+	// no signature meta, so this `key` is the only proof.
+	for _, p := range wsp.Props {
+		if p.Key == "key" {
+			if len(p.Value) >= 33 {
+				var supplied [33]byte
+				copy(supplied[:], p.Value[:33])
+				if supplied != w.BlockSigningKey {
+					return fmt.Errorf("witness_set_properties: 'key' does not match witness signing key for %q", wsp.Owner)
+				}
+			}
+		}
+	}
+
 	for _, p := range wsp.Props {
 		switch p.Key {
 		case "account_creation_fee":
