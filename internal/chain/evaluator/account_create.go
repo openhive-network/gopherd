@@ -56,10 +56,11 @@ func (accountCreateEvaluator) Apply(ctx *Context, o op.Operation) error {
 	creator.Balance -= ac.Fee.Amount
 	objects.PutAccount(ctx.DB, &creator)
 
-	// Create the new account. The full hived flow also creates an
-	// account_authority_object and credits VESTS via the fee — those land
-	// when their respective state objects are introduced. For now we
-	// initialize a minimal Account record with the memo key and metadata.
+	// Create the new account first so CreateVesting can credit it.
+	// hived's account_create_evaluator (libraries/chain/hive_evaluator.cpp)
+	// runs `db.create_vesting(new_account, o.fee)` immediately after,
+	// converting the creator's fee into starter VESTS for the new
+	// account at the current vesting price.
 	newAcct := objects.Account{
 		Name:         ac.NewAccountName,
 		Created:      ctx.BlockTime,
@@ -67,6 +68,11 @@ func (accountCreateEvaluator) Apply(ctx *Context, o op.Operation) error {
 		JSONMetadata: ac.JSONMetadata,
 	}
 	objects.PutAccount(ctx.DB, &newAcct)
+	if ac.Fee.Amount > 0 {
+		if _, err := CreateVesting(ctx.DB, ac.NewAccountName, ac.Fee.Amount, false); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

@@ -142,6 +142,14 @@ func (accountCreateWithDelegationEvaluator) Apply(ctx *Context, o op.Operation) 
 		JSONMetadata:          ac.JSONMetadata,
 		ReceivedVestingShares: ac.Delegation.Amount,
 	})
+	// Convert the fee to starter VESTS for the new account, matching
+	// hived's account_create_with_delegation_evaluator (libraries/chain/
+	// hive_evaluator.cpp) which calls db.create_vesting2 on the fee.
+	if ac.Fee.Amount > 0 {
+		if _, err := CreateVesting(ctx.DB, ac.NewAccountName, ac.Fee.Amount, false); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
