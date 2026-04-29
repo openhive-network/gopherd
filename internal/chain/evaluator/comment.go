@@ -145,9 +145,14 @@ func (deleteCommentEvaluator) Apply(ctx *Context, o op.Operation) error {
 	return nil
 }
 
-// commentOptionsEvaluator implements comment_options. Sets the
-// payout-time properties on the comment; rejected if the comment
-// already has votes (matches hived).
+// commentOptionsEvaluator implements comment_options.
+//
+// Mirrors libraries/chain/hive_evaluator_social.cpp:137:
+//   - tightening only (cannot raise max_payout, cannot raise percent_hbd,
+//     cannot re-enable curation rewards or votes once disabled);
+//   - tightening that EXCLUDES new positive rshares (disabling votes,
+//     disabling curation, or lowering max_payout) requires no existing
+//     votes on the comment.
 type commentOptionsEvaluator struct{}
 
 func (commentOptionsEvaluator) Apply(ctx *Context, o op.Operation) error {
@@ -162,9 +167,34 @@ func (commentOptionsEvaluator) Apply(ctx *Context, o op.Operation) error {
 		}
 		return err
 	}
-	if c.VoteCount != 0 {
-		return fmt.Errorf("%w: cannot change options after votes are cast", ErrCommentClosed)
+	// hived: post-HF24, comment_options on a paid-out comment is a hard
+	// error. Pre-HF24 it's a silent no-op. We use CashoutTime == 0 as our
+	// paid-out sentinel.
+	if c.CashoutTime == 0 {
+		return nil
 	}
+
+	// "Disabling-or-lowering" requires no votes on the comment yet.
+	disablingCuration := !co.AllowCurationRewards
+	disablingVotes := !co.AllowVotes
+	loweringMaxPayout := co.MaxAcceptedPayout.Amount < c.MaxAcceptedPayout
+	if (disablingCuration || disablingVotes || loweringMaxPayout) && c.VoteCount != 0 {
+		return fmt.Errorf("%w: option tightening requires no votes", ErrCommentClosed)
+	}
+	// Always tightening-only: can't re-enable curation/votes once off.
+	if !c.AllowCurationRewards && co.AllowCurationRewards {
+		return fmt.Errorf("comment_options: curation rewards cannot be re-enabled")
+	}
+	if !c.AllowVotes && co.AllowVotes {
+		return fmt.Errorf("comment_options: voting cannot be re-enabled")
+	}
+	if co.MaxAcceptedPayout.Amount > c.MaxAcceptedPayout {
+		return fmt.Errorf("comment_options: max_accepted_payout cannot be raised")
+	}
+	if co.PercentHbd > c.PercentHbd {
+		return fmt.Errorf("comment_options: percent_hbd cannot be raised")
+	}
+
 	c.MaxAcceptedPayout = co.MaxAcceptedPayout.Amount
 	c.PercentHbd = co.PercentHbd
 	c.AllowVotes = co.AllowVotes
