@@ -88,6 +88,9 @@ func (r *Reader) ReadBool() (bool, error) {
 func (r *Reader) ReadUint8() (uint8, error) { return r.ReadByte() }
 func (r *Reader) ReadInt8() (int8, error)   { b, err := r.ReadByte(); return int8(b), err }
 
+// for symmetry with ReadUint8 in places where we want explicit naming.
+var _ = (*Reader).ReadUint8
+
 // ReadUint16 / ReadInt16 — little-endian.
 func (r *Reader) ReadUint16() (uint16, error) {
 	if err := r.ensure(2); err != nil {

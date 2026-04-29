@@ -90,6 +90,5 @@ func init() {
 	register(op.TagRemoveProposal, stub("remove_proposal", noValidate))
 	register(op.TagUpdateProposal, stub("update_proposal", noValidate))
 
-	// Recurrent transfers (post-HF26, need recurrent_transfer_object).
-	register(op.TagRecurrentTransfer, stub("recurrent_transfer", noValidate))
+	// (recurrent_transfer implemented in recurrent_transfer.go.)
 }
