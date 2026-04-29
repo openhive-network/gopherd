@@ -254,9 +254,37 @@ func ReadCommentVote(src []byte) (CommentVote, error) {
 	return cv, nil
 }
 
-// PutCommentVote stores cv.
+// CommentVoteByCommentIndex is the secondary index on CommentVote that
+// orders entries by (author, permlink, voter) so that all votes on a
+// given comment can be enumerated by prefix iteration. Used by the
+// cashout pipeline to split the curator pool among voters.
+const CommentVoteByCommentIndex state.IndexID = 1
+
+// commentVoteByCommentKey encodes (author, permlink, voter) for the
+// secondary index.
+func commentVoteByCommentKey(author auth.AccountName, permlink string, voter auth.AccountName) []byte {
+	out := state.AppendAccountName(nil, author)
+	out = append(out, permlink...)
+	// Separator between variable-length permlink and fixed-width voter.
+	// The 0x00 byte is unambiguous because permlinks (account_names too)
+	// are restricted to a-z, 0-9, '.', '-' so they can't contain NUL.
+	out = append(out, 0)
+	return state.AppendAccountName(out, voter)
+}
+
+// CommentVoteByCommentPrefix returns the (author, permlink, 0x00) prefix
+// suitable for Range iteration over all voters of a comment.
+func CommentVoteByCommentPrefix(author auth.AccountName, permlink string) []byte {
+	out := state.AppendAccountName(nil, author)
+	out = append(out, permlink...)
+	out = append(out, 0)
+	return out
+}
+
+// PutCommentVote stores cv and updates the secondary by-comment index.
 func PutCommentVote(s *state.Session, cv *CommentVote) {
 	s.Put(CommentVoteTable, state.PrimaryIndex, commentVoteKey(cv.Voter, cv.Author, cv.Permlink), AppendCommentVote(nil, cv))
+	s.Put(CommentVoteTable, CommentVoteByCommentIndex, commentVoteByCommentKey(cv.Author, cv.Permlink, cv.Voter), nil)
 }
 
 // GetCommentVote fetches the vote (voter, author, permlink).

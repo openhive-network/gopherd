@@ -40,6 +40,16 @@ type DynamicGlobalProperty struct {
 	// scaling baked in by virtue of the satoshi-level division). When
 	// either is 0, the initial 1:1000 satoshi-level ratio is used.
 	TotalVestingFundHive int64
+	// Reward pool that comment cashouts draw from. process_funds adds the
+	// per-block content_reward here; processCommentCashouts subtracts the
+	// author + curator slice as comments pay out.
+	TotalRewardFundHive int64
+	// Sum of evaluate_reward_curve(c.NetRshares) over all unpaid comments
+	// — hived's `dynamic_global_property_object::total_reward_shares2`.
+	// Stored as 16 bytes big-endian (uint128). Vote evaluators
+	// adjust_rshares2(old_curve, new_curve) on every cast/recast; the
+	// cashout subtracts the comment's curve value.
+	TotalRewardShares2 [16]byte
 }
 
 // AppendDGPO serializes p to dst.
@@ -53,6 +63,8 @@ func AppendDGPO(dst []byte, p *DynamicGlobalProperty) []byte {
 	dst = appendI64LE(dst, p.CurrentHBDSupply)
 	dst = appendI64LE(dst, p.TotalVestingShares)
 	dst = appendI64LE(dst, p.TotalVestingFundHive)
+	dst = appendI64LE(dst, p.TotalRewardFundHive)
+	dst = append(dst, p.TotalRewardShares2[:]...)
 	return dst
 }
 
@@ -84,6 +96,21 @@ func ReadDGPO(src []byte) (DynamicGlobalProperty, error) {
 	}
 	if p.TotalVestingFundHive, err = r.ReadInt64(); err != nil {
 		return p, fmt.Errorf("dgpo.total_vesting_fund_hive: %w", err)
+	}
+	// total_reward_fund_hive is a later addition; tolerate older rows
+	// (which won't have it) by treating EOF as zero.
+	if r.AtEnd() {
+		return p, nil
+	}
+	if p.TotalRewardFundHive, err = r.ReadInt64(); err != nil {
+		return p, fmt.Errorf("dgpo.total_reward_fund_hive: %w", err)
+	}
+	// total_reward_shares2 is a later addition.
+	if r.AtEnd() {
+		return p, nil
+	}
+	if err := r.ReadInto(p.TotalRewardShares2[:]); err != nil {
+		return p, fmt.Errorf("dgpo.total_reward_shares2: %w", err)
 	}
 	if !r.AtEnd() {
 		return p, errors.New("dgpo: trailing bytes after decode (schema mismatch?)")

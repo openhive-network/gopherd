@@ -154,20 +154,13 @@ func processFunds(s *state.Session, blockNum uint32) {
 		vestingReward *= 9
 	}
 
-	// Compensation factor: until comment cashout pays curators in VESTS
-	// (which moves HIVE from total_reward_fund_hive into the vesting
-	// fund) and the APR formula climbs because virtual_supply has been
-	// inflating over many years, our `vesting_reward` lags hived's by
-	// roughly 3×. Boost it to keep the dynamic vesting price (used by
-	// withdraw_vesting) close enough to hived's that account-level
-	// HIVE liquidity tracks. Drop the factor when the missing inflation
-	// paths land.
-	const vestingRewardMissingFactor int64 = 4
-	vestingReward *= vestingRewardMissingFactor
-
 	dgpo.TotalVestingFundHive += vestingReward
+	// hived: total_reward_fund_hive grows by the per-block content_reward;
+	// processCommentCashouts later draws from this fund to pay authors
+	// and curators.
+	dgpo.TotalRewardFundHive += contentReward + curateReward
 	// content_reward + vesting_reward; witness_pay is added in
 	// processProducerReward to avoid double-counting.
-	dgpo.CurrentSupply += contentReward + vestingReward
+	dgpo.CurrentSupply += contentReward + curateReward + vestingReward
 	objects.PutDGPO(s, &dgpo)
 }

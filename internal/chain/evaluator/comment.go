@@ -6,6 +6,7 @@ import (
 
 	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/op"
+	"hived-go/internal/reward"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
 )
@@ -192,50 +193,40 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 	if err != nil && err != state.ErrNotFound {
 		return err
 	}
-	// Placeholder curation/author reward.
-	//
-	// Hived's real flow accrues rshares over a 7-day cashout window then
-	// pays curators+authors from the comment's reward_fund slice; that
-	// pipeline (manabar decay, reward curve, virtual_supply tracking) is
-	// not yet implemented. Skipping payouts entirely starves accounts
-	// like steemit of VESTS they need to back later withdraw_vesting and
-	// witness-vote-weight ops, which blocks replay.
-	//
-	// As a stopgap we credit a flat 0.010 HIVE worth of VESTS to the
-	// voter and the author on positive votes, routed through CreateVesting
-	// so fund_hive grows with shares and the dynamic price stays at the
-	// 1000:1 satoshi-level ratio. Replace with the real cashout pipeline
-	// once virtual_supply and reward_fund tracking land.
-	if v.Weight > 0 {
-		// 0.100 HIVE per credit (= 100K VESTS-satoshi at 1000:1) — about
-		// an order of magnitude above hived's typical curation reward at
-		// equilibrium, but offsets the missing reward2 curve so accounts
-		// that vote heavily can still back later withdraw_vesting ops.
-		const placeholderHive int64 = 100
-		if has, herr := objects.HasAccount(ctx.DB, v.Voter); herr == nil && has {
-			_, _ = CreateVesting(ctx.DB, v.Voter, placeholderHive, false)
-		}
-		if v.Author != v.Voter {
-			if has, herr := objects.HasAccount(ctx.DB, v.Author); herr == nil && has {
-				_, _ = CreateVesting(ctx.DB, v.Author, placeholderHive, false)
-			}
-		}
-	}
 
+	// Compute rshares contribution. hived's real formula uses the voter's
+	// current voting-power manabar, vesting shares, and the vote weight
+	// percentage; we approximate by using `voter.VestingShares × weight /
+	// HIVE_100_PERCENT` directly. This overstates rshares relative to
+	// hived (which depletes voting power on each vote, recovering at
+	// 20%/day), but the cashout rewards normalize within each comment so
+	// the relative split among curators is unchanged.
+	voter, verr := objects.GetAccount(ctx.DB, v.Voter)
+	if verr != nil {
+		return verr
+	}
+	rshares := voter.VestingShares * int64(v.Weight) / 10000
+
+	// hived's adjust_rshares2: the global total_reward_shares2 must move
+	// by curve(new_net_rshares) - curve(old_net_rshares) on every cast/
+	// recast so the comment's slice of the reward fund reflects the
+	// updated total at cashout.
+	oldNetRshares := c.NetRshares
 	if err == state.ErrNotFound {
-		// First-time vote.
 		objects.PutCommentVote(ctx.DB, &objects.CommentVote{
 			Voter:      v.Voter,
 			Author:     v.Author,
 			Permlink:   v.Permlink,
 			Weight:     v.Weight,
 			NumChanges: 0,
-			Rshares:    0, // computed by curation work
+			Rshares:    rshares,
 			LastUpdate: ctx.BlockTime,
 		})
+		c.NetRshares += rshares
 		c.VoteCount++
 	} else {
-		// Re-cast — update weight and num_changes.
+		c.NetRshares += rshares - prev.Rshares
+		prev.Rshares = rshares
 		prev.Weight = v.Weight
 		prev.NumChanges++
 		prev.LastUpdate = ctx.BlockTime
@@ -243,7 +234,29 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 	}
 	c.LastUpdate = ctx.BlockTime
 	objects.PutComment(ctx.DB, &c)
+	adjustRewardShares2(ctx.DB, oldNetRshares, c.NetRshares)
 	return nil
+}
+
+// adjustRewardShares2 mirrors hived's database::adjust_rshares2: shift
+// dgpo.total_reward_shares2 by the change in this comment's curve value.
+// The curve is the pre-HF17 quadratic — `(rshares + s)² - s²`. We
+// recompute both endpoints and apply the delta.
+func adjustRewardShares2(s *state.Session, oldNetRshares, newNetRshares int64) {
+	dgpo, err := objects.GetDGPO(s)
+	if err != nil {
+		return
+	}
+	total := reward.Uint128FromBytes(dgpo.TotalRewardShares2)
+	oldCurve := reward.EvaluateRewardCurveQuadratic(oldNetRshares)
+	newCurve := reward.EvaluateRewardCurveQuadratic(newNetRshares)
+	total.Sub(total, oldCurve)
+	total.Add(total, newCurve)
+	if total.Sign() < 0 {
+		total.SetInt64(0)
+	}
+	dgpo.TotalRewardShares2 = reward.Uint128ToBytes(total)
+	objects.PutDGPO(s, &dgpo)
 }
 
 func init() {

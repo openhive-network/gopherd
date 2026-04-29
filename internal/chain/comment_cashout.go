@@ -1,31 +1,27 @@
 package chain
 
 import (
+	"math/big"
+
+	"hived-go/internal/reward"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
 )
 
-// commentCashoutAuthorReward is the placeholder HIVE-satoshi total paid
-// to the author of each comment at cashout.
+// Author/curator split (basis points of HIVE_100_PERCENT).
 //
-// hived's actual payout is content_reward × (rshares² / total_rshares²),
-// distributed 75% author / 25% curators (with the % shifting at HF17 /
-// HF21). Modeling that requires per-block content_reward accumulation in
-// total_reward_fund_hive plus a global rshares² sum that's expensive to
-// maintain.
-//
-// As a stopgap each cashed-out comment with positive net_rshares grants
-// the author a flat 1 HIVE total reward, split per hived's percent_hbd
-// rule: (percent_hbd / 20000) of the reward is paid as HIVE liquid
-// (matching the HBD-portion path that pre-feed-history reduces to liquid
-// HIVE), the remainder as VESTS. Curators receive a small per-vote
-// credit at vote time (see voteEvaluator). Replace with the real reward2
-// curve once virtual_supply / reward_fund tracking lands.
-const commentCashoutAuthorReward int64 = 100000 // 100.000 HIVE in satoshi
+// hived's defaults are 75/25 pre-HF17, then 50/50 from HF17 onwards
+// (per get_curation_rewards_percent in database.cpp). HF17 sits at
+// block 10,629,455 — well past the section we're driving forward
+// today, so we keep 75/25.
+const (
+	authorRewardPercent  int64 = 7500
+	curatorRewardPercent int64 = 2500
+)
 
 // processCommentCashouts pays out comments whose CashoutTime has elapsed.
-// Mirrors the perform_cashout / cashout_comment_helper flow in
-// libraries/chain/database_comment.cpp, drastically simplified.
+// Mirrors libraries/chain/database_comment.cpp::cashout_comment_helper,
+// applied in time order against the per-block schedule index.
 func processCommentCashouts(s *state.Session, blockTime uint32) {
 	type pending struct {
 		cashoutTime uint32
@@ -34,7 +30,6 @@ func processCommentCashouts(s *state.Session, blockTime uint32) {
 	}
 	var ready []pending
 
-	// Snapshot ready entries so we don't mutate the table mid-iteration.
 	_ = s.Range(objects.CommentCashoutScheduleTable, state.PrimaryIndex, nil,
 		func(body, _ []byte) (bool, error) {
 			if len(body) < 4+state.AccountNameKeyLen {
@@ -63,7 +58,21 @@ func processCommentCashouts(s *state.Session, blockTime uint32) {
 	}
 }
 
-// processOneCashout pays out a single due comment.
+// processOneCashout pays out a single due comment, mirroring the no-HF17
+// branch of cashout_comment_helper:
+//
+//	rshare_reward = total_reward_fund_hive × evaluate_reward_curve(net_rshares)
+//	                                       / total_reward_shares2
+//	curation_tokens = rshare_reward × curation_pct / 100%
+//	author_tokens   = rshare_reward - curation_tokens
+//
+//	pay_curators distributes curation_tokens proportionally to each
+//	  voter's rshares² weight; remainder folds back to author.
+//	author_tokens splits per percent_hbd: hbd_hive (paid as liquid HIVE
+//	  before the price feed) and vesting_hive (via create_vesting).
+//
+// adjust_rshares2 then subtracts the comment's curve value from
+// total_reward_shares2 so the next comment's slice excludes this one.
 func processOneCashout(s *state.Session, scheduledTime uint32, author, permlink string) {
 	objects.DeleteCommentCashoutSchedule(s, scheduledTime, author, permlink)
 
@@ -71,43 +80,139 @@ func processOneCashout(s *state.Session, scheduledTime uint32, author, permlink 
 	if err != nil {
 		return
 	}
-
-	// Mark as paid out. Setting CashoutTime to a sentinel keeps the
-	// comment row but prevents re-scheduling. (Hived's full flow may
-	// also schedule a second cashout window pre-HF17 for additional
-	// curation; we collapse into a single payout for now.)
 	c.CashoutTime = 0
+	defer objects.PutComment(s, &c)
 
-	// Only pay if AllowCurationRewards (a comment_options flag) and the
-	// comment had any positive votes — matches hived's gate.
-	if c.AllowCurationRewards && c.VoteCount > 0 {
-		// Split: percent_hbd / 20000 share goes to liquid HIVE balance
-		// (the path that hived's create_hbd reduces to before the price
-		// feed is established), remainder to VESTS via CreateVesting.
-		hbdHive := commentCashoutAuthorReward * int64(c.PercentHbd) / 20000
-		vestingHive := commentCashoutAuthorReward - hbdHive
-
-		if hbdHive > 0 {
-			a, gerr := objects.GetAccount(s, author)
-			if gerr == nil {
-				a.Balance += hbdHive
-				objects.PutAccount(s, &a)
-				if dgpo, derr := objects.GetDGPO(s); derr == nil {
-					dgpo.CurrentSupply += hbdHive
-					objects.PutDGPO(s, &dgpo)
-				}
-			}
-		}
-		if vestingHive > 0 {
-			_, _ = createVestingForCashout(s, author, vestingHive)
-		}
+	if !c.AllowCurationRewards || c.NetRshares <= 0 {
+		return
 	}
 
-	objects.PutComment(s, &c)
+	dgpo, err := objects.GetDGPO(s)
+	if err != nil {
+		return
+	}
+	if dgpo.TotalRewardFundHive <= 0 {
+		return
+	}
+
+	totalShares2 := reward.Uint128FromBytes(dgpo.TotalRewardShares2)
+	if totalShares2.Sign() <= 0 {
+		return
+	}
+	commentCurve := reward.EvaluateRewardCurveQuadratic(c.NetRshares)
+	if commentCurve.Sign() <= 0 {
+		return
+	}
+
+	// payout = reward_fund × curve / total_shares2.
+	payoutBig := new(big.Int).Mul(big.NewInt(dgpo.TotalRewardFundHive), commentCurve)
+	payoutBig.Quo(payoutBig, totalShares2)
+	if !payoutBig.IsInt64() {
+		// Cap to int64 max if anything pathologically large slipped through.
+		payoutBig.SetInt64(int64(^uint64(0) >> 1))
+	}
+	claimed := payoutBig.Int64()
+	if claimed > c.MaxAcceptedPayout {
+		claimed = c.MaxAcceptedPayout
+	}
+	if claimed > dgpo.TotalRewardFundHive {
+		claimed = dgpo.TotalRewardFundHive
+	}
+
+	// adjust_rshares2: drop this comment's curve from the global sum
+	// regardless of whether the payout was zero (it still removes the
+	// claim weight from the running total).
+	totalShares2.Sub(totalShares2, commentCurve)
+	if totalShares2.Sign() < 0 {
+		totalShares2.SetInt64(0)
+	}
+	dgpo.TotalRewardShares2 = reward.Uint128ToBytes(totalShares2)
+
+	if claimed <= 0 {
+		objects.PutDGPO(s, &dgpo)
+		return
+	}
+	dgpo.TotalRewardFundHive -= claimed
+	objects.PutDGPO(s, &dgpo)
+
+	curatorPool := claimed * curatorRewardPercent / 10000
+	authorPool := claimed - curatorPool
+
+	// pay_curators: distribute curatorPool by each voter's rshares²
+	// (matching hived's by-comment-vote-weight ordering since our weight
+	// equals rshares² in this simplified model).
+	if curatorPool > 0 {
+		distributeCuratorPool(s, c.Author, c.Permlink, curatorPool)
+	}
+
+	// Author payout: percent_hbd / 20000 share goes to liquid HIVE
+	// balance (hived's create_hbd path before the feed history is
+	// established), remainder via CreateVesting.
+	hbdHive := authorPool * int64(c.PercentHbd) / 20000
+	vestingHive := authorPool - hbdHive
+	if hbdHive > 0 {
+		if a, gerr := objects.GetAccount(s, author); gerr == nil {
+			a.Balance += hbdHive
+			objects.PutAccount(s, &a)
+		}
+	}
+	if vestingHive > 0 {
+		_, _ = CreateVesting_via_chain(s, author, vestingHive, false)
+	}
 }
 
-// createVestingForCashout invokes the evaluator package's CreateVesting
-// helper through the chain bridge, keeping the import direction one-way.
-func createVestingForCashout(s *state.Session, account string, hiveSatoshi int64) (int64, error) {
-	return CreateVesting_via_chain(s, account, hiveSatoshi, false)
+// distributeCuratorPool walks every CommentVote on (author, permlink)
+// via the by-comment secondary index and credits each voter their
+// proportional share of the pool (weighted by rshares²).
+func distributeCuratorPool(s *state.Session, author, permlink string, pool int64) {
+	type voterShare struct {
+		voter string
+		w     *big.Int // rshares²
+	}
+	var voters []voterShare
+	totalW := new(big.Int)
+
+	prefix := objects.CommentVoteByCommentPrefix(author, permlink)
+	_ = s.Range(objects.CommentVoteTable, objects.CommentVoteByCommentIndex, prefix,
+		func(body, _ []byte) (bool, error) {
+			if len(body) < state.AccountNameKeyLen {
+				return true, nil
+			}
+			voterBytes := body[len(body)-state.AccountNameKeyLen:]
+			n := state.AccountNameKeyLen
+			for n > 0 && voterBytes[n-1] == 0 {
+				n--
+			}
+			voter := string(voterBytes[:n])
+			cv, gerr := objects.GetCommentVote(s, voter, author, permlink)
+			if gerr != nil {
+				return true, nil
+			}
+			if cv.Rshares <= 0 {
+				return true, nil
+			}
+			r := big.NewInt(cv.Rshares)
+			w := new(big.Int).Mul(r, r)
+			voters = append(voters, voterShare{voter: voter, w: w})
+			totalW.Add(totalW, w)
+			return true, nil
+		})
+
+	if totalW.Sign() <= 0 || len(voters) == 0 {
+		return
+	}
+
+	poolBig := big.NewInt(pool)
+	for _, vs := range voters {
+		share := new(big.Int).Mul(poolBig, vs.w)
+		share.Quo(share, totalW)
+		if !share.IsInt64() {
+			continue
+		}
+		s64 := share.Int64()
+		if s64 <= 0 {
+			continue
+		}
+		_, _ = CreateVesting_via_chain(s, vs.voter, s64, false)
+	}
 }

@@ -67,6 +67,7 @@ func cmdStateDump(args []string) int {
 				"current_hbd_supply":      p.CurrentHBDSupply,
 				"total_vesting_shares":    p.TotalVestingShares,
 				"total_vesting_fund_hive": p.TotalVestingFundHive,
+				"total_reward_fund_hive":  p.TotalRewardFundHive,
 			})
 		}
 	}
