@@ -99,8 +99,10 @@ func payPowReward(ctx *Context) error {
 		w.Balance += pay
 		dgpo.CurrentSupply += pay
 	} else {
-		w.VestingShares += pay
-		dgpo.TotalVestingShares += pay
+		// HIVE → VESTS at the 1:1 price scaled by precision (see
+		// HiveToVestsRatio). VESTS has 6 decimals, HIVE 3.
+		w.VestingShares += pay * HiveToVestsRatio
+		dgpo.TotalVestingShares += pay * HiveToVestsRatio
 	}
 	objects.PutAccount(ctx.DB, &w)
 	objects.PutDGPO(ctx.DB, &dgpo)

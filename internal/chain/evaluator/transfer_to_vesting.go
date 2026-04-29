@@ -60,9 +60,14 @@ func (transferToVestingEvaluator) Apply(ctx *Context, o op.Operation) error {
 		}
 		return err
 	}
-	// Placeholder 1:1 vesting price. A real conversion uses
-	// total_vesting_shares / total_vesting_fund_hive.
-	to.VestingShares += tv.Amount.Amount
+	// Convert HIVE → VESTS. At the early 1:1 vesting price, 1 HIVE
+	// (precision 3, satoshi=1000) equals 1 VESTS (precision 6,
+	// satoshi=1,000,000), so HIVE-satoshi × HiveToVestsRatio = VESTS-satoshi.
+	// This is the price hived saw at genesis; total_vesting_fund_hive /
+	// total_vesting_shares diverges later (we approximate with the
+	// constant ratio for now).
+	vestsAmount := tv.Amount.Amount * HiveToVestsRatio
+	to.VestingShares += vestsAmount
 	objects.PutAccount(ctx.DB, &to)
 
 	// Track the chain-wide totals.
@@ -71,7 +76,7 @@ func (transferToVestingEvaluator) Apply(ctx *Context, o op.Operation) error {
 		return err
 	}
 	dgpo.CurrentSupply -= tv.Amount.Amount
-	dgpo.TotalVestingShares += tv.Amount.Amount
+	dgpo.TotalVestingShares += vestsAmount
 	objects.PutDGPO(ctx.DB, &dgpo)
 	return nil
 }

@@ -42,7 +42,9 @@ func processProducerReward(s *state.Session, witnessName string, blockNum uint32
 	if blockNum < startMinerVotingBlock {
 		a.Balance += pay
 	} else {
-		a.VestingShares += pay
+		// HIVE → VESTS conversion: HIVE has 3 decimals, VESTS has 6,
+		// so HIVE-satoshi × 1000 = VESTS-satoshi at the 1:1 price.
+		a.VestingShares += pay * 1000
 	}
 	objects.PutAccount(s, &a)
 
@@ -53,7 +55,7 @@ func processProducerReward(s *state.Session, witnessName string, blockNum uint32
 	if blockNum < startMinerVotingBlock {
 		dgpo.CurrentSupply += pay
 	} else {
-		dgpo.TotalVestingShares += pay
+		dgpo.TotalVestingShares += pay * 1000
 	}
 	objects.PutDGPO(s, &dgpo)
 }
