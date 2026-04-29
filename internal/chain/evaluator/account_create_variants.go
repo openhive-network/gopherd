@@ -130,6 +130,15 @@ func (accountCreateWithDelegationEvaluator) Apply(ctx *Context, o op.Operation) 
 	} else if has {
 		return fmt.Errorf("%w: %q", ErrAccountAlreadyExists, ac.NewAccountName)
 	}
+	if err := verifyAuthorityAccountsExist(ctx, ac.Owner); err != nil {
+		return err
+	}
+	if err := verifyAuthorityAccountsExist(ctx, ac.Active); err != nil {
+		return err
+	}
+	if err := verifyAuthorityAccountsExist(ctx, ac.Posting); err != nil {
+		return err
+	}
 
 	creator.Balance -= ac.Fee.Amount
 	creator.DelegatedVestingShares += ac.Delegation.Amount

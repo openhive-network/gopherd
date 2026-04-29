@@ -5,10 +5,27 @@ import (
 	"fmt"
 
 	"hived-go/internal/protocol/asset"
+	"hived-go/internal/protocol/auth"
 	"hived-go/internal/protocol/op"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
 )
+
+// verifyAuthorityAccountsExist mirrors hived's verify_authority_accounts_exist
+// (libraries/chain/hive_evaluator_account.cpp:80). Each name appearing in the
+// authority's account_auths list must already exist in the account table.
+// is_required=true (the post-HF15 mode we use here) makes any missing account
+// a hard error.
+func verifyAuthorityAccountsExist(ctx *Context, a auth.Authority) error {
+	for _, aa := range a.AccountAuths {
+		if has, err := objects.HasAccount(ctx.DB, aa.Account); err != nil {
+			return err
+		} else if !has {
+			return fmt.Errorf("%w: authority references missing %q", ErrAccountNotFound, aa.Account)
+		}
+	}
+	return nil
+}
 
 // ErrAccountAlreadyExists is returned by account_create when the chosen
 // new_account_name is already taken.
@@ -50,6 +67,19 @@ func (accountCreateEvaluator) Apply(ctx *Context, o op.Operation) error {
 		return err
 	} else if has {
 		return fmt.Errorf("%w: %q", ErrAccountAlreadyExists, ac.NewAccountName)
+	}
+
+	// hived: verify_authority_accounts_exist for each of owner/active/posting.
+	// Without this we silently accept account_creates that hived rejects;
+	// the chain then has different account counts than hived.
+	if err := verifyAuthorityAccountsExist(ctx, ac.Owner); err != nil {
+		return err
+	}
+	if err := verifyAuthorityAccountsExist(ctx, ac.Active); err != nil {
+		return err
+	}
+	if err := verifyAuthorityAccountsExist(ctx, ac.Posting); err != nil {
+		return err
 	}
 
 	// Debit creator.
