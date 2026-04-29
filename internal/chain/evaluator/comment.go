@@ -11,28 +11,33 @@ import (
 	"hived-go/internal/state/objects"
 )
 
-// Cashout window seconds, mirroring HIVE_CASHOUT_WINDOW_SECONDS in
-// libraries/protocol/include/hive/protocol/config.hpp:
+// Cashout windows mirror libraries/chain/hive_evaluator_social.cpp:248:
 //
-//	pre-HF12: 24h
-//	pre-HF17 (post-HF12): 12h
-//	post-HF17:           7d
+//	if has_hardfork(HF17__769):              cashout = now + 7d
+//	elif !parent && has_hardfork(HF12__177): cashout = now + 12h
+//	else:                                    cashout = time_point_sec::max  (no cashout)
+//
+// Pre-HF12 (block 3,533,567) NO comments pay out — content_reward
+// accumulates unbounded in total_reward_fund_hive until HF12 kicks in.
+// HF12 to HF17: only ROOT posts pay out (replies remain frozen). HF17+:
+// all comments pay out at 7d.
 const (
-	cashoutWindowSecondsPreHF12 uint32 = 60 * 60 * 24
 	cashoutWindowSecondsPreHF17 uint32 = 60 * 60 * 12
 	cashoutWindowSeconds        uint32 = 60 * 60 * 24 * 7
 )
 
-// commentCashoutWindow returns the cashout window in seconds for the
-// hardforks active at apply time.
-func commentCashoutWindow(hf hardfork.Set) uint32 {
+// commentCashoutTime returns the cashout time for a new comment given
+// the hardforks active at apply time and whether it has a parent (i.e.
+// it's a reply, not a root post). Returns 0 to mean "never cash out"
+// (we use 0 as our sentinel since uint32 can't hold time_point_sec::max).
+func commentCashoutTime(hf hardfork.Set, blockTime uint32, hasParent bool) uint32 {
 	if hf.Has(hardfork.HF17) {
-		return cashoutWindowSeconds
+		return blockTime + cashoutWindowSeconds
 	}
-	if hf.Has(hardfork.HF12) {
-		return cashoutWindowSecondsPreHF17
+	if !hasParent && hf.Has(hardfork.HF12) {
+		return blockTime + cashoutWindowSecondsPreHF17
 	}
-	return cashoutWindowSecondsPreHF12
+	return 0 // never cash out
 }
 
 // Errors specific to comment evaluators.
@@ -70,10 +75,11 @@ func (commentEvaluator) Apply(ctx *Context, o op.Operation) error {
 		return err
 	}
 	if err == state.ErrNotFound {
-		// New comment — assign a cashout time and register on the
-		// per-block cashout schedule. The window depends on active
-		// hardforks (24h pre-HF12, 12h pre-HF17, 7d after).
-		cashoutTime := ctx.BlockTime + commentCashoutWindow(ctx.Hardforks)
+		// New comment — pre-HF12 comments are frozen (no cashout).
+		// HF12-HF17 only root posts cash out. HF17+ all comments do.
+		// commentCashoutTime returns 0 when the comment never cashes out.
+		hasParent := c.ParentAuthor != ""
+		cashoutTime := commentCashoutTime(ctx.Hardforks, ctx.BlockTime, hasParent)
 		objects.PutComment(ctx.DB, &objects.Comment{
 			Author:               c.Author,
 			Permlink:             c.Permlink,
@@ -87,7 +93,9 @@ func (commentEvaluator) Apply(ctx *Context, o op.Operation) error {
 			AllowVotes:           true,
 			AllowCurationRewards: true,
 		})
-		objects.PutCommentCashoutSchedule(ctx.DB, cashoutTime, c.Author, c.Permlink)
+		if cashoutTime != 0 {
+			objects.PutCommentCashoutSchedule(ctx.DB, cashoutTime, c.Author, c.Permlink)
+		}
 		return nil
 	}
 	// Update existing.
@@ -168,9 +176,6 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 	if !ok {
 		return fmt.Errorf("voteEvaluator: unexpected op type %T", o)
 	}
-	if v.Weight == 0 {
-		return ErrVoteWeightZero
-	}
 
 	if has, err := objects.HasAccount(ctx.DB, v.Voter); err != nil {
 		return err
@@ -192,6 +197,13 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 	prev, err := objects.GetCommentVote(ctx.DB, v.Voter, v.Author, v.Permlink)
 	if err != nil && err != state.ErrNotFound {
 		return err
+	}
+
+	// hived only enforces "weight != 0" on FIRST cast; recasts may set
+	// weight to 0 to remove the vote (libraries/chain/hive_evaluator_social.cpp:456).
+	isNew := err == state.ErrNotFound
+	if isNew && v.Weight == 0 {
+		return ErrVoteWeightZero
 	}
 
 	// Compute rshares contribution. hived's real formula uses the voter's
