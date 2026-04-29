@@ -206,6 +206,7 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	processVestingWithdrawals(session, hdr.Timestamp)
 	processSavingsWithdraws(session, hdr.Timestamp)
 	processConversions(session, hdr.Timestamp)
+	payLiquidityReward(session, blockNum, hdr.Timestamp)
 	clearExpiredOrders(session, hdr.Timestamp)
 	expireEscrowRatifications(session, hdr.Timestamp)
 	processAccountRecovery(session, hdr.Timestamp)

@@ -4,9 +4,19 @@ import (
 	"math/big"
 
 	"hived-go/internal/protocol/asset"
+	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
 )
+
+// liquidityRewardMinAgePreHF10 — pre-HF10 a maker's order must rest on
+// the books at least 1 minute before fills earn liquidity-reward volume
+// credit (HIVE_MIN_LIQUIDITY_REWARD_PERIOD_SEC).
+const liquidityRewardMinAgePreHF10 uint32 = 60
+
+// liquidityRewardMinAgePostHF10 — HF10 raised the minimum maker age to
+// 30 minutes (HIVE_MIN_LIQUIDITY_REWARD_PERIOD_SEC_HF10).
+const liquidityRewardMinAgePostHF10 uint32 = 30 * 60
 
 // applyOrder mirrors database::apply_order in
 // libraries/chain/database_market.cpp:226. It walks the by_price
@@ -125,6 +135,21 @@ func matchOrders(ctx *Context, newOrder, old *objects.LimitOrder) int {
 	oldOrderPays = newOrderReceives
 	newOrderPays = oldOrderReceives
 
+	// Pre-HF12 liquidity-reward volume tracking: if the maker (old)
+	// order has rested long enough on the books, credit them volume
+	// equal to the HIVE-side leg of this trade and debit the taker by
+	// the same amount. Post-HF12 the whole liquidity-reward subsystem
+	// is shut off (HF12__178). Mirrors database_market.cpp:294-309.
+	if !ctx.Hardforks.Has(hardfork.HF12) {
+		minAge := liquidityRewardMinAgePreHF10
+		if ctx.Hardforks.Has(hardfork.HF10) {
+			minAge = liquidityRewardMinAgePostHF10
+		}
+		if old.Created != 0 && ctx.BlockTime >= old.Created+minAge {
+			adjustLiquidityRewardOnFill(ctx, old, newOrder, oldOrderReceives, newOrderReceives)
+		}
+	}
+
 	result := 0
 	if fillLimitOrder(ctx, newOrder, newOrderPays, newOrderReceives) {
 		result |= 1
@@ -133,6 +158,70 @@ func matchOrders(ctx *Context, newOrder, old *objects.LimitOrder) int {
 		result |= 2
 	}
 	return result
+}
+
+// adjustLiquidityRewardOnFill mirrors the C++ branch in match() (lines
+// 295-309): when both legs of a fill are HIVE/HBD, the trade's
+// HIVE-side amount is credited to the maker and debited from the taker.
+// volumes can go negative for takers; the LP balance row's `weight`
+// recomputes with `is_positive` blocking negative-volume rows from
+// counting.
+func adjustLiquidityRewardOnFill(ctx *Context, old, new *objects.LimitOrder, oldReceives, newReceives int64) {
+	// HIVE-side amount of this trade. Either old_receives or new_receives
+	// will be in HIVE, depending on which order is selling HIVE.
+	var hiveAmount int64
+	if asset.AssetNum(old.MinReceiveSym) == asset.HiveSymbol {
+		// old receives HIVE; new pays HIVE.
+		hiveAmount = oldReceives
+	} else if asset.AssetNum(new.MinReceiveSym) == asset.HiveSymbol {
+		// new receives HIVE; old pays HIVE.
+		hiveAmount = newReceives
+	} else {
+		// Neither side is HIVE — only HIVE/HBD trades qualify in hived's
+		// pre-HF12 LP scheme. Skip.
+		return
+	}
+	if hiveAmount <= 0 {
+		return
+	}
+	// Determine which side is the maker (old) and which symbol they
+	// receive. In hived match's branch-1 logic, the volume is always the
+	// HIVE-equivalent regardless of leg orientation.
+	makerIsHive := asset.AssetNum(old.MinReceiveSym) == asset.HiveSymbol
+	hf9 := ctx.Hardforks.Has(hardfork.HF9)
+	adjustLiquidityVolume(ctx, old.Owner, hiveAmount, !makerIsHive, hf9)  // maker += hive_amount on its hive_volume side
+	adjustLiquidityVolume(ctx, new.Owner, -hiveAmount, !makerIsHive, hf9) // taker -= same
+}
+
+// adjustLiquidityVolume mirrors database::adjust_liquidity_reward
+// (database_vesting.cpp:62). Looks up or creates the row; resets
+// volumes if the row hasn't been touched in HIVE_LIQUIDITY_TIMEOUT_SEC
+// (7d); applies the volume delta; recomputes weight; updates last_update.
+func adjustLiquidityVolume(ctx *Context, owner string, delta int64, isHbd bool, hf9 bool) {
+	const liquidityTimeoutSec uint32 = 60 * 60 * 24 * 7
+	now := ctx.BlockTime
+	b, err := objects.GetLiquidityRewardBalance(ctx.DB, owner)
+	prevWeight := b.Weight
+	exists := err == nil
+	if exists && now-b.LastUpdate >= liquidityTimeoutSec {
+		b.HiveVolume = 0
+		b.HBDVolume = 0
+	}
+	if !exists {
+		b = objects.LiquidityRewardBalance{Owner: owner}
+	}
+	if isHbd {
+		b.HBDVolume += delta
+	} else {
+		b.HiveVolume += delta
+	}
+	b.Weight = objects.ComputeLiquidityWeight(b.HiveVolume, b.HBDVolume, hf9)
+	b.LastUpdate = now
+	if exists {
+		objects.PutLiquidityRewardBalanceUpdating(ctx.DB, &b, prevWeight)
+	} else {
+		objects.PutLiquidityRewardBalance(ctx.DB, &b)
+	}
 }
 
 // fillLimitOrder mirrors database::fill_order in database_market.cpp:323.
