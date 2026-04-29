@@ -3,6 +3,7 @@ package evaluator
 import (
 	"fmt"
 
+	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/op"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
@@ -30,7 +31,10 @@ func (powEvaluator) Apply(ctx *Context, o op.Operation) error {
 	if !ok {
 		return fmt.Errorf("powEvaluator: unexpected op type %T", o)
 	}
-	return ensureMinerAccount(ctx, pw.WorkerAccount)
+	// pow1 always pays the reward (it's deprecated at HF13 and chains
+	// past that point reject the op entirely; the block_log won't
+	// contain pow1 ops post-HF13).
+	return ensureMinerAccountForPow(ctx, pw.WorkerAccount, true)
 }
 
 // pow2Evaluator implements the partial-mining-era apply for `pow2`. Same
@@ -51,7 +55,10 @@ func (pow2Evaluator) Apply(ctx *Context, o op.Operation) error {
 	default:
 		return fmt.Errorf("pow2: unknown work variant %d", pw.WorkVariantTag)
 	}
-	return ensureMinerAccount(ctx, worker)
+	// hived's pow2_evaluator (libraries/chain/hive_evaluator.cpp:593) only
+	// pays the reward when HF16 is NOT yet active. Account/witness setup
+	// always runs.
+	return ensureMinerAccountForPow(ctx, worker, !ctx.Hardforks.Has(hardfork.HF16))
 }
 
 // HIVE_MIN_POW_REWARD = HIVE_MINING_REWARD = 1.000 HIVE in satoshi
@@ -114,10 +121,10 @@ func payPowReward(ctx *Context) error {
 	return nil
 }
 
-// ensureMinerAccount creates an account named worker if missing.
-// No balance is credited — the pow reward goes to the block producer
-// (see payPowReward).
-func ensureMinerAccount(ctx *Context, worker string) error {
+// ensureMinerAccountForPow creates an account named worker if missing
+// and (when payReward is true) credits the block producer with the
+// pow reward.
+func ensureMinerAccountForPow(ctx *Context, worker string, payReward bool) error {
 	if worker == "" {
 		return fmt.Errorf("pow/pow2: empty worker_account")
 	}
@@ -143,6 +150,9 @@ func ensureMinerAccount(ctx *Context, worker string) error {
 			Owner:   worker,
 			Created: ctx.BlockTime,
 		})
+	}
+	if !payReward {
+		return nil
 	}
 	return payPowReward(ctx)
 }
