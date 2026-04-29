@@ -28,6 +28,23 @@ func (accountUpdateEvaluator) Apply(ctx *Context, o op.Operation) error {
 		}
 		return err
 	}
+	// hived: each rotated authority's account_auths must reference real
+	// accounts (libraries/chain/hive_evaluator_account.cpp:318).
+	if au.Owner != nil {
+		if err := verifyAuthorityAccountsExist(ctx, *au.Owner); err != nil {
+			return err
+		}
+	}
+	if au.Active != nil {
+		if err := verifyAuthorityAccountsExist(ctx, *au.Active); err != nil {
+			return err
+		}
+	}
+	if au.Posting != nil {
+		if err := verifyAuthorityAccountsExist(ctx, *au.Posting); err != nil {
+			return err
+		}
+	}
 	a.MemoKey = au.MemoKey
 	a.JSONMetadata = au.JSONMetadata
 	objects.PutAccount(ctx.DB, &a)
