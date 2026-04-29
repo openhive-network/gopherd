@@ -59,12 +59,18 @@ type Stats struct {
 	// SkipReasons counts skipped ops by a coarse "op_name: error_class" key.
 	// Populated only when TolerateFailingOps is true.
 	SkipReasons map[string]uint64
+	// SkipAccounts counts insufficient-balance failures by the offending
+	// account name (the one extracted from the error message). Lets the
+	// summary highlight which accounts the upstream cascade is starving.
+	SkipAccounts map[string]uint64
 }
 
 func (s *Stats) recordSkip(opName string, err error) {
 	if s.SkipReasons == nil {
 		s.SkipReasons = make(map[string]uint64, 32)
 	}
+	// Walk to the leaf for the reason key (so wrapping noise like the
+	// "apply_block N tx M op K: " prefix doesn't fragment the histogram).
 	leaf := err
 	for {
 		next := unwrap(leaf)
@@ -73,11 +79,37 @@ func (s *Stats) recordSkip(opName string, err error) {
 		}
 		leaf = next
 	}
-	msg := leaf.Error()
-	if i := indexOfByte(msg, ':'); i > 0 {
-		msg = msg[:i]
+	short := leaf.Error()
+	if i := indexOfByte(short, ':'); i > 0 {
+		short = short[:i]
 	}
-	s.SkipReasons[opName+": "+msg]++
+	s.SkipReasons[opName+": "+short]++
+	// For the starved-accounts histogram we want the ORIGINAL formatted
+	// message (which still has the quoted account name); the leaf is
+	// just the bare sentinel and never carries the name.
+	full := err.Error()
+	if name := firstQuotedToken(full); name != "" {
+		if s.SkipAccounts == nil {
+			s.SkipAccounts = make(map[string]uint64, 64)
+		}
+		s.SkipAccounts[name]++
+	}
+}
+
+// firstQuotedToken returns the contents of the first `"…"` quoted span
+// in s, or "" if there is none.
+func firstQuotedToken(s string) string {
+	a := -1
+	for i := 0; i < len(s); i++ {
+		if s[i] == '"' {
+			if a < 0 {
+				a = i + 1
+			} else {
+				return s[a:i]
+			}
+		}
+	}
+	return ""
 }
 
 func indexOfByte(s string, c byte) int {

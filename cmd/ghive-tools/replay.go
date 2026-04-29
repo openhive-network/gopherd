@@ -157,6 +157,25 @@ func cmdReplay(args []string) int {
 				fmt.Printf("  %8d  %s\n", it.val, it.key)
 			}
 		}
+		if len(stats.SkipAccounts) > 0 {
+			type kv struct {
+				key string
+				val uint64
+			}
+			items := make([]kv, 0, len(stats.SkipAccounts))
+			for k, v := range stats.SkipAccounts {
+				items = append(items, kv{k, v})
+			}
+			sort.Slice(items, func(i, j int) bool { return items[i].val > items[j].val })
+			fmt.Println("top starved accounts:")
+			top := 15
+			if len(items) < top {
+				top = len(items)
+			}
+			for _, it := range items[:top] {
+				fmt.Printf("  %8d  %s\n", it.val, it.key)
+			}
+		}
 		return 0
 	}
 	return 1
