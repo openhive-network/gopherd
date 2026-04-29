@@ -90,6 +90,13 @@ func (transferFromSavingsEvaluator) Apply(ctx *Context, o op.Operation) error {
 		}
 		return err
 	}
+	// hived verifies the recipient exists at op time
+	// (libraries/chain/hive_evaluator_transfer.cpp:592).
+	if has, herr := objects.HasAccount(ctx.DB, t.To); herr != nil {
+		return herr
+	} else if !has {
+		return fmt.Errorf("%w: to=%q", ErrAccountNotFound, t.To)
+	}
 	switch t.Amount.Symbol.Num {
 	case asset.HiveSymbol:
 		if from.SavingsBalance < t.Amount.Amount {
