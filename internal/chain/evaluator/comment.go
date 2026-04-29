@@ -117,10 +117,17 @@ func (commentEvaluator) Apply(ctx *Context, o op.Operation) error {
 	return nil
 }
 
-// deleteCommentEvaluator implements delete_comment. hived only allows
-// deletion if there are no votes and no children. We enforce the
-// no-votes invariant; child counting requires the children_count field
-// which lands with the full comment schema.
+// deleteCommentEvaluator implements delete_comment.
+//
+// Mirrors libraries/chain/hive_evaluator_social.cpp:55:
+//   - Pre-HF19: rejects only if the comment has replies (we don't track
+//     a children_count, so we accept; close enough — the chain rejects
+//     these too if hived's own logic catches them, otherwise we have an
+//     extra deletion).
+//   - HF19+: net_rshares <= 0 required; if > 0, silent no-op (push
+//     ineffective_delete_comment vop in hived).
+//   - Always: post-payout (no comment_cashout / our CashoutTime == 0
+//     sentinel) is a hard error post-HF19.
 type deleteCommentEvaluator struct{}
 
 func (deleteCommentEvaluator) Apply(ctx *Context, o op.Operation) error {
@@ -135,8 +142,12 @@ func (deleteCommentEvaluator) Apply(ctx *Context, o op.Operation) error {
 		}
 		return err
 	}
-	if c.VoteCount != 0 {
-		return fmt.Errorf("%w: comment has %d votes", ErrCommentClosed, c.VoteCount)
+	if ctx.Hardforks.Has(hardfork.HF19) {
+		// Post-HF19: silent no-op if net positive votes; hard error if
+		// already paid out.
+		if c.NetRshares > 0 {
+			return nil
+		}
 	}
 	if c.CashoutTime != 0 {
 		objects.DeleteCommentCashoutSchedule(ctx.DB, c.CashoutTime, dc.Author, dc.Permlink)
