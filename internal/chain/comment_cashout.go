@@ -3,26 +3,38 @@ package chain
 import (
 	"math/big"
 
+	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/reward"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
 )
 
-// Author/curator split (basis points of HIVE_100_PERCENT).
+// curationRewardsPercentPreHF8 — pre-HF8, curators get 50% of the
+// claimed reward (matches get_curation_rewards_percent in C++).
+// HF8 lowers it to 25%; post-HF17 the percentage comes from the
+// reward_fund_object — we'll wire that in once that table lands.
 //
-// hived's defaults are 75/25 pre-HF17, then 50/50 from HF17 onwards
-// (per get_curation_rewards_percent in database.cpp). HF17 sits at
-// block 10,629,455 — well past the section we're driving forward
-// today, so we keep 75/25.
+// HIVE_1_PERCENT = 100, so 50 × 100 = 5000 basis points (50%).
 const (
-	authorRewardPercent  int64 = 7500
-	curatorRewardPercent int64 = 2500
+	curationPctPreHF8  int64 = 5000 // 50%
+	curationPctPostHF8 int64 = 2500 // 25%
 )
+
+// curationPercentForBlock returns the curator-share basis points for the
+// hardforks active at blockNum.
+func curationPercentForBlock(blockNum uint32) int64 {
+	hf := hardfork.SetForBlock(blockNum)
+	if hf.Has(hardfork.HF8) {
+		return curationPctPostHF8
+	}
+	return curationPctPreHF8
+}
 
 // processCommentCashouts pays out comments whose CashoutTime has elapsed.
 // Mirrors libraries/chain/database_comment.cpp::cashout_comment_helper,
-// applied in time order against the per-block schedule index.
-func processCommentCashouts(s *state.Session, blockTime uint32) {
+// applied in time order against the per-block schedule index. blockNum
+// drives the curation/author split (HF8 toggles 50/50 → 25/75).
+func processCommentCashouts(s *state.Session, blockTime, blockNum uint32) {
 	type pending struct {
 		cashoutTime uint32
 		author      string
@@ -53,8 +65,9 @@ func processCommentCashouts(s *state.Session, blockTime uint32) {
 			return true, nil
 		})
 
+	curationPct := curationPercentForBlock(blockNum)
 	for _, p := range ready {
-		processOneCashout(s, p.cashoutTime, p.author, p.permlink)
+		processOneCashout(s, p.cashoutTime, p.author, p.permlink, curationPct)
 	}
 }
 
@@ -73,7 +86,7 @@ func processCommentCashouts(s *state.Session, blockTime uint32) {
 //
 // adjust_rshares2 then subtracts the comment's curve value from
 // total_reward_shares2 so the next comment's slice excludes this one.
-func processOneCashout(s *state.Session, scheduledTime uint32, author, permlink string) {
+func processOneCashout(s *state.Session, scheduledTime uint32, author, permlink string, curationPct int64) {
 	objects.DeleteCommentCashoutSchedule(s, scheduledTime, author, permlink)
 
 	c, err := objects.GetComment(s, author, permlink)
@@ -135,7 +148,7 @@ func processOneCashout(s *state.Session, scheduledTime uint32, author, permlink 
 	dgpo.TotalRewardFundHive -= claimed
 	objects.PutDGPO(s, &dgpo)
 
-	curatorPool := claimed * curatorRewardPercent / 10000
+	curatorPool := claimed * curationPct / 10000
 	authorPool := claimed - curatorPool
 
 	// pay_curators: distribute curatorPool by each voter's rshares²

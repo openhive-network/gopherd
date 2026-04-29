@@ -196,7 +196,7 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	processProducerReward(session, hdr.Witness, blockNum)
 	processFunds(session, blockNum)
 	processVestingWithdrawals(session, hdr.Timestamp)
-	processCommentCashouts(session, hdr.Timestamp)
+	processCommentCashouts(session, hdr.Timestamp, blockNum)
 
 	// Roll forward the DGPO. We always have enough info here even if no
 	// evaluator touched it.
