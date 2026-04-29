@@ -54,15 +54,62 @@ func (pow2Evaluator) Apply(ctx *Context, o op.Operation) error {
 	return ensureMinerAccount(ctx, worker)
 }
 
-// hiveMiningReward is HIVE_MINING_REWARD (libraries/protocol/include/hive/protocol/config.hpp):
-// `asset(1000, HIVE_SYMBOL)` — 1.000 HIVE per pow op. hived's mining flow
-// converts this to VESTS via create_vesting; we credit the liquid Balance
-// to keep subsequent transfers funded. CurrentSupply on the DGPO is
-// adjusted to track the inflation.
-const hiveMiningReward int64 = 1000
+// HIVE_MIN_POW_REWARD = HIVE_MINING_REWARD = 1.000 HIVE in satoshi
+// (libraries/protocol/include/hive/protocol/config.hpp).
+const minPowReward int64 = 1000
 
-// ensureMinerAccount creates an account named worker if missing AND
-// credits the standard mining reward to the worker's HIVE balance.
+// HIVE_MAX_WITNESSES — used to multiply the pow reward pre-HIVE_START_MINER_VOTING_BLOCK.
+const maxWitnesses int64 = 21
+
+// HIVE_START_MINER_VOTING_BLOCK = 30 days × 28800 = 864,000.
+const startMinerVotingBlockPow uint32 = 864_000
+
+// payPowReward implements the C++ pow_apply reward distribution:
+//
+//	pow_reward = HIVE_MIN_POW_REWARD                                      // formula floor
+//	if (head_block < HIVE_START_MINER_VOTING_BLOCK)
+//	    pow_reward *= HIVE_MAX_WITNESSES                                  // 21x boost early
+//	dgpo.current_supply += pow_reward
+//	if (head_block < HIVE_START_MINER_VOTING_BLOCK)
+//	    inc_witness.balance += pow_reward                                 // liquid HIVE
+//	else
+//	    inc_witness.vesting_shares += create_vesting(pow_reward)          // VESTS
+//
+// The reward goes to the BLOCK PRODUCER (dgp.current_witness), not the
+// worker — a critical detail. The worker's only state effect is having
+// its account created if it didn't exist yet.
+func payPowReward(ctx *Context) error {
+	dgpo, err := objects.GetDGPO(ctx.DB)
+	if err != nil && err != state.ErrNotFound {
+		return err
+	}
+	witnessName := ctx.Witness
+	if witnessName == "" {
+		return nil
+	}
+	pay := minPowReward
+	if ctx.BlockNum < startMinerVotingBlockPow {
+		pay *= maxWitnesses
+	}
+	w, err := objects.GetAccount(ctx.DB, witnessName)
+	if err != nil {
+		return nil
+	}
+	if ctx.BlockNum < startMinerVotingBlockPow {
+		w.Balance += pay
+		dgpo.CurrentSupply += pay
+	} else {
+		w.VestingShares += pay
+		dgpo.TotalVestingShares += pay
+	}
+	objects.PutAccount(ctx.DB, &w)
+	objects.PutDGPO(ctx.DB, &dgpo)
+	return nil
+}
+
+// ensureMinerAccount creates an account named worker if missing.
+// No balance is credited — the pow reward goes to the block producer
+// (see payPowReward).
 func ensureMinerAccount(ctx *Context, worker string) error {
 	if worker == "" {
 		return fmt.Errorf("pow/pow2: empty worker_account")
@@ -77,20 +124,20 @@ func ensureMinerAccount(ctx *Context, worker string) error {
 			Created: ctx.BlockTime,
 		})
 	}
-	a, err := objects.GetAccount(ctx.DB, worker)
+	// Register the worker as a witness if missing — hived's pow_apply
+	// calls db.create<witness_object>(...) on first pow from this
+	// account, alongside the account creation.
+	wExists, err := objects.HasWitness(ctx.DB, worker)
 	if err != nil {
 		return err
 	}
-	a.Balance += hiveMiningReward
-	objects.PutAccount(ctx.DB, &a)
-
-	dgpo, err := objects.GetDGPO(ctx.DB)
-	if err != nil && err != state.ErrNotFound {
-		return err
+	if !wExists {
+		objects.PutWitness(ctx.DB, &objects.Witness{
+			Owner:   worker,
+			Created: ctx.BlockTime,
+		})
 	}
-	dgpo.CurrentSupply += hiveMiningReward
-	objects.PutDGPO(ctx.DB, &dgpo)
-	return nil
+	return payPowReward(ctx)
 }
 
 func init() {

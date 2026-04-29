@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 
-	"hived-go/internal/protocol/asset"
 	"hived-go/internal/protocol/op"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
@@ -36,32 +35,20 @@ func (witnessUpdateEvaluator) Apply(ctx *Context, o op.Operation) error {
 	if !ok {
 		return fmt.Errorf("witnessUpdateEvaluator: unexpected op type %T", o)
 	}
-	owner, err := objects.GetAccount(ctx.DB, wu.Owner)
-	if err != nil {
-		if err == state.ErrNotFound {
-			return fmt.Errorf("%w: owner=%q", ErrAccountNotFound, wu.Owner)
-		}
+	// hived's witness_update_evaluator only verifies the owner exists.
+	// The op's `fee` field is IGNORED — there is no on-chain fee for
+	// becoming a witness; the field is a historical artifact. Charging it
+	// would lock out witnesses with low HIVE balances. See
+	// libraries/chain/hive_evaluator.cpp::witness_update_evaluator::do_apply.
+	if has, err := objects.HasAccount(ctx.DB, wu.Owner); err != nil {
 		return err
-	}
-
-	// Cap fee paid in HIVE.
-	if wu.Fee.Symbol.Num != asset.HiveSymbol {
-		return fmt.Errorf("%w: witness_update fee must be HIVE", ErrUnsupportedSymbol)
-	}
-	if wu.Fee.Amount < 0 {
-		return ErrTransferAmountNotPos
+	} else if !has {
+		return fmt.Errorf("%w: owner=%q", ErrAccountNotFound, wu.Owner)
 	}
 
 	exists, err := objects.HasWitness(ctx.DB, wu.Owner)
 	if err != nil {
 		return err
-	}
-	if !exists {
-		if owner.Balance < wu.Fee.Amount {
-			return fmt.Errorf("%w: %q has %d HIVE, fee %d", ErrInsufficientBalance, wu.Owner, owner.Balance, wu.Fee.Amount)
-		}
-		owner.Balance -= wu.Fee.Amount
-		objects.PutAccount(ctx.DB, &owner)
 	}
 
 	w := objects.Witness{

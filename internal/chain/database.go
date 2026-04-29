@@ -56,6 +56,37 @@ type Stats struct {
 	OpsSkipped  uint64
 	BlocksFull  uint64 // blocks where every op applied cleanly
 	BlocksDirty uint64 // blocks with at least one skipped op
+	// SkipReasons counts skipped ops by a coarse "op_name: error_class" key.
+	// Populated only when TolerateFailingOps is true.
+	SkipReasons map[string]uint64
+}
+
+func (s *Stats) recordSkip(opName string, err error) {
+	if s.SkipReasons == nil {
+		s.SkipReasons = make(map[string]uint64, 32)
+	}
+	leaf := err
+	for {
+		next := unwrap(leaf)
+		if next == nil {
+			break
+		}
+		leaf = next
+	}
+	msg := leaf.Error()
+	if i := indexOfByte(msg, ':'); i > 0 {
+		msg = msg[:i]
+	}
+	s.SkipReasons[opName+": "+msg]++
+}
+
+func indexOfByte(s string, c byte) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == c {
+			return i
+		}
+	}
+	return -1
 }
 
 // ApplyBlock runs every transaction's operations through their registered
@@ -78,6 +109,7 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 		Hardforks: hf,
 		BlockNum:  blockNum,
 		BlockTime: hdr.Timestamp,
+		Witness:   hdr.Witness,
 	}
 
 	r := fcraw.NewReader(rawBlock[hdrLen:])
@@ -95,10 +127,16 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 			if err := evaluator.Apply(ctx, o); err != nil {
 				if opts.SkipUnknownOps && isNotImplemented(err) {
 					skippedThisBlock++
+					if stats != nil {
+						stats.recordSkip(o.OpTag().Name(), err)
+					}
 					continue
 				}
 				if opts.TolerateFailingOps {
 					skippedThisBlock++
+					if stats != nil {
+						stats.recordSkip(o.OpTag().Name(), err)
+					}
 					continue
 				}
 				return objects.DynamicGlobalProperty{}, fmt.Errorf("apply_block %d tx %d op %d: %w", blockNum, i, j, err)

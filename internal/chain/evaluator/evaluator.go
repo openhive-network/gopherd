@@ -31,6 +31,12 @@ type Context struct {
 	BlockNum uint32
 	// BlockTime is the head block's time_point_sec.
 	BlockTime uint32
+	// Witness is the producer of the block currently being applied (the
+	// `witness` field of its signed_block_header). hived's DGPO is updated
+	// to point at this name BEFORE evaluators run, so any evaluator
+	// looking at dgpo.current_witness sees this account. We carry it on
+	// Context to avoid having to mutate DGPO at the apply-loop top.
+	Witness string
 }
 
 // Evaluator applies a single operation to ctx.DB.
