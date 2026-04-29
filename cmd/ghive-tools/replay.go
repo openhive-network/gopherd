@@ -11,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"sort"
 	"time"
 
 	"hived-go/internal/blocklog"
@@ -135,6 +136,27 @@ func cmdReplay(args []string) int {
 	}
 	if errCount == 0 {
 		fmt.Println("status:         PARTIAL — pipeline drove all blocks; some ops skipped (expected with stubs)")
+		// Print top skip reasons so the operator sees which evaluators
+		// are responsible for the missing-balance cascades.
+		if len(stats.SkipReasons) > 0 {
+			type kv struct {
+				key string
+				val uint64
+			}
+			items := make([]kv, 0, len(stats.SkipReasons))
+			for k, v := range stats.SkipReasons {
+				items = append(items, kv{k, v})
+			}
+			sort.Slice(items, func(i, j int) bool { return items[i].val > items[j].val })
+			fmt.Println("top skip reasons:")
+			top := 15
+			if len(items) < top {
+				top = len(items)
+			}
+			for _, it := range items[:top] {
+				fmt.Printf("  %8d  %s\n", it.val, it.key)
+			}
+		}
 		return 0
 	}
 	return 1
