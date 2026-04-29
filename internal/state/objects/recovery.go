@@ -29,12 +29,28 @@ type ChangeRecoveryAccountRequest struct {
 }
 
 const (
-	AccountRecoveryRequestTable        state.TableID = 14
-	ChangeRecoveryAccountRequestTable  state.TableID = 15
+	AccountRecoveryRequestTable       state.TableID = 14
+	ChangeRecoveryAccountRequestTable state.TableID = 15
+	// Secondary indices for the per-block account_recovery_processing
+	// hook (libraries/chain/database.cpp:1962): expired
+	// account_recovery_request rows get cleared, and pending
+	// change_recovery_account rows fire when their effective time hits.
+	AccountRecoveryByExpirationIndex   state.IndexID = 1
+	ChangeRecoveryByEffectiveDateIndex state.IndexID = 1
 )
 
 func recoveryRequestKey(account auth.AccountName) []byte {
 	return state.AppendAccountName(nil, account)
+}
+
+func accountRecoveryByExpirationKey(expiration uint32, account auth.AccountName) []byte {
+	out := state.AppendUint32BE(nil, expiration)
+	return state.AppendAccountName(out, account)
+}
+
+func changeRecoveryByEffectiveDateKey(effective uint32, account auth.AccountName) []byte {
+	out := state.AppendUint32BE(nil, effective)
+	return state.AppendAccountName(out, account)
 }
 
 func AppendAccountRecoveryRequest(dst []byte, r *AccountRecoveryRequest) []byte {
@@ -68,10 +84,21 @@ func ReadAccountRecoveryRequest(src []byte) (AccountRecoveryRequest, error) {
 
 func PutAccountRecoveryRequest(s *state.Session, r *AccountRecoveryRequest) {
 	s.Put(AccountRecoveryRequestTable, state.PrimaryIndex, recoveryRequestKey(r.AccountToRecover), AppendAccountRecoveryRequest(nil, r))
+	s.Put(AccountRecoveryRequestTable, AccountRecoveryByExpirationIndex,
+		accountRecoveryByExpirationKey(r.Expiration, r.AccountToRecover), nil)
 }
 
 func DeleteAccountRecoveryRequest(s *state.Session, account auth.AccountName) {
+	// Caller is responsible for clearing the secondary entry too if it
+	// has the row in hand (see DeleteAccountRecoveryRequestFull).
 	s.Delete(AccountRecoveryRequestTable, state.PrimaryIndex, recoveryRequestKey(account))
+}
+
+// DeleteAccountRecoveryRequestFull removes both indices.
+func DeleteAccountRecoveryRequestFull(s *state.Session, r *AccountRecoveryRequest) {
+	s.Delete(AccountRecoveryRequestTable, state.PrimaryIndex, recoveryRequestKey(r.AccountToRecover))
+	s.Delete(AccountRecoveryRequestTable, AccountRecoveryByExpirationIndex,
+		accountRecoveryByExpirationKey(r.Expiration, r.AccountToRecover))
 }
 
 func GetAccountRecoveryRequest(s *state.Session, account auth.AccountName) (AccountRecoveryRequest, error) {
@@ -114,4 +141,13 @@ func ReadChangeRecoveryRequest(src []byte) (ChangeRecoveryAccountRequest, error)
 
 func PutChangeRecoveryRequest(s *state.Session, r *ChangeRecoveryAccountRequest) {
 	s.Put(ChangeRecoveryAccountRequestTable, state.PrimaryIndex, recoveryRequestKey(r.AccountToRecover), AppendChangeRecoveryRequest(nil, r))
+	s.Put(ChangeRecoveryAccountRequestTable, ChangeRecoveryByEffectiveDateIndex,
+		changeRecoveryByEffectiveDateKey(r.EffectiveOn, r.AccountToRecover), nil)
+}
+
+// DeleteChangeRecoveryRequestFull removes both indices.
+func DeleteChangeRecoveryRequestFull(s *state.Session, r *ChangeRecoveryAccountRequest) {
+	s.Delete(ChangeRecoveryAccountRequestTable, state.PrimaryIndex, recoveryRequestKey(r.AccountToRecover))
+	s.Delete(ChangeRecoveryAccountRequestTable, ChangeRecoveryByEffectiveDateIndex,
+		changeRecoveryByEffectiveDateKey(r.EffectiveOn, r.AccountToRecover))
 }

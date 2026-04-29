@@ -50,12 +50,12 @@ func (recoverAccountEvaluator) Apply(ctx *Context, o op.Operation) error {
 		return err
 	}
 	if ctx.BlockTime > req.Expiration {
-		objects.DeleteAccountRecoveryRequest(ctx.DB, r.AccountToRecover)
+		objects.DeleteAccountRecoveryRequestFull(ctx.DB, &req)
 		return fmt.Errorf("recover_account: request expired")
 	}
 	// Owner authority rotation requires the account_authority_object;
 	// for now we just delete the recovery request to mark it consumed.
-	objects.DeleteAccountRecoveryRequest(ctx.DB, r.AccountToRecover)
+	objects.DeleteAccountRecoveryRequestFull(ctx.DB, &req)
 	return nil
 }
 
