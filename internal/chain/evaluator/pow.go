@@ -91,21 +91,26 @@ func payPowReward(ctx *Context) error {
 	if ctx.BlockNum < startMinerVotingBlockPow {
 		pay *= maxWitnesses
 	}
-	w, err := objects.GetAccount(ctx.DB, witnessName)
-	if err != nil {
+	if _, err := objects.GetAccount(ctx.DB, witnessName); err != nil {
 		return nil
 	}
-	if ctx.BlockNum < startMinerVotingBlockPow {
-		w.Balance += pay
-		dgpo.CurrentSupply += pay
-	} else {
-		// HIVE → VESTS at the 1:1 price scaled by precision (see
-		// HiveToVestsRatio). VESTS has 6 decimals, HIVE 3.
-		w.VestingShares += pay * HiveToVestsRatio
-		dgpo.TotalVestingShares += pay * HiveToVestsRatio
-	}
-	objects.PutAccount(ctx.DB, &w)
+	// hived: adjust_supply then either credit balance directly (pre-864000)
+	// or call create_vesting (post-864000). Both branches grow current_supply.
+	dgpo.CurrentSupply += pay
 	objects.PutDGPO(ctx.DB, &dgpo)
+
+	if ctx.BlockNum < startMinerVotingBlockPow {
+		w, err := objects.GetAccount(ctx.DB, witnessName)
+		if err != nil {
+			return nil
+		}
+		w.Balance += pay
+		objects.PutAccount(ctx.DB, &w)
+	} else {
+		if _, err := CreateVesting(ctx.DB, witnessName, pay, false); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

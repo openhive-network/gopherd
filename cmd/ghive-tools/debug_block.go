@@ -74,7 +74,7 @@ func cmdDebugBlock(args []string) int {
 			len(res.SignedTx.Operations), len(res.SignedTx.Signatures),
 			hex.EncodeToString(txID[:]))
 		for j, op := range res.SignedTx.Operations {
-			fmt.Printf("    op %d: %s\n", j, op.OpTag().Name())
+			fmt.Printf("    op %d: %s -- %+v\n", j, op.OpTag().Name(), op)
 		}
 		fmt.Printf("    unsigned_first16: %x\n", unsigned[:min(16, len(unsigned))])
 		fmt.Printf("    signed_last16:    %x\n", signed[max(0, len(signed)-16):])

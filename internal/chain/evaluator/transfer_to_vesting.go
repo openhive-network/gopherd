@@ -10,15 +10,22 @@ import (
 )
 
 // transferToVestingEvaluator implements transfer_to_vesting (a.k.a. "power
-// up"). The sender's HIVE is converted to VESTS and credited to the
-// recipient at the current vesting price. The conversion price uses the
-// dynamic_global_property_object's total_vesting_shares /
-// total_vesting_fund_hive ratio.
+// up"). The sender's HIVE moves out of liquid balance and into the
+// chain-wide vesting fund; the recipient is credited VESTS at the
+// current vesting price.
 //
-// For our minimal-viable schema the DGPO doesn't yet track
-// total_vesting_fund_hive separately, so we use a fixed 1:1 conversion
-// when no ratio is available. Once vesting accounting lands the real
-// price will be substituted.
+// hived's accounting (libraries/chain/hive_evaluator.cpp,
+// transfer_to_vesting_evaluator):
+//
+//	from.balance               -= amount
+//	total_vesting_fund_hive    += amount        // HIVE moves into the fund
+//	total_vesting_shares       += new_vesting   // VESTS issued at dynamic price
+//	to.vesting_shares          += new_vesting
+//	current_supply              unchanged       // fund_hive is a subset of supply
+//
+// The dynamic price is total_vesting_shares / total_vesting_fund_hive
+// (with the 1:1000 satoshi-level ratio at genesis). Both writes are
+// encapsulated in CreateVesting.
 type transferToVestingEvaluator struct{}
 
 func (transferToVestingEvaluator) Apply(ctx *Context, o op.Operation) error {
@@ -53,31 +60,18 @@ func (transferToVestingEvaluator) Apply(ctx *Context, o op.Operation) error {
 	from.Balance -= tv.Amount.Amount
 	objects.PutAccount(ctx.DB, &from)
 
-	to, err := objects.GetAccount(ctx.DB, toName)
-	if err != nil {
-		if err == state.ErrNotFound {
-			return fmt.Errorf("%w: to=%q", ErrAccountNotFound, toName)
-		}
+	// Confirm the recipient exists before moving HIVE into the fund.
+	if has, err := objects.HasAccount(ctx.DB, toName); err != nil {
 		return err
+	} else if !has {
+		return fmt.Errorf("%w: to=%q", ErrAccountNotFound, toName)
 	}
-	// Convert HIVE → VESTS. At the early 1:1 vesting price, 1 HIVE
-	// (precision 3, satoshi=1000) equals 1 VESTS (precision 6,
-	// satoshi=1,000,000), so HIVE-satoshi × HiveToVestsRatio = VESTS-satoshi.
-	// This is the price hived saw at genesis; total_vesting_fund_hive /
-	// total_vesting_shares diverges later (we approximate with the
-	// constant ratio for now).
-	vestsAmount := tv.Amount.Amount * HiveToVestsRatio
-	to.VestingShares += vestsAmount
-	objects.PutAccount(ctx.DB, &to)
 
-	// Track the chain-wide totals.
-	dgpo, err := objects.GetDGPO(ctx.DB)
-	if err != nil && err != state.ErrNotFound {
+	// CreateVesting handles fund_hive += amount, shares += new_vesting,
+	// and recipient.vesting_shares += new_vesting at the dynamic price.
+	if _, err := CreateVesting(ctx.DB, toName, tv.Amount.Amount, false); err != nil {
 		return err
 	}
-	dgpo.CurrentSupply -= tv.Amount.Amount
-	dgpo.TotalVestingShares += vestsAmount
-	objects.PutDGPO(ctx.DB, &dgpo)
 	return nil
 }
 

@@ -159,39 +159,28 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 	if err != nil && err != state.ErrNotFound {
 		return err
 	}
-	// Approximate curation reward. The full hived flow accumulates
-	// per-comment rshares over the cashout window (24h pre-HF17, 7d
-	// after), then pays a chunk back to voters proportional to their
-	// rshares contribution from the comment's reward_fund slice. The
-	// reward is in VESTS, credited to voter.RewardVests for later
-	// claim_reward_balance.
+	// Placeholder curation/author reward.
 	//
-	// Until the cashout pipeline lands, we credit a flat positive-vote
-	// curation reward immediately. This is consensus-INCORRECT (the
-	// amount doesn't match real Hive's curve) but keeps voter VESTS
-	// roughly tracking the chain so downstream withdraw_vesting and
-	// witness-vote-tally operations don't fail at zero. Replace with
-	// a real cashout when the curve work lands.
+	// Hived's real flow accrues rshares over a 7-day cashout window then
+	// pays curators+authors from the comment's reward_fund slice; that
+	// pipeline (manabar decay, reward curve, virtual_supply tracking) is
+	// not yet implemented. Skipping payouts entirely starves accounts
+	// like steemit of VESTS they need to back later withdraw_vesting and
+	// witness-vote-weight ops, which blocks replay.
+	//
+	// As a stopgap we credit a flat 0.010 HIVE worth of VESTS to the
+	// voter and the author on positive votes, routed through CreateVesting
+	// so fund_hive grows with shares and the dynamic price stays at the
+	// 1000:1 satoshi-level ratio. Replace with the real cashout pipeline
+	// once virtual_supply and reward_fund tracking land.
 	if v.Weight > 0 {
-		const placeholderCurationVests int64 = 10_000 // 0.01 VESTS to voter
-		const placeholderAuthorVests int64 = 10_000   // 0.01 VESTS to author
-		credited := int64(0)
-		if voter, err := objects.GetAccount(ctx.DB, v.Voter); err == nil {
-			voter.VestingShares += placeholderCurationVests
-			objects.PutAccount(ctx.DB, &voter)
-			credited += placeholderCurationVests
+		const placeholderHive int64 = 10 // 0.010 HIVE → 10K VESTS-satoshi
+		if has, herr := objects.HasAccount(ctx.DB, v.Voter); herr == nil && has {
+			_, _ = CreateVesting(ctx.DB, v.Voter, placeholderHive, false)
 		}
 		if v.Author != v.Voter {
-			if author, err := objects.GetAccount(ctx.DB, v.Author); err == nil {
-				author.VestingShares += placeholderAuthorVests
-				objects.PutAccount(ctx.DB, &author)
-				credited += placeholderAuthorVests
-			}
-		}
-		if credited > 0 {
-			if dgpo, err := objects.GetDGPO(ctx.DB); err == nil {
-				dgpo.TotalVestingShares += credited
-				objects.PutDGPO(ctx.DB, &dgpo)
+			if has, herr := objects.HasAccount(ctx.DB, v.Author); herr == nil && has {
+				_, _ = CreateVesting(ctx.DB, v.Author, placeholderHive, false)
 			}
 		}
 	}

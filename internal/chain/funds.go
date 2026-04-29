@@ -40,25 +40,33 @@ func processProducerReward(s *state.Session, witnessName string, blockNum uint32
 	}
 	pay := minProducerReward
 	// Hived: VESTS path if head_block >= 864000 OR witness has 0 vesting.
-	// The vesting==0 special case lets new witnesses accumulate VESTS
-	// from producer rewards even pre-864000, giving them governance
-	// weight (otherwise they'd accumulate only liquid HIVE).
+	// hived's adjust_supply runs before either branch, so dgpo.current_supply
+	// always rises by `pay`. Inside the VESTS path, create_vesting moves
+	// `pay` HIVE into total_vesting_fund_hive and credits the resulting
+	// VESTS to the witness.
 	asVests := blockNum >= startMinerVotingBlock || a.VestingShares == 0
-	if asVests {
-		a.VestingShares += pay * 1000 // HIVE-satoshi × 1000 = VESTS-satoshi
-	} else {
-		a.Balance += pay
-	}
-	objects.PutAccount(s, &a)
 
 	dgpo, err := objects.GetDGPO(s)
 	if err != nil && err != state.ErrNotFound {
 		return
 	}
-	if asVests {
-		dgpo.TotalVestingShares += pay * 1000
-	} else {
-		dgpo.CurrentSupply += pay
-	}
+	dgpo.CurrentSupply += pay
 	objects.PutDGPO(s, &dgpo)
+
+	if asVests {
+		// CreateVesting moves `pay` HIVE into the vesting fund, computes
+		// VESTS at the dynamic price, and credits the witness.
+		if _, err := CreateVesting_via_chain(s, witnessName, pay, false); err != nil {
+			return
+		}
+	} else {
+		// Refresh `a` since CurrentSupply update might have happened in
+		// a different branch — but here we only need to mutate Balance.
+		a, err := objects.GetAccount(s, witnessName)
+		if err != nil {
+			return
+		}
+		a.Balance += pay
+		objects.PutAccount(s, &a)
+	}
 }

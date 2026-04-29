@@ -35,6 +35,11 @@ type DynamicGlobalProperty struct {
 	CurrentHBDSupply int64
 	// Total VESTS in circulation.
 	TotalVestingShares int64
+	// HIVE backing the VESTS pool (the "vesting fund"). Vesting price =
+	// TotalVestingShares / TotalVestingFundHive (with 1e-6 / 1e-3 precision
+	// scaling baked in by virtue of the satoshi-level division). When
+	// either is 0, the initial 1:1000 satoshi-level ratio is used.
+	TotalVestingFundHive int64
 }
 
 // AppendDGPO serializes p to dst.
@@ -47,6 +52,7 @@ func AppendDGPO(dst []byte, p *DynamicGlobalProperty) []byte {
 	dst = appendI64LE(dst, p.CurrentSupply)
 	dst = appendI64LE(dst, p.CurrentHBDSupply)
 	dst = appendI64LE(dst, p.TotalVestingShares)
+	dst = appendI64LE(dst, p.TotalVestingFundHive)
 	return dst
 }
 
@@ -75,6 +81,9 @@ func ReadDGPO(src []byte) (DynamicGlobalProperty, error) {
 	}
 	if p.TotalVestingShares, err = r.ReadInt64(); err != nil {
 		return p, fmt.Errorf("dgpo.total_vesting_shares: %w", err)
+	}
+	if p.TotalVestingFundHive, err = r.ReadInt64(); err != nil {
+		return p, fmt.Errorf("dgpo.total_vesting_fund_hive: %w", err)
 	}
 	if !r.AtEnd() {
 		return p, errors.New("dgpo: trailing bytes after decode (schema mismatch?)")
