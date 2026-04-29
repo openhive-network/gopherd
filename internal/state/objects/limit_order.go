@@ -31,6 +31,17 @@ type LimitOrder struct {
 // LimitOrderTable holds the orders.
 const LimitOrderTable state.TableID = 6
 
+// LimitOrderByExpirationIndex orders entries by (expiration, owner,
+// orderID) so clear_expired_orders can iterate in time order. Key:
+// [expiration_BE_4][owner_padded_16][orderid_BE_4].
+const LimitOrderByExpirationIndex state.IndexID = 1
+
+func limitOrderByExpirationKey(expiration uint32, owner auth.AccountName, orderID uint32) []byte {
+	out := state.AppendUint32BE(nil, expiration)
+	out = state.AppendAccountName(out, owner)
+	return state.AppendUint32BE(out, orderID)
+}
+
 // limitOrderKey is owner(16 bytes) || orderID(4 bytes BE).
 func limitOrderKey(owner auth.AccountName, orderID uint32) []byte {
 	out := state.AppendAccountName(nil, owner)
@@ -87,9 +98,13 @@ func ReadLimitOrder(src []byte) (LimitOrder, error) {
 	return lo, nil
 }
 
-// PutLimitOrder stores lo.
+// PutLimitOrder stores lo and updates the secondary by-expiration index.
+// The expiration value is permitted to be 0 (no expiry) — those orders
+// sort to the front of the secondary index but clear_expired_orders
+// guards against acting on expiration == 0.
 func PutLimitOrder(s *state.Session, lo *LimitOrder) {
 	s.Put(LimitOrderTable, state.PrimaryIndex, limitOrderKey(lo.Owner, lo.OrderID), AppendLimitOrder(nil, lo))
+	s.Put(LimitOrderTable, LimitOrderByExpirationIndex, limitOrderByExpirationKey(lo.Expiration, lo.Owner, lo.OrderID), nil)
 }
 
 // GetLimitOrder fetches the order (owner, orderID).
@@ -106,9 +121,18 @@ func HasLimitOrder(s *state.Session, owner auth.AccountName, orderID uint32) (bo
 	return s.Has(LimitOrderTable, state.PrimaryIndex, limitOrderKey(owner, orderID))
 }
 
-// DeleteLimitOrder removes the order.
+// DeleteLimitOrder removes the order. Caller must already know the
+// expiration to also clear the secondary entry — most call sites have
+// the order in hand and use DeleteLimitOrderFull.
 func DeleteLimitOrder(s *state.Session, owner auth.AccountName, orderID uint32) {
 	s.Delete(LimitOrderTable, state.PrimaryIndex, limitOrderKey(owner, orderID))
+}
+
+// DeleteLimitOrderFull deletes the primary entry AND the secondary
+// by-expiration entry in one shot.
+func DeleteLimitOrderFull(s *state.Session, lo *LimitOrder) {
+	s.Delete(LimitOrderTable, state.PrimaryIndex, limitOrderKey(lo.Owner, lo.OrderID))
+	s.Delete(LimitOrderTable, LimitOrderByExpirationIndex, limitOrderByExpirationKey(lo.Expiration, lo.Owner, lo.OrderID))
 }
 
 // silence unused-import on encoding/binary (kept available for future

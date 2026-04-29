@@ -197,6 +197,7 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	processFunds(session, blockNum)
 	processVestingWithdrawals(session, hdr.Timestamp)
 	processCommentCashouts(session, hdr.Timestamp, blockNum)
+	clearExpiredOrders(session, hdr.Timestamp)
 
 	// Roll forward the DGPO. We always have enough info here even if no
 	// evaluator touched it.

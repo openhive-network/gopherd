@@ -141,7 +141,7 @@ func (limitOrderCancelEvaluator) Apply(ctx *Context, o op.Operation) error {
 		a.HBDBalance += order.ForSaleAmount
 	}
 	objects.PutAccount(ctx.DB, &a)
-	objects.DeleteLimitOrder(ctx.DB, lo.Owner, lo.OrderID)
+	objects.DeleteLimitOrderFull(ctx.DB, &order)
 	return nil
 }
 
