@@ -70,6 +70,12 @@ func cmdStateDump(args []string) int {
 				"total_reward_fund_hive":  p.TotalRewardFundHive,
 			})
 		}
+		if h, err := objects.GetFeedHistory(s); err == nil {
+			emit(enc, "feed_history", map[string]interface{}{
+				"price_history_len":      len(h.PriceHistory),
+				"current_median_history": fmt.Sprintf("%d/%d %d/%d", h.CurrentMedianHistory.Base.Amount, h.CurrentMedianHistory.Base.Symbol.Num, h.CurrentMedianHistory.Quote.Amount, h.CurrentMedianHistory.Quote.Symbol.Num),
+			})
+		}
 	}
 
 	var counts = map[string]uint64{}
