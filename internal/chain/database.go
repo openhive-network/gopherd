@@ -193,11 +193,17 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	//   2. apply chain inflation (content + vesting reward) to dgpo
 	//   3. fire any vesting withdrawals whose interval elapsed
 	//   4. cash out any comments whose payout window closed
+	// Hook order mirrors libraries/chain/database.cpp:2335 in apply_block:
+	// process_funds → process_conversions → process_comment_cashout →
+	// process_vesting_withdrawals → process_savings_withdraws → ...
+	// process_funds in C++ also dispatches the producer-reward (we do
+	// that explicitly upstream so the witness's vesting state is set
+	// before vesting-share inflation runs).
 	processProducerReward(session, hdr.Witness, blockNum)
 	processFunds(session, blockNum)
-	processSavingsWithdraws(session, hdr.Timestamp)
-	processVestingWithdrawals(session, hdr.Timestamp)
 	processCommentCashouts(session, hdr.Timestamp, blockNum)
+	processVestingWithdrawals(session, hdr.Timestamp)
+	processSavingsWithdraws(session, hdr.Timestamp)
 	clearExpiredOrders(session, hdr.Timestamp)
 
 	// Roll forward the DGPO. We always have enough info here even if no
