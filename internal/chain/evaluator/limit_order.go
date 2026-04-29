@@ -20,11 +20,14 @@ var (
 
 // limitOrderCreateEvaluator implements limit_order_create.
 //
-// Hived semantics: validate, debit owner.balance by amount_to_sell, run
-// the matching engine against existing orders on the opposite side,
-// create a limit_order_object with whatever's unfilled. We elide the
-// matching engine for now — the order is debited and recorded; cross-
-// trades won't happen until the engine lands.
+// Mirrors libraries/chain/hive_evaluator_transfer.cpp:522:
+//   - validate expiration is in the future (28-day cap post-HF20)
+//   - debit owner.balance by amount_to_sell
+//   - create limit_order_object
+//   - apply_order: try to match against existing opposite-side orders
+//     in the by_price index; partial fills update for_sale, full fills
+//     remove the order
+//   - if fill_or_kill and the new order didn't fully fill, the op fails
 type limitOrderCreateEvaluator struct{}
 
 func (limitOrderCreateEvaluator) Apply(ctx *Context, o op.Operation) error {
@@ -97,21 +100,26 @@ func applyLimitOrderCreate(ctx *Context, owner string, orderID uint32, amountToS
 		return fmt.Errorf("%w: %q/%d", ErrLimitOrderExists, owner, orderID)
 	}
 	objects.PutAccount(ctx.DB, &a)
-	objects.PutLimitOrder(ctx.DB, &objects.LimitOrder{
-		Owner:         owner,
-		OrderID:       orderID,
-		Created:       ctx.BlockTime,
-		Expiration:    expiration,
-		ForSaleAmount: amountToSell.Amount,
-		ForSaleSymbol: uint32(amountToSell.Symbol.Num),
-		MinReceiveAmt: minToReceive.Amount,
-		MinReceiveSym: uint32(minToReceive.Symbol.Num),
-	})
+	newOrder := objects.LimitOrder{
+		Owner:               owner,
+		OrderID:             orderID,
+		Created:             ctx.BlockTime,
+		Expiration:          expiration,
+		ForSaleAmount:       amountToSell.Amount,
+		ForSaleSymbol:       uint32(amountToSell.Symbol.Num),
+		MinReceiveAmt:       minToReceive.Amount,
+		MinReceiveSym:       uint32(minToReceive.Symbol.Num),
+		SellPriceBaseAmount: amountToSell.Amount, // immutable, set at create time
+	}
+	objects.PutLimitOrder(ctx.DB, &newOrder)
 
-	// fill_or_kill fully-or-nothing semantics require running the matching
-	// engine; until that lands we accept (don't fail) FoK orders. They
-	// behave as ordinary orders that wait for a counterparty.
-	_ = fillOrKill
+	// apply_order: walk opposite-side orders in by_price descending and
+	// match against any whose price satisfies new's max acceptable rate.
+	// Returns true when the new order was fully filled.
+	filled := applyOrder(ctx, &newOrder)
+	if fillOrKill && !filled {
+		return fmt.Errorf("limit_order_create: fill_or_kill order %q/%d not fully matched", owner, orderID)
+	}
 	return nil
 }
 
