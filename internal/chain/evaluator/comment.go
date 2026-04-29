@@ -4,10 +4,35 @@ import (
 	"errors"
 	"fmt"
 
+	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/op"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
 )
+
+// Cashout window seconds, mirroring HIVE_CASHOUT_WINDOW_SECONDS in
+// libraries/protocol/include/hive/protocol/config.hpp:
+//
+//	pre-HF12: 24h
+//	pre-HF17 (post-HF12): 12h
+//	post-HF17:           7d
+const (
+	cashoutWindowSecondsPreHF12 uint32 = 60 * 60 * 24
+	cashoutWindowSecondsPreHF17 uint32 = 60 * 60 * 12
+	cashoutWindowSeconds        uint32 = 60 * 60 * 24 * 7
+)
+
+// commentCashoutWindow returns the cashout window in seconds for the
+// hardforks active at apply time.
+func commentCashoutWindow(hf hardfork.Set) uint32 {
+	if hf.Has(hardfork.HF17) {
+		return cashoutWindowSeconds
+	}
+	if hf.Has(hardfork.HF12) {
+		return cashoutWindowSecondsPreHF17
+	}
+	return cashoutWindowSecondsPreHF12
+}
 
 // Errors specific to comment evaluators.
 var (
@@ -44,7 +69,10 @@ func (commentEvaluator) Apply(ctx *Context, o op.Operation) error {
 		return err
 	}
 	if err == state.ErrNotFound {
-		// New comment.
+		// New comment — assign a cashout time and register on the
+		// per-block cashout schedule. The window depends on active
+		// hardforks (24h pre-HF12, 12h pre-HF17, 7d after).
+		cashoutTime := ctx.BlockTime + commentCashoutWindow(ctx.Hardforks)
 		objects.PutComment(ctx.DB, &objects.Comment{
 			Author:               c.Author,
 			Permlink:             c.Permlink,
@@ -52,11 +80,13 @@ func (commentEvaluator) Apply(ctx *Context, o op.Operation) error {
 			ParentPermlink:       c.ParentPermlink,
 			Created:              ctx.BlockTime,
 			LastUpdate:           ctx.BlockTime,
+			CashoutTime:          cashoutTime,
 			MaxAcceptedPayout:    1_000_000_000_000, // HIVE_MAX_SHARE_SUPPLY default
 			PercentHbd:           10000,             // HIVE_100_PERCENT
 			AllowVotes:           true,
 			AllowCurationRewards: true,
 		})
+		objects.PutCommentCashoutSchedule(ctx.DB, cashoutTime, c.Author, c.Permlink)
 		return nil
 	}
 	// Update existing.
@@ -85,6 +115,9 @@ func (deleteCommentEvaluator) Apply(ctx *Context, o op.Operation) error {
 	}
 	if c.VoteCount != 0 {
 		return fmt.Errorf("%w: comment has %d votes", ErrCommentClosed, c.VoteCount)
+	}
+	if c.CashoutTime != 0 {
+		objects.DeleteCommentCashoutSchedule(ctx.DB, c.CashoutTime, dc.Author, dc.Permlink)
 	}
 	objects.DeleteComment(ctx.DB, dc.Author, dc.Permlink)
 	return nil
@@ -174,7 +207,11 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 	// 1000:1 satoshi-level ratio. Replace with the real cashout pipeline
 	// once virtual_supply and reward_fund tracking land.
 	if v.Weight > 0 {
-		const placeholderHive int64 = 10 // 0.010 HIVE → 10K VESTS-satoshi
+		// 0.100 HIVE per credit (= 100K VESTS-satoshi at 1000:1) — about
+		// an order of magnitude above hived's typical curation reward at
+		// equilibrium, but offsets the missing reward2 curve so accounts
+		// that vote heavily can still back later withdraw_vesting ops.
+		const placeholderHive int64 = 100
 		if has, herr := objects.HasAccount(ctx.DB, v.Voter); herr == nil && has {
 			_, _ = CreateVesting(ctx.DB, v.Voter, placeholderHive, false)
 		}

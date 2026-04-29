@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"hived-go/internal/protocol/asset"
+	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/op"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
@@ -12,8 +13,12 @@ import (
 // HIVE_VESTING_WITHDRAW_INTERVAL_SECONDS — 1 week between payouts.
 const vestingWithdrawIntervalSec = 60 * 60 * 24 * 7
 
-// HIVE_VESTING_WITHDRAW_INTERVALS — 13 weeks total.
-const vestingWithdrawIntervals = 13
+// HIVE_VESTING_WITHDRAW_INTERVALS_PRE_HF_16 — 104 weeks (~2 years).
+// HIVE_VESTING_WITHDRAW_INTERVALS                  — 13 weeks (1 quarter), HF16 onwards.
+const (
+	vestingWithdrawIntervalsPreHF16 = 104
+	vestingWithdrawIntervals        = 13
+)
 
 // withdrawVestingEvaluator implements withdraw_vesting (start power-down).
 // Setting vesting_shares=0 cancels an existing power-down.
@@ -39,6 +44,12 @@ func (withdrawVestingEvaluator) Apply(ctx *Context, o op.Operation) error {
 		return err
 	}
 
+	// Drop any existing schedule entry for this account from the
+	// time-ordered index before we mutate the next-withdrawal field.
+	if a.NextVestingWithdrawal != 0 {
+		objects.DeleteVestingWithdrawalSchedule(ctx.DB, a.NextVestingWithdrawal, w.Account)
+	}
+
 	if w.VestingShares.Amount == 0 {
 		// Cancel the schedule.
 		a.VestingWithdrawRate = 0
@@ -54,7 +65,11 @@ func (withdrawVestingEvaluator) Apply(ctx *Context, o op.Operation) error {
 		return fmt.Errorf("%w: %q has %d undelegated VESTS", ErrInsufficientBalance, w.Account, available)
 	}
 
-	a.VestingWithdrawRate = w.VestingShares.Amount / vestingWithdrawIntervals
+	intervals := int64(vestingWithdrawIntervalsPreHF16)
+	if ctx.Hardforks.Has(hardfork.HF16) {
+		intervals = vestingWithdrawIntervals
+	}
+	a.VestingWithdrawRate = w.VestingShares.Amount / intervals
 	if a.VestingWithdrawRate == 0 {
 		a.VestingWithdrawRate = 1
 	}
@@ -62,8 +77,7 @@ func (withdrawVestingEvaluator) Apply(ctx *Context, o op.Operation) error {
 	a.ToWithdraw = w.VestingShares.Amount
 	a.Withdrawn = 0
 	objects.PutAccount(ctx.DB, &a)
-	// NOTE: actual periodic payouts come from a per-block hook
-	// (process_vesting_withdrawals); they're not modeled here yet.
+	objects.PutVestingWithdrawalSchedule(ctx.DB, a.NextVestingWithdrawal, w.Account)
 	return nil
 }
 

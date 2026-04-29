@@ -22,8 +22,14 @@ type Comment struct {
 	ParentPermlink string
 	Created        uint32
 	LastUpdate     uint32
-	NetRshares     int64 // running sum of vote rshares (placeholder — exact math comes later)
-	VoteCount      uint32
+	// CashoutTime is the time_point_sec when the comment is eligible for
+	// payout. Set when the comment is created based on the active cashout
+	// window (24h pre-HF12, 12h pre-HF17, 7d after) and used by the
+	// per-block process_comment_cashouts hook to identify due comments.
+	// Cleared (set to max uint32) once the comment has been paid out.
+	CashoutTime uint32
+	NetRshares  int64 // running sum of vote rshares (placeholder — exact math comes later)
+	VoteCount   uint32
 	// MaxAcceptedPayout / PercentHbd / AllowVotes / AllowCurationRewards
 	// are mirrored from the most recent comment_options operation. In
 	// hived these can only be set BEFORE the first vote.
@@ -48,7 +54,33 @@ type CommentVote struct {
 const (
 	CommentTable     state.TableID = 4
 	CommentVoteTable state.TableID = 5
+	// CommentCashoutScheduleTable indexes pending comment payouts by
+	// cashout time. Key: [cashout_time_BE_4][author_padded_16][permlink_varlen].
+	// Value: empty. process_comment_cashouts iterates the table in time
+	// order each block and pays out every entry whose time has elapsed.
+	CommentCashoutScheduleTable state.TableID = 19
 )
+
+// CommentCashoutScheduleKey encodes (cashoutTime, author, permlink) into
+// the schedule index key. Time is BE-encoded so lex order matches numeric
+// order; author is padded to AccountNameKeyLen; permlink follows raw.
+func CommentCashoutScheduleKey(cashoutTime uint32, author auth.AccountName, permlink string) []byte {
+	out := state.AppendUint32BE(nil, cashoutTime)
+	out = state.AppendAccountName(out, author)
+	return append(out, permlink...)
+}
+
+// PutCommentCashoutSchedule registers (cashoutTime, author, permlink) in
+// the schedule index.
+func PutCommentCashoutSchedule(s *state.Session, cashoutTime uint32, author auth.AccountName, permlink string) {
+	s.Put(CommentCashoutScheduleTable, state.PrimaryIndex, CommentCashoutScheduleKey(cashoutTime, author, permlink), nil)
+}
+
+// DeleteCommentCashoutSchedule removes a (cashoutTime, author, permlink)
+// schedule entry.
+func DeleteCommentCashoutSchedule(s *state.Session, cashoutTime uint32, author auth.AccountName, permlink string) {
+	s.Delete(CommentCashoutScheduleTable, state.PrimaryIndex, CommentCashoutScheduleKey(cashoutTime, author, permlink))
+}
 
 // commentKey encodes (author, permlink) as a fixed-width 16-byte author
 // followed by the raw permlink bytes. Fixed-width author means no
@@ -72,6 +104,7 @@ func AppendComment(dst []byte, c *Comment) []byte {
 	dst = append(dst, c.ParentPermlink...)
 	dst = appendU32LE(dst, c.Created)
 	dst = appendU32LE(dst, c.LastUpdate)
+	dst = appendU32LE(dst, c.CashoutTime)
 	dst = appendI64LE(dst, c.NetRshares)
 	dst = appendU32LE(dst, c.VoteCount)
 	dst = appendI64LE(dst, c.MaxAcceptedPayout)
@@ -110,6 +143,9 @@ func ReadComment(src []byte) (Comment, error) {
 		return c, err
 	}
 	if c.LastUpdate, err = r.ReadUint32(); err != nil {
+		return c, err
+	}
+	if c.CashoutTime, err = r.ReadUint32(); err != nil {
 		return c, err
 	}
 	if c.NetRshares, err = r.ReadInt64(); err != nil {

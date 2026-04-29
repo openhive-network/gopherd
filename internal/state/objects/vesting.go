@@ -31,7 +31,32 @@ type WithdrawRoute struct {
 const (
 	VestingDelegationTable state.TableID = 8
 	WithdrawRouteTable     state.TableID = 9
+	// VestingWithdrawalScheduleTable indexes accounts with active power-down
+	// schedules by next-withdrawal time. Key: [next_withdrawal_BE_4][account_name_padded_16].
+	// Value is the empty byte slice — the only data we need is the (time, account)
+	// pair encoded in the key. process_vesting_withdrawals iterates this in
+	// time order each block to find ready payouts.
+	VestingWithdrawalScheduleTable state.TableID = 18
 )
+
+// VestingWithdrawalScheduleKey encodes (nextWithdrawal, account) for the
+// schedule index.
+func VestingWithdrawalScheduleKey(nextWithdrawal uint32, account auth.AccountName) []byte {
+	out := state.AppendUint32BE(nil, nextWithdrawal)
+	return state.AppendAccountName(out, account)
+}
+
+// PutVestingWithdrawalSchedule registers (nextWithdrawal, account) in the
+// schedule index.
+func PutVestingWithdrawalSchedule(s *state.Session, nextWithdrawal uint32, account auth.AccountName) {
+	s.Put(VestingWithdrawalScheduleTable, state.PrimaryIndex, VestingWithdrawalScheduleKey(nextWithdrawal, account), nil)
+}
+
+// DeleteVestingWithdrawalSchedule removes (nextWithdrawal, account) from the
+// schedule index.
+func DeleteVestingWithdrawalSchedule(s *state.Session, nextWithdrawal uint32, account auth.AccountName) {
+	s.Delete(VestingWithdrawalScheduleTable, state.PrimaryIndex, VestingWithdrawalScheduleKey(nextWithdrawal, account))
+}
 
 func vestingDelegationKey(delegator, delegatee auth.AccountName) []byte {
 	out := state.AppendAccountName(nil, delegator)
