@@ -63,9 +63,7 @@ func init() {
 	// Feed (need feed_history_object + price tracking).
 	register(op.TagFeedPublish, stub("feed_publish", noValidate))
 
-	// Convert (need convert_request_object).
-	register(op.TagConvert, stub("convert", noValidate))
-	register(op.TagCollateralizedConvert, stub("collateralized_convert", noValidate))
+	// (convert + collateralized_convert implemented in convert.go.)
 
 	// (escrow_transfer / approve / dispute / release implemented in escrow.go.)
 
