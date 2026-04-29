@@ -6,6 +6,7 @@ import (
 
 	"hived-go/internal/crypto"
 	"hived-go/internal/fcraw"
+	"hived-go/internal/protocol/asset"
 	"hived-go/internal/protocol/auth"
 	"hived-go/internal/state"
 )
@@ -28,6 +29,10 @@ type Witness struct {
 	HardforkVersionVote    uint32 // packed v_num; 0 = unset
 	HardforkTimeVote       uint32 // time_point_sec
 	RunningVersion         uint32
+	// HBDExchangeRate is the most recent feed_publish from this witness
+	// — a price of HBD/HIVE. Zero amount on Base means "not set yet".
+	HBDExchangeRate         asset.Price
+	LastHBDExchangeUpdate   uint32 // time_point_sec of last feed_publish
 }
 
 // AccountWitnessVote represents one (account, witness) edge in the
@@ -61,6 +66,8 @@ func AppendWitness(dst []byte, w *Witness) []byte {
 	dst = appendU32LE(dst, w.HardforkVersionVote)
 	dst = appendU32LE(dst, w.HardforkTimeVote)
 	dst = appendU32LE(dst, w.RunningVersion)
+	dst = asset.AppendPrice(dst, w.HBDExchangeRate)
+	dst = appendU32LE(dst, w.LastHBDExchangeUpdate)
 	return dst
 }
 
@@ -105,6 +112,17 @@ func ReadWitness(src []byte) (Witness, error) {
 	}
 	if w.RunningVersion, err = r.ReadUint32(); err != nil {
 		return w, err
+	}
+	// HBDExchangeRate / LastHBDExchangeUpdate are a later schema
+	// addition; treat EOF as "not set yet" so legacy rows still decode.
+	if r.AtEnd() {
+		return w, nil
+	}
+	if w.HBDExchangeRate, err = asset.ReadPrice(r); err != nil {
+		return w, fmt.Errorf("witness.hbd_exchange_rate: %w", err)
+	}
+	if w.LastHBDExchangeUpdate, err = r.ReadUint32(); err != nil {
+		return w, fmt.Errorf("witness.last_hbd_exchange_update: %w", err)
 	}
 	if !r.AtEnd() {
 		return w, errors.New("witness: trailing bytes")

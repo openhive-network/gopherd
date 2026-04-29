@@ -8,9 +8,13 @@ import (
 	"hived-go/internal/state/objects"
 )
 
-// feedPublishEvaluator updates the publishing witness's last-feed
-// timestamp; the actual median price feed (feed_history_object) is a
-// per-block computation we'll add alongside the price-aware vesting math.
+// feedPublishEvaluator stamps the publishing witness's most recent
+// HBD/HIVE exchange rate plus the publish timestamp. The chain-wide
+// median is computed by the per-block update_median_feed hook, which
+// reads each scheduled witness's HBDExchangeRate and emits a new entry
+// into the FeedHistory's rolling window.
+//
+// Mirrors libraries/chain/hive_evaluator.cpp:605.
 type feedPublishEvaluator struct{}
 
 func (feedPublishEvaluator) Apply(ctx *Context, o op.Operation) error {
@@ -25,9 +29,12 @@ func (feedPublishEvaluator) Apply(ctx *Context, o op.Operation) error {
 		}
 		return err
 	}
-	// Stamp last-feed via TotalMissedBlocks placeholder slot? No — we
-	// don't yet store last-feed time. For now: no-op state mutation
-	// beyond touching the witness so its presence is updated.
+	// hived post-HF20 enforces HBD base + HIVE quote; pre-HF20 there
+	// were even reverted-orientation feeds (commit f87cc43e is the
+	// canonical example). We accept whatever the op says since the
+	// median computation normalizes anyway.
+	w.HBDExchangeRate = fp.ExchangeRate
+	w.LastHBDExchangeUpdate = ctx.BlockTime
 	objects.PutWitness(ctx.DB, &w)
 	return nil
 }

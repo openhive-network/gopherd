@@ -199,11 +199,13 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	// process_funds in C++ also dispatches the producer-reward (we do
 	// that explicitly upstream so the witness's vesting state is set
 	// before vesting-share inflation runs).
+	updateMedianFeed(session, blockNum, hdr.Timestamp)
 	processProducerReward(session, hdr.Witness, blockNum)
 	processFunds(session, blockNum)
 	processCommentCashouts(session, hdr.Timestamp, blockNum)
 	processVestingWithdrawals(session, hdr.Timestamp)
 	processSavingsWithdraws(session, hdr.Timestamp)
+	processConversions(session, hdr.Timestamp)
 	clearExpiredOrders(session, hdr.Timestamp)
 
 	// Roll forward the DGPO. We always have enough info here even if no

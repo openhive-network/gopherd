@@ -21,8 +21,18 @@ type ConvertRequest struct {
 
 const ConvertRequestTable state.TableID = 11
 
+// ConvertRequestByDateIndex orders entries by conversion time so the
+// per-block process_conversions hook can settle matures in time order.
+const ConvertRequestByDateIndex state.IndexID = 1
+
 func convertRequestKey(owner auth.AccountName, requestID uint32) []byte {
 	out := state.AppendAccountName(nil, owner)
+	return state.AppendUint32BE(out, requestID)
+}
+
+func convertRequestByDateKey(conversion uint32, owner auth.AccountName, requestID uint32) []byte {
+	out := state.AppendUint32BE(nil, conversion)
+	out = state.AppendAccountName(out, owner)
 	return state.AppendUint32BE(out, requestID)
 }
 
@@ -60,10 +70,27 @@ func ReadConvertRequest(src []byte) (ConvertRequest, error) {
 
 func PutConvertRequest(s *state.Session, c *ConvertRequest) {
 	s.Put(ConvertRequestTable, state.PrimaryIndex, convertRequestKey(c.Owner, c.RequestID), AppendConvertRequest(nil, c))
+	s.Put(ConvertRequestTable, ConvertRequestByDateIndex, convertRequestByDateKey(c.Conversion, c.Owner, c.RequestID), nil)
 }
 
 func HasConvertRequest(s *state.Session, owner auth.AccountName, requestID uint32) (bool, error) {
 	return s.Has(ConvertRequestTable, state.PrimaryIndex, convertRequestKey(owner, requestID))
+}
+
+// GetConvertRequest fetches a pending convert request.
+func GetConvertRequest(s *state.Session, owner auth.AccountName, requestID uint32) (ConvertRequest, error) {
+	v, err := s.Get(ConvertRequestTable, state.PrimaryIndex, convertRequestKey(owner, requestID))
+	if err != nil {
+		return ConvertRequest{}, err
+	}
+	return ReadConvertRequest(v)
+}
+
+// DeleteConvertRequestFull removes both the primary entry and the
+// by-conversion-date secondary entry.
+func DeleteConvertRequestFull(s *state.Session, c *ConvertRequest) {
+	s.Delete(ConvertRequestTable, state.PrimaryIndex, convertRequestKey(c.Owner, c.RequestID))
+	s.Delete(ConvertRequestTable, ConvertRequestByDateIndex, convertRequestByDateKey(c.Conversion, c.Owner, c.RequestID))
 }
 
 // CollateralizedConvert (HF26+) — separate table since the semantics differ
