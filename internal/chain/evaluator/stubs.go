@@ -76,10 +76,8 @@ func init() {
 	// (transfer_to_savings, transfer_from_savings,
 	// cancel_transfer_from_savings implemented in savings.go.)
 
-	// Vesting (need vesting_withdraw schedule + vesting_delegation_object).
-	register(op.TagWithdrawVesting, stub("withdraw_vesting", noValidate))
-	register(op.TagSetWithdrawVestingRoute, stub("set_withdraw_vesting_route", noValidate))
-	register(op.TagDelegateVestingShares, stub("delegate_vesting_shares", noValidate))
+	// (withdraw_vesting / set_withdraw_vesting_route /
+	// delegate_vesting_shares implemented in vesting.go.)
 
 	// Recovery (need account_recovery_request_object + history).
 	register(op.TagRequestAccountRecovery, stub("request_account_recovery", noValidate))

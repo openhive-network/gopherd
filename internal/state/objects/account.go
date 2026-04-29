@@ -60,6 +60,13 @@ type Account struct {
 	// to others; ReceivedVestingShares are VESTS delegated in.
 	DelegatedVestingShares int64
 	ReceivedVestingShares  int64
+	// Vesting power-down schedule (withdraw_vesting). Pays
+	// HIVE_VESTING_WITHDRAW_INTERVAL_SECONDS apart for
+	// HIVE_VESTING_WITHDRAW_INTERVALS iterations.
+	VestingWithdrawRate   int64
+	NextVestingWithdrawal uint32
+	ToWithdraw            int64
+	Withdrawn             int64
 }
 
 // AppendAccount serializes a to dst using FC binary form. The field
@@ -87,6 +94,10 @@ func AppendAccount(dst []byte, a *Account) []byte {
 	dst = appendI64LE(dst, a.SavingsHBDBalance)
 	dst = appendI64LE(dst, a.DelegatedVestingShares)
 	dst = appendI64LE(dst, a.ReceivedVestingShares)
+	dst = appendI64LE(dst, a.VestingWithdrawRate)
+	dst = appendU32LE(dst, a.NextVestingWithdrawal)
+	dst = appendI64LE(dst, a.ToWithdraw)
+	dst = appendI64LE(dst, a.Withdrawn)
 	return dst
 }
 
@@ -146,6 +157,18 @@ func ReadAccount(src []byte) (Account, error) {
 	}
 	if a.ReceivedVestingShares, err = r.ReadInt64(); err != nil {
 		return a, fmt.Errorf("account.received_vesting_shares: %w", err)
+	}
+	if a.VestingWithdrawRate, err = r.ReadInt64(); err != nil {
+		return a, fmt.Errorf("account.vesting_withdraw_rate: %w", err)
+	}
+	if a.NextVestingWithdrawal, err = r.ReadUint32(); err != nil {
+		return a, fmt.Errorf("account.next_vesting_withdrawal: %w", err)
+	}
+	if a.ToWithdraw, err = r.ReadInt64(); err != nil {
+		return a, fmt.Errorf("account.to_withdraw: %w", err)
+	}
+	if a.Withdrawn, err = r.ReadInt64(); err != nil {
+		return a, fmt.Errorf("account.withdrawn: %w", err)
 	}
 	if !r.AtEnd() {
 		return a, errors.New("account: trailing bytes after decode (schema mismatch?)")
