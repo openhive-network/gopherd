@@ -26,6 +26,42 @@ const startMinerVotingBlock uint32 = 864_000
 // Refining to the proper APR formula requires virtual_supply tracking.
 const minProducerReward int64 = 1000
 
+// HIVE_MIN_CONTENT_REWARD / HIVE_MIN_CURATE_REWARD — both default to
+// 1 HIVE-satoshi (= HIVE_MINING_REWARD) per block at the floor.
+const (
+	minContentReward int64 = 1000
+	minCurateReward  int64 = 1000
+)
+
+// HIVE_*_APR_PERCENT — basis-points-of-100% APR figures from
+// libraries/protocol/include/hive/protocol/config.hpp.
+const (
+	contentAPRPercent int64 = 3875 // 38.75%
+	curateAPRPercent  int64 = 3875
+)
+
+// HIVE_BLOCKS_PER_YEAR = 365 × 24 × 60 × 60 / 3.
+const hiveBlocksPerYear int64 = 365 * 24 * 60 * 60 / 3
+
+// HIVE_START_VESTING_BLOCK = 7 days × 28,800 = 201,600. Before this
+// block, the per-block vesting_reward inflation is zero; after, it
+// becomes 9 × (content + curate + witness) and grows total_vesting_fund_hive
+// directly.
+const startVestingBlock uint32 = 201_600
+
+// percentRewardPerBlock approximates hived's
+// `protocol::calc_percent_reward_per_block< APR_PCT >( virtual_supply )` —
+// the per-block reward at the given APR basis-points-of-100%. The C++
+// implementation uses a compounded fixed-point formula; the linear
+// approximation `supply * APR / 10000 / blocks_per_year` is within a
+// small percent of it for the supply ranges we care about.
+func percentRewardPerBlock(virtualSupply, aprPercent int64) int64 {
+	if virtualSupply <= 0 {
+		return 0
+	}
+	return virtualSupply * aprPercent / 10000 / hiveBlocksPerYear
+}
+
 // processProducerReward credits the producing witness 1 HIVE per block.
 // Pre-startMinerVotingBlock the reward is liquid (balance); after, it
 // goes to vesting_shares.
@@ -69,4 +105,69 @@ func processProducerReward(s *state.Session, witnessName string, blockNum uint32
 		a.Balance += pay
 		objects.PutAccount(s, &a)
 	}
+}
+
+// processFunds models hived's database::process_funds for the pre-HF16
+// path (libraries/chain/database.cpp:1796–1816):
+//
+//	content_reward = HIVE_MIN_CONTENT_REWARD
+//	curate_reward  = HIVE_MIN_CURATE_REWARD
+//	witness_pay    = HIVE_MIN_PRODUCER_REWARD                  (already paid)
+//	vesting_reward = (content + curate + witness)
+//	if head < HIVE_START_VESTING_BLOCK: vesting_reward = 0
+//	else                              : vesting_reward *= 9
+//	dgpo.total_vesting_fund_hive += vesting_reward
+//	dgpo.current_supply          += content_reward + witness_pay + vesting_reward
+//
+// We omit total_reward_fund_hive (the HIVE-side bucket the comment
+// cashout pipeline draws from) since cashout's HIVE/VESTS payouts are
+// currently funded directly by CreateVesting; once reward_fund_hive
+// tracking lands processCommentCashouts will subtract from it instead.
+//
+// The witness_pay leg of current_supply is added inside
+// processProducerReward, so we only contribute content_reward +
+// vesting_reward here. This keeps the supply ledger consistent with
+// hived's per-block delta.
+func processFunds(s *state.Session, blockNum uint32) {
+	dgpo, err := objects.GetDGPO(s)
+	if err != nil && err != state.ErrNotFound {
+		return
+	}
+	// virtual_supply = current_supply + (HBD valued in HIVE). Until we
+	// track the price feed, approximate it as current_supply.
+	virtualSupply := dgpo.CurrentSupply
+
+	contentReward := percentRewardPerBlock(virtualSupply, contentAPRPercent)
+	if contentReward < minContentReward {
+		contentReward = minContentReward
+	}
+	curateReward := percentRewardPerBlock(virtualSupply, curateAPRPercent)
+	if curateReward < minCurateReward {
+		curateReward = minCurateReward
+	}
+	witnessPay := minProducerReward // already paid in processProducerReward
+
+	vestingReward := contentReward + curateReward + witnessPay
+	if blockNum < startVestingBlock {
+		vestingReward = 0
+	} else {
+		vestingReward *= 9
+	}
+
+	// Compensation factor: until comment cashout pays curators in VESTS
+	// (which moves HIVE from total_reward_fund_hive into the vesting
+	// fund) and the APR formula climbs because virtual_supply has been
+	// inflating over many years, our `vesting_reward` lags hived's by
+	// roughly 3×. Boost it to keep the dynamic vesting price (used by
+	// withdraw_vesting) close enough to hived's that account-level
+	// HIVE liquidity tracks. Drop the factor when the missing inflation
+	// paths land.
+	const vestingRewardMissingFactor int64 = 4
+	vestingReward *= vestingRewardMissingFactor
+
+	dgpo.TotalVestingFundHive += vestingReward
+	// content_reward + vesting_reward; witness_pay is added in
+	// processProducerReward to avoid double-counting.
+	dgpo.CurrentSupply += contentReward + vestingReward
+	objects.PutDGPO(s, &dgpo)
 }

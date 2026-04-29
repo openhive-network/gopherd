@@ -32,14 +32,16 @@ func CreateVesting(s *state.Session, accountName string, hiveSatoshi int64, toRe
 	if err != nil && err != state.ErrNotFound {
 		return 0, err
 	}
-	// Until the full inflation/cashout pipeline lands (process_funds adds
-	// `9 * witness_pay` to fund_hive without growing shares post-block
-	// 201600, comment cashout pays curators in VESTS funded by
-	// reward_fund_hive, etc.), the dynamic shares/fund ratio drifts away
-	// from the genesis 1000:1 because we don't replicate every flow.
-	// The placeholder curation hack in the vote evaluator is the most
-	// visible offender. Apply the genesis 1:1000 satoshi ratio
-	// unconditionally for now; tighten when the pipeline lands.
+	// Use the fixed genesis 1:1000 satoshi ratio for HIVE → VESTS until
+	// the full reward2 / curation pipeline is in place. The per-vote
+	// curation hack and flat author reward run through this helper too,
+	// so a dynamic shares/fund price would compound their distortions
+	// across many credits and starve later transfer/withdraw flows
+	// (observed regression at block 202,807 with steemit's withdraw).
+	// process_funds does still grow fund_hive — withdraw_vesting picks
+	// the dynamic fund/shares ratio there, so the inflation is real
+	// for VESTS holders going liquid even while CreateVesting stays at
+	// the constant rate.
 	vestsAmount := hiveSatoshi * 1000
 
 	a, err := objects.GetAccount(s, accountName)

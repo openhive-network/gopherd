@@ -8,10 +8,20 @@ import (
 // HIVE_VESTING_WITHDRAW_INTERVAL_SECONDS — 1 week between payouts.
 const vestingWithdrawIntervalSec uint32 = 60 * 60 * 24 * 7
 
-// hive_to_vests_satoshi_ratio mirrors the genesis 1:1000 conversion price
-// CreateVesting uses: 1 HIVE-satoshi (precision 3) → 1000 VESTS-satoshi
-// (precision 6). Reverse direction (VESTS → HIVE) divides by 1000.
-const vestsToHiveSatoshiRatio int64 = 1000
+// vestsToHive converts a VESTS-satoshi amount to HIVE-satoshi at the
+// vesting fund's current dynamic price (fund / shares). Pre-genesis (or
+// when either side is zero) it falls back to the inverse of the 1:1000
+// initial CreateVesting ratio.
+//
+// hived's expression is `to_convert * cprops.get_vesting_share_price()`
+// with VEST_price as `vesting_shares / vesting_fund_hive`; the reverse
+// VESTS→HIVE multiply is therefore `vests * fund / shares`.
+func vestsToHive(vests int64, dgpo *objects.DynamicGlobalProperty) int64 {
+	if dgpo.TotalVestingFundHive == 0 || dgpo.TotalVestingShares == 0 {
+		return vests / 1000
+	}
+	return vests * dgpo.TotalVestingFundHive / dgpo.TotalVestingShares
+}
 
 // processVestingWithdrawals mirrors database::process_vesting_withdrawals
 // (libraries/chain/database_vesting.cpp:111).
@@ -105,8 +115,8 @@ func processOneWithdrawal(s *state.Session, accountName string, scheduledTime ui
 	// Routes (set_withdraw_vesting_route). For each route, divert
 	// (percent/HIVE_100_PERCENT) of toWithdraw — first as VESTS for
 	// auto_vest=true entries (VESTS stay in the vesting pool), then as
-	// HIVE for auto_vest=false entries (price-converted via the genesis
-	// 1:1000 ratio). The remainder is paid to the account itself in HIVE.
+	// HIVE for auto_vest=false entries (priced via the dynamic ratio).
+	// The remainder is paid to the account itself in HIVE.
 	var depositedVests int64
 	depositedVests += processWithdrawRoutes(s, accountName, toWithdraw, true)
 	depositedVests += processWithdrawRoutes(s, accountName, toWithdraw, false)
@@ -118,8 +128,12 @@ func processOneWithdrawal(s *state.Session, accountName string, scheduledTime ui
 		return
 	}
 
+	dgpo, err := objects.GetDGPO(s)
+	if err != nil && err != state.ErrNotFound {
+		return
+	}
 	toConvertToHive := toWithdraw - depositedVests
-	convertedHive := toConvertToHive / vestsToHiveSatoshiRatio
+	convertedHive := vestsToHive(toConvertToHive, &dgpo)
 
 	a.VestingShares -= toWithdraw
 	a.Balance += convertedHive
@@ -136,12 +150,9 @@ func processOneWithdrawal(s *state.Session, accountName string, scheduledTime ui
 	}
 	objects.PutAccount(s, &a)
 
-	dgpo, err := objects.GetDGPO(s)
-	if err == nil {
-		dgpo.TotalVestingFundHive -= convertedHive
-		dgpo.TotalVestingShares -= toConvertToHive
-		objects.PutDGPO(s, &dgpo)
-	}
+	dgpo.TotalVestingFundHive -= convertedHive
+	dgpo.TotalVestingShares -= toConvertToHive
+	objects.PutDGPO(s, &dgpo)
 }
 
 // processWithdrawRoutes handles the set_withdraw_vesting_route diversions
@@ -171,10 +182,11 @@ func processWithdrawRoutes(s *state.Session, fromAccount string, toWithdraw int6
 			if autoVest {
 				to.VestingShares += toDeposit
 			} else {
-				to.Balance += toDeposit / vestsToHiveSatoshiRatio
 				dgpo, derr := objects.GetDGPO(s)
 				if derr == nil {
-					dgpo.TotalVestingFundHive -= toDeposit / vestsToHiveSatoshiRatio
+					hive := vestsToHive(toDeposit, &dgpo)
+					to.Balance += hive
+					dgpo.TotalVestingFundHive -= hive
 					dgpo.TotalVestingShares -= toDeposit
 					objects.PutDGPO(s, &dgpo)
 				}

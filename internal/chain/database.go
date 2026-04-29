@@ -155,9 +155,14 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 		}
 	}
 
-	// Per-block hooks: pay the producing witness, advance per-block
-	// schedules, etc. (process_funds in hived).
+	// Per-block hooks (mirror hived's database::process_funds and
+	// adjacent chain maintenance, in order):
+	//   1. pay the producing witness their per-block reward
+	//   2. apply chain inflation (content + vesting reward) to dgpo
+	//   3. fire any vesting withdrawals whose interval elapsed
+	//   4. cash out any comments whose payout window closed
 	processProducerReward(session, hdr.Witness, blockNum)
+	processFunds(session, blockNum)
 	processVestingWithdrawals(session, hdr.Timestamp)
 	processCommentCashouts(session, hdr.Timestamp)
 
