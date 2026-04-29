@@ -45,7 +45,13 @@ func (accountUpdateEvaluator) Apply(ctx *Context, o op.Operation) error {
 			return err
 		}
 	}
-	a.MemoKey = au.MemoKey
+	// hived only overwrites memo_key when the op carries a non-zero
+	// public_key_type (hive_evaluator_account.cpp:343). We treat the
+	// all-zero 33-byte key as the same sentinel.
+	var zeroKey [33]byte
+	if au.MemoKey != zeroKey {
+		a.MemoKey = au.MemoKey
+	}
 	a.JSONMetadata = au.JSONMetadata
 	objects.PutAccount(ctx.DB, &a)
 	return nil
