@@ -137,6 +137,24 @@ func (commentEvaluator) Apply(ctx *Context, o op.Operation) error {
 		}
 		objects.PutAccount(ctx.DB, &authorAcct)
 
+		// Root-tracking: replies inherit Root from parent; root posts are
+		// their own root. Mirrors comment_cashout_ex_object::root_id.
+		rootAuthor := c.Author
+		rootPermlink := c.Permlink
+		if hasParent {
+			if parent, perr := objects.GetComment(ctx.DB, c.ParentAuthor, c.ParentPermlink); perr == nil {
+				if parent.RootAuthor != "" {
+					rootAuthor = parent.RootAuthor
+					rootPermlink = parent.RootPermlink
+				} else {
+					// Legacy parent without Root* set: parent's root is
+					// itself if it's a top-level post, else trace up.
+					rootAuthor = parent.Author
+					rootPermlink = parent.Permlink
+				}
+			}
+		}
+
 		objects.PutComment(ctx.DB, &objects.Comment{
 			Author:               c.Author,
 			Permlink:             c.Permlink,
@@ -149,6 +167,8 @@ func (commentEvaluator) Apply(ctx *Context, o op.Operation) error {
 			PercentHbd:           10000,             // HIVE_100_PERCENT
 			AllowVotes:           true,
 			AllowCurationRewards: true,
+			RootAuthor:           rootAuthor,
+			RootPermlink:         rootPermlink,
 		})
 		if cashoutTime != 0 {
 			objects.PutCommentCashoutSchedule(ctx.DB, cashoutTime, c.Author, c.Permlink)

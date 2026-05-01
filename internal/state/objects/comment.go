@@ -65,6 +65,14 @@ type Comment struct {
 	// pool is curatorPool * vote.curation_weight / total_vote_weight.
 	// Mirrors comment_cashout_object::total_vote_weight.
 	TotalVoteWeight uint64
+	// RootAuthor / RootPermlink point to the discussion root — the
+	// top-level post in this thread. Root posts have Root* == self.
+	// Mirrors comment_cashout_ex_object::root_id. Pre-HF17
+	// process_comment_cashout iterates by root_id and pays every
+	// comment under the same root together; that path needs this
+	// field to find siblings.
+	RootAuthor   auth.AccountName
+	RootPermlink string
 }
 
 // Beneficiary is one row in a comment's beneficiaries list.
@@ -108,6 +116,32 @@ const (
 	// order each block and pays out every entry whose time has elapsed.
 	CommentCashoutScheduleTable state.TableID = 19
 )
+
+// CommentByRootIndex mirrors comment_cashout_ex_index::by_root in hived
+// — every comment_cashout_ex_object stores a root_id and is indexed by it
+// so process_comment_cashout pre-HF17 can pay all replies under a root
+// when that root cashes out (libraries/chain/database_comment.cpp:485-507).
+// Key: [root_author_padded_16][root_permlink_varlen][author_padded_16][permlink_varlen].
+const CommentByRootIndex state.IndexID = 1
+
+func commentByRootKey(rootAuthor auth.AccountName, rootPermlink string, author auth.AccountName, permlink string) []byte {
+	out := state.AppendAccountName(nil, rootAuthor)
+	out = append(out, rootPermlink...)
+	// Separator between root permlink and author so the by-root prefix
+	// scan stops cleanly at the next root. The 0x00 byte cannot appear
+	// inside a permlink (validate_permlink_*) so it's a safe sentinel.
+	out = append(out, 0x00)
+	out = state.AppendAccountName(out, author)
+	return append(out, permlink...)
+}
+
+// CommentByRootPrefix returns the prefix that selects every comment
+// under (rootAuthor, rootPermlink).
+func CommentByRootPrefix(rootAuthor auth.AccountName, rootPermlink string) []byte {
+	out := state.AppendAccountName(nil, rootAuthor)
+	out = append(out, rootPermlink...)
+	return append(out, 0x00)
+}
 
 // CommentCashoutScheduleKey encodes (cashoutTime, author, permlink) into
 // the schedule index key. Time is BE-encoded so lex order matches numeric
@@ -182,6 +216,10 @@ func AppendComment(dst []byte, c *Comment) []byte {
 	dst = appendU64LE(dst, c.VoteRshares)
 	dst = appendU64LE(dst, c.TotalVoteWeight)
 	dst = appendU32LE(dst, c.LastPayout)
+	dst = fcraw.AppendVarUint(dst, uint32(len(c.RootAuthor)))
+	dst = append(dst, c.RootAuthor...)
+	dst = fcraw.AppendVarUint(dst, uint32(len(c.RootPermlink)))
+	dst = append(dst, c.RootPermlink...)
 	return dst
 }
 
@@ -279,15 +317,38 @@ func ReadComment(src []byte) (Comment, error) {
 	if c.LastPayout, err = r.ReadUint32(); err != nil {
 		return c, fmt.Errorf("comment.last_payout: %w", err)
 	}
+	// RootAuthor + RootPermlink are a later schema addition; tolerate EOF
+	// for legacy rows. New rows always populate them at create time.
+	if r.AtEnd() {
+		c.RootAuthor = c.Author
+		c.RootPermlink = c.Permlink
+		return c, nil
+	}
+	if c.RootAuthor, err = r.ReadString(); err != nil {
+		return c, fmt.Errorf("comment.root_author: %w", err)
+	}
+	if c.RootPermlink, err = r.ReadString(); err != nil {
+		return c, fmt.Errorf("comment.root_permlink: %w", err)
+	}
 	if !r.AtEnd() {
 		return c, errors.New("comment: trailing bytes")
 	}
 	return c, nil
 }
 
-// PutComment stores c.
+// PutComment stores c. RootAuthor/RootPermlink default to (Author,
+// Permlink) — root posts are their own root — so legacy callers that
+// haven't been updated still get a self-rooted entry, which is the
+// correct behavior for top-level posts and lets the by_root scan find
+// the post itself.
 func PutComment(s *state.Session, c *Comment) {
+	if c.RootAuthor == "" {
+		c.RootAuthor = c.Author
+		c.RootPermlink = c.Permlink
+	}
 	s.Put(CommentTable, state.PrimaryIndex, commentKey(c.Author, c.Permlink), AppendComment(nil, c))
+	s.Put(CommentTable, CommentByRootIndex,
+		commentByRootKey(c.RootAuthor, c.RootPermlink, c.Author, c.Permlink), nil)
 }
 
 // GetComment fetches a comment by (author, permlink).
@@ -304,8 +365,18 @@ func HasComment(s *state.Session, author auth.AccountName, permlink string) (boo
 	return s.Has(CommentTable, state.PrimaryIndex, commentKey(author, permlink))
 }
 
-// DeleteComment removes a comment.
+// DeleteComment removes a comment plus its by-root index entry. The
+// caller must hand us the row's current Root* fields — we use them to
+// compute the secondary key. Callers that already have a Comment value
+// in hand should prefer DeleteCommentFull below.
 func DeleteComment(s *state.Session, author auth.AccountName, permlink string) {
+	// Best-effort by-root index delete: read the row first to learn its
+	// Root* fields. If the row is missing (e.g., already deleted) we
+	// just drop the primary entry.
+	if c, err := GetComment(s, author, permlink); err == nil {
+		s.Delete(CommentTable, CommentByRootIndex,
+			commentByRootKey(c.RootAuthor, c.RootPermlink, author, permlink))
+	}
 	s.Delete(CommentTable, state.PrimaryIndex, commentKey(author, permlink))
 }
 

@@ -86,8 +86,82 @@ func processCommentCashouts(s *state.Session, blockTime, blockNum uint32) {
 		})
 
 	curationPct := curationPercentForBlock(blockNum)
+	hf := hardfork.SetForBlock(blockNum)
+	if hf.Has(hardfork.HF17) {
+		// HF17+: pay each due comment individually (matches
+		// database_comment.cpp:466-481).
+		for _, p := range ready {
+			processOneCashout(s, blockTime, blockNum, p.cashoutTime, p.author, p.permlink, curationPct)
+		}
+		return
+	}
+
+	// Pre-HF17 thread-cashout grouping (database_comment.cpp:485-507):
+	// for each ready entry, find the discussion ROOT and pay every
+	// comment under that root_id together. Already-paid comments are
+	// skipped via a per-call dedup set, so we never double-pay even
+	// when multiple replies in the same thread land in `ready`.
+	paid := make(map[string]struct{}, len(ready))
 	for _, p := range ready {
-		processOneCashout(s, blockTime, blockNum, p.cashoutTime, p.author, p.permlink, curationPct)
+		c, cerr := objects.GetComment(s, p.author, p.permlink)
+		if cerr != nil {
+			continue
+		}
+		rootAuthor := c.RootAuthor
+		rootPermlink := c.RootPermlink
+		if rootAuthor == "" {
+			// Legacy row predating Root* — fall back to per-comment.
+			rootAuthor = c.Author
+			rootPermlink = c.Permlink
+		}
+		// Snapshot every comment under this root so we don't mutate the
+		// by-root index while iterating. Ordered by (author, permlink)
+		// since that's the secondary key — close enough to hived's
+		// by_root iteration order for the cascade.
+		type sibling struct {
+			author      string
+			permlink    string
+			cashoutTime uint32
+		}
+		var siblings []sibling
+		prefix := objects.CommentByRootPrefix(rootAuthor, rootPermlink)
+		_ = s.Range(objects.CommentTable, objects.CommentByRootIndex, prefix,
+			func(body, _ []byte) (bool, error) {
+				// body = [root_author 16][root_permlink][0x00][author 16][permlink]
+				// Strip the root prefix to leave [author 16][permlink].
+				if len(body) <= len(prefix) {
+					return true, nil
+				}
+				rest := body[len(prefix):]
+				if len(rest) < state.AccountNameKeyLen {
+					return true, nil
+				}
+				authorBytes := rest[:state.AccountNameKeyLen]
+				permlink := string(rest[state.AccountNameKeyLen:])
+				n := state.AccountNameKeyLen
+				for n > 0 && authorBytes[n-1] == 0 {
+					n--
+				}
+				author := string(authorBytes[:n])
+				sib, gerr := objects.GetComment(s, author, permlink)
+				if gerr != nil {
+					return true, nil
+				}
+				siblings = append(siblings, sibling{
+					author:      author,
+					permlink:    permlink,
+					cashoutTime: sib.CashoutTime,
+				})
+				return true, nil
+			})
+		for _, sib := range siblings {
+			key := sib.author + "/" + sib.permlink
+			if _, dup := paid[key]; dup {
+				continue
+			}
+			paid[key] = struct{}{}
+			processOneCashout(s, blockTime, blockNum, sib.cashoutTime, sib.author, sib.permlink, curationPct)
+		}
 	}
 }
 
