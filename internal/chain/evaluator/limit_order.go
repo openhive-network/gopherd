@@ -3,6 +3,7 @@ package evaluator
 import (
 	"errors"
 	"fmt"
+	"os"
 
 	"hived-go/internal/protocol/asset"
 	"hived-go/internal/protocol/hardfork"
@@ -10,6 +11,28 @@ import (
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
 )
+
+// ghiveDiff emits a GHIVEDIFF-tagged stderr line whenever the GHIVEDIFF
+// env var is set, matching the format of the patched hived in
+// libraries/chain/database_market.cpp + hive_evaluator_transfer.cpp. Used
+// to side-by-side diff replay traces. Filtered to adm/abit by default.
+func ghiveDiff(format string, args ...any) {
+	if os.Getenv("GHIVEDIFF") == "" {
+		return
+	}
+	fmt.Fprintf(os.Stderr, format, args...)
+}
+
+func ghiveDiffOwnerMatch(owner string) bool {
+	return owner == "adm" || owner == "abit"
+}
+
+// ghiveDiffWide returns true when the diff trace should match the C++
+// "wide" log window (every owner) — currently the 20-block neighborhood
+// of the adm/20001 cancel divergence at block 2,889,559.
+func ghiveDiffWide(blockNum uint32) bool {
+	return blockNum >= 2889540 && blockNum <= 2889560
+}
 
 // Errors specific to limit_order evaluators.
 var (
@@ -36,7 +59,19 @@ func (limitOrderCreateEvaluator) Apply(ctx *Context, o op.Operation) error {
 	if !ok {
 		return fmt.Errorf("limitOrderCreateEvaluator: unexpected op type %T", o)
 	}
-	return applyLimitOrderCreate(ctx, lo.Owner, lo.OrderID, lo.AmountToSell, lo.MinToReceive, lo.Expiration, lo.FillOrKill)
+	if ghiveDiffOwnerMatch(lo.Owner) || ghiveDiffWide(ctx.BlockNum) {
+		ghiveDiff("GHIVEDIFF CREATE block=%d t=%d owner=%s orderid=%d sell=%d/%d recv=%d/%d exp=%d\n",
+			ctx.BlockNum, ctx.HeadBlockTime, lo.Owner, lo.OrderID,
+			lo.AmountToSell.Amount, lo.AmountToSell.Symbol.Num,
+			lo.MinToReceive.Amount, lo.MinToReceive.Symbol.Num,
+			lo.Expiration)
+	}
+	err := applyLimitOrderCreate(ctx, lo.Owner, lo.OrderID, lo.AmountToSell, lo.MinToReceive, lo.Expiration, lo.FillOrKill)
+	if err != nil && (ghiveDiffOwnerMatch(lo.Owner) || ghiveDiffWide(ctx.BlockNum)) {
+		ghiveDiff("GHIVEDIFF CREATE-FAIL block=%d t=%d owner=%s orderid=%d err=%v\n",
+			ctx.BlockNum, ctx.HeadBlockTime, lo.Owner, lo.OrderID, err)
+	}
+	return err
 }
 
 type limitOrderCreate2Evaluator struct{}
@@ -45,6 +80,14 @@ func (limitOrderCreate2Evaluator) Apply(ctx *Context, o op.Operation) error {
 	lo, ok := o.(op.LimitOrderCreate2)
 	if !ok {
 		return fmt.Errorf("limitOrderCreate2Evaluator: unexpected op type %T", o)
+	}
+	if ghiveDiffOwnerMatch(lo.Owner) || ghiveDiffWide(ctx.BlockNum) {
+		ghiveDiff("GHIVEDIFF CREATE2 block=%d t=%d owner=%s orderid=%d sell=%d/%d rate=%d/%d/%d/%d exp=%d\n",
+			ctx.BlockNum, ctx.HeadBlockTime, lo.Owner, lo.OrderID,
+			lo.AmountToSell.Amount, lo.AmountToSell.Symbol.Num,
+			lo.ExchangeRate.Base.Amount, lo.ExchangeRate.Base.Symbol.Num,
+			lo.ExchangeRate.Quote.Amount, lo.ExchangeRate.Quote.Symbol.Num,
+			lo.Expiration)
 	}
 	// In create2 the price implies min_to_receive: amount_to_sell * (quote/base).
 	// We compute it via the Price's base/quote ratio.
@@ -89,6 +132,10 @@ func applyLimitOrderCreate(ctx *Context, owner string, orderID uint32, amountToS
 			return fmt.Errorf("%w: owner=%q", ErrAccountNotFound, owner)
 		}
 		return err
+	}
+	if ghiveDiffOwnerMatch(owner) || ghiveDiffWide(ctx.BlockNum) {
+		ghiveDiff("GHIVEDIFF BAL-CREATE block=%d t=%d owner=%s hive=%d hbd=%d need=%d sym=%d\n",
+			ctx.BlockNum, ctx.HeadBlockTime, owner, a.Balance, a.HBDBalance, amountToSell.Amount, amountToSell.Symbol.Num)
 	}
 	switch amountToSell.Symbol.Num {
 	case asset.HiveSymbol:
@@ -143,6 +190,19 @@ func (limitOrderCancelEvaluator) Apply(ctx *Context, o op.Operation) error {
 	orderID := lo.OrderID
 	if !ctx.Hardforks.Has(hardfork.HF6) {
 		orderID &= 0xFFFF
+	}
+	if ghiveDiffOwnerMatch(lo.Owner) {
+		_, gerr := objects.GetLimitOrder(ctx.DB, lo.Owner, orderID)
+		var forSale int64
+		present := 0
+		if gerr == nil {
+			present = 1
+			if o2, e2 := objects.GetLimitOrder(ctx.DB, lo.Owner, orderID); e2 == nil {
+				forSale = o2.ForSaleAmount
+			}
+		}
+		ghiveDiff("GHIVEDIFF CANCEL block=%d t=%d owner=%s orderid=%d present=%d for_sale=%d\n",
+			ctx.BlockNum, ctx.HeadBlockTime, lo.Owner, lo.OrderID, present, forSale)
 	}
 	order, err := objects.GetLimitOrder(ctx.DB, lo.Owner, orderID)
 	if err != nil {

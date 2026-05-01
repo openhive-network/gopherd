@@ -230,6 +230,11 @@ func adjustLiquidityVolume(ctx *Context, owner string, delta int64, isHbd bool, 
 // remaining amount_to_receive becomes zero — a dust safety valve from
 // hived). Returns true when the order was fully consumed.
 func fillLimitOrder(ctx *Context, order *objects.LimitOrder, pays, receives int64) bool {
+	if ghiveDiffOwnerMatch(order.Owner) || ghiveDiffWide(ctx.BlockNum) {
+		ghiveDiff("GHIVEDIFF FILL block=%d t=%d seller=%s orderid=%d pays=%d pays_sym=%d receives=%d receives_sym=%d for_sale_before=%d\n",
+			ctx.BlockNum, ctx.HeadBlockTime, order.Owner, order.OrderID,
+			pays, order.ForSaleSymbol, receives, order.MinReceiveSym, order.ForSaleAmount)
+	}
 	if pays <= 0 || receives <= 0 {
 		return false
 	}

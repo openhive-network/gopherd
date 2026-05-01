@@ -356,35 +356,6 @@ func (s *Session) Range(table TableID, index IndexID, prefix []byte, fn func(bod
 	// scan) silently saw zero candidates as a result.
 	upper := nextPrefix(lower)
 
-	// Collect overlay entries in this range by ascending the sorted-key
-	// btree from `lower` to (exclusive) `upper`. O(log N + matches)
-	// regardless of overlay size. Entry bodies alias the overlay map
-	// keys (stable for the Session lifetime), values alias the overlay
-	// value slices (allocated once at Put); no copy needed.
-	type entry struct {
-		body, value []byte
-		tombstone   bool
-	}
-	var overlayKeys map[string]entry
-	if s.overlayKeys.Len() > 0 {
-		upperStr := string(upper)
-		s.overlayKeys.Ascend(string(lower), func(k string) bool {
-			if k >= upperStr {
-				return false
-			}
-			e, ok := s.overlay[k]
-			if !ok {
-				return true
-			}
-			if overlayKeys == nil {
-				overlayKeys = make(map[string]entry, 4)
-			}
-			key := []byte(k)
-			overlayKeys[k] = entry{body: key[keyPrefixLen:], value: e.value, tombstone: e.tombstone}
-			return true
-		})
-	}
-
 	// Pooled Pebble iterator: allocate once per Session, reuse via
 	// SetBounds for all subsequent Ranges. Avoids the per-call NewIter
 	// cost (which dominated CPU under the per-block hook hot path).
@@ -410,18 +381,62 @@ func (s *Session) Range(table TableID, index IndexID, prefix []byte, fn func(bod
 		return nil
 	}
 
-	// Range emits backend slices directly to fn — callers must not
-	// retain or mutate them past the callback return (mem backend
-	// aliases btree storage, Pebble aliases iterator scratch). Match
-	// the same read-only contract as Session.Get.
-	for iter.First(); iter.Valid(); iter.Next() {
-		k := iter.Key()
-		if e, ok := overlayKeys[string(k)]; ok {
-			delete(overlayKeys, string(k))
+	// Merge backend + overlay entries in physical-key (sort) order so the
+	// caller sees the same ordering chainbase does: every limit-order
+	// matching pass needs an opposite-side order placed THIS BLOCK to
+	// be considered alongside committed orders, sorted by their actual
+	// key. Iterate both cursors in lockstep:
+	//
+	//   - backend: forward iteration over the prefix range
+	//   - overlay: ascending btree walk from `lower` (stops at `upper`)
+	//
+	// On each step emit the smaller key (overlay wins on tie, modeling
+	// "overlay overrides committed"). Tombstones in the overlay suppress
+	// the corresponding emit but never the overlay's smaller-key
+	// advancement.
+	upperStr := string(upper)
+	overlayItr := s.overlayKeys.Iter()
+	defer overlayItr.Release()
+	overlayValid := false
+	if s.overlayKeys.Len() > 0 {
+		overlayValid = overlayItr.Seek(string(lower)) && overlayItr.Item() < upperStr
+	}
+	iter.First()
+	for {
+		backendValid := iter.Valid()
+		if !backendValid && !overlayValid {
+			break
+		}
+		// Decide which side to consume next.
+		consumeOverlay := false
+		if backendValid && overlayValid {
+			bk := iter.Key()
+			ok := overlayItr.Item()
+			cmp := compareBytes(bk, []byte(ok))
+			// equal keys → overlay overrides backend; consume overlay.
+			consumeOverlay = cmp >= 0
+		} else if !backendValid {
+			consumeOverlay = true
+		}
+
+		if consumeOverlay {
+			ok := overlayItr.Item()
+			e := s.overlay[ok]
+			// If both sides are at the same key, advance backend too.
+			if backendValid && compareBytes(iter.Key(), []byte(ok)) == 0 {
+				iter.Next()
+			}
+			// Advance overlay cursor.
+			if !overlayItr.Next() {
+				overlayValid = false
+			} else if overlayItr.Item() >= upperStr {
+				overlayValid = false
+			}
 			if e.tombstone {
 				continue
 			}
-			if err := emit(e.body, e.value); err != nil {
+			body := []byte(ok)[keyPrefixLen:]
+			if err := emit(body, e.value); err != nil {
 				if errors.Is(err, errStopIteration) {
 					return nil
 				}
@@ -429,34 +444,24 @@ func (s *Session) Range(table TableID, index IndexID, prefix []byte, fn func(bod
 			}
 			continue
 		}
+
+		// consumeBackend
+		k := iter.Key()
 		v, err := iter.ValueAndErr()
 		if err != nil {
 			return err
 		}
 		body := k[keyPrefixLen:]
-		val := v
-		if err := emit(body, val); err != nil {
+		if err := emit(body, v); err != nil {
 			if errors.Is(err, errStopIteration) {
 				return nil
 			}
 			return err
 		}
+		iter.Next()
 	}
 	if err := iter.Error(); err != nil {
 		return err
-	}
-
-	// Emit overlay-only entries (not seen during Pebble scan).
-	for _, e := range overlayKeys {
-		if e.tombstone {
-			continue
-		}
-		if err := emit(e.body, e.value); err != nil {
-			if errors.Is(err, errStopIteration) {
-				return nil
-			}
-			return err
-		}
 	}
 	return nil
 }
