@@ -208,11 +208,13 @@ func (deleteCommentEvaluator) Apply(ctx *Context, o op.Operation) error {
 	}
 	// hived's delete_comment_evaluator (hive_evaluator_social.cpp:55-106)
 	// asserts a comment_cashout_object exists ("Cannot delete comment
-	// after payout."). In our model that maps to c.CashoutTime != 0:
-	// frozen comments (paid-out replies, HF17+ paid posts) have
-	// CashoutTime=0, root posts pre-HF17 with the 30d second-cashout
-	// window still have CashoutTime>0 and remain deletable.
-	if c.CashoutTime == 0 {
+	// after payout."). Pre-HF19, find_comment_cashout always returns a
+	// valid object (the cashout row is rescheduled-or-frozen but never
+	// removed) so the assert never fires. HF19+ removes the cashout
+	// row at payout (database_comment.cpp:480), so deletes after payout
+	// trip the assert. Our equivalent: c.CashoutTime==0 = frozen, but
+	// only HF19+ should reject.
+	if ctx.Hardforks.Has(hardfork.HF19) && c.CashoutTime == 0 {
 		return fmt.Errorf("%w: cannot delete comment after payout", ErrCommentClosed)
 	}
 	if ctx.Hardforks.Has(hardfork.HF19) {
@@ -221,7 +223,9 @@ func (deleteCommentEvaluator) Apply(ctx *Context, o op.Operation) error {
 			return nil
 		}
 	}
-	objects.DeleteCommentCashoutSchedule(ctx.DB, c.CashoutTime, dc.Author, dc.Permlink)
+	if c.CashoutTime != 0 {
+		objects.DeleteCommentCashoutSchedule(ctx.DB, c.CashoutTime, dc.Author, dc.Permlink)
+	}
 	objects.DeleteComment(ctx.DB, dc.Author, dc.Permlink)
 	return nil
 }
