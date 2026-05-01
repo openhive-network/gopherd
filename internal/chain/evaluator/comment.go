@@ -497,18 +497,44 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 	// comment's TotalVoteWeight accumulates `max_vote_weight`
 	// (pre-discount). At cashout this gap leaves a curation
 	// "remainder" which forwards to the author pre-HF20.
+	// HIVE_HARDFORK_0_6_REVERSE_AUCTION_TIME = HF6_TIME - 6d = 1466776800.
+	// Comments created before this use the rshares³/abs_rshares² weight
+	// (hive_evaluator_social.cpp:502-516); after, the bounded W(R) curve.
+	const hf6ReverseAuctionTimeCubed uint32 = 1466776800
 	var voteCurationWeight, maxVoteWeight uint64
 	if rshares > 0 && c.AllowCurationRewards && err == state.ErrNotFound {
 		oldVoteRshares := c.VoteRshares
 		newVoteRshares := oldVoteRshares + uint64(rshares)
-		oldW := curationWeightCurve(ctx, &c, oldVoteRshares)
-		newW := curationWeightCurve(ctx, &c, newVoteRshares)
-		if newW.Cmp(oldW) > 0 {
-			delta := new(big.Int).Sub(newW, oldW)
-			if delta.IsUint64() {
-				voteCurationWeight = delta.Uint64()
-			} else {
-				voteCurationWeight = ^uint64(0)
+		if c.Created < hf6ReverseAuctionTimeCubed {
+			rshares3 := new(big.Int).SetInt64(rshares)
+			postAbs := c.AbsRshares + absRshares
+			total2 := big.NewInt(postAbs)
+			if !ctx.Hardforks.Has(hardfork.HF1) {
+				m := big.NewInt(1_000_000)
+				rshares3.Mul(rshares3, m)
+				total2.Mul(total2, m)
+			}
+			cube := new(big.Int).Mul(rshares3, rshares3)
+			cube.Mul(cube, rshares3)
+			total2.Mul(total2, total2)
+			if total2.Sign() > 0 {
+				cube.Quo(cube, total2)
+				if cube.IsUint64() {
+					voteCurationWeight = cube.Uint64()
+				} else {
+					voteCurationWeight = ^uint64(0)
+				}
+			}
+		} else {
+			oldW := curationWeightCurve(ctx, &c, oldVoteRshares)
+			newW := curationWeightCurve(ctx, &c, newVoteRshares)
+			if newW.Cmp(oldW) > 0 {
+				delta := new(big.Int).Sub(newW, oldW)
+				if delta.IsUint64() {
+					voteCurationWeight = delta.Uint64()
+				} else {
+					voteCurationWeight = ^uint64(0)
+				}
 			}
 		}
 		maxVoteWeight = voteCurationWeight
