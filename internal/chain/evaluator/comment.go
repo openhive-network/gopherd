@@ -206,16 +206,22 @@ func (deleteCommentEvaluator) Apply(ctx *Context, o op.Operation) error {
 		}
 		return err
 	}
+	// hived's delete_comment_evaluator (hive_evaluator_social.cpp:55-106)
+	// asserts a comment_cashout_object exists ("Cannot delete comment
+	// after payout."). In our model that maps to c.CashoutTime != 0:
+	// frozen comments (paid-out replies, HF17+ paid posts) have
+	// CashoutTime=0, root posts pre-HF17 with the 30d second-cashout
+	// window still have CashoutTime>0 and remain deletable.
+	if c.CashoutTime == 0 {
+		return fmt.Errorf("%w: cannot delete comment after payout", ErrCommentClosed)
+	}
 	if ctx.Hardforks.Has(hardfork.HF19) {
-		// Post-HF19: silent no-op if net positive votes; hard error if
-		// already paid out.
+		// HF19+: silent no-op if net positive votes (vop in hived).
 		if c.NetRshares > 0 {
 			return nil
 		}
 	}
-	if c.CashoutTime != 0 {
-		objects.DeleteCommentCashoutSchedule(ctx.DB, c.CashoutTime, dc.Author, dc.Permlink)
-	}
+	objects.DeleteCommentCashoutSchedule(ctx.DB, c.CashoutTime, dc.Author, dc.Permlink)
 	objects.DeleteComment(ctx.DB, dc.Author, dc.Permlink)
 	return nil
 }
