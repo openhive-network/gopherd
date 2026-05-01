@@ -428,10 +428,12 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 	if ctx.Hardforks.Has(hardfork.HF14) && absRshares <= hiveVoteDustThreshold && v.Weight != 0 {
 		return fmt.Errorf("vote: %q rshares %d below dust threshold", v.Voter, absRshares)
 	}
-	// hive_evaluator_social.cpp:706 — subtract dust threshold from
-	// rshares (post-HF14). This is what flows into net_rshares; the
-	// effective reward weight for a vote is mana_used - dust_threshold.
-	if ctx.Hardforks.Has(hardfork.HF14) {
+	// HF20+ subtracts the dust threshold from abs_rshares before it becomes
+	// rshares (hf20_vote_evaluator at hive_evaluator_social.cpp:706). The
+	// pre-HF20 evaluator only gates on the threshold (line 369) and uses
+	// the full abs_rshares — so subtracting here too would shrink every
+	// pre-HF20 vote by 50M rshares and starve every cashout downstream.
+	if ctx.Hardforks.Has(hardfork.HF20) {
 		absRshares -= hiveVoteDustThreshold
 		if absRshares < 0 {
 			absRshares = 0
