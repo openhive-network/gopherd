@@ -1,6 +1,9 @@
 package chain
 
 import (
+	"fmt"
+	"os"
+
 	"hived-go/internal/protocol/asset"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
@@ -38,6 +41,12 @@ func clearExpiredOrders(s *state.Session, blockTime uint32) {
 		func(body, _ []byte) (bool, error) {
 			if len(body) < 4+state.AccountNameKeyLen+4 {
 				return true, nil
+			}
+			if os.Getenv("GHIVEDIFF") != "" && len(body) >= 24 {
+				owner := string(body[4 : 4+state.AccountNameKeyLen])
+				if owner[:3] == "jsc" {
+					fmt.Fprintf(os.Stderr, "GHIVEDIFF SCAN bodylen=%d hex=%x\n", len(body), body)
+				}
 			}
 			exp := uint32(body[0])<<24 | uint32(body[1])<<16 | uint32(body[2])<<8 | uint32(body[3])
 			// expiration == 0 is "never expires"; skip it. (hived models
@@ -89,6 +98,10 @@ func cancelExpiredOrder(s *state.Session, owner string, orderID uint32, blockTim
 	order, err := objects.GetLimitOrder(s, owner, orderID)
 	if err != nil {
 		return
+	}
+	if owner == "jsc" && os.Getenv("GHIVEDIFF") != "" {
+		fmt.Fprintf(os.Stderr, "GHIVEDIFF EXPIRE block-t=%d owner=%s orderid=%d for_sale=%d exp=%d\n",
+			blockTime, owner, orderID, order.ForSaleAmount, order.Expiration)
 	}
 	a, err := objects.GetAccount(s, owner)
 	if err != nil {

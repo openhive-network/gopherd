@@ -24,14 +24,14 @@ func ghiveDiff(format string, args ...any) {
 }
 
 func ghiveDiffOwnerMatch(owner string) bool {
-	return owner == "adm" || owner == "abit"
+	return owner == "adm" || owner == "abit" || owner == "jsc"
 }
 
 // ghiveDiffWide returns true when the diff trace should match the C++
 // "wide" log window (every owner) — currently the 20-block neighborhood
 // of the adm/20001 cancel divergence at block 2,889,559.
 func ghiveDiffWide(blockNum uint32) bool {
-	return blockNum >= 2889540 && blockNum <= 2890000
+	return blockNum >= 2738850 && blockNum <= 2890900
 }
 
 // Errors specific to limit_order evaluators.
@@ -106,12 +106,16 @@ func (limitOrderCreate2Evaluator) Apply(ctx *Context, o op.Operation) error {
 }
 
 func applyLimitOrderCreate(ctx *Context, owner string, orderID uint32, amountToSell, minToReceive asset.Asset, expiration uint32, fillOrKill bool) error {
-	// Pre-HF6 hived masks orderID to 16 bits
-	// (libraries/chain/database_market.cpp:218). This avoids
-	// orderid-already-exists / not-found mismatches against accounts
-	// that used the high bits before HF6 stabilized the wire format.
+	// Pre-HF6 hived masks orderID to 16 bits AT LOOKUP TIME ONLY
+	// (libraries/chain/database_market.cpp:51-56 — find_limit_order
+	// applies the mask before the lookup; the create call passes the
+	// raw o.orderid into the limit_order_object constructor at
+	// hive_evaluator_transfer.cpp:542). So pre-HF6 we mask the
+	// duplicate-detection lookup, but STORE the raw orderID. Post-HF6
+	// the same raw orderID is found unmasked.
+	lookupOrderID := orderID
 	if !ctx.Hardforks.Has(hardfork.HF6) {
-		orderID &= 0xFFFF
+		lookupOrderID &= 0xFFFF
 	}
 	if amountToSell.Symbol.Num == minToReceive.Symbol.Num {
 		return ErrLimitOrderSameSymbol
@@ -150,7 +154,7 @@ func applyLimitOrderCreate(ctx *Context, owner string, orderID uint32, amountToS
 		objects.AdjustHBDBalance(ctx.DB, &a, ctx.HeadBlockTime, -amountToSell.Amount)
 	}
 
-	if has, err := objects.HasLimitOrder(ctx.DB, owner, orderID); err != nil {
+	if has, err := objects.HasLimitOrder(ctx.DB, owner, lookupOrderID); err != nil {
 		return err
 	} else if has {
 		return fmt.Errorf("%w: %q/%d", ErrLimitOrderExists, owner, orderID)
