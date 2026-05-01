@@ -1,7 +1,9 @@
 package chain
 
 import (
+	"fmt"
 	"math/big"
+	"os"
 	"sort"
 
 	"hived-go/internal/protocol/asset"
@@ -10,6 +12,13 @@ import (
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
 )
+
+func ghiveDiff(format string, args ...any) {
+	if os.Getenv("GHIVEDIFF") == "" {
+		return
+	}
+	fmt.Fprintf(os.Stderr, format, args...)
+}
 
 // curationRewardsPercentPreHF8 — pre-HF8, curators get 50% of the
 // claimed reward (matches get_curation_rewards_percent in C++).
@@ -205,8 +214,11 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 		}
 	}
 
-	// adjust_rshares2 / recent_claims: drop this comment's curve from
-	// the running total regardless of whether the payout was zero.
+	// adjust_rshares2 / recent_claims: drop this comment's curve from the
+	// running total. Pre-HF17 the cashout helper explicitly calls
+	// `adjust_rshares2(curve(net_rshares), 0)` at
+	// database_comment.cpp:350-351; HF17+ the per-fund recent_claims
+	// snapshot is decremented analogously.
 	shares2.Sub(shares2, commentCurve)
 	if shares2.Sign() < 0 {
 		shares2.SetInt64(0)
@@ -293,6 +305,10 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 	// half VESTS at the dynamic price.
 	hbdHive := authorPool * int64(c.PercentHbd) / 20000
 	vestingHive := authorPool - hbdHive
+	if author == "proskynneo" || author == "hipster" {
+		ghiveDiff("GHIVEDIFF CASHOUT-AUTHOR block=%d author=%s permlink=%s author_tokens=%d hbd_hive=%d vesting_hive=%d curator_remainder=%d\n",
+			blockNum, author, permlink, authorPool, hbdHive, vestingHive, curatorRemainder)
+	}
 	if hbdHive > 0 {
 		if a, gerr := objects.GetAccount(s, author); gerr == nil {
 			payCreateHbd(s, &a, blockTime, hbdHive)
@@ -516,7 +532,12 @@ func distributeCuratorPool(s *state.Session, author, permlink string, pool int64
 	})
 
 	paid := int64(0)
+	dgpoNow, _ := objects.GetDGPO(s)
 	for _, p := range pays {
+		if p.voter == "proskynneo" || p.voter == "hipster" {
+			ghiveDiff("GHIVEDIFF CASHOUT-CURATOR block=%d author=%s permlink=%s voter=%s weight=%d total_weight=%d pool=%d claim=%d\n",
+				dgpoNow.HeadBlockNumber, author, permlink, p.voter, p.weight, c.TotalVoteWeight, pool, p.share)
+		}
 		_, _ = CreateVesting_via_chain(s, p.voter, p.share, false)
 		paid += p.share
 	}

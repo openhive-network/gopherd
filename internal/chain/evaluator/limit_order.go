@@ -31,7 +31,7 @@ func ghiveDiffOwnerMatch(owner string) bool {
 // "wide" log window (every owner) — currently the 20-block neighborhood
 // of the adm/20001 cancel divergence at block 2,889,559.
 func ghiveDiffWide(blockNum uint32) bool {
-	return blockNum >= 2889540 && blockNum <= 2889560
+	return blockNum >= 2889540 && blockNum <= 2890000
 }
 
 // Errors specific to limit_order evaluators.
