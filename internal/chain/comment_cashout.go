@@ -2,6 +2,7 @@ package chain
 
 import (
 	"math/big"
+	"sort"
 
 	"hived-go/internal/protocol/asset"
 	"hived-go/internal/protocol/hardfork"
@@ -466,8 +467,9 @@ func distributeCuratorPool(s *state.Session, author, permlink string, pool int64
 	poolBig := big.NewInt(pool)
 
 	type pay struct {
-		voter string
-		share int64
+		voter  string
+		weight uint64
+		share  int64
 	}
 	var pays []pay
 
@@ -497,9 +499,21 @@ func distributeCuratorPool(s *state.Session, author, permlink string, pool int64
 			if s64 <= 0 {
 				return true, nil
 			}
-			pays = append(pays, pay{voter: voter, share: s64})
+			pays = append(pays, pay{voter: voter, weight: cv.CurationWeight, share: s64})
 			return true, nil
 		})
+
+	// hived's pay_curators iterates a std::set keyed by
+	// (weight DESC, voter ASC) — see database_comment.cpp:131-140. Each
+	// CreateVesting call mutates total_vesting_fund_hive/total_vesting_shares,
+	// so the order curators are paid in subtly affects the share-price
+	// each subsequent curator sees. Match the C++ order.
+	sort.Slice(pays, func(i, j int) bool {
+		if pays[i].weight != pays[j].weight {
+			return pays[i].weight > pays[j].weight
+		}
+		return pays[i].voter < pays[j].voter
+	})
 
 	paid := int64(0)
 	for _, p := range pays {
