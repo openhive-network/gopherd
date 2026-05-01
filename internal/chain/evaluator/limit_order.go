@@ -51,9 +51,10 @@ func (limitOrderCreate2Evaluator) Apply(ctx *Context, o op.Operation) error {
 	if lo.ExchangeRate.Base.Amount <= 0 || lo.ExchangeRate.Quote.Amount <= 0 {
 		return fmt.Errorf("%w: invalid exchange_rate", ErrTransferAmountNotPos)
 	}
-	// min_to_receive = amount_to_sell * exchange_rate.quote / exchange_rate.base
-	num := lo.AmountToSell.Amount * lo.ExchangeRate.Quote.Amount
-	minToReceiveAmt := num / lo.ExchangeRate.Base.Amount
+	// min_to_receive = amount_to_sell * exchange_rate.quote / exchange_rate.base.
+	// hived uses fc::uint128 here (asset::operator*(price)): amounts × prices
+	// can blow past int64 well before mainnet caps.
+	minToReceiveAmt := mulDiv(lo.AmountToSell.Amount, lo.ExchangeRate.Quote.Amount, lo.ExchangeRate.Base.Amount)
 	minToReceive := asset.Asset{
 		Amount: minToReceiveAmt,
 		Symbol: lo.ExchangeRate.Quote.Symbol,

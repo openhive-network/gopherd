@@ -46,11 +46,11 @@ func clearExpiredOrders(s *state.Session, blockTime uint32) {
 			if exp == 0 {
 				return true, nil
 			}
-			// hived clears any order with expiration <= head_block_time.
-			// We iterate the BE-sorted index ascending; stop at the
-			// first order whose expiration is strictly greater (in the
-			// future).
-			if exp > blockTime {
+			// hived's clear_expired_orders cancels orders with
+			// `expiration < now` (strictly less; database_market.cpp:384).
+			// Stop at the first order whose expiration is at or past the
+			// current block time.
+			if exp >= blockTime {
 				nextExp = exp
 				return false, nil
 			}
