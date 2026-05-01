@@ -50,6 +50,51 @@ type DynamicGlobalProperty struct {
 	// adjust_rshares2(old_curve, new_curve) on every cast/recast; the
 	// cashout subtracts the comment's curve value.
 	TotalRewardShares2 [16]byte
+	// HBD interest rate (basis points × 100; HIVE_DEFAULT_HBD_INTEREST_RATE
+	// = 1000 = 10% APR). The witness schedule object publishes the median
+	// of active witnesses; we shadow the median into DGPO each block when
+	// the schedule rebuilds. Until that lands, the rate stays at the
+	// genesis default.
+	HBDInterestRate uint16
+	// HBDPrintRate (HF14+) — basis points of HIVE_100_PERCENT (10000 ==
+	// 100%). Cashout HBD payouts multiply by this rate; the rest goes
+	// out as HIVE. update_virtual_supply ramps it down once HBD's share
+	// of the virtual supply rises past hbd_start_percent.
+	HBDPrintRate uint16
+	// HBDStartPercent / HBDStopPercent (HF14, HF20, HF26) — basis points.
+	// Below start: print 100%. Above stop: print 0%. Linear in between.
+	HBDStartPercent uint16
+	HBDStopPercent  uint16
+	// VirtualSupply = current_supply + (current_hbd_supply × median_price).
+	// Recomputed each block in update_virtual_supply.
+	VirtualSupply int64
+	// Inflation / reward split percentages. Pre-HF16 these are unused
+	// (process_funds adds the floor amounts directly); HF16+ uses these
+	// to slice new_hive into content / vesting / proposal / witness
+	// rewards.
+	ContentRewardPercent uint16
+	VestingRewardPercent uint16
+	ProposalFundPercent  uint16
+	// ReverseAuctionSeconds — curation reward time penalty window
+	// (libraries/protocol/include/hive/protocol/config.hpp:
+	//   HIVE_REVERSE_AUCTION_WINDOW_SECONDS_HF6 = 1800
+	//   HIVE_REVERSE_AUCTION_WINDOW_SECONDS_HF20 = 900
+	//   HIVE_REVERSE_AUCTION_WINDOW_SECONDS_HF21 = 300).
+	// Votes within this window after creation get penalized weight.
+	ReverseAuctionSeconds uint32
+	// DelegationReturnPeriod (HF20+) — seconds after a delegation
+	// reduction that the VESTS return to the delegator. Pre-HF20 it's
+	// HIVE_VOTING_MANA_REGENERATION_SECONDS (5 days); HF20 sets the
+	// same value, HF26 may shorten further. Stored so per-block hooks
+	// can read it without re-deriving from HF state.
+	DelegationReturnPeriod uint32
+	// AvailableAccountSubsidies (HF20+) — leaky-bucket pool that
+	// claim_account draws from. Per-block hook increments by
+	// account_subsidy_budget and decays by account_subsidy_decay × pool.
+	// claim_account requires the pool ≥ HIVE_ACCOUNT_SUBSIDY_PRECISION
+	// (10000) to issue a free claim instead of charging the fee.
+	// Mirrors dynamic_global_property_object::available_account_subsidies.
+	AvailableAccountSubsidies int64
 }
 
 // AppendDGPO serializes p to dst.
@@ -65,6 +110,17 @@ func AppendDGPO(dst []byte, p *DynamicGlobalProperty) []byte {
 	dst = appendI64LE(dst, p.TotalVestingFundHive)
 	dst = appendI64LE(dst, p.TotalRewardFundHive)
 	dst = append(dst, p.TotalRewardShares2[:]...)
+	dst = append(dst, byte(p.HBDInterestRate), byte(p.HBDInterestRate>>8))
+	dst = append(dst, byte(p.HBDPrintRate), byte(p.HBDPrintRate>>8))
+	dst = append(dst, byte(p.HBDStartPercent), byte(p.HBDStartPercent>>8))
+	dst = append(dst, byte(p.HBDStopPercent), byte(p.HBDStopPercent>>8))
+	dst = appendI64LE(dst, p.VirtualSupply)
+	dst = append(dst, byte(p.ContentRewardPercent), byte(p.ContentRewardPercent>>8))
+	dst = append(dst, byte(p.VestingRewardPercent), byte(p.VestingRewardPercent>>8))
+	dst = append(dst, byte(p.ProposalFundPercent), byte(p.ProposalFundPercent>>8))
+	dst = appendU32LE(dst, p.ReverseAuctionSeconds)
+	dst = appendU32LE(dst, p.DelegationReturnPeriod)
+	dst = appendI64LE(dst, p.AvailableAccountSubsidies)
 	return dst
 }
 
@@ -112,24 +168,116 @@ func ReadDGPO(src []byte) (DynamicGlobalProperty, error) {
 	if err := r.ReadInto(p.TotalRewardShares2[:]); err != nil {
 		return p, fmt.Errorf("dgpo.total_reward_shares2: %w", err)
 	}
+	if r.AtEnd() {
+		return p, nil
+	}
+	if p.HBDInterestRate, err = r.ReadUint16(); err != nil {
+		return p, fmt.Errorf("dgpo.hbd_interest_rate: %w", err)
+	}
+	// HF14+/HF16+ extension fields land here. Tolerate EOF for older
+	// rows seeded before this schema bump.
+	if r.AtEnd() {
+		return p, nil
+	}
+	if p.HBDPrintRate, err = r.ReadUint16(); err != nil {
+		return p, err
+	}
+	if p.HBDStartPercent, err = r.ReadUint16(); err != nil {
+		return p, err
+	}
+	if p.HBDStopPercent, err = r.ReadUint16(); err != nil {
+		return p, err
+	}
+	if p.VirtualSupply, err = r.ReadInt64(); err != nil {
+		return p, err
+	}
+	if p.ContentRewardPercent, err = r.ReadUint16(); err != nil {
+		return p, err
+	}
+	if p.VestingRewardPercent, err = r.ReadUint16(); err != nil {
+		return p, err
+	}
+	if p.ProposalFundPercent, err = r.ReadUint16(); err != nil {
+		return p, err
+	}
+	if p.ReverseAuctionSeconds, err = r.ReadUint32(); err != nil {
+		return p, err
+	}
+	if p.DelegationReturnPeriod, err = r.ReadUint32(); err != nil {
+		return p, err
+	}
+	// AvailableAccountSubsidies is a later schema addition; tolerate EOF.
+	if r.AtEnd() {
+		return p, nil
+	}
+	if p.AvailableAccountSubsidies, err = r.ReadInt64(); err != nil {
+		return p, fmt.Errorf("dgpo.available_account_subsidies: %w", err)
+	}
 	if !r.AtEnd() {
 		return p, errors.New("dgpo: trailing bytes after decode (schema mismatch?)")
 	}
 	return p, nil
 }
 
-// PutDGPO stores p in the singleton slot.
-func PutDGPO(s *state.Session, p *DynamicGlobalProperty) {
-	s.Put(DynamicGlobalPropertyTable, state.PrimaryIndex, dgpoSingletonKey, AppendDGPO(nil, p))
+const dgpoAuxKey = "dgpo"
+
+// dgpoLazy holds the per-block parsed DGPO and a dirty flag. PutDGPO
+// mutates the cached struct in place and registers a single
+// pre-commit callback that serializes the final state once at the end
+// of the block — instead of re-serializing on every Put within the
+// block (the typical block has 5+ DGPO mutations: tx-end, schedule
+// update, fund processing, virtual supply, etc.).
+type dgpoLazy struct {
+	val   DynamicGlobalProperty
+	dirty bool
 }
 
-// GetDGPO fetches the singleton dynamic_global_property_object.
+// PutDGPO updates the per-Session DGPO cache. The actual serialized
+// write is deferred to commit time via a pre-commit hook registered
+// on the first PutDGPO of the block.
+func PutDGPO(s *state.Session, p *DynamicGlobalProperty) {
+	if s.Aux == nil {
+		s.Aux = make(map[string]any, 4)
+	}
+	cached, ok := s.Aux[dgpoAuxKey].(*dgpoLazy)
+	if !ok {
+		cached = &dgpoLazy{val: *p}
+		s.Aux[dgpoAuxKey] = cached
+	} else {
+		cached.val = *p
+	}
+	if !cached.dirty {
+		cached.dirty = true
+		s.RegisterPreCommit(func() {
+			s.SerScratch = AppendDGPO(s.SerScratch[:0], &cached.val)
+			s.Put(DynamicGlobalPropertyTable, state.PrimaryIndex, dgpoSingletonKey, s.SerScratch)
+		})
+	}
+}
+
+// GetDGPO fetches the singleton dynamic_global_property_object. The
+// parsed struct is cached per Session so repeated callers within one
+// block don't re-deserialize the row, and PutDGPO mutates the cached
+// struct in place rather than re-encoding on every write.
 func GetDGPO(s *state.Session) (DynamicGlobalProperty, error) {
+	if s.Aux != nil {
+		if cached, ok := s.Aux[dgpoAuxKey].(*dgpoLazy); ok {
+			return cached.val, nil
+		}
+	}
 	v, err := s.Get(DynamicGlobalPropertyTable, state.PrimaryIndex, dgpoSingletonKey)
 	if err != nil {
 		return DynamicGlobalProperty{}, err
 	}
-	return ReadDGPO(v)
+	p, err := ReadDGPO(v)
+	if err != nil {
+		return DynamicGlobalProperty{}, err
+	}
+	if s.Aux == nil {
+		s.Aux = make(map[string]any, 4)
+	}
+	s.Aux[dgpoAuxKey] = &dgpoLazy{val: p}
+	return p, nil
 }
 
 // --- private helpers ----------------------------------------------------
@@ -140,4 +288,8 @@ func appendU32LE(dst []byte, v uint32) []byte {
 
 func appendI64LE(dst []byte, v int64) []byte {
 	return binary.LittleEndian.AppendUint64(dst, uint64(v))
+}
+
+func appendU64LE(dst []byte, v uint64) []byte {
+	return binary.LittleEndian.AppendUint64(dst, v)
 }

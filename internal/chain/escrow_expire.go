@@ -14,12 +14,17 @@ import (
 // the escrow_expiration deadline (handled by escrow_dispute /
 // escrow_release).
 func expireEscrowRatifications(s *state.Session, blockTime uint32) {
+	if hint, ok := s.GetExpHint(objects.EscrowTable, objects.EscrowByRatificationIndex); ok && hint > blockTime {
+		return
+	}
+
 	type pending struct {
 		deadline uint32
 		from     string
 		escrowID uint32
 	}
 	var ready []pending
+	var nextExp uint32
 
 	_ = s.Range(objects.EscrowTable, objects.EscrowByRatificationIndex, nil,
 		func(body, _ []byte) (bool, error) {
@@ -28,6 +33,7 @@ func expireEscrowRatifications(s *state.Session, blockTime uint32) {
 			}
 			d := uint32(body[0])<<24 | uint32(body[1])<<16 | uint32(body[2])<<8 | uint32(body[3])
 			if d > blockTime {
+				nextExp = d
 				return false, nil
 			}
 			fromBytes := body[4 : 4+state.AccountNameKeyLen]
@@ -55,9 +61,13 @@ func expireEscrowRatifications(s *state.Session, blockTime uint32) {
 		from, ferr := objects.GetAccount(s, esc.From)
 		if ferr == nil {
 			from.Balance += esc.HiveAmount + esc.PendingFee
-			from.HBDBalance += esc.HBDAmount
+			objects.AdjustHBDBalance(s, &from, blockTime, esc.HBDAmount)
 			objects.PutAccount(s, &from)
 		}
 		objects.DeleteEscrowFull(s, &esc)
 	}
+	if nextExp == 0 {
+		nextExp = ^uint32(0)
+	}
+	s.SetExpHint(objects.EscrowTable, objects.EscrowByRatificationIndex, nextExp)
 }

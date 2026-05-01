@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"hived-go/internal/protocol/asset"
+	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/op"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
@@ -61,13 +62,20 @@ func (limitOrderCreate2Evaluator) Apply(ctx *Context, o op.Operation) error {
 }
 
 func applyLimitOrderCreate(ctx *Context, owner string, orderID uint32, amountToSell, minToReceive asset.Asset, expiration uint32, fillOrKill bool) error {
+	// Pre-HF6 hived masks orderID to 16 bits
+	// (libraries/chain/database_market.cpp:218). This avoids
+	// orderid-already-exists / not-found mismatches against accounts
+	// that used the high bits before HF6 stabilized the wire format.
+	if !ctx.Hardforks.Has(hardfork.HF6) {
+		orderID &= 0xFFFF
+	}
 	if amountToSell.Symbol.Num == minToReceive.Symbol.Num {
 		return ErrLimitOrderSameSymbol
 	}
 	if amountToSell.Amount <= 0 || minToReceive.Amount <= 0 {
 		return ErrTransferAmountNotPos
 	}
-	if expiration != 0 && expiration <= ctx.BlockTime {
+	if expiration != 0 && expiration <= ctx.HeadBlockTime {
 		return ErrLimitOrderExpired
 	}
 	if amountToSell.Symbol.Num != asset.HiveSymbol && amountToSell.Symbol.Num != asset.HbdSymbol {
@@ -91,7 +99,7 @@ func applyLimitOrderCreate(ctx *Context, owner string, orderID uint32, amountToS
 		if a.HBDBalance < amountToSell.Amount {
 			return fmt.Errorf("%w: %q has %d HBD, sell %d", ErrInsufficientBalance, owner, a.HBDBalance, amountToSell.Amount)
 		}
-		a.HBDBalance -= amountToSell.Amount
+		objects.AdjustHBDBalance(ctx.DB, &a, ctx.HeadBlockTime, -amountToSell.Amount)
 	}
 
 	if has, err := objects.HasLimitOrder(ctx.DB, owner, orderID); err != nil {
@@ -103,7 +111,7 @@ func applyLimitOrderCreate(ctx *Context, owner string, orderID uint32, amountToS
 	newOrder := objects.LimitOrder{
 		Owner:               owner,
 		OrderID:             orderID,
-		Created:             ctx.BlockTime,
+		Created:             ctx.HeadBlockTime,
 		Expiration:          expiration,
 		ForSaleAmount:       amountToSell.Amount,
 		ForSaleSymbol:       uint32(amountToSell.Symbol.Num),
@@ -131,7 +139,11 @@ func (limitOrderCancelEvaluator) Apply(ctx *Context, o op.Operation) error {
 	if !ok {
 		return fmt.Errorf("limitOrderCancelEvaluator: unexpected op type %T", o)
 	}
-	order, err := objects.GetLimitOrder(ctx.DB, lo.Owner, lo.OrderID)
+	orderID := lo.OrderID
+	if !ctx.Hardforks.Has(hardfork.HF6) {
+		orderID &= 0xFFFF
+	}
+	order, err := objects.GetLimitOrder(ctx.DB, lo.Owner, orderID)
 	if err != nil {
 		if err == state.ErrNotFound {
 			return fmt.Errorf("%w: %q/%d", ErrLimitOrderNotFound, lo.Owner, lo.OrderID)
@@ -146,7 +158,7 @@ func (limitOrderCancelEvaluator) Apply(ctx *Context, o op.Operation) error {
 	case asset.HiveSymbol:
 		a.Balance += order.ForSaleAmount
 	case asset.HbdSymbol:
-		a.HBDBalance += order.ForSaleAmount
+		objects.AdjustHBDBalance(ctx.DB, &a, ctx.HeadBlockTime, order.ForSaleAmount)
 	}
 	objects.PutAccount(ctx.DB, &a)
 	objects.DeleteLimitOrderFull(ctx.DB, &order)

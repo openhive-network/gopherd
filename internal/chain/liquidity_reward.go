@@ -95,7 +95,16 @@ func payLiquidityReward(s *state.Session, blockNum, blockTime uint32) {
 	a.Balance += reward
 	objects.PutAccount(s, &a)
 
-	dgpo.CurrentSupply += reward
+	// hived's pay_liquidity_reward calls adjust_supply(reward, true):
+	// supply += 10×reward; fund_hive += 9×reward (post-201600).
+	const startVestingBlock uint32 = 7 * 28800
+	newVesting := int64(0)
+	if blockNum >= startVestingBlock && reward > 0 {
+		newVesting = reward * 9
+	}
+	dgpo.CurrentSupply += reward + newVesting
+	dgpo.VirtualSupply += reward + newVesting
+	dgpo.TotalVestingFundHive += newVesting
 	objects.PutDGPO(s, &dgpo)
 
 	prevWeight := row.Weight
@@ -118,9 +127,7 @@ func liquidityRewardForVirtualSupply(virtualSupply int64) int64 {
 		return liquidityRewardMin
 	}
 	const aprPct = int64(750) // HIVE_LIQUIDITY_APR_PERCENT
-	const blocksPerYear = int64(10_512_000)
-	// Per-block share, then × HIVE_LIQUIDITY_REWARD_BLOCKS for one hour.
-	pct := virtualSupply * aprPct / 10000 / blocksPerYear * int64(liquidityRewardBlocks)
+	pct := percentRewardPerHour(virtualSupply, aprPct)
 	if pct < liquidityRewardMin {
 		return liquidityRewardMin
 	}

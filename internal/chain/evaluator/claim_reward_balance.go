@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"hived-go/internal/protocol/asset"
+	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/op"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
@@ -52,12 +53,20 @@ func (claimRewardBalanceEvaluator) Apply(ctx *Context, o op.Operation) error {
 		return fmt.Errorf("%w: %q reward_vests %d, claim %d", ErrInsufficientBalance, cr.Account, a.RewardVests, cr.RewardVests.Amount)
 	}
 
+	// HF20+: refresh RC manabar BEFORE any vesting change.
+	if ctx.Hardforks.Has(hardfork.HF20) {
+		objects.RegenerateRCMana(&a, ctx.HeadBlockTime)
+	}
 	a.RewardHive -= cr.RewardHive.Amount
 	a.Balance += cr.RewardHive.Amount
 	a.RewardHBD -= cr.RewardHbd.Amount
-	a.HBDBalance += cr.RewardHbd.Amount
+	objects.AdjustHBDBalance(ctx.DB, &a, ctx.HeadBlockTime, cr.RewardHbd.Amount)
 	a.RewardVests -= cr.RewardVests.Amount
 	a.VestingShares += cr.RewardVests.Amount
+	// Refresh again so LastMaxRC tracks the post-claim cap.
+	if ctx.Hardforks.Has(hardfork.HF20) {
+		objects.RegenerateRCMana(&a, ctx.HeadBlockTime)
+	}
 	objects.PutAccount(ctx.DB, &a)
 	return nil
 }

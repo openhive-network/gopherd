@@ -30,7 +30,7 @@ func (requestAccountRecoveryEvaluator) Apply(ctx *Context, o op.Operation) error
 	objects.PutAccountRecoveryRequest(ctx.DB, &objects.AccountRecoveryRequest{
 		AccountToRecover:     rr.AccountToRecover,
 		NewOwnerAuthorityRaw: auth.AppendAuthority(nil, rr.NewOwnerAuthority),
-		Expiration:           ctx.BlockTime + recoveryRequestExpirationSec,
+		Expiration:           ctx.HeadBlockTime + recoveryRequestExpirationSec,
 	})
 	return nil
 }
@@ -49,7 +49,7 @@ func (recoverAccountEvaluator) Apply(ctx *Context, o op.Operation) error {
 		}
 		return err
 	}
-	if ctx.BlockTime > req.Expiration {
+	if ctx.HeadBlockTime > req.Expiration {
 		objects.DeleteAccountRecoveryRequestFull(ctx.DB, &req)
 		return fmt.Errorf("recover_account: request expired")
 	}
@@ -74,7 +74,7 @@ func (changeRecoveryAccountEvaluator) Apply(ctx *Context, o op.Operation) error 
 	objects.PutChangeRecoveryRequest(ctx.DB, &objects.ChangeRecoveryAccountRequest{
 		AccountToRecover: cr.AccountToRecover,
 		RecoveryAccount:  cr.NewRecoveryAccount,
-		EffectiveOn:      ctx.BlockTime + changeRecoveryEffectiveDelaySec,
+		EffectiveOn:      ctx.HeadBlockTime + changeRecoveryEffectiveDelaySec,
 	})
 	return nil
 }

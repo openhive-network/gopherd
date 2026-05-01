@@ -30,6 +30,12 @@ Commands:
                                          evaluator pipeline (state mutation)
   state-dump --data-dir=PATH             dump state objects as JSONL for
                                          comparison vs hived state_snapshot
+  state-jsonl --data-dir=PATH            deterministic JSONL dump (sorted, stable
+                                         field order) for line-diffable parity
+  benchmark <block_log>                  cold-start replay benchmark — wall-clock,
+                                         peak RSS, ops/sec
+  snapshot-diff <a.jsonl> <b.jsonl>      compare two state-jsonl outputs line by
+                                         line; report missing/extra/changed objects
   version                                print version
   help                                   show this message
 `
@@ -54,6 +60,16 @@ func main() {
 		os.Exit(cmdReplay(os.Args[2:]))
 	case "state-dump":
 		os.Exit(cmdStateDump(os.Args[2:]))
+	case "state-jsonl":
+		os.Exit(cmdStateJSONL(os.Args[2:]))
+	case "benchmark":
+		os.Exit(cmdBenchmark(os.Args[2:]))
+	case "snapshot-diff":
+		os.Exit(cmdSnapshotDiff(os.Args[2:]))
+	case "validate-state":
+		os.Exit(cmdValidateState(os.Args[2:]))
+	case "dumpvotes":
+		runDumpVotes()
 	case "version":
 		fmt.Println("ghive-tools 0.0.1 (P0)")
 	case "-h", "--help", "help":

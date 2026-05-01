@@ -203,6 +203,9 @@ func PutLimitOrder(s *state.Session, lo *LimitOrder) {
 	s.Put(LimitOrderTable, LimitOrderByExpirationIndex, limitOrderByExpirationKey(lo.Expiration, lo.Owner, lo.OrderID), nil)
 	s.Put(LimitOrderTable, LimitOrderByPriceIndex,
 		limitOrderByPriceKey(lo.ForSaleSymbol, lo.MinReceiveSym, lo.SellPriceBaseAmount, lo.MinReceiveAmt, lo.Owner, lo.OrderID), nil)
+	if lo.Expiration != 0 {
+		s.NudgeExpHint(LimitOrderTable, LimitOrderByExpirationIndex, lo.Expiration)
+	}
 }
 
 // GetLimitOrder fetches the order (owner, orderID).

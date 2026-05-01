@@ -89,6 +89,9 @@ func ReadSavingsWithdraw(src []byte) (SavingsWithdraw, error) {
 func PutSavingsWithdraw(s *state.Session, w *SavingsWithdraw) {
 	s.Put(SavingsWithdrawTable, state.PrimaryIndex, savingsWithdrawKey(w.From, w.RequestID), AppendSavingsWithdraw(nil, w))
 	s.Put(SavingsWithdrawTable, SavingsWithdrawByCompleteIndex, savingsWithdrawByCompleteKey(w.Complete, w.From, w.RequestID), nil)
+	if w.Complete != 0 {
+		s.NudgeExpHint(SavingsWithdrawTable, SavingsWithdrawByCompleteIndex, w.Complete)
+	}
 }
 
 func GetSavingsWithdraw(s *state.Session, from auth.AccountName, requestID uint32) (SavingsWithdraw, error) {

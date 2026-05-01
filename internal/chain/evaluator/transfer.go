@@ -65,8 +65,8 @@ func (transferEvaluator) Apply(ctx *Context, o op.Operation) error {
 		if from.HBDBalance < tx.Amount.Amount {
 			return fmt.Errorf("%w: %q has %d HBD, needs %d", ErrInsufficientBalance, tx.From, from.HBDBalance, tx.Amount.Amount)
 		}
-		debit = func(a *objects.Account) { a.HBDBalance -= tx.Amount.Amount }
-		credit = func(a *objects.Account) { a.HBDBalance += tx.Amount.Amount }
+		debit = func(a *objects.Account) { objects.AdjustHBDBalance(ctx.DB, a, ctx.HeadBlockTime, -tx.Amount.Amount) }
+		credit = func(a *objects.Account) { objects.AdjustHBDBalance(ctx.DB, a, ctx.HeadBlockTime, tx.Amount.Amount) }
 	default:
 		return fmt.Errorf("%w: %s (transfer accepts HIVE or HBD only)", ErrUnsupportedSymbol, tx.Amount.Symbol.String())
 	}

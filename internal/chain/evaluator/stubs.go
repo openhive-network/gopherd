@@ -38,7 +38,9 @@ func noValidate(_ op.Operation) error { return nil }
 
 func init() {
 	register(op.TagCustom, stub("custom", noValidate))
-	register(op.TagCustomJSON, stub("custom_json", noValidate))
+	// custom_json now has a real evaluator (custom_json_rc.go) that
+	// dispatches consensus-touching IDs (chiefly "rc" for delegate_rc
+	// post-HF22). It registers itself separately.
 	register(op.TagCustomBinary, stub("custom_binary", noValidate))
 	register(op.TagWitnessBlockApprove, stub("witness_block_approve", noValidate))
 	register(op.TagResetAccount, stub("reset_account", noValidate))

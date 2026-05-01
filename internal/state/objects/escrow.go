@@ -121,6 +121,9 @@ func ReadEscrow(src []byte) (Escrow, error) {
 func PutEscrow(s *state.Session, e *Escrow) {
 	s.Put(EscrowTable, state.PrimaryIndex, escrowKey(e.From, e.EscrowID), AppendEscrow(nil, e))
 	s.Put(EscrowTable, EscrowByRatificationIndex, escrowByRatificationKey(e.RatificationDeadline, e.From, e.EscrowID), nil)
+	if e.RatificationDeadline != 0 {
+		s.NudgeExpHint(EscrowTable, EscrowByRatificationIndex, e.RatificationDeadline)
+	}
 }
 
 func GetEscrow(s *state.Session, from auth.AccountName, escrowID uint32) (Escrow, error) {

@@ -1,25 +1,30 @@
 package evaluator
 
 import (
+	"math/big"
+
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
 )
 
 // CreateVesting converts hiveSatoshi liquid HIVE into VESTS for the
-// given account, mirroring hived's create_vesting2.
+// given account, mirroring hived's create_vesting2 (database.cpp:1048).
 //
-// Conversion price (libraries/chain/include/hive/chain/detail/state/global_property_object.hpp):
+// Conversion price (libraries/chain/include/hive/chain/global_property_object.hpp
+// vesting_share_price()):
 //
 //	if (total_vesting_fund_hive == 0 || total_vesting_shares == 0)
-//	    price = VEST_price(1_000_000, 1_000)               // initial 1:1
+//	    price = VEST_price(1_000_000 VESTS, 1_000 HIVE)        // initial 1:1
 //	else
 //	    price = VEST_price(total_vesting_shares, total_vesting_fund_hive)
 //
-//	new_vesting = hive_amount * price
+//	new_vesting = (hive_amount * shares / fund)   when fund>0,shares>0
 //
-// In satoshi space (HIVE has 3 decimal places, VESTS has 6) the initial
-// price multiplies HIVE-satoshi by 1000 to get VESTS-satoshi. After the
-// fund accumulates, the dynamic price drives the conversion.
+// At satoshi precision the initial price gives 1 HIVE-satoshi → 1000
+// VESTS-satoshi. After HF1 (the ×1,000,000 vesting share split) the
+// dynamic ratio quickly diverges from 1:1000; a fixed 1:1000 understates
+// new VESTS by ~1000x relative to hived, starving every later payout
+// that reads the resulting state.
 //
 // Side effects:
 //   - account.VestingShares += new_vesting (or RewardVests if toReward)
@@ -32,17 +37,24 @@ func CreateVesting(s *state.Session, accountName string, hiveSatoshi int64, toRe
 	if err != nil && err != state.ErrNotFound {
 		return 0, err
 	}
-	// Use the fixed genesis 1:1000 satoshi ratio for HIVE → VESTS until
-	// the full reward2 / curation pipeline is in place. The per-vote
-	// curation hack and flat author reward run through this helper too,
-	// so a dynamic shares/fund price would compound their distortions
-	// across many credits and starve later transfer/withdraw flows
-	// (observed regression at block 202,807 with steemit's withdraw).
-	// process_funds does still grow fund_hive — withdraw_vesting picks
-	// the dynamic fund/shares ratio there, so the inflation is real
-	// for VESTS holders going liquid even while CreateVesting stays at
-	// the constant rate.
-	vestsAmount := hiveSatoshi * 1000
+
+	var vestsAmount int64
+	if dgpo.TotalVestingFundHive == 0 || dgpo.TotalVestingShares == 0 {
+		// Genesis price = 1_000_000 VESTS-sat per 1_000 HIVE-sat = 1000:1.
+		vestsAmount = hiveSatoshi * 1000
+	} else {
+		// Dynamic price: vests = hive * shares / fund. shares × hive can
+		// exceed int64 (post-HF1 vesting share split puts shares around
+		// 10^17 satoshi at chain-head); use math/big to mirror hived's
+		// fc::uint128 multiply step in price::operator*.
+		prod := new(big.Int).Mul(big.NewInt(hiveSatoshi), big.NewInt(dgpo.TotalVestingShares))
+		prod.Quo(prod, big.NewInt(dgpo.TotalVestingFundHive))
+		if !prod.IsInt64() {
+			vestsAmount = 0
+		} else {
+			vestsAmount = prod.Int64()
+		}
+	}
 
 	a, err := objects.GetAccount(s, accountName)
 	if err != nil {

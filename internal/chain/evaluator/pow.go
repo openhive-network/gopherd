@@ -101,9 +101,19 @@ func payPowReward(ctx *Context) error {
 	if _, err := objects.GetAccount(ctx.DB, witnessName); err != nil {
 		return nil
 	}
-	// hived: adjust_supply then either credit balance directly (pre-864000)
-	// or call create_vesting (post-864000). Both branches grow current_supply.
-	dgpo.CurrentSupply += pay
+	// hived's adjust_supply(pow_reward, /*adjust_vesting=*/true) at
+	// database.cpp:3357. When head ≥ HIVE_START_VESTING_BLOCK
+	// (7×28800 = 201600) and delta > 0, fund_hive grows by 9× the
+	// reward and supply by 10×. Pre-201600 the vesting leg is
+	// suppressed (only current_supply += pay).
+	const startVestingBlock uint32 = 7 * 28800
+	newVesting := int64(0)
+	if ctx.BlockNum >= startVestingBlock && pay > 0 {
+		newVesting = pay * 9
+	}
+	dgpo.CurrentSupply += pay + newVesting
+	dgpo.VirtualSupply += pay + newVesting
+	dgpo.TotalVestingFundHive += newVesting
 	objects.PutDGPO(ctx.DB, &dgpo)
 
 	if ctx.BlockNum < startMinerVotingBlockPow {
@@ -134,8 +144,10 @@ func ensureMinerAccountForPow(ctx *Context, worker string, payReward bool) error
 	}
 	if !has {
 		objects.PutAccount(ctx.DB, &objects.Account{
-			Name:    worker,
-			Created: ctx.BlockTime,
+			Name:                 worker,
+			Created:              ctx.HeadBlockTime,
+			VotingManaCurrent:    10000,
+			VotingManaLastUpdate: ctx.HeadBlockTime,
 		})
 	}
 	// Register the worker as a witness if missing — hived's pow_apply
@@ -148,7 +160,7 @@ func ensureMinerAccountForPow(ctx *Context, worker string, payReward bool) error
 	if !wExists {
 		objects.PutWitness(ctx.DB, &objects.Witness{
 			Owner:   worker,
-			Created: ctx.BlockTime,
+			Created: ctx.HeadBlockTime,
 		})
 	}
 	if !payReward {

@@ -1,6 +1,7 @@
 package objects
 
 import (
+	"reflect"
 	"testing"
 
 	"hived-go/internal/state"
@@ -33,7 +34,7 @@ func TestAccountRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != a {
+	if !reflect.DeepEqual(got, a) {
 		t.Fatalf("round-trip:\n got %+v\nwant %+v", got, a)
 	}
 
@@ -47,7 +48,7 @@ func TestAccountRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got2 != a {
+	if !reflect.DeepEqual(got2, a) {
 		t.Fatalf("after Commit:\n got %+v\nwant %+v", got2, a)
 	}
 }

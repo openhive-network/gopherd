@@ -21,10 +21,14 @@ import (
 // hive::chain::database in spirit, scoped to what current evaluators need.
 type Database struct {
 	state *state.Database
+	// reused across ApplyBlock calls; maps are clear()'d on Commit so
+	// the underlying buckets stay warm and we avoid 14M+ map allocations
+	// per replay.
+	session *state.Session
 }
 
 // New wraps an opened state.Database for block application.
-func New(s *state.Database) *Database { return &Database{state: s} }
+func New(s *state.Database) *Database { return &Database{state: s, session: state.NewSession(s)} }
 
 // State returns the underlying state.Database.
 func (d *Database) State() *state.Database { return d.state }
@@ -47,6 +51,16 @@ type ApplyOptions struct {
 	TolerateFailingOps bool
 	// Sync controls whether each block's commit fsyncs.
 	Sync bool
+	// SkipTransactionSignatures bypasses tx-level signature checks
+	// (mirrors hived's skip_transaction_signatures flag). Replay
+	// always sets this true — historical txs already passed validation
+	// at the producing-node side; re-verifying is wasted work. Live
+	// sync sets it false.
+	SkipTransactionSignatures bool
+	// SkipBlockSignature bypasses the witness's block-level signature
+	// check (mirrors hived's skip_witness_signature). Same rationale
+	// as above for replay.
+	SkipBlockSignature bool
 }
 
 // Stats accumulates per-pipeline-run counters. Pass a non-nil pointer to
@@ -134,14 +148,23 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 		return objects.DynamicGlobalProperty{}, fmt.Errorf("apply_block %d header: %w", blockNum, err)
 	}
 
-	session := state.NewSession(d.state)
+	session := d.session
 	hf := hardfork.SetForBlock(blockNum)
+	// hived's head_block_time() during transactions returns dgpo.time,
+	// which is the PREVIOUS block's timestamp — update_global_dynamic_data
+	// only advances dgpo.time after tx application. Read it now and pass
+	// to evaluators so they match C++.
+	headBlockTime := hdr.Timestamp
+	if dgpo, err := objects.GetDGPO(session); err == nil {
+		headBlockTime = dgpo.Time
+	}
 	ctx := &evaluator.Context{
-		DB:        session,
-		Hardforks: hf,
-		BlockNum:  blockNum,
-		BlockTime: hdr.Timestamp,
-		Witness:   hdr.Witness,
+		DB:            session,
+		Hardforks:     hf,
+		BlockNum:      blockNum,
+		BlockTime:     hdr.Timestamp,
+		HeadBlockTime: headBlockTime,
+		Witness:       hdr.Witness,
 	}
 
 	r := fcraw.NewReader(rawBlock[hdrLen:])
@@ -155,27 +178,62 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 		if err != nil {
 			return objects.DynamicGlobalProperty{}, fmt.Errorf("apply_block %d tx %d parse: %w", blockNum, i, err)
 		}
+		// hived's apply_block wraps each push_transaction in its own
+		// undo session — if any op in the tx throws, the whole tx is
+		// rolled back atomically. Subsequent txs in the same block
+		// are unaffected. We mirror that by snapshotting the overlay
+		// at tx-start; on failure we Restore.
+		txSnap := session.Snapshot()
+		txFailed := false
+		var failOp string
+		var failErr error
 		for j, o := range txRes.SignedTx.Operations {
 			if err := evaluator.Apply(ctx, o); err != nil {
-				if opts.SkipUnknownOps && isNotImplemented(err) {
-					skippedThisBlock++
-					if stats != nil {
-						stats.recordSkip(o.OpTag().Name(), err)
-					}
-					continue
-				}
-				if opts.TolerateFailingOps {
-					skippedThisBlock++
-					if stats != nil {
-						stats.recordSkip(o.OpTag().Name(), err)
-					}
-					continue
-				}
-				return objects.DynamicGlobalProperty{}, fmt.Errorf("apply_block %d tx %d op %d: %w", blockNum, i, j, err)
+				txFailed = true
+				failOp = o.OpTag().Name()
+				failErr = fmt.Errorf("op %d: %w", j, err)
+				break
 			}
 			if stats != nil {
 				stats.OpsApplied++
 			}
+		}
+		// HF20+: charge RC for the entire transaction. Use a stub
+		// per-op cost; subtract from the first op's payer's manabar.
+		// Replay never enforces — current_mana can go negative.
+		if !txFailed && hardfork.SetForBlock(blockNum).Has(hardfork.HF20) && len(txRes.SignedTx.Operations) > 0 {
+			cost := ComputeRCCost(&txRes.SignedTx, blockNum)
+			payer := PayerOf(txRes.SignedTx.Operations[0])
+			if cost > 0 && payer != "" {
+				if a, err := objects.GetAccount(session, payer); err == nil {
+					objects.RegenerateRCMana(&a, hdr.Timestamp)
+					a.RCManaCurrent = objects.UseMana(a.RCManaCurrent, cost, -a.LastMaxRC)
+					objects.PutAccount(session, &a)
+				}
+			}
+		}
+		if txFailed {
+			// Roll back the partial tx's writes; subsequent txs proceed.
+			session.Restore(txSnap)
+			// Undo the per-op `OpsApplied` increments for the rolled-back ops.
+			if stats != nil {
+				// Number of ops successfully applied within this tx
+				// before the failure point. Subtract since we're
+				// rolling them back.
+				// (we counted them above per-op; the simplest fix
+				// is to leave stats-level counters and just increment
+				// the skip counter). Here we follow the simpler path
+				// and only count the rolled-back as "skipped".
+				stats.recordSkip(failOp, failErr)
+			}
+			skippedThisBlock++
+			if opts.SkipUnknownOps && isNotImplemented(failErr) {
+				continue
+			}
+			if opts.TolerateFailingOps {
+				continue
+			}
+			return objects.DynamicGlobalProperty{}, fmt.Errorf("apply_block %d tx %d: %w", blockNum, i, failErr)
 		}
 	}
 	if stats != nil {
@@ -187,33 +245,11 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 		}
 	}
 
-	// Per-block hooks (mirror hived's database::process_funds and
-	// adjacent chain maintenance, in order):
-	//   1. pay the producing witness their per-block reward
-	//   2. apply chain inflation (content + vesting reward) to dgpo
-	//   3. fire any vesting withdrawals whose interval elapsed
-	//   4. cash out any comments whose payout window closed
-	// Hook order mirrors libraries/chain/database.cpp:2335 in apply_block:
-	// process_funds → process_conversions → process_comment_cashout →
-	// process_vesting_withdrawals → process_savings_withdraws → ...
-	// process_funds in C++ also dispatches the producer-reward (we do
-	// that explicitly upstream so the witness's vesting state is set
-	// before vesting-share inflation runs).
-	updateMedianFeed(session, blockNum, hdr.Timestamp)
-	processProducerReward(session, hdr.Witness, blockNum)
-	processFunds(session, blockNum)
-	processCommentCashouts(session, hdr.Timestamp, blockNum)
-	processVestingWithdrawals(session, hdr.Timestamp)
-	processSavingsWithdraws(session, hdr.Timestamp)
-	processConversions(session, hdr.Timestamp)
-	payLiquidityReward(session, blockNum, hdr.Timestamp)
-	clearExpiredOrders(session, hdr.Timestamp)
-	expireEscrowRatifications(session, hdr.Timestamp)
-	processAccountRecovery(session, hdr.Timestamp)
-	processHardforks(session, blockNum)
-
-	// Roll forward the DGPO. We always have enough info here even if no
-	// evaluator touched it.
+	// Roll forward the DGPO BEFORE per-block hooks — hived calls
+	// update_global_dynamic_data right after tx application and before
+	// any of the per-block processing functions, so they see the
+	// current block's head_block_number / time / current_witness.
+	// Mirrors libraries/chain/database.cpp:2825.
 	dgpo, err := objects.GetDGPO(session)
 	if err != nil && err != state.ErrNotFound {
 		return objects.DynamicGlobalProperty{}, fmt.Errorf("apply_block %d dgpo read: %w", blockNum, err)
@@ -223,6 +259,62 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	dgpo.CurrentWitness = hdr.Witness
 	dgpo.HeadBlockID = block.ConstructID(rawBlock[:hdrLen], blockNum)
 	objects.PutDGPO(session, &dgpo)
+
+	// Per-block hooks — order mirrors libraries/chain/database.cpp's
+	// _apply_block (lines 2335-2356):
+	//
+	//   clear_expired_transactions    (we don't track tx dedup yet)
+	//   clear_expired_orders
+	//   clear_expired_delegations
+	//   update_witness_schedule
+	//   update_median_feed
+	//   update_virtual_supply
+	//   clear_null_account_balance
+	//   process_funds                 → producer_reward + inflation
+	//   process_conversions           → settles HBD→HIVE under feed
+	//   process_comment_cashout       → uses same feed
+	//   process_vesting_withdrawals
+	//   process_savings_withdraws
+	//   process_subsidized_accounts
+	//   pay_liquidity_reward
+	//   update_virtual_supply         (HBD might have changed)
+	//   account_recovery_processing
+	//   expire_escrow_ratification
+	//   process_decline_voting_rights
+	//   process_proposals
+	//   process_delayed_voting
+	//   remove_expired_governance_votes
+	//   process_recurrent_transfers
+	//   process_hardforks             → applies HF state effects last
+	clearExpiredOrders(session, hdr.Timestamp)
+	clearExpiredDelegations(session, hdr.Timestamp)
+	updateWitnessSchedule(session, blockNum)
+	updateMedianFeed(session, blockNum, hdr.Timestamp)
+	updateVirtualSupply(session, blockNum)
+	clearNullAccountBalance(session, blockNum)
+	processProducerReward(session, hdr.Witness, blockNum)
+	processFunds(session, blockNum, hdr.Witness)
+	processConversions(session, hdr.Timestamp)
+	processCommentCashouts(session, hdr.Timestamp, blockNum)
+	processVestingWithdrawals(session, hdr.Timestamp)
+	processSavingsWithdraws(session, hdr.Timestamp)
+	processSubsidizedAccounts(session, blockNum)
+	payLiquidityReward(session, blockNum, hdr.Timestamp)
+	updateVirtualSupply(session, blockNum)
+	processAccountRecovery(session, hdr.Timestamp)
+	expireEscrowRatifications(session, hdr.Timestamp)
+	processDeclineVotingRights(session, hdr.Timestamp)
+	processProposals(session, hdr.Timestamp, blockNum)
+	processDelayedVoting(session, hdr.Timestamp, blockNum)
+	removeExpiredGovernanceVotes(session, hdr.Timestamp, blockNum)
+	processRecurrentTransfers(session, hdr.Timestamp, blockNum)
+	processHardforks(session, blockNum)
+
+	// Re-read dgpo so the returned value reflects per-block hook
+	// updates (supply, vesting fund, etc.).
+	if updated, err := objects.GetDGPO(session); err == nil {
+		dgpo = updated
+	}
 
 	if err := session.Commit(opts.Sync); err != nil {
 		return dgpo, fmt.Errorf("apply_block %d commit: %w", blockNum, err)
@@ -242,6 +334,22 @@ func (d *Database) HeadBlock() (uint32, error) {
 		return 0, err
 	}
 	return p.HeadBlockNumber, nil
+}
+
+// ScheduledWitness returns the witness who should produce the block
+// at slot_num counting from 1 (1 = next block). Mirrors hived's
+// database::get_scheduled_witness.
+func (d *Database) ScheduledWitness(slotNum uint32) (string, error) {
+	s := state.NewSession(d.state)
+	dgpo, err := objects.GetDGPO(s)
+	if err != nil {
+		return "", err
+	}
+	ws, err := objects.GetWitnessSchedule(s)
+	if err != nil {
+		return "", err
+	}
+	return string(ws.ScheduledWitnessForSlot(dgpo.HeadBlockNumber, slotNum)), nil
 }
 
 // isNotImplemented reports whether err wraps evaluator.ErrNotImplemented.

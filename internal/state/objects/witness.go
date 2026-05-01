@@ -33,7 +33,33 @@ type Witness struct {
 	// — a price of HBD/HIVE. Zero amount on Base means "not set yet".
 	HBDExchangeRate         asset.Price
 	LastHBDExchangeUpdate   uint32 // time_point_sec of last feed_publish
+	// AvailableWitnessAccountSubsidies — per-witness subsidy pool that
+	// claim_account can draw from BEFORE the global pool. Mirrors
+	// witness_object::available_witness_account_subsidies. Updated
+	// every block by process_subsidized_accounts based on
+	// account_subsidy_witness_rd parameters.
+	AvailableWitnessAccountSubsidies int64
+	// Schedule — which slot type this witness occupies in the active
+	// schedule (witness_object::schedule_type in witness_objects.hpp).
+	// Updated every shuffle by update_witness_schedule. process_funds
+	// reads this to apply the per-slot pay weight.
+	Schedule WitnessScheduleType
 }
+
+// WitnessScheduleType mirrors witness_object::schedule_type:
+//
+//	none      = 0 (default, not in active schedule)
+//	elected   = 1 (vote-elected slot)
+//	timeshare = 2 (low-vote rotating slot)
+//	miner     = 3 (PoW slot, deprecated post-HF13)
+type WitnessScheduleType uint8
+
+const (
+	WitnessScheduleNone      WitnessScheduleType = 0
+	WitnessScheduleElected   WitnessScheduleType = 1
+	WitnessScheduleTimeshare WitnessScheduleType = 2
+	WitnessScheduleMiner     WitnessScheduleType = 3
+)
 
 // AccountWitnessVote represents one (account, witness) edge in the
 // witness vote graph. Stored under WitnessVoteTable with a composite
@@ -48,7 +74,24 @@ const (
 	WitnessTable      state.TableID = 2
 	WitnessVoteTable  state.TableID = 3
 	WitnessVotesByOwnerIndex state.IndexID = 1 // secondary: owner -> witness names voted
+	// WitnessByVoteIndex orders witnesses by total_votes_vests DESC,
+	// owner ASC. Used by update_witness_schedule to pick the top 21
+	// without scanning the whole witness table. Key:
+	// [^uint64(votes)_BE_8][owner_padded_16].
+	WitnessByVoteIndex state.IndexID = 2
 )
+
+// witnessByVoteKey encodes (votes, owner) so byte-wise lex order
+// matches descending votes, ascending owner. Votes are inverted via
+// MaxUint64 - uint64(votes) (votes are always >= 0 in practice).
+func witnessByVoteKey(votes int64, owner auth.AccountName) []byte {
+	v := uint64(votes)
+	if votes < 0 {
+		v = 0
+	}
+	out := state.AppendUint64BE(nil, ^v)
+	return state.AppendAccountName(out, owner)
+}
 
 // AppendWitness serializes w to dst.
 func AppendWitness(dst []byte, w *Witness) []byte {
@@ -68,6 +111,8 @@ func AppendWitness(dst []byte, w *Witness) []byte {
 	dst = appendU32LE(dst, w.RunningVersion)
 	dst = asset.AppendPrice(dst, w.HBDExchangeRate)
 	dst = appendU32LE(dst, w.LastHBDExchangeUpdate)
+	dst = appendI64LE(dst, w.AvailableWitnessAccountSubsidies)
+	dst = append(dst, byte(w.Schedule))
 	return dst
 }
 
@@ -124,6 +169,23 @@ func ReadWitness(src []byte) (Witness, error) {
 	if w.LastHBDExchangeUpdate, err = r.ReadUint32(); err != nil {
 		return w, fmt.Errorf("witness.last_hbd_exchange_update: %w", err)
 	}
+	// AvailableWitnessAccountSubsidies is a later schema addition;
+	// tolerate EOF for legacy rows.
+	if r.AtEnd() {
+		return w, nil
+	}
+	if w.AvailableWitnessAccountSubsidies, err = r.ReadInt64(); err != nil {
+		return w, fmt.Errorf("witness.available_witness_account_subsidies: %w", err)
+	}
+	// Schedule is a later schema addition; tolerate EOF.
+	if r.AtEnd() {
+		return w, nil
+	}
+	sb, err := r.ReadByte()
+	if err != nil {
+		return w, fmt.Errorf("witness.schedule: %w", err)
+	}
+	w.Schedule = WitnessScheduleType(sb)
 	if !r.AtEnd() {
 		return w, errors.New("witness: trailing bytes")
 	}
@@ -135,9 +197,35 @@ func WitnessKey(owner auth.AccountName) []byte {
 	return state.AppendAccountName(nil, owner)
 }
 
-// PutWitness stores w under its owner key.
+// PutWitness stores w under its owner key and maintains the by-vote
+// secondary index. If a prior record exists with different votes, the
+// stale by-vote entry is removed first.
 func PutWitness(s *state.Session, w *Witness) {
-	s.Put(WitnessTable, state.PrimaryIndex, WitnessKey(w.Owner), AppendWitness(nil, w))
+	if oldVotes, ok := readWitnessVotes(s, w.Owner); ok {
+		if oldVotes != w.TotalVotesVests {
+			s.Delete(WitnessTable, WitnessByVoteIndex, witnessByVoteKey(oldVotes, w.Owner))
+			s.Put(WitnessTable, WitnessByVoteIndex, witnessByVoteKey(w.TotalVotesVests, w.Owner), nil)
+		}
+	} else {
+		s.Put(WitnessTable, WitnessByVoteIndex, witnessByVoteKey(w.TotalVotesVests, w.Owner), nil)
+	}
+	s.SerScratch = AppendWitness(s.SerScratch[:0], w)
+	s.Put(WitnessTable, state.PrimaryIndex, WitnessKey(w.Owner), s.SerScratch)
+}
+
+// readWitnessVotes returns the stored TotalVotesVests for the named
+// witness without decoding the rest of the row. Returns (0, false) if
+// the witness does not exist or the row is malformed.
+func readWitnessVotes(s *state.Session, owner auth.AccountName) (int64, bool) {
+	v, err := s.Get(WitnessTable, state.PrimaryIndex, WitnessKey(owner))
+	if err != nil {
+		return 0, false
+	}
+	w, err := ReadWitness(v)
+	if err != nil {
+		return 0, false
+	}
+	return w.TotalVotesVests, true
 }
 
 // GetWitness fetches the witness named owner.
@@ -173,6 +261,94 @@ func HasWitnessVote(s *state.Session, account, witness auth.AccountName) (bool, 
 // DeleteWitnessVote removes account's vote for witness.
 func DeleteWitnessVote(s *state.Session, account, witness auth.AccountName) {
 	s.Delete(WitnessVoteTable, state.PrimaryIndex, witnessVoteKey(account, witness))
+}
+
+// AdjustWitnessVotesForVoter walks every witness_vote row cast by
+// `account` and shifts each voted-for witness's total_votes_vests by
+// `delta`. Mirrors hived's database::adjust_proxied_witness_votes flat
+// path (the no-proxy case in
+// libraries/chain/database.cpp:1108-1129) — every time a voter's
+// vesting weight changes (transfer_to_vesting, withdraw chunk fired,
+// delegate_vesting_shares delta), the witnesses they vote for need
+// their total_votes_vests re-weighted by the same delta.
+//
+// We omit the recursive proxy chain re-adjustment (proxied_vsf_votes
+// array) since we don't model that field — for accounts with a proxy,
+// we credit the proxy target as if it were the direct voter, which
+// approximates the hived semantics one level deep.
+func AdjustWitnessVotesForVoter(s *state.Session, account auth.AccountName, delta int64) {
+	if delta == 0 {
+		return
+	}
+	prefix := state.AppendAccountName(nil, account)
+	type pair struct{ witness auth.AccountName }
+	var votes []pair
+	_ = s.Range(WitnessVoteTable, state.PrimaryIndex, prefix,
+		func(body, _ []byte) (bool, error) {
+			if len(body) < 2*state.AccountNameKeyLen {
+				return true, nil
+			}
+			witnessBytes := body[state.AccountNameKeyLen : 2*state.AccountNameKeyLen]
+			n := state.AccountNameKeyLen
+			for n > 0 && witnessBytes[n-1] == 0 {
+				n--
+			}
+			votes = append(votes, pair{witness: string(witnessBytes[:n])})
+			return true, nil
+		})
+	for _, v := range votes {
+		w, err := GetWitness(s, v.witness)
+		if err != nil {
+			continue
+		}
+		w.TotalVotesVests += delta
+		if w.TotalVotesVests < 0 {
+			w.TotalVotesVests = 0
+		}
+		PutWitness(s, &w)
+	}
+}
+
+// ClearWitnessVotesForAccount walks every witness_vote row keyed under
+// account and removes it, decrementing each affected witness's
+// total_votes_vests by voterVesting. Mirrors hived's
+// database::clear_witness_votes (database_witness.cpp:96), invoked by
+// account_witness_proxy when a proxy is set and by
+// process_decline_voting_rights.
+//
+// Returns the number of votes cleared.
+func ClearWitnessVotesForAccount(s *state.Session, account auth.AccountName, voterVesting int64) int {
+	prefix := state.AppendAccountName(nil, account)
+	type pair struct{ witness auth.AccountName }
+	var votes []pair
+	_ = s.Range(WitnessVoteTable, state.PrimaryIndex, prefix,
+		func(body, _ []byte) (bool, error) {
+			// body is the row's primary key minus the [table:index] prefix:
+			// account_padded(16) || witness_padded(16). Recover the
+			// witness name from the trailing 16 bytes.
+			if len(body) < 2*state.AccountNameKeyLen {
+				return true, nil
+			}
+			witnessBytes := body[state.AccountNameKeyLen : 2*state.AccountNameKeyLen]
+			n := state.AccountNameKeyLen
+			for n > 0 && witnessBytes[n-1] == 0 {
+				n--
+			}
+			votes = append(votes, pair{witness: string(witnessBytes[:n])})
+			return true, nil
+		})
+	for _, v := range votes {
+		DeleteWitnessVote(s, account, v.witness)
+		w, err := GetWitness(s, v.witness)
+		if err == nil {
+			w.TotalVotesVests -= voterVesting
+			if w.TotalVotesVests < 0 {
+				w.TotalVotesVests = 0
+			}
+			PutWitness(s, &w)
+		}
+	}
+	return len(votes)
 }
 
 // --- private helpers (added here to avoid cycling imports) --------------

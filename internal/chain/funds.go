@@ -1,6 +1,9 @@
 package chain
 
 import (
+	"math/big"
+
+	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
 )
@@ -49,26 +52,108 @@ const hiveBlocksPerYear int64 = 365 * 24 * 60 * 60 / 3
 // directly.
 const startVestingBlock uint32 = 201_600
 
-// percentRewardPerBlock approximates hived's
-// `protocol::calc_percent_reward_per_block< APR_PCT >( virtual_supply )` —
-// the per-block reward at the given APR basis-points-of-100%. The C++
-// implementation uses a compounded fixed-point formula; the linear
-// approximation `supply * APR / 10000 / blocks_per_year` is within a
-// small percent of it for the supply ranges we care about.
+// HIVE_APR_PERCENT_MULTIPLY_PER_BLOCK / SHIFT_PER_BLOCK from
+// libraries/protocol/include/hive/protocol/config.hpp:305. The
+// compounded per-block multiplier is
+// int(expm1( log1p( 1 ) / BLOCKS_PER_YEAR ) * 2**87 / 100000 + 0.5).
+// Formula: reward = (supply × percent × multiply + half) >> shift.
+const (
+	aprMultiplyPerBlock uint64 = 0x5ccc_e802_de5f
+	aprShiftPerBlock    uint   = 87
+	aprMultiplyPerRound uint64 = 0x79cc_f5c7_3480
+	aprShiftPerRound    uint   = 83
+	aprMultiplyPerHour  uint64 = 0x6cc1_39a1_5cbd
+	aprShiftPerHour     uint   = 77
+)
+
+// percentRewardPerBlock mirrors hived's `calc_percent_reward_per_block<
+// percent >( virtual_supply )` (compound.hpp:38).  The compounded fixed-
+// point formula stays accurate at every supply, where a linear
+// approximation diverges enough to push past the floor a few hundred
+// thousand blocks before C++ would.
 func percentRewardPerBlock(virtualSupply, aprPercent int64) int64 {
-	if virtualSupply <= 0 {
+	return percentRewardCompound(virtualSupply, aprPercent, aprMultiplyPerBlock, aprShiftPerBlock)
+}
+
+func percentRewardPerRound(virtualSupply, aprPercent int64) int64 {
+	return percentRewardCompound(virtualSupply, aprPercent, aprMultiplyPerRound, aprShiftPerRound)
+}
+
+// percentRewardPerHour mirrors hived's calc_percent_reward_per_hour
+// (compound.hpp:32) — used by the liquidity reward subsystem which fires
+// once per hour.
+func percentRewardPerHour(virtualSupply, aprPercent int64) int64 {
+	return percentRewardCompound(virtualSupply, aprPercent, aprMultiplyPerHour, aprShiftPerHour)
+}
+
+// applyWitnessRewardWeighting takes the per-block witness slice and
+// applies the C++ witness_reward * 21 * schedule_weight / pay_norm
+// formula. Falls back to the unweighted slice if the schedule object
+// or this witness aren't loadable (early chain or stub state).
+func applyWitnessRewardWeighting(s *state.Session, witnessReward int64, witnessName string) int64 {
+	wso, err := objects.GetWitnessSchedule(s)
+	if err != nil {
+		return witnessReward
+	}
+	w, err := objects.GetWitness(s, witnessName)
+	if err != nil {
+		return witnessReward
+	}
+	const maxWitnesses int64 = 21
+	weighted := witnessReward * maxWitnesses
+	switch w.Schedule {
+	case objects.WitnessScheduleTimeshare:
+		weighted *= int64(wso.TimeshareWeight)
+	case objects.WitnessScheduleMiner:
+		weighted *= int64(wso.MinerWeight)
+	case objects.WitnessScheduleElected:
+		weighted *= int64(wso.ElectedWeight)
+	default:
+		// Schedule == none means the witness isn't on the active
+		// schedule — but they produced this block, so something's
+		// off. Fall back to the unweighted slice to avoid 0-pay
+		// surprises during the early HF16 transition.
+		return witnessReward
+	}
+	if wso.WitnessPayNormalizationFactor == 0 {
+		return witnessReward
+	}
+	return weighted / int64(wso.WitnessPayNormalizationFactor)
+}
+
+func percentRewardCompound(virtualSupply, aprPercent int64, multiplyConstant uint64, shiftConstant uint) int64 {
+	if virtualSupply <= 0 || aprPercent <= 0 {
 		return 0
 	}
-	return virtualSupply * aprPercent / 10000 / hiveBlocksPerYear
+	// reward = ((supply × percent × multiply) + half) >> shift, in uint128.
+	prod := new(big.Int).Mul(big.NewInt(virtualSupply), big.NewInt(aprPercent))
+	prod.Mul(prod, new(big.Int).SetUint64(multiplyConstant))
+	half := new(big.Int).Lsh(big.NewInt(1), shiftConstant-1)
+	prod.Add(prod, half)
+	prod.Rsh(prod, shiftConstant)
+	if !prod.IsInt64() {
+		return int64(^uint64(0) >> 1) // saturate
+	}
+	return prod.Int64()
 }
 
 // processProducerReward credits the producing witness 1 HIVE per block.
 // Pre-startMinerVotingBlock the reward is liquid (balance); after, it
 // goes to vesting_shares.
+//
+// HF16+: this is a no-op. process_funds (HF16+ branch) computes and
+// pays the witness's inflation slice as VESTS in one step; calling
+// this would double-credit. Mirrors hived's database.cpp where
+// get_producer_reward only runs in the pre-HF16 branch.
 func processProducerReward(s *state.Session, witnessName string, blockNum uint32) {
 	if witnessName == "" {
 		return
 	}
+	hf := hardfork.SetForBlock(blockNum)
+	if hf.Has(hardfork.HF16) {
+		return
+	}
+	_ = hf
 	a, err := objects.GetAccount(s, witnessName)
 	if err != nil {
 		// Witness account hasn't been created yet — nothing to credit.
@@ -128,13 +213,19 @@ func processProducerReward(s *state.Session, witnessName string, blockNum uint32
 // processProducerReward, so we only contribute content_reward +
 // vesting_reward here. This keeps the supply ledger consistent with
 // hived's per-block delta.
-func processFunds(s *state.Session, blockNum uint32) {
+func processFunds(s *state.Session, blockNum uint32, witnessName string) {
+	hf := hardfork.SetForBlock(blockNum)
 	dgpo, err := objects.GetDGPO(s)
 	if err != nil && err != state.ErrNotFound {
 		return
 	}
-	// virtual_supply = current_supply + (HBD valued in HIVE). Until we
-	// track the price feed, approximate it as current_supply.
+
+	if hf.Has(hardfork.HF16) {
+		processFundsHF16(s, &dgpo, blockNum, witnessName)
+		return
+	}
+
+	// Pre-HF16 path: floor-based rewards.
 	virtualSupply := dgpo.CurrentSupply
 
 	contentReward := percentRewardPerBlock(virtualSupply, contentAPRPercent)
@@ -163,4 +254,116 @@ func processFunds(s *state.Session, blockNum uint32) {
 	// processProducerReward to avoid double-counting.
 	dgpo.CurrentSupply += contentReward + curateReward + vestingReward
 	objects.PutDGPO(s, &dgpo)
+}
+
+// HIVE_INFLATION constants from libraries/protocol/include/hive/protocol/config.hpp.
+const (
+	inflationStartBP   int64 = 978     // 9.78 %
+	inflationStopBP    int64 = 95      // 0.95 %
+	inflationNarrowing int64 = 250_000 // narrows by 1bp every 250k blocks
+)
+
+// processFundsHF16 mirrors database::process_funds (post-HF16 branch,
+// libraries/chain/database.cpp:1710-1793). New HIVE per block is
+//
+//	current_inflation_rate = max(start - block/250000, stop)            // basis points
+//	new_hive               = virtual_supply × current_inflation_rate
+//	                       / (HIVE_100_PERCENT × HIVE_BLOCKS_PER_YEAR)
+//
+// Sliced as content × content_reward_percent + vesting × vesting_reward_percent
+// + dhf × proposal_fund_percent + witness_reward = remainder.
+//
+// Witness reward is paid as VESTS (post-block-864000 we always
+// create_vesting). Pre-HF17 the content slice goes into
+// dgpo.total_reward_fund_hive; HF17+ it lands in the post reward_fund.
+//
+// We elide the witness_pay_normalization_factor / schedule weighting
+// (timeshare/miner/elected) since the witness schedule object is not
+// modeled — we just apply the content/vesting/proposal/witness split
+// directly.
+func processFundsHF16(s *state.Session, dgpo *objects.DynamicGlobalProperty, blockNum uint32, witnessName string) {
+	const blocksPerYear int64 = 365 * 24 * 60 * 60 / 3
+	rate := inflationStartBP - int64(blockNum)/inflationNarrowing
+	if rate < inflationStopBP {
+		rate = inflationStopBP
+	}
+	virtualSupply := dgpo.VirtualSupply
+	if virtualSupply <= 0 {
+		virtualSupply = dgpo.CurrentSupply
+	}
+
+	// new_hive = virtual_supply × rate / (10000 × blocks_per_year)
+	prod := virtualSupply / 10000 * rate / blocksPerYear
+	if prod < 0 {
+		prod = 0
+	}
+	newHive := prod
+
+	contentPct := int64(dgpo.ContentRewardPercent)
+	if contentPct == 0 {
+		contentPct = 7500
+	}
+	vestingPct := int64(dgpo.VestingRewardPercent)
+	if vestingPct == 0 {
+		vestingPct = 1500
+	}
+	dhfPct := int64(dgpo.ProposalFundPercent)
+
+	contentReward := newHive * contentPct / 10000
+	vestingReward := newHive * vestingPct / 10000
+	dhfNew := newHive * dhfPct / 10000
+	witnessReward := newHive - contentReward - vestingReward - dhfNew
+	if witnessReward < 0 {
+		witnessReward = 0
+	}
+
+	// Mirror C++ process_funds HF16+ branch (database.cpp:1748-1763):
+	//
+	//	witness_reward *= HIVE_MAX_WITNESSES   // 21
+	//	if witness.schedule == timeshare: witness_reward *= wso.timeshare_weight
+	//	elif schedule == miner:          witness_reward *= wso.miner_weight
+	//	elif schedule == elected:        witness_reward *= wso.elected_weight
+	//	witness_reward /= wso.witness_pay_normalization_factor
+	//
+	// Without the schedule weighting, every block's producer gets a
+	// flat 1/21 of the inflation slice — i.e. ~21× too low at HF16+.
+	if witnessReward > 0 && witnessName != "" {
+		witnessReward = applyWitnessRewardWeighting(s, witnessReward, witnessName)
+	}
+
+	hf := hardfork.SetForBlock(blockNum)
+	if hf.Has(hardfork.HF17) {
+		// HF17+: content_reward goes into post reward_fund.
+		if fund, err := objects.GetRewardFund(s, objects.PostRewardFundName); err == nil {
+			fund.RewardBalance += contentReward
+			objects.PutRewardFund(s, &fund)
+		}
+	} else {
+		dgpo.TotalRewardFundHive += contentReward
+	}
+
+	dgpo.TotalVestingFundHive += vestingReward
+	dgpo.CurrentSupply += contentReward + vestingReward + witnessReward + dhfNew
+	if dhfNew > 0 {
+		// Treasury gets the DHF allocation as HBD-equivalent. Without
+		// a feed we credit it as HIVE; once the feed is wired hived
+		// converts via median_price. Pre-HF24 treasury is "steem.dao";
+		// HF24+ "hive.fund". We try the post-HF24 name first.
+		if treasury, err := objects.GetAccount(s, "hive.fund"); err == nil {
+			treasury.Balance += dhfNew
+			objects.PutAccount(s, &treasury)
+		} else if treasury, err := objects.GetAccount(s, "steem.dao"); err == nil {
+			treasury.Balance += dhfNew
+			objects.PutAccount(s, &treasury)
+		}
+	}
+	objects.PutDGPO(s, dgpo)
+
+	// Witness reward payable as VESTS via create_vesting at the dynamic
+	// price. Post-HF16 hived's process_funds is the SOLE producer-pay
+	// path (we skip processProducerReward in that branch). The witness
+	// is the producer of THIS block (passed in via witnessName).
+	if witnessReward > 0 && witnessName != "" {
+		_, _ = CreateVesting_via_chain(s, witnessName, witnessReward, false)
+	}
 }

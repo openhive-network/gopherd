@@ -1,12 +1,21 @@
 package chain
 
 import (
+	"math/big"
+
+	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
 )
 
-// HIVE_VESTING_WITHDRAW_INTERVAL_SECONDS — 1 week between payouts.
+// HIVE_VESTING_WITHDRAW_INTERVAL_SECONDS — 1 week between payouts at
+// every hardfork. See evaluator/vesting.go for the C++ rationale; only
+// the payout count differs across HF16 (104 vs 13).
 const vestingWithdrawIntervalSec uint32 = 60 * 60 * 24 * 7
+
+func vestingWithdrawIntervalForBlock(blockNum uint32) uint32 {
+	return vestingWithdrawIntervalSec
+}
 
 // vestsToHive converts a VESTS-satoshi amount to HIVE-satoshi at the
 // vesting fund's current dynamic price (fund / shares). Pre-genesis (or
@@ -16,11 +25,20 @@ const vestingWithdrawIntervalSec uint32 = 60 * 60 * 24 * 7
 // hived's expression is `to_convert * cprops.get_vesting_share_price()`
 // with VEST_price as `vesting_shares / vesting_fund_hive`; the reverse
 // VESTS→HIVE multiply is therefore `vests * fund / shares`.
+//
+// The intermediate `vests * fund` overflows int64 well before reaching
+// realistic chain state (vests ≈ 1e9, fund ≈ 1e10 already wraps). FC's
+// asset.cpp uses a fc::uint128 for this; we mirror with math/big.
 func vestsToHive(vests int64, dgpo *objects.DynamicGlobalProperty) int64 {
 	if dgpo.TotalVestingFundHive == 0 || dgpo.TotalVestingShares == 0 {
 		return vests / 1000
 	}
-	return vests * dgpo.TotalVestingFundHive / dgpo.TotalVestingShares
+	prod := new(big.Int).Mul(big.NewInt(vests), big.NewInt(dgpo.TotalVestingFundHive))
+	prod.Quo(prod, big.NewInt(dgpo.TotalVestingShares))
+	if !prod.IsInt64() {
+		return 0
+	}
+	return prod.Int64()
 }
 
 // processVestingWithdrawals mirrors database::process_vesting_withdrawals
@@ -138,6 +156,41 @@ func processOneWithdrawal(s *state.Session, accountName string, scheduledTime ui
 	a.VestingShares -= toWithdraw
 	a.Balance += convertedHive
 	a.Withdrawn += toWithdraw
+	// adjust_proxied_witness_votes for the withdrawn-out VESTS.
+	//
+	// Pre-HF24: full toWithdraw decrements witness votes immediately.
+	// Post-HF24: erase from the back of DelayedVotes first (those vests
+	// were never voting); only the leftover beyond SumDelayedVotes
+	// decrements witness votes (those vests had matured + were
+	// counting). Mirrors database_vesting.cpp:288.
+	if toWithdraw > 0 {
+		hf := hardfork.SetForBlock(scheduledTime / 3) // approximation; HF gating is by time too
+		_ = hf
+		// Actual gate: use the hardfork set computed from current
+		// block. We don't carry blockNum here; use the dgpo's head.
+		dgpoNow, _ := objects.GetDGPO(s)
+		hfNow := hardfork.SetForBlock(dgpoNow.HeadBlockNumber)
+		if hfNow.Has(hardfork.HF24) {
+			// Try to erase the toWithdraw amount from the back of
+			// DelayedVotes. The back is the most-recent (newest)
+			// bucket, which is conceptually the vests that just left
+			// the account.
+			withdrawAmt := uint64(toWithdraw)
+			eraseAmt := withdrawAmt
+			if eraseAmt > a.SumDelayedVotes {
+				eraseAmt = a.SumDelayedVotes
+			}
+			if eraseAmt > 0 {
+				_ = objects.DelayedVotingEraseOnAccount(&a, eraseAmt)
+			}
+			leftover := withdrawAmt - eraseAmt
+			if leftover > 0 {
+				objects.AdjustProxiedWitnessVotes(s, &a, -int64(leftover))
+			}
+		} else {
+			objects.AdjustProxiedWitnessVotes(s, &a, -toWithdraw)
+		}
+	}
 
 	if a.Withdrawn >= a.ToWithdraw || a.VestingShares == 0 {
 		a.VestingWithdrawRate = 0
@@ -145,8 +198,13 @@ func processOneWithdrawal(s *state.Session, accountName string, scheduledTime ui
 		a.ToWithdraw = 0
 		a.Withdrawn = 0
 	} else {
-		a.NextVestingWithdrawal = scheduledTime + vestingWithdrawIntervalSec
+		dgpoNow, _ := objects.GetDGPO(s)
+		a.NextVestingWithdrawal = scheduledTime + vestingWithdrawIntervalForBlock(dgpoNow.HeadBlockNumber)
 		objects.PutVestingWithdrawalSchedule(s, a.NextVestingWithdrawal, accountName)
+	}
+	// HF20+: power-down decreased effective_vests → refresh RC cap.
+	if dgpoNow, _ := objects.GetDGPO(s); hardfork.SetForBlock(dgpoNow.HeadBlockNumber).Has(hardfork.HF20) {
+		objects.RegenerateRCMana(&a, scheduledTime)
 	}
 	objects.PutAccount(s, &a)
 

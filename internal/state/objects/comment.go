@@ -37,17 +37,65 @@ type Comment struct {
 	PercentHbd           uint16
 	AllowVotes           bool
 	AllowCurationRewards bool
+	// Beneficiaries (HF17+) — comment_payout_beneficiaries extension on
+	// comment_options. Each beneficiary takes a percentage of the
+	// author payout AT cashout. Sum of weights ≤ HIVE_100_PERCENT (10000).
+	Beneficiaries []Beneficiary
+	// AbsRshares accumulates |rshares| over all votes; used by hived's
+	// curation weight calc and the "must not have been voted on yet"
+	// gate for setting beneficiaries.
+	AbsRshares int64
+	// WasPaid is set true after the first cashout. Used by HF12-HF17
+	// to gate the second-cashout window: pre-HF17 root posts that
+	// haven't been paid get rescheduled at +30d after first cashout;
+	// already-paid posts go to max (frozen).
+	WasPaid bool
+	// LastPayout — time_point_sec of the most recent cashout that
+	// fired on this comment. Mirrors comment_cashout_ex_object::last_payout.
+	// Used by HF12 to schedule the second cashout window
+	// (last_payout + HIVE_SECOND_CASHOUT_WINDOW).
+	LastPayout uint32
+	// VoteRshares accumulates POSITIVE rshares only — used as the
+	// input to the curation-weight curve W(R) so each vote's weight
+	// is W(vote_rshares_after) - W(vote_rshares_before). Mirrors
+	// comment_cashout_object::vote_rshares.
+	VoteRshares uint64
+	// TotalVoteWeight is the sum of every vote's curation weight on
+	// this comment. At cashout, each voter's slice of the curator
+	// pool is curatorPool * vote.curation_weight / total_vote_weight.
+	// Mirrors comment_cashout_object::total_vote_weight.
+	TotalVoteWeight uint64
 }
+
+// Beneficiary is one row in a comment's beneficiaries list.
+type Beneficiary struct {
+	Account auth.AccountName
+	Weight  uint16 // basis points of HIVE_100_PERCENT
+}
+
+// WasPaid is implicitly tracked via a sentinel value in CashoutTime
+// (we mirror hived's "set to time_point_sec::max after first cashout").
+// In our model CashoutTime==0 means "max"/frozen; once set, we know
+// the comment has been paid at least once.
+//
+// This file's struct definition only declares the explicit fields
+// already present; the flag below is a virtual property derived from
+// CashoutTime + flag bit packed into reserved space.
 
 // CommentVote is one (voter, author, permlink) edge — a comment_vote_object.
 type CommentVote struct {
 	Voter      auth.AccountName
 	Author     auth.AccountName
 	Permlink   string
-	Weight     int16  // 0..10000 (HIVE_100_PERCENT)
-	NumChanges int16  // 0 on first cast; -1 marks a delete in hived
-	Rshares    int64  // simplified — full calc deferred
+	Weight     int16 // 0..10000 (HIVE_100_PERCENT) — the vote's percent
+	NumChanges int16 // 0 on first cast; -1 marks a delete in hived
+	Rshares    int64 // signed rshares contribution
 	LastUpdate uint32
+	// CurationWeight is the W(R_N) - W(R_N-1) increment computed at
+	// vote time, post-reverse-auction time scaling. Used at cashout
+	// to distribute the curator pool proportionally. Mirrors
+	// comment_vote_object::weight.
+	CurationWeight uint64
 }
 
 // Table IDs.
@@ -119,6 +167,21 @@ func AppendComment(dst []byte, c *Comment) []byte {
 	} else {
 		dst = append(dst, 0)
 	}
+	dst = fcraw.AppendVarUint(dst, uint32(len(c.Beneficiaries)))
+	for _, b := range c.Beneficiaries {
+		dst = fcraw.AppendVarUint(dst, uint32(len(b.Account)))
+		dst = append(dst, b.Account...)
+		dst = append(dst, byte(b.Weight), byte(b.Weight>>8))
+	}
+	dst = appendI64LE(dst, c.AbsRshares)
+	if c.WasPaid {
+		dst = append(dst, 1)
+	} else {
+		dst = append(dst, 0)
+	}
+	dst = appendU64LE(dst, c.VoteRshares)
+	dst = appendU64LE(dst, c.TotalVoteWeight)
+	dst = appendU32LE(dst, c.LastPayout)
 	return dst
 }
 
@@ -165,6 +228,56 @@ func ReadComment(src []byte) (Comment, error) {
 	}
 	if c.AllowCurationRewards, err = r.ReadBool(); err != nil {
 		return c, err
+	}
+	// Beneficiaries + AbsRshares are a later schema addition; tolerate EOF.
+	if r.AtEnd() {
+		return c, nil
+	}
+	count, err := r.ReadVarUint()
+	if err != nil {
+		return c, fmt.Errorf("comment.beneficiaries.len: %w", err)
+	}
+	if count > 8 {
+		return c, fmt.Errorf("comment.beneficiaries: count %d exceeds HIVE_MAX_COMMENT_BENEFICIARIES (8)", count)
+	}
+	c.Beneficiaries = make([]Beneficiary, count)
+	for i := uint32(0); i < count; i++ {
+		acct, err := r.ReadString()
+		if err != nil {
+			return c, fmt.Errorf("comment.beneficiaries[%d].account: %w", i, err)
+		}
+		w, err := r.ReadUint16()
+		if err != nil {
+			return c, fmt.Errorf("comment.beneficiaries[%d].weight: %w", i, err)
+		}
+		c.Beneficiaries[i] = Beneficiary{Account: acct, Weight: w}
+	}
+	if c.AbsRshares, err = r.ReadInt64(); err != nil {
+		return c, fmt.Errorf("comment.abs_rshares: %w", err)
+	}
+	// WasPaid is a later schema addition; tolerate EOF.
+	if r.AtEnd() {
+		return c, nil
+	}
+	if c.WasPaid, err = r.ReadBool(); err != nil {
+		return c, fmt.Errorf("comment.was_paid: %w", err)
+	}
+	// VoteRshares + TotalVoteWeight are a later schema addition; tolerate EOF.
+	if r.AtEnd() {
+		return c, nil
+	}
+	if c.VoteRshares, err = r.ReadUint64(); err != nil {
+		return c, fmt.Errorf("comment.vote_rshares: %w", err)
+	}
+	if c.TotalVoteWeight, err = r.ReadUint64(); err != nil {
+		return c, fmt.Errorf("comment.total_vote_weight: %w", err)
+	}
+	// LastPayout is a later schema addition; tolerate EOF.
+	if r.AtEnd() {
+		return c, nil
+	}
+	if c.LastPayout, err = r.ReadUint32(); err != nil {
+		return c, fmt.Errorf("comment.last_payout: %w", err)
 	}
 	if !r.AtEnd() {
 		return c, errors.New("comment: trailing bytes")
@@ -215,6 +328,7 @@ func AppendCommentVote(dst []byte, cv *CommentVote) []byte {
 	dst = append(dst, byte(cv.NumChanges), byte(cv.NumChanges>>8))
 	dst = appendI64LE(dst, cv.Rshares)
 	dst = appendU32LE(dst, cv.LastUpdate)
+	dst = appendU64LE(dst, cv.CurationWeight)
 	return dst
 }
 
@@ -247,6 +361,13 @@ func ReadCommentVote(src []byte) (CommentVote, error) {
 	}
 	if cv.LastUpdate, err = r.ReadUint32(); err != nil {
 		return cv, err
+	}
+	// CurationWeight is a later schema addition; tolerate EOF.
+	if r.AtEnd() {
+		return cv, nil
+	}
+	if cv.CurationWeight, err = r.ReadUint64(); err != nil {
+		return cv, fmt.Errorf("comment_vote.curation_weight: %w", err)
 	}
 	if !r.AtEnd() {
 		return cv, errors.New("comment_vote: trailing bytes")
@@ -299,4 +420,11 @@ func GetCommentVote(s *state.Session, voter, author auth.AccountName, permlink s
 // HasCommentVote reports vote existence.
 func HasCommentVote(s *state.Session, voter, author auth.AccountName, permlink string) (bool, error) {
 	return s.Has(CommentVoteTable, state.PrimaryIndex, commentVoteKey(voter, author, permlink))
+}
+
+// DeleteCommentVote removes (voter, author, permlink) from both the
+// primary index and the by-comment secondary.
+func DeleteCommentVote(s *state.Session, voter, author auth.AccountName, permlink string) {
+	s.Delete(CommentVoteTable, state.PrimaryIndex, commentVoteKey(voter, author, permlink))
+	s.Delete(CommentVoteTable, CommentVoteByCommentIndex, commentVoteByCommentKey(author, permlink, voter))
 }

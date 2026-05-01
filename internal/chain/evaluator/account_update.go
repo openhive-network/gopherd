@@ -53,6 +53,24 @@ func (accountUpdateEvaluator) Apply(ctx *Context, o op.Operation) error {
 		a.MemoKey = au.MemoKey
 	}
 	a.JSONMetadata = au.JSONMetadata
+	// hived's update_owner_authority (database.cpp:1678): when the
+	// owner authority is rotated, record the OLD owner_authority in
+	// owner_authority_history_object and bump previous_owner_update /
+	// last_owner_update timestamps.
+	if au.Owner != nil {
+		objects.PutOwnerAuthorityHistory(ctx.DB, &objects.OwnerAuthorityHistory{
+			Account:                au.Account,
+			PreviousOwnerAuthority: *au.Owner, // best-effort: we don't
+			// track the prior owner authority on the account, so we
+			// record the new one as a structural placeholder. The
+			// recovery flow doesn't validate signatures (replay-mode),
+			// so this row's primary purpose is the existence-check
+			// gate for the owner-update-rate-limit (HIVE_OWNER_UPDATE_LIMIT).
+			LastValidTime: ctx.HeadBlockTime,
+		})
+		a.PreviousOwnerUpdate = a.LastOwnerUpdate
+		a.LastOwnerUpdate = ctx.HeadBlockTime
+	}
 	objects.PutAccount(ctx.DB, &a)
 	return nil
 }

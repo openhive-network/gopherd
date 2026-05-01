@@ -22,11 +22,16 @@ func processAccountRecovery(s *state.Session, blockTime uint32) {
 }
 
 func clearExpiredRecoveryRequests(s *state.Session, blockTime uint32) {
+	if hint, ok := s.GetExpHint(objects.AccountRecoveryRequestTable, objects.AccountRecoveryByExpirationIndex); ok && hint > blockTime {
+		return
+	}
+
 	type pending struct {
 		expiration uint32
 		account    string
 	}
 	var ready []pending
+	var nextExp uint32
 
 	_ = s.Range(objects.AccountRecoveryRequestTable, objects.AccountRecoveryByExpirationIndex, nil,
 		func(body, _ []byte) (bool, error) {
@@ -35,6 +40,7 @@ func clearExpiredRecoveryRequests(s *state.Session, blockTime uint32) {
 			}
 			t := uint32(body[0])<<24 | uint32(body[1])<<16 | uint32(body[2])<<8 | uint32(body[3])
 			if t > blockTime {
+				nextExp = t
 				return false, nil
 			}
 			nameBytes := body[4 : 4+state.AccountNameKeyLen]
@@ -53,14 +59,23 @@ func clearExpiredRecoveryRequests(s *state.Session, blockTime uint32) {
 		}
 		objects.DeleteAccountRecoveryRequestFull(s, &req)
 	}
+	if nextExp == 0 {
+		nextExp = ^uint32(0)
+	}
+	s.SetExpHint(objects.AccountRecoveryRequestTable, objects.AccountRecoveryByExpirationIndex, nextExp)
 }
 
 func applyEffectiveRecoveryAccountChanges(s *state.Session, blockTime uint32) {
+	if hint, ok := s.GetExpHint(objects.ChangeRecoveryAccountRequestTable, objects.ChangeRecoveryByEffectiveDateIndex); ok && hint > blockTime {
+		return
+	}
+
 	type pending struct {
 		effective uint32
 		account   string
 	}
 	var ready []pending
+	var nextExp uint32
 
 	_ = s.Range(objects.ChangeRecoveryAccountRequestTable, objects.ChangeRecoveryByEffectiveDateIndex, nil,
 		func(body, _ []byte) (bool, error) {
@@ -69,6 +84,7 @@ func applyEffectiveRecoveryAccountChanges(s *state.Session, blockTime uint32) {
 			}
 			t := uint32(body[0])<<24 | uint32(body[1])<<16 | uint32(body[2])<<8 | uint32(body[3])
 			if t > blockTime {
+				nextExp = t
 				return false, nil
 			}
 			nameBytes := body[4 : 4+state.AccountNameKeyLen]
@@ -95,4 +111,8 @@ func applyEffectiveRecoveryAccountChanges(s *state.Session, blockTime uint32) {
 		}
 		objects.DeleteChangeRecoveryRequestFull(s, &req)
 	}
+	if nextExp == 0 {
+		nextExp = ^uint32(0)
+	}
+	s.SetExpHint(objects.ChangeRecoveryAccountRequestTable, objects.ChangeRecoveryByEffectiveDateIndex, nextExp)
 }

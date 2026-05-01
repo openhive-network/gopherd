@@ -58,13 +58,13 @@ func (convertEvaluator) Apply(ctx *Context, o op.Operation) error {
 	} else if has {
 		return fmt.Errorf("%w: %q/%d", ErrConvertExists, c.Owner, c.RequestID)
 	}
-	a.HBDBalance -= c.Amount.Amount
+	objects.AdjustHBDBalance(ctx.DB, &a, ctx.HeadBlockTime, -c.Amount.Amount)
 	objects.PutAccount(ctx.DB, &a)
 	objects.PutConvertRequest(ctx.DB, &objects.ConvertRequest{
 		Owner:      c.Owner,
 		RequestID:  c.RequestID,
 		Amount:     c.Amount.Amount,
-		Conversion: ctx.BlockTime + conversionDelay(ctx.Hardforks),
+		Conversion: ctx.HeadBlockTime + conversionDelay(ctx.Hardforks),
 	})
 	return nil
 }
@@ -109,7 +109,7 @@ func (collateralizedConvertEvaluator) Apply(ctx *Context, o op.Operation) error 
 		RequestID:  c.RequestID,
 		Collateral: c.Amount.Amount,
 		HBDOut:     0,
-		Conversion: ctx.BlockTime + conversionDelay(ctx.Hardforks),
+		Conversion: ctx.HeadBlockTime + conversionDelay(ctx.Hardforks),
 	})
 	return nil
 }

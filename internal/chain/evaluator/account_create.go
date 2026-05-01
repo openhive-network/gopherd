@@ -6,6 +6,7 @@ import (
 
 	"hived-go/internal/protocol/asset"
 	"hived-go/internal/protocol/auth"
+	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/op"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
@@ -92,15 +93,30 @@ func (accountCreateEvaluator) Apply(ctx *Context, o op.Operation) error {
 	// converting the creator's fee into starter VESTS for the new
 	// account at the current vesting price.
 	newAcct := objects.Account{
-		Name:         ac.NewAccountName,
-		Created:      ctx.BlockTime,
-		MemoKey:      ac.MemoKey,
-		JSONMetadata: ac.JSONMetadata,
+		Name:                 ac.NewAccountName,
+		Created:              ctx.HeadBlockTime,
+		MemoKey:              ac.MemoKey,
+		JSONMetadata:         ac.JSONMetadata,
+		VotingManaCurrent:    10000, // full mana at creation
+		VotingManaLastUpdate: ctx.HeadBlockTime,
+	}
+	// HF20+: prime the RC manabar at creation so subsequent regen
+	// has a defined origin. max_rc starts at 0 (no VESTS yet).
+	if ctx.Hardforks.Has(hardfork.HF20) {
+		objects.InitRCManabar(&newAcct, ctx.HeadBlockTime)
 	}
 	objects.PutAccount(ctx.DB, &newAcct)
 	if ac.Fee.Amount > 0 {
 		if _, err := CreateVesting(ctx.DB, ac.NewAccountName, ac.Fee.Amount, false); err != nil {
 			return err
+		}
+		// After CreateVesting credits VESTS to the new account, refresh
+		// its RC cap.
+		if ctx.Hardforks.Has(hardfork.HF20) {
+			if a, err := objects.GetAccount(ctx.DB, ac.NewAccountName); err == nil {
+				objects.RegenerateRCMana(&a, ctx.HeadBlockTime)
+				objects.PutAccount(ctx.DB, &a)
+			}
 		}
 	}
 	return nil

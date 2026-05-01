@@ -75,7 +75,92 @@ type Account struct {
 	// hive_evaluator_social.cpp:204.
 	LastPost     uint32
 	LastRootPost uint32
+	// HBDSeconds tracks integral( hbd_balance dt ) since
+	// HBDSecondsLastUpdate; on every adjust_balance() it accrues, and on
+	// every >= HIVE_HBD_INTEREST_COMPOUND_INTERVAL_SEC tick it is paid
+	// out as HBD interest. Stored as a 16-byte big-endian uint128 since
+	// hbd_balance × seconds can exceed int64 for large balances over a
+	// year. Mirrors account_object::hbd_seconds in
+	// libraries/chain/include/hive/chain/account_object.hpp.
+	HBDSeconds              [16]byte
+	HBDSecondsLastUpdate    uint32
+	HBDLastInterestPayment  uint32
+	SavingsHBDSeconds       [16]byte
+	SavingsHBDSecondsLastUpdate   uint32
+	SavingsHBDLastInterestPayment uint32
+	// voting_manabar (libraries/chain/util/manabar.hpp +
+	// libraries/chain/include/hive/chain/account_object.hpp): each vote
+	// depletes current_mana, regenerating linearly back to the cap of
+	// HIVE_100_PERCENT (10000 pre-HF20) over
+	// HIVE_VOTING_MANA_REGENERATION_SECONDS (5 days). Post-HF20 the cap
+	// becomes the account's effective vesting weight; this Go field
+	// stores both regimes.
+	VotingManaCurrent    int64
+	VotingManaLastUpdate uint32
+	// CanVote — set false by decline_voting_rights effective-date hook.
+	// Default true (the FC-decoded zero value would be false; we shift
+	// the sense to "VoteRevoked" to keep the zero value harmless).
+	VoteRevoked bool
+	// GovernanceVoteExpiration — HF22+ governance votes expire after a
+	// year of voter inactivity. We mirror the field; the per-block
+	// remove_expired_governance_votes hook is not modeled.
+	GovernanceVoteExpiration uint32
+	// DelayedVotes / SumDelayedVotes — HF24+ vesting-share maturation
+	// queue. Newly-acquired VESTS (from transfer_to_vesting) sit in
+	// DelayedVotes for HIVE_DELAYED_VOTING_TOTAL_INTERVAL_SECONDS
+	// (30 days) before counting toward witness vote weight. Buckets are
+	// HIVE_DELAYED_VOTING_INTERVAL_SECONDS (1 day) wide; up to 30
+	// buckets at any time.
+	//
+	// SumDelayedVotes is the redundant sum of all bucket values, kept
+	// in sync by add/erase to avoid having to walk the slice every
+	// effective-vote-weight read.
+	//
+	// Mirrors libraries/chain/include/hive/chain/util/
+	// delayed_voting_processor.hpp + account_object.hpp.
+	DelayedVotes    []DelayedVoteEntry
+	SumDelayedVotes uint64
+	// Resource Credits manabar (HF20+). Mirrors hived's
+	// account_object::rc_manabar + last_max_rc fields.
+	//
+	//	max_rc      = effective_vesting_shares (post HF22+ adjusted by
+	//	              direct RC delegations in/out)
+	//	regen_time  = HIVE_RC_REGEN_TIME = 5 days
+	//	current_mana regenerates linearly to max_mana over regen_time.
+	//
+	// LastMaxRC is the max_rc value at the most recent
+	// regenerate_rc_mana call — used as a sanity check that every op
+	// that mutates vesting also bumps the manabar.
+	RCManaCurrent    int64
+	RCManaLastUpdate uint32
+	LastMaxRC        int64
+	// LastOwnerUpdate / PreviousOwnerUpdate (post-HF, but cheap to
+	// always track). Mirrors account_authority_object::last_owner_update
+	// and previous_owner_update. Set whenever account_update changes
+	// the owner authority. Used by request_account_recovery to gate
+	// the HIVE_OWNER_UPDATE_LIMIT (60 minutes between owner changes).
+	LastOwnerUpdate     uint32
+	PreviousOwnerUpdate uint32
+	// DelegatedRCIn / DelegatedRCOut — HF22+ direct RC delegations.
+	// MaximumRC = effective_vesting + DelegatedRCIn - DelegatedRCOut.
+	// Mirrors account_object's tracking fields used by
+	// rc_direct_delegation_object aggregations.
+	DelegatedRCIn  int64
+	DelegatedRCOut int64
+	// ProxiedVSFVotes — HIVE_MAX_PROXY_RECURSION_DEPTH+1 = 5 slots of
+	// vesting weight proxied THROUGH this account at depth i. When an
+	// account A proxies to B, A's direct vest goes into B.ProxiedVSFVotes[0],
+	// A.ProxiedVSFVotes[i] cascades into B.ProxiedVSFVotes[i+1], etc.
+	// Used by adjust_proxied_witness_votes and nullify_proxied_witness_votes
+	// (database.cpp:1077-1138). Pre-HF24 the direct portion (delta[0]) is
+	// vesting_shares; HF24+ it's vesting_shares - sum_delayed_votes.
+	ProxiedVSFVotes [5]int64
 }
+
+// CanVote returns whether the account is allowed to cast votes
+// (negation of the on-disk VoteRevoked flag, which has zero value =
+// false = "still allowed", matching new accounts which can vote).
+func (a *Account) CanVote() bool { return !a.VoteRevoked }
 
 // AppendAccount serializes a to dst using FC binary form. The field
 // order chosen here is internal to the state schema — it does not need
@@ -108,6 +193,36 @@ func AppendAccount(dst []byte, a *Account) []byte {
 	dst = appendI64LE(dst, a.Withdrawn)
 	dst = appendU32LE(dst, a.LastPost)
 	dst = appendU32LE(dst, a.LastRootPost)
+	dst = append(dst, a.HBDSeconds[:]...)
+	dst = appendU32LE(dst, a.HBDSecondsLastUpdate)
+	dst = appendU32LE(dst, a.HBDLastInterestPayment)
+	dst = append(dst, a.SavingsHBDSeconds[:]...)
+	dst = appendU32LE(dst, a.SavingsHBDSecondsLastUpdate)
+	dst = appendU32LE(dst, a.SavingsHBDLastInterestPayment)
+	dst = appendI64LE(dst, a.VotingManaCurrent)
+	dst = appendU32LE(dst, a.VotingManaLastUpdate)
+	if a.VoteRevoked {
+		dst = append(dst, 1)
+	} else {
+		dst = append(dst, 0)
+	}
+	dst = appendU32LE(dst, a.GovernanceVoteExpiration)
+	dst = fcraw.AppendVarUint(dst, uint32(len(a.DelayedVotes)))
+	for _, e := range a.DelayedVotes {
+		dst = appendU32LE(dst, e.Time)
+		dst = appendU64LE(dst, e.Val)
+	}
+	dst = appendU64LE(dst, a.SumDelayedVotes)
+	dst = appendI64LE(dst, a.RCManaCurrent)
+	dst = appendU32LE(dst, a.RCManaLastUpdate)
+	dst = appendI64LE(dst, a.LastMaxRC)
+	dst = appendU32LE(dst, a.LastOwnerUpdate)
+	dst = appendU32LE(dst, a.PreviousOwnerUpdate)
+	dst = appendI64LE(dst, a.DelegatedRCIn)
+	dst = appendI64LE(dst, a.DelegatedRCOut)
+	for _, v := range a.ProxiedVSFVotes {
+		dst = appendI64LE(dst, v)
+	}
 	return dst
 }
 
@@ -191,6 +306,110 @@ func ReadAccount(src []byte) (Account, error) {
 	if a.LastRootPost, err = r.ReadUint32(); err != nil {
 		return a, fmt.Errorf("account.last_root_post: %w", err)
 	}
+	// HBD interest tracking is a later schema addition; tolerate EOF.
+	if r.AtEnd() {
+		return a, nil
+	}
+	if err := r.ReadInto(a.HBDSeconds[:]); err != nil {
+		return a, fmt.Errorf("account.hbd_seconds: %w", err)
+	}
+	if a.HBDSecondsLastUpdate, err = r.ReadUint32(); err != nil {
+		return a, fmt.Errorf("account.hbd_seconds_last_update: %w", err)
+	}
+	if a.HBDLastInterestPayment, err = r.ReadUint32(); err != nil {
+		return a, fmt.Errorf("account.hbd_last_interest_payment: %w", err)
+	}
+	if err := r.ReadInto(a.SavingsHBDSeconds[:]); err != nil {
+		return a, fmt.Errorf("account.savings_hbd_seconds: %w", err)
+	}
+	if a.SavingsHBDSecondsLastUpdate, err = r.ReadUint32(); err != nil {
+		return a, fmt.Errorf("account.savings_hbd_seconds_last_update: %w", err)
+	}
+	if a.SavingsHBDLastInterestPayment, err = r.ReadUint32(); err != nil {
+		return a, fmt.Errorf("account.savings_hbd_last_interest_payment: %w", err)
+	}
+	// voting_manabar fields are a later schema addition; tolerate EOF.
+	if r.AtEnd() {
+		return a, nil
+	}
+	if a.VotingManaCurrent, err = r.ReadInt64(); err != nil {
+		return a, fmt.Errorf("account.voting_mana_current: %w", err)
+	}
+	if a.VotingManaLastUpdate, err = r.ReadUint32(); err != nil {
+		return a, fmt.Errorf("account.voting_mana_last_update: %w", err)
+	}
+	// VoteRevoked + GovernanceVoteExpiration are a later schema addition;
+	// tolerate EOF.
+	if r.AtEnd() {
+		return a, nil
+	}
+	if a.VoteRevoked, err = r.ReadBool(); err != nil {
+		return a, fmt.Errorf("account.vote_revoked: %w", err)
+	}
+	if a.GovernanceVoteExpiration, err = r.ReadUint32(); err != nil {
+		return a, fmt.Errorf("account.governance_vote_expiration: %w", err)
+	}
+	// DelayedVotes / SumDelayedVotes are a later schema addition; tolerate EOF.
+	if r.AtEnd() {
+		return a, nil
+	}
+	count, err := r.ReadVarUint()
+	if err != nil {
+		return a, fmt.Errorf("account.delayed_votes.count: %w", err)
+	}
+	if count > 0 {
+		a.DelayedVotes = make([]DelayedVoteEntry, count)
+		for i := uint32(0); i < count; i++ {
+			if a.DelayedVotes[i].Time, err = r.ReadUint32(); err != nil {
+				return a, fmt.Errorf("account.delayed_votes[%d].time: %w", i, err)
+			}
+			if a.DelayedVotes[i].Val, err = r.ReadUint64(); err != nil {
+				return a, fmt.Errorf("account.delayed_votes[%d].val: %w", i, err)
+			}
+		}
+	}
+	if a.SumDelayedVotes, err = r.ReadUint64(); err != nil {
+		return a, fmt.Errorf("account.sum_delayed_votes: %w", err)
+	}
+	// RC manabar fields are a later schema addition; tolerate EOF.
+	if r.AtEnd() {
+		return a, nil
+	}
+	if a.RCManaCurrent, err = r.ReadInt64(); err != nil {
+		return a, fmt.Errorf("account.rc_mana_current: %w", err)
+	}
+	if a.RCManaLastUpdate, err = r.ReadUint32(); err != nil {
+		return a, fmt.Errorf("account.rc_mana_last_update: %w", err)
+	}
+	if a.LastMaxRC, err = r.ReadInt64(); err != nil {
+		return a, fmt.Errorf("account.last_max_rc: %w", err)
+	}
+	// LastOwnerUpdate / PreviousOwnerUpdate / DelegatedRC* are a
+	// later schema addition; tolerate EOF.
+	if r.AtEnd() {
+		return a, nil
+	}
+	if a.LastOwnerUpdate, err = r.ReadUint32(); err != nil {
+		return a, fmt.Errorf("account.last_owner_update: %w", err)
+	}
+	if a.PreviousOwnerUpdate, err = r.ReadUint32(); err != nil {
+		return a, fmt.Errorf("account.previous_owner_update: %w", err)
+	}
+	if a.DelegatedRCIn, err = r.ReadInt64(); err != nil {
+		return a, fmt.Errorf("account.delegated_rc_in: %w", err)
+	}
+	if a.DelegatedRCOut, err = r.ReadInt64(); err != nil {
+		return a, fmt.Errorf("account.delegated_rc_out: %w", err)
+	}
+	// ProxiedVSFVotes is a later schema addition; tolerate EOF.
+	if r.AtEnd() {
+		return a, nil
+	}
+	for i := 0; i < 5; i++ {
+		if a.ProxiedVSFVotes[i], err = r.ReadInt64(); err != nil {
+			return a, fmt.Errorf("account.proxied_vsf_votes[%d]: %w", i, err)
+		}
+	}
 	if !r.AtEnd() {
 		return a, errors.New("account: trailing bytes after decode (schema mismatch?)")
 	}
@@ -205,9 +424,13 @@ func AccountKey(name auth.AccountName) []byte {
 }
 
 // PutAccount stores a in the session under the primary key derived from
-// a.Name.
+// a.Name. Reuses Session.SerScratch as the serialization output buffer
+// to avoid per-call growslice allocations — Session.Put copies the
+// value into the overlay so the buffer is safe to reuse on the next
+// PutAccount call.
 func PutAccount(s *state.Session, a *Account) {
-	s.Put(AccountTable, state.PrimaryIndex, AccountKey(a.Name), AppendAccount(nil, a))
+	s.SerScratch = AppendAccount(s.SerScratch[:0], a)
+	s.Put(AccountTable, state.PrimaryIndex, AccountKey(a.Name), s.SerScratch)
 }
 
 // GetAccount fetches the account named name. Returns ErrNotFound if absent.

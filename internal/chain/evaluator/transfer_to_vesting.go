@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"hived-go/internal/protocol/asset"
+	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/op"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
@@ -57,6 +58,11 @@ func (transferToVestingEvaluator) Apply(ctx *Context, o op.Operation) error {
 		toName = tv.From
 	}
 
+	// HF20+: refresh sender's RC manabar before any vesting changes,
+	// so a stale cap from a previous block doesn't leak through.
+	if ctx.Hardforks.Has(hardfork.HF20) {
+		objects.RegenerateRCMana(&from, ctx.HeadBlockTime)
+	}
 	from.Balance -= tv.Amount.Amount
 	objects.PutAccount(ctx.DB, &from)
 
@@ -69,8 +75,44 @@ func (transferToVestingEvaluator) Apply(ctx *Context, o op.Operation) error {
 
 	// CreateVesting handles fund_hive += amount, shares += new_vesting,
 	// and recipient.vesting_shares += new_vesting at the dynamic price.
-	if _, err := CreateVesting(ctx.DB, toName, tv.Amount.Amount, false); err != nil {
+	newVests, err := CreateVesting(ctx.DB, toName, tv.Amount.Amount, false)
+	if err != nil {
 		return err
+	}
+	if newVests <= 0 {
+		return nil
+	}
+	// HF24+: vesting from transfer_to_vesting is voting-deferred for 30
+	// days. The new VESTS go into the recipient's DelayedVotes queue;
+	// witness vote weight is not adjusted yet. The per-block
+	// delayed_voting hook calls AdjustWitnessVotesForVoter when a
+	// bucket matures.
+	//
+	// Pre-HF24: apply immediately to witness vote totals.
+	if ctx.Hardforks.Has(hardfork.HF24) {
+		to, err := objects.GetAccount(ctx.DB, toName)
+		if err != nil {
+			return err
+		}
+		if err := objects.DelayedVotingAddOnAccount(&to, ctx.HeadBlockTime, uint64(newVests)); err != nil {
+			return fmt.Errorf("transfer_to_vesting: delayed_voting add: %w", err)
+		}
+		objects.PutAccount(ctx.DB, &to)
+	} else {
+		// Mirror C++ create_vesting2 → adjust_proxied_witness_votes.
+		// If the recipient has a proxy, the new vest cascades up the
+		// chain; otherwise it lands on the witnesses they vote for.
+		to, err := objects.GetAccount(ctx.DB, toName)
+		if err == nil {
+			objects.AdjustProxiedWitnessVotes(ctx.DB, &to, newVests)
+		}
+	}
+	// HF20+: recipient's effective_vests went up → refresh RC cap.
+	if ctx.Hardforks.Has(hardfork.HF20) {
+		if to, err := objects.GetAccount(ctx.DB, toName); err == nil {
+			objects.RegenerateRCMana(&to, ctx.HeadBlockTime)
+			objects.PutAccount(ctx.DB, &to)
+		}
 	}
 	return nil
 }

@@ -96,6 +96,12 @@ func (updateProposalVotesEvaluator) Apply(ctx *Context, o op.Operation) error {
 		}
 		return err
 	}
+	// dhf_evaluator.cpp:169 — UNCONDITIONAL refresh of governance vote
+	// expiration on every proposal vote, with the HF25 redistribution
+	// formula applied to votes that would otherwise expire before
+	// HARDFORK_1_25_FIRST_GOVERNANCE_VOTE_EXPIRE_TIMESTAMP.
+	updateGovernanceVoteExpirationTs(&voter, ctx.HeadBlockTime)
+	objects.PutAccount(ctx.DB, &voter)
 	for _, id := range uv.ProposalIDs {
 		p, err := objects.GetProposal(ctx.DB, id)
 		if err != nil {
@@ -139,7 +145,7 @@ func (removeProposalEvaluator) Apply(ctx *Context, o op.Operation) error {
 		if p.Creator != rp.ProposalOwner {
 			return fmt.Errorf("%w: id=%d", ErrProposalNotOwnedByYou, id)
 		}
-		objects.DeleteProposal(ctx.DB, id)
+		objects.DeleteProposalFull(ctx.DB, &p)
 	}
 	return nil
 }

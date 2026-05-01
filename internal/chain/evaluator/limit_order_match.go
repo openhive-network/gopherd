@@ -145,7 +145,7 @@ func matchOrders(ctx *Context, newOrder, old *objects.LimitOrder) int {
 		if ctx.Hardforks.Has(hardfork.HF10) {
 			minAge = liquidityRewardMinAgePostHF10
 		}
-		if old.Created != 0 && ctx.BlockTime >= old.Created+minAge {
+		if old.Created != 0 && ctx.HeadBlockTime >= old.Created+minAge {
 			adjustLiquidityRewardOnFill(ctx, old, newOrder, oldOrderReceives, newOrderReceives)
 		}
 	}
@@ -199,7 +199,7 @@ func adjustLiquidityRewardOnFill(ctx *Context, old, new *objects.LimitOrder, old
 // (7d); applies the volume delta; recomputes weight; updates last_update.
 func adjustLiquidityVolume(ctx *Context, owner string, delta int64, isHbd bool, hf9 bool) {
 	const liquidityTimeoutSec uint32 = 60 * 60 * 24 * 7
-	now := ctx.BlockTime
+	now := ctx.HeadBlockTime
 	b, err := objects.GetLiquidityRewardBalance(ctx.DB, owner)
 	prevWeight := b.Weight
 	exists := err == nil
@@ -240,7 +240,7 @@ func fillLimitOrder(ctx *Context, order *objects.LimitOrder, pays, receives int6
 		case asset.HiveSymbol:
 			a.Balance += receives
 		case asset.HbdSymbol:
-			a.HBDBalance += receives
+			objects.AdjustHBDBalance(ctx.DB, &a, ctx.HeadBlockTime, receives)
 		}
 		objects.PutAccount(ctx.DB, &a)
 	}
@@ -265,7 +265,7 @@ func fillLimitOrder(ctx *Context, order *objects.LimitOrder, pays, receives int6
 			case asset.HiveSymbol:
 				a.Balance += order.ForSaleAmount
 			case asset.HbdSymbol:
-				a.HBDBalance += order.ForSaleAmount
+				objects.AdjustHBDBalance(ctx.DB, &a, ctx.HeadBlockTime, order.ForSaleAmount)
 			}
 			objects.PutAccount(ctx.DB, &a)
 		}

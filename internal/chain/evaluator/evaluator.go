@@ -29,8 +29,18 @@ type Context struct {
 	Hardforks hardfork.Set
 	// BlockNum is the block currently being applied (1-based).
 	BlockNum uint32
-	// BlockTime is the head block's time_point_sec.
+	// BlockTime is the time_point_sec of the block currently being
+	// applied — i.e., what hived calls `_current_timestamp`. Used for
+	// the few places where C++ explicitly reads the new block's
+	// timestamp (e.g., signing-witness records).
 	BlockTime uint32
+	// HeadBlockTime is the value hived's `head_block_time()` returns
+	// while transactions are still applying — that is, the previous
+	// block's timestamp. dgpo.time only advances to the current block
+	// AFTER tx application via update_global_dynamic_data, so
+	// evaluators that match `_now = _db.head_block_time()` should read
+	// HeadBlockTime, not BlockTime, to stay byte-compatible with C++.
+	HeadBlockTime uint32
 	// Witness is the producer of the block currently being applied (the
 	// `witness` field of its signed_block_header). hived's DGPO is updated
 	// to point at this name BEFORE evaluators run, so any evaluator

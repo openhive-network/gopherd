@@ -55,7 +55,7 @@ func (escrowTransferEvaluator) Apply(ctx *Context, o op.Operation) error {
 	}
 
 	from.Balance -= e.HiveAmount.Amount + e.Fee.Amount
-	from.HBDBalance -= e.HbdAmount.Amount
+	objects.AdjustHBDBalance(ctx.DB, &from, ctx.HeadBlockTime, -e.HbdAmount.Amount)
 	objects.PutAccount(ctx.DB, &from)
 
 	objects.PutEscrow(ctx.DB, &objects.Escrow{
@@ -115,7 +115,7 @@ func (escrowApproveEvaluator) Apply(ctx *Context, o op.Operation) error {
 		return err
 	}
 	from.Balance += esc.HiveAmount + esc.PendingFee
-	from.HBDBalance += esc.HBDAmount
+	objects.AdjustHBDBalance(ctx.DB, &from, ctx.HeadBlockTime, esc.HBDAmount)
 	objects.PutAccount(ctx.DB, &from)
 	objects.DeleteEscrowFull(ctx.DB, &esc)
 	return nil
@@ -172,7 +172,7 @@ func (escrowReleaseEvaluator) Apply(ctx *Context, o op.Operation) error {
 		return err
 	}
 	receiver.Balance += r.HiveAmount.Amount
-	receiver.HBDBalance += r.HbdAmount.Amount
+	objects.AdjustHBDBalance(ctx.DB, &receiver, ctx.HeadBlockTime, r.HbdAmount.Amount)
 	objects.PutAccount(ctx.DB, &receiver)
 
 	esc.HiveAmount -= r.HiveAmount.Amount

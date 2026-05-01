@@ -216,11 +216,13 @@ func (r *Reader) ReadBytesAlias() ([]byte, error) {
 
 // ReadString reads a length-prefixed UTF-8 string.
 func (r *Reader) ReadString() (string, error) {
-	b, err := r.ReadBytes()
+	n, err := r.readLengthPrefix()
 	if err != nil {
 		return "", err
 	}
-	return string(b), nil
+	src := r.src[r.pos : r.pos+n]
+	r.pos += n
+	return string(src), nil
 }
 
 // ReadTimePointSec reads a 4-byte uint32 LE.

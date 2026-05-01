@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 
+	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/op"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
@@ -21,6 +22,43 @@ var (
 
 // HIVE_MAX_ACCOUNT_WITNESS_VOTES from libraries/protocol/include/hive/protocol/config.hpp.
 const maxAccountWitnessVotes uint16 = 30
+
+// HIVE_GOVERNANCE_VOTE_EXPIRATION_PERIOD = 365 days (HF22+). Each
+// governance action (witness vote, witness proxy, proposal vote)
+// extends the account's expiration by this much from now.
+const governanceVoteExpirationPeriodSec uint32 = 365 * 24 * 60 * 60
+
+// HIVE_HARDFORK_1_25_TIME (mainnet, libraries/protocol/hardfork.d/1_25.hf:10).
+const hardfork125TimeSec uint32 = 1625061600
+
+// HARDFORK_1_25_FIRST_GOVERNANCE_VOTE_EXPIRE_TIMESTAMP — the earliest
+// expiration time anyone can have post-HF25. Calculated as HF25_TIME +
+// 1y. Pre-HF25 votes get redistributed under this anchor.
+const hardfork125FirstGovernanceExpireTimestamp uint32 = hardfork125TimeSec + governanceVoteExpirationPeriodSec
+
+// HIVE_HARDFORK_1_25_MAX_OLD_GOVERNANCE_VOTE_EXPIRE_SHIFT — half of one
+// year. Used to spread pre-HF25 vote expirations across a 6-month
+// window starting at HARDFORK_1_25_FIRST_GOVERNANCE_VOTE_EXPIRE_TIMESTAMP
+// instead of clustering them on the HF25 anniversary.
+const hardfork125MaxGovernanceExpireShiftSec uint32 = governanceVoteExpirationPeriodSec / 2
+
+// updateGovernanceVoteExpirationTs mirrors C++'s
+// account_object::update_governance_vote_expiration_ts (account_object.hpp:280):
+//
+//	expiration = vote_time + HIVE_GOVERNANCE_VOTE_EXPIRATION_PERIOD
+//	if (expiration < HARDFORK_1_25_FIRST_GOVERNANCE_VOTE_EXPIRE_TIMESTAMP)
+//	    expiration = HARDFORK_1_25_FIRST_GOVERNANCE_VOTE_EXPIRE_TIMESTAMP
+//	               + (expiration % HIVE_HARDFORK_1_25_MAX_OLD_GOVERNANCE_VOTE_EXPIRE_SHIFT)
+//
+// The redistribution prevents every pre-HF25 vote from expiring on the
+// same day after HF25 activation.
+func updateGovernanceVoteExpirationTs(a *objects.Account, voteTime uint32) {
+	expiration := voteTime + governanceVoteExpirationPeriodSec
+	if expiration < hardfork125FirstGovernanceExpireTimestamp {
+		expiration = hardfork125FirstGovernanceExpireTimestamp + (expiration % hardfork125MaxGovernanceExpireShiftSec)
+	}
+	a.GovernanceVoteExpiration = expiration
+}
 
 // witnessUpdateEvaluator implements witness_update.
 //
@@ -53,7 +91,7 @@ func (witnessUpdateEvaluator) Apply(ctx *Context, o op.Operation) error {
 
 	w := objects.Witness{
 		Owner:              wu.Owner,
-		Created:            ctx.BlockTime,
+		Created:            ctx.HeadBlockTime,
 		URL:                wu.URL,
 		BlockSigningKey:    wu.BlockSigningKey,
 		AccountCreationFee: wu.Props.AccountCreationFee.Amount,
@@ -163,6 +201,9 @@ func (accountWitnessVoteEvaluator) Apply(ctx *Context, o op.Operation) error {
 		}
 		return err
 	}
+	if !voter.CanVote() {
+		return fmt.Errorf("account_witness_vote: %q has declined voting rights", wv.Account)
+	}
 	if voter.Proxy != "" {
 		return ErrCantVoteWithProxy
 	}
@@ -180,16 +221,35 @@ func (accountWitnessVoteEvaluator) Apply(ctx *Context, o op.Operation) error {
 		return err
 	}
 
+	// Effective vote weight: pre-HF24, the full VestingShares applies
+	// immediately. Post-HF24, votes still in the DelayedVotes queue
+	// don't count toward the witness's total — only matured votes do.
+	// Mirrors hived's account_object::get_governance_vote_power().
+	effectiveVests := voter.VestingShares
+	if ctx.Hardforks.Has(hardfork.HF24) {
+		effectiveVests -= int64(voter.SumDelayedVotes)
+		if effectiveVests < 0 {
+			effectiveVests = 0
+		}
+	}
+
 	if wv.Approve {
 		if had {
 			return fmt.Errorf("%w: %q -> %q", ErrAlreadyVotedForWitness, wv.Account, wv.Witness)
 		}
-		if voter.WitnessesVotedFor >= maxAccountWitnessVotes {
+		// hived only enforces the 30-vote cap post-HF2 (the upstream
+		// commit a49e13be78bf… pushed fminerten over the limit before
+		// the gate landed). hive_evaluator.cpp:281.
+		if ctx.Hardforks.Has(hardfork.HF2) && voter.WitnessesVotedFor >= maxAccountWitnessVotes {
 			return fmt.Errorf("%w: %q has %d/%d", ErrTooManyWitnessVotes, wv.Account, voter.WitnessesVotedFor, maxAccountWitnessVotes)
 		}
 		objects.PutWitnessVote(ctx.DB, wv.Account, wv.Witness)
 		voter.WitnessesVotedFor++
-		w.TotalVotesVests += voter.VestingShares
+		applyWitnessVoteDelta(ctx, &voter, &w, effectiveVests)
+		// hive_evaluator.cpp:269 — UNCONDITIONAL refresh of the
+		// governance vote expiration. Pre-HF22 the field exists but
+		// is unread (so the write is a harmless idempotent set).
+		updateGovernanceVoteExpirationTs(&voter, ctx.HeadBlockTime)
 	} else {
 		if !had {
 			return fmt.Errorf("%w: %q -> %q", ErrNotVotedForWitness, wv.Account, wv.Witness)
@@ -198,17 +258,57 @@ func (accountWitnessVoteEvaluator) Apply(ctx *Context, o op.Operation) error {
 		if voter.WitnessesVotedFor > 0 {
 			voter.WitnessesVotedFor--
 		}
-		w.TotalVotesVests -= voter.VestingShares
-		if w.TotalVotesVests < 0 {
-			w.TotalVotesVests = 0
-		}
+		applyWitnessVoteDelta(ctx, &voter, &w, -effectiveVests)
 	}
 	objects.PutAccount(ctx.DB, &voter)
 	objects.PutWitness(ctx.DB, &w)
 	return nil
 }
 
+// applyWitnessVoteDelta mirrors the per-hardfork branch in
+// hive_evaluator.cpp:289-299:
+//
+//	pre-HF2  : adjust THIS witness directly (w.votes += delta)
+//	HF2-HF3  : adjust_proxied_witness_votes(voter, delta) — since voter
+//	           has no proxy this collapses to walking ALL witnesses voter
+//	           votes for and adding delta to each (i.e. the bug HF3 fixed)
+//	HF3+     : adjust THIS witness directly
+//
+// The pre-HF2 / HF3+ paths mutate `w` in place (caller persists). The
+// HF2-HF3 path walks the witness_vote table directly via the proxied
+// helper, which writes through to storage; the caller's local `w` is
+// stale afterwards, so on that path we re-read from storage so the
+// caller's PutWitness doesn't overwrite the table-walk's mutation.
+func applyWitnessVoteDelta(ctx *Context, voter *objects.Account, w *objects.Witness, delta int64) {
+	if !ctx.Hardforks.Has(hardfork.HF2) || ctx.Hardforks.Has(hardfork.HF3) {
+		w.TotalVotesVests += delta
+		if w.TotalVotesVests < 0 {
+			w.TotalVotesVests = 0
+		}
+		return
+	}
+	objects.AdjustProxiedWitnessVotes(ctx.DB, voter, delta)
+	if fresh, ferr := objects.GetWitness(ctx.DB, w.Owner); ferr == nil {
+		*w = fresh
+	}
+}
+
 // accountWitnessProxyEvaluator implements account_witness_proxy.
+//
+// hived's flow (libraries/chain/hive_evaluator.cpp:210):
+//   - nullify_proxied_witness_votes(account)             [always]
+//   - if SETTING a non-empty proxy:
+//       - check for proxy-loop (chain ≤ HIVE_MAX_PROXY_RECURSION_DEPTH=4)
+//       - clear_witness_votes(account)        [removes direct votes]
+//       - set proxy
+//       - re-add the account's voting weight up the new proxy chain
+//   - if CLEARING the proxy (proxy == ""): just clear the proxy field
+//
+// We currently elide proxied_vsf_votes (the recursion-up-the-chain
+// re-adjustment) since we don't model the per-account
+// proxied_vsf_votes[5] array. The clear_witness_votes side-effect IS
+// modeled, since not modeling it caused stale witness_vote rows that
+// rejected later re-votes ("already votes for this witness").
 type accountWitnessProxyEvaluator struct{}
 
 func (accountWitnessProxyEvaluator) Apply(ctx *Context, o op.Operation) error {
@@ -226,10 +326,53 @@ func (accountWitnessProxyEvaluator) Apply(ctx *Context, o op.Operation) error {
 		}
 		return err
 	}
-	// HIVE_PROXY_TO_SELF_ACCOUNT (= "") clears the proxy.
-	a.Proxy = pr.Proxy
+	if !a.CanVote() {
+		return fmt.Errorf("account_witness_proxy: %q has declined voting rights", pr.Account)
+	}
+	// hive_evaluator.cpp:214 — refresh governance vote expiration
+	// unconditionally before propagating proxy changes.
+	updateGovernanceVoteExpirationTs(&a, ctx.HeadBlockTime)
+
+	// Mirror C++ hive_evaluator.cpp:210 — account_witness_proxy unconditionally
+	// nullifies the propagation chain first (so any prior proxy stops
+	// receiving this account's vest), then either sets a new proxy and
+	// re-propagates, or clears the field.
+	directPower := directGovernanceVotePower(ctx, &a)
+	objects.NullifyProxiedWitnessVotes(ctx.DB, &a, directPower)
+	if pr.Proxy != "" {
+		// Setting a new proxy: also drop all direct witness votes
+		// (clear_witness_votes in C++ — sets witnesses_voted_for=0
+		// and removes each row).
+		objects.ClearWitnessVotesForAccount(ctx.DB, pr.Account, a.VestingShares)
+		a.WitnessesVotedFor = 0
+		a.Proxy = pr.Proxy
+		// Re-read after Nullify possibly mutated `a` (proxy chain
+		// updates can write back through GetAccount).
+		fresh, ferr := objects.GetAccount(ctx.DB, pr.Account)
+		if ferr == nil {
+			fresh.Proxy = pr.Proxy
+			fresh.WitnessesVotedFor = 0
+			a = fresh
+		}
+		objects.ApplyProxyAtDepth(ctx.DB, &a, directPower)
+	} else {
+		a.Proxy = ""
+	}
 	objects.PutAccount(ctx.DB, &a)
 	return nil
+}
+
+// directGovernanceVotePower mirrors C++'s account_object::get_direct_governance_vote_power().
+// Pre-HF24: vesting_shares; HF24+: vesting_shares - sum_delayed_votes.
+func directGovernanceVotePower(ctx *Context, a *objects.Account) int64 {
+	v := a.VestingShares
+	if ctx.Hardforks.Has(hardfork.HF24) {
+		v -= int64(a.SumDelayedVotes)
+		if v < 0 {
+			v = 0
+		}
+	}
+	return v
 }
 
 // --- low-level LE readers --------------------------------------------

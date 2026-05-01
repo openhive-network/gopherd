@@ -30,6 +30,10 @@ type ProposalVote struct {
 const (
 	ProposalTable     state.TableID = 16
 	ProposalVoteTable state.TableID = 17
+	// ProposalByEndDateIndex orders proposals by end_date. The
+	// per-block process_proposals hook iterates this index to retire
+	// any proposal whose end_date has passed.
+	ProposalByEndDateIndex state.IndexID = 1
 )
 
 func proposalKey(id int64) []byte {
@@ -95,8 +99,24 @@ func ReadProposal(src []byte) (Proposal, error) {
 	return p, nil
 }
 
+func proposalByEndDateKey(endDate uint32, id int64) []byte {
+	out := state.AppendUint32BE(nil, endDate)
+	return state.AppendInt64BE(out, id)
+}
+
+// PutProposal stores p AND maintains the by-end-date secondary index.
+// Callers updating an existing proposal's EndDate (uncommon) must
+// DeleteProposalByEndDate at the OLD endDate first.
 func PutProposal(s *state.Session, p *Proposal) {
 	s.Put(ProposalTable, state.PrimaryIndex, proposalKey(p.ID), AppendProposal(nil, p))
+	s.Put(ProposalTable, ProposalByEndDateIndex, proposalByEndDateKey(p.EndDate, p.ID), nil)
+}
+
+// DeleteProposalFull removes both the primary row and the by-end-date
+// index entry. Use this when a proposal is removed or expired-out.
+func DeleteProposalFull(s *state.Session, p *Proposal) {
+	s.Delete(ProposalTable, state.PrimaryIndex, proposalKey(p.ID))
+	s.Delete(ProposalTable, ProposalByEndDateIndex, proposalByEndDateKey(p.EndDate, p.ID))
 }
 
 func GetProposal(s *state.Session, id int64) (Proposal, error) {

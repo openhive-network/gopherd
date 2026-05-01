@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"hived-go/internal/protocol/asset"
+	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/op"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
@@ -43,6 +44,34 @@ func (claimAccountEvaluator) Apply(ctx *Context, o op.Operation) error {
 		}
 		return err
 	}
+	// HF20+: Fee=0 ⇒ subsidy. The current block's producer pays
+	// FIRST from THEIR per-witness pool (if creator IS that witness),
+	// else from the global pool. Both pools must have ≥
+	// HIVE_ACCOUNT_SUBSIDY_PRECISION (10000) units.
+	if ca.Fee.Amount == 0 {
+		dgpo, derr := objects.GetDGPO(ctx.DB)
+		if derr == nil {
+			// Try per-witness pool if creator is the current producer.
+			if string(ca.Creator) == dgpo.CurrentWitness {
+				if w, werr := objects.GetWitness(ctx.DB, ca.Creator); werr == nil &&
+					w.AvailableWitnessAccountSubsidies >= 10000 {
+					w.AvailableWitnessAccountSubsidies -= 10000
+					objects.PutWitness(ctx.DB, &w)
+					creator.PendingClaimedAccounts++
+					objects.PutAccount(ctx.DB, &creator)
+					return nil
+				}
+			}
+			// Fallback: global pool.
+			if dgpo.AvailableAccountSubsidies >= 10000 {
+				dgpo.AvailableAccountSubsidies -= 10000
+				objects.PutDGPO(ctx.DB, &dgpo)
+				creator.PendingClaimedAccounts++
+				objects.PutAccount(ctx.DB, &creator)
+				return nil
+			}
+		}
+	}
 	if creator.Balance < ca.Fee.Amount {
 		return fmt.Errorf("%w: %q has %d HIVE, fee %d", ErrInsufficientBalance, ca.Creator, creator.Balance, ca.Fee.Amount)
 	}
@@ -69,26 +98,31 @@ func (createClaimedAccountEvaluator) Apply(ctx *Context, o op.Operation) error {
 		}
 		return err
 	}
-	// Strict hived: PendingClaimedAccounts must be > 0. We're lenient and
-	// allow creation either way — without claim_account fully wired up
-	// (and without the genesis pre-mine), accounts that legitimately had
-	// claims would otherwise be blocked. This trades a strict invariant
-	// for forward progress; correctness recovered when both are real.
-	if creator.PendingClaimedAccounts > 0 {
-		creator.PendingClaimedAccounts--
-		objects.PutAccount(ctx.DB, &creator)
+	// hived requires the creator to have a non-zero
+	// pending_claimed_accounts counter (the slot was paid for via a
+	// prior claim_account).
+	if creator.PendingClaimedAccounts == 0 {
+		return fmt.Errorf("%w: %q has no pending claimed accounts", ErrInsufficientBalance, cc.Creator)
 	}
+	creator.PendingClaimedAccounts--
+	objects.PutAccount(ctx.DB, &creator)
 	if has, err := objects.HasAccount(ctx.DB, cc.NewAccountName); err != nil {
 		return err
 	} else if has {
 		return fmt.Errorf("%w: %q", ErrAccountAlreadyExists, cc.NewAccountName)
 	}
-	objects.PutAccount(ctx.DB, &objects.Account{
-		Name:         cc.NewAccountName,
-		Created:      ctx.BlockTime,
-		MemoKey:      cc.MemoKey,
-		JSONMetadata: cc.JSONMetadata,
-	})
+	newAcct := objects.Account{
+		Name:                 cc.NewAccountName,
+		Created:              ctx.HeadBlockTime,
+		MemoKey:              cc.MemoKey,
+		JSONMetadata:         cc.JSONMetadata,
+		VotingManaCurrent:    10000,
+		VotingManaLastUpdate: ctx.HeadBlockTime,
+	}
+	if ctx.Hardforks.Has(hardfork.HF20) {
+		objects.InitRCManabar(&newAcct, ctx.HeadBlockTime)
+	}
+	objects.PutAccount(ctx.DB, &newAcct)
 	return nil
 }
 
@@ -144,13 +178,19 @@ func (accountCreateWithDelegationEvaluator) Apply(ctx *Context, o op.Operation) 
 	creator.DelegatedVestingShares += ac.Delegation.Amount
 	objects.PutAccount(ctx.DB, &creator)
 
-	objects.PutAccount(ctx.DB, &objects.Account{
+	newAcct := objects.Account{
 		Name:                  ac.NewAccountName,
-		Created:               ctx.BlockTime,
+		Created:               ctx.HeadBlockTime,
 		MemoKey:               ac.MemoKey,
 		JSONMetadata:          ac.JSONMetadata,
 		ReceivedVestingShares: ac.Delegation.Amount,
-	})
+		VotingManaCurrent:     10000,
+		VotingManaLastUpdate:  ctx.HeadBlockTime,
+	}
+	if ctx.Hardforks.Has(hardfork.HF20) {
+		objects.InitRCManabar(&newAcct, ctx.HeadBlockTime)
+	}
+	objects.PutAccount(ctx.DB, &newAcct)
 	// Convert the fee to starter VESTS for the new account, matching
 	// hived's account_create_with_delegation_evaluator (libraries/chain/
 	// hive_evaluator.cpp) which calls db.create_vesting2 on the fee.
@@ -159,8 +199,39 @@ func (accountCreateWithDelegationEvaluator) Apply(ctx *Context, o op.Operation) 
 			return err
 		}
 	}
+	// hive_evaluator_account.cpp:268 — record the vesting_delegation
+	// with a min_delegation_time of head + 30 days. Pre-HF19__997
+	// always creates the row; post-HF19 only when delegation > 0.
+	// Reducing this delegation later goes through a longer return
+	// period than ordinary delegate_vesting_shares — the rebate fires
+	// at max(now + delegation_return_period, min_delegation_time).
+	if ac.Delegation.Amount > 0 || !ctx.Hardforks.Has(hardfork.HF19) {
+		objects.PutVestingDelegation(ctx.DB, &objects.VestingDelegation{
+			Delegator:     ac.Creator,
+			Delegatee:     ac.NewAccountName,
+			VestingShares: ac.Delegation.Amount,
+			MinDelegation: ctx.HeadBlockTime + createAccountDelegationTimeSec,
+		})
+	}
+	// Refresh the new account's RC cap now that VESTS (delegated +
+	// from fee) are in place.
+	if ctx.Hardforks.Has(hardfork.HF20) {
+		if a, err := objects.GetAccount(ctx.DB, ac.NewAccountName); err == nil {
+			objects.RegenerateRCMana(&a, ctx.HeadBlockTime)
+			objects.PutAccount(ctx.DB, &a)
+		}
+		// Creator's effective_vests went down → refresh creator too.
+		if creator, err := objects.GetAccount(ctx.DB, ac.Creator); err == nil {
+			objects.RegenerateRCMana(&creator, ctx.HeadBlockTime)
+			objects.PutAccount(ctx.DB, &creator)
+		}
+	}
 	return nil
 }
+
+// HIVE_CREATE_ACCOUNT_DELEGATION_TIME = 30 days. Mirror of
+// libraries/protocol/include/hive/protocol/config.hpp:280.
+const createAccountDelegationTimeSec uint32 = 30 * 24 * 60 * 60
 
 func init() {
 	register(op.TagClaimAccount, claimAccountEvaluator{})

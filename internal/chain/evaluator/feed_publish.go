@@ -34,37 +34,54 @@ func (feedPublishEvaluator) Apply(ctx *Context, o op.Operation) error {
 	// canonical example). We accept whatever the op says since the
 	// median computation normalizes anyway.
 	w.HBDExchangeRate = fp.ExchangeRate
-	w.LastHBDExchangeUpdate = ctx.BlockTime
+	w.LastHBDExchangeUpdate = ctx.HeadBlockTime
 	objects.PutWitness(ctx.DB, &w)
 	return nil
 }
 
 type declineVotingRightsEvaluator struct{}
 
-// declineVotingRights schedules the loss of voting rights after a 30-day
-// delay. Until the per-block hook fires, voting still works; once
-// finalized, the account's witness votes are cleared and it can no
-// longer cast votes. We record by setting WitnessesVotedFor=0xFFFF as a
-// sentinel "voting disabled" marker — full DeclineVotingRightsRequest
-// schema lands later.
+// HIVE_OWNER_AUTH_RECOVERY_PERIOD = 30 days. Same window as recovery
+// account changes. Mirrors libraries/protocol/include/hive/protocol/config.hpp.
+const ownerAuthRecoveryPeriodSec uint32 = 60 * 60 * 24 * 30
+
+// declineVotingRights creates / cancels a request to revoke voting
+// rights after the 30-day delay. Mirrors hived's
+// decline_voting_rights_evaluator (libraries/chain/hive_evaluator.cpp).
+//   - decline=true: create request with effective_date = now + 30d
+//   - decline=false: cancel pending request (if any)
+// process_decline_voting_rights fires once the effective date passes.
 func (declineVotingRightsEvaluator) Apply(ctx *Context, o op.Operation) error {
 	dv, ok := o.(op.DeclineVotingRights)
 	if !ok {
 		return fmt.Errorf("declineVotingRightsEvaluator: unexpected op type %T", o)
 	}
-	a, err := objects.GetAccount(ctx.DB, dv.Account)
+	if has, err := objects.HasAccount(ctx.DB, dv.Account); err != nil {
+		return err
+	} else if !has {
+		return fmt.Errorf("%w: %q", ErrAccountNotFound, dv.Account)
+	}
+	if dv.Decline {
+		if has, err := objects.HasDeclineVotingRightsRequest(ctx.DB, dv.Account); err != nil {
+			return err
+		} else if has {
+			return fmt.Errorf("decline_voting_rights: request already pending for %q", dv.Account)
+		}
+		objects.PutDeclineVotingRightsRequest(ctx.DB, &objects.DeclineVotingRightsRequest{
+			Account:       dv.Account,
+			EffectiveDate: ctx.HeadBlockTime + ownerAuthRecoveryPeriodSec,
+		})
+		return nil
+	}
+	// Cancel
+	req, err := objects.GetDeclineVotingRightsRequest(ctx.DB, dv.Account)
 	if err != nil {
 		if err == state.ErrNotFound {
-			return fmt.Errorf("%w: %q", ErrAccountNotFound, dv.Account)
+			return fmt.Errorf("decline_voting_rights: no pending request for %q", dv.Account)
 		}
 		return err
 	}
-	if dv.Decline {
-		// Record the request — full 30-day delay handled by per-block hook.
-		// For now, leave the account untouched; the request gets re-issued
-		// or cancelled in subsequent blocks.
-		_ = a
-	}
+	objects.DeleteDeclineVotingRightsRequestFull(ctx.DB, &req)
 	return nil
 }
 

@@ -10,6 +10,8 @@ package main
 import (
 	"flag"
 	"fmt"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"sort"
 	"time"
@@ -29,8 +31,20 @@ func cmdReplay(args []string) int {
 	progressEvery := fs.Uint("progress-every", 10_000, "print progress every N blocks")
 	maxErrors := fs.Uint("max-errors", 5, "abort after this many apply errors")
 	tolerateFailing := fs.Bool("tolerate-failing-ops", false, "skip ops whose evaluator returns an error (use during P1 incremental development; never on a real node)")
+	watchAccount := fs.String("watch-account", "", "if set, print every block where the named account's balance/HBD/vesting changes")
+	pprofAddr := fs.String("pprof", "", "if set, expose net/http/pprof on this addr (e.g. localhost:6060)")
+	cacheMB := fs.Int("cache-mb", 256, "Pebble block cache size in MiB (ignored for --backend=mem)")
+	backend := fs.String("backend", "pebble", "state backend: pebble (persistent) or mem (in-memory btree, faster)")
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+	if *pprofAddr != "" {
+		go func() {
+			fmt.Fprintf(os.Stderr, "replay: pprof listening on http://%s/debug/pprof/\n", *pprofAddr)
+			if err := http.ListenAndServe(*pprofAddr, nil); err != nil {
+				fmt.Fprintf(os.Stderr, "replay: pprof server: %v\n", err)
+			}
+		}()
 	}
 	rest := fs.Args()
 	if len(rest) != 1 {
@@ -39,24 +53,35 @@ func cmdReplay(args []string) int {
 	}
 	logPath := rest[0]
 
-	dir := *dataDir
-	if dir == "" {
+	var stateDB *state.Database
+	switch *backend {
+	case "mem":
+		stateDB = state.OpenMem()
+		fmt.Println("replay: using in-memory btree backend (state is volatile)")
+	case "pebble", "":
+		dir := *dataDir
+		if dir == "" {
+			var err error
+			dir, err = os.MkdirTemp("", "ghive-replay-*")
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "replay: tempdir: %v\n", err)
+				return 1
+			}
+			defer os.RemoveAll(dir)
+			fmt.Printf("replay: using ephemeral state dir %s\n", dir)
+		} else {
+			fmt.Printf("replay: state dir %s\n", dir)
+		}
+		cacheBytes := int64(*cacheMB) << 20
 		var err error
-		dir, err = os.MkdirTemp("", "ghive-replay-*")
+		stateDB, err = state.Open(dir, cacheBytes)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "replay: tempdir: %v\n", err)
+			fmt.Fprintf(os.Stderr, "replay: open state: %v\n", err)
 			return 1
 		}
-		defer os.RemoveAll(dir)
-		fmt.Printf("replay: using ephemeral state dir %s\n", dir)
-	} else {
-		fmt.Printf("replay: state dir %s\n", dir)
-	}
-
-	stateDB, err := state.Open(dir, 256<<20) // 256 MB Pebble cache
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "replay: open state: %v\n", err)
-		return 1
+	default:
+		fmt.Fprintf(os.Stderr, "replay: unknown backend %q (want pebble or mem)\n", *backend)
+		return 2
 	}
 	defer stateDB.Close()
 
@@ -84,7 +109,34 @@ func cmdReplay(args []string) int {
 		applied, errCount uint64
 		stats             chain.Stats
 	)
-	opts := chain.ApplyOptions{Sync: false, SkipUnknownOps: false, TolerateFailingOps: *tolerateFailing}
+	opts := chain.ApplyOptions{
+		Sync:                      false,
+		SkipUnknownOps:            false,
+		TolerateFailingOps:        *tolerateFailing,
+		SkipTransactionSignatures: true, // replay always skips sigs
+		SkipBlockSignature:        true,
+	}
+
+	type acctSnap struct {
+		balance, hbd, vesting, savings, savingsHBD int64
+		exists                                     bool
+	}
+	prevSnap := acctSnap{}
+	snapshotAccount := func(name string) acctSnap {
+		s := state.NewSession(stateDB)
+		a, err := objects.GetAccount(s, name)
+		if err != nil {
+			return acctSnap{}
+		}
+		return acctSnap{
+			balance:    a.Balance,
+			hbd:        a.HBDBalance,
+			vesting:    a.VestingShares,
+			savings:    a.SavingsBalance,
+			savingsHBD: a.SavingsHBDBalance,
+			exists:     true,
+		}
+	}
 
 	for n := uint32(*startBlock); n <= end; n++ {
 		raw, err := bl.Block(n)
@@ -105,6 +157,19 @@ func cmdReplay(args []string) int {
 			continue
 		}
 		applied++
+		if *watchAccount != "" {
+			cur := snapshotAccount(*watchAccount)
+			if cur != prevSnap {
+				fmt.Printf("  WATCH %s @block %d: bal %d→%d hbd %d→%d vests %d→%d savings %d→%d savings_hbd %d→%d\n",
+					*watchAccount, n,
+					prevSnap.balance, cur.balance,
+					prevSnap.hbd, cur.hbd,
+					prevSnap.vesting, cur.vesting,
+					prevSnap.savings, cur.savings,
+					prevSnap.savingsHBD, cur.savingsHBD)
+				prevSnap = cur
+			}
+		}
 		if uint64(n)%uint64(*progressEvery) == 0 {
 			elapsed := time.Since(start)
 			rate := float64(applied) / elapsed.Seconds()

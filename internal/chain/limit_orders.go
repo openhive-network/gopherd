@@ -18,12 +18,21 @@ import (
 // hived's by_expiration index excludes them too via fc::time_point_sec
 // max-value sentinel.
 func clearExpiredOrders(s *state.Session, blockTime uint32) {
+	// Skip the Pebble Range entirely when our cached "earliest pending
+	// expiration" hint says nothing is due yet. The hint is maintained
+	// by PutLimitOrder (insertions) and refreshed at the bottom of this
+	// function (after a scan). When unset, we always scan.
+	if hint, ok := s.GetExpHint(objects.LimitOrderTable, objects.LimitOrderByExpirationIndex); ok && hint > blockTime {
+		return
+	}
+
 	type pending struct {
 		expiration uint32
 		owner      string
 		orderID    uint32
 	}
 	var ready []pending
+	var nextExp uint32
 
 	_ = s.Range(objects.LimitOrderTable, objects.LimitOrderByExpirationIndex, nil,
 		func(body, _ []byte) (bool, error) {
@@ -37,7 +46,12 @@ func clearExpiredOrders(s *state.Session, blockTime uint32) {
 			if exp == 0 {
 				return true, nil
 			}
-			if exp >= blockTime {
+			// hived clears any order with expiration <= head_block_time.
+			// We iterate the BE-sorted index ascending; stop at the
+			// first order whose expiration is strictly greater (in the
+			// future).
+			if exp > blockTime {
+				nextExp = exp
 				return false, nil
 			}
 			ownerBytes := body[4 : 4+state.AccountNameKeyLen]
@@ -56,13 +70,22 @@ func clearExpiredOrders(s *state.Session, blockTime uint32) {
 		})
 
 	for _, p := range ready {
-		cancelExpiredOrder(s, p.owner, p.orderID)
+		cancelExpiredOrder(s, p.owner, p.orderID, blockTime)
 	}
+
+	// Refresh the hint with the first non-expired entry's time. When
+	// the scan found nothing future, store a sentinel so the next
+	// block skips the scan entirely; NudgeExpHint on insert correctly
+	// lowers it.
+	if nextExp == 0 {
+		nextExp = ^uint32(0)
+	}
+	s.SetExpHint(objects.LimitOrderTable, objects.LimitOrderByExpirationIndex, nextExp)
 }
 
 // cancelExpiredOrder refunds the order's for_sale amount to the seller
 // and removes the order. Mirrors hived's cancel_order.
-func cancelExpiredOrder(s *state.Session, owner string, orderID uint32) {
+func cancelExpiredOrder(s *state.Session, owner string, orderID uint32, blockTime uint32) {
 	order, err := objects.GetLimitOrder(s, owner, orderID)
 	if err != nil {
 		return
@@ -76,7 +99,7 @@ func cancelExpiredOrder(s *state.Session, owner string, orderID uint32) {
 	case asset.HiveSymbol:
 		a.Balance += order.ForSaleAmount
 	case asset.HbdSymbol:
-		a.HBDBalance += order.ForSaleAmount
+		objects.AdjustHBDBalance(s, &a, blockTime, order.ForSaleAmount)
 	}
 	objects.PutAccount(s, &a)
 	objects.DeleteLimitOrderFull(s, &order)

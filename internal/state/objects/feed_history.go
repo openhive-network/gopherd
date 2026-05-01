@@ -78,17 +78,40 @@ func ReadFeedHistory(src []byte) (FeedHistory, error) {
 	return h, nil
 }
 
-// PutFeedHistory stores h in the singleton slot.
+const feedHistoryAuxKey = "feed_history"
+
+// PutFeedHistory stores h in the singleton slot and invalidates the
+// cross-Session parsed-object cache so subsequent reads re-parse.
 func PutFeedHistory(s *state.Session, h *FeedHistory) {
-	s.Put(FeedHistoryTable, state.PrimaryIndex, feedHistorySingletonKey, AppendFeedHistory(nil, h))
+	s.SerScratch = AppendFeedHistory(s.SerScratch[:0], h)
+	s.Put(FeedHistoryTable, state.PrimaryIndex, feedHistorySingletonKey, s.SerScratch)
+	s.DatabaseAuxInvalidate(feedHistoryAuxKey)
 }
 
 // GetFeedHistory fetches the singleton feed_history (returning a zero
 // value with state.ErrNotFound when no median has been computed yet).
+// The parsed struct is cached at the Database level — feed_history
+// only changes when updateMedianFeed actually shifts the median
+// (~hourly), so most reads across blocks hit a warm cache without
+// touching the backend or the deserializer.
 func GetFeedHistory(s *state.Session) (FeedHistory, error) {
+	// If this Session has written to the FH row, the overlay holds the
+	// new value; bypass the cross-block cache and re-read from overlay.
+	if !s.HasOverlayWrite(FeedHistoryTable, state.PrimaryIndex) {
+		if cached, ok := s.DatabaseAux(feedHistoryAuxKey); ok {
+			if h, ok := cached.(FeedHistory); ok {
+				return h, nil
+			}
+		}
+	}
 	v, err := s.Get(FeedHistoryTable, state.PrimaryIndex, feedHistorySingletonKey)
 	if err != nil {
 		return FeedHistory{}, err
 	}
-	return ReadFeedHistory(v)
+	h, err := ReadFeedHistory(v)
+	if err != nil {
+		return FeedHistory{}, err
+	}
+	s.DatabaseAuxStore(feedHistoryAuxKey, h)
+	return h, nil
 }

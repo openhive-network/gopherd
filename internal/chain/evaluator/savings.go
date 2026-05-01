@@ -48,7 +48,7 @@ func (transferToSavingsEvaluator) Apply(ctx *Context, o op.Operation) error {
 		if from.HBDBalance < t.Amount.Amount {
 			return fmt.Errorf("%w: %q has %d HBD", ErrInsufficientBalance, t.From, from.HBDBalance)
 		}
-		from.HBDBalance -= t.Amount.Amount
+		objects.AdjustHBDBalance(ctx.DB, &from, ctx.HeadBlockTime, -t.Amount.Amount)
 	default:
 		return fmt.Errorf("%w: transfer_to_savings", ErrUnsupportedSymbol)
 	}
@@ -65,7 +65,7 @@ func (transferToSavingsEvaluator) Apply(ctx *Context, o op.Operation) error {
 	case asset.HiveSymbol:
 		to.SavingsBalance += t.Amount.Amount
 	case asset.HbdSymbol:
-		to.SavingsHBDBalance += t.Amount.Amount
+		objects.AdjustSavingsHBDBalance(ctx.DB, &to, ctx.HeadBlockTime, t.Amount.Amount)
 	}
 	objects.PutAccount(ctx.DB, &to)
 	return nil
@@ -107,7 +107,7 @@ func (transferFromSavingsEvaluator) Apply(ctx *Context, o op.Operation) error {
 		if from.SavingsHBDBalance < t.Amount.Amount {
 			return fmt.Errorf("%w: %q savings %d HBD", ErrInsufficientBalance, t.From, from.SavingsHBDBalance)
 		}
-		from.SavingsHBDBalance -= t.Amount.Amount
+		objects.AdjustSavingsHBDBalance(ctx.DB, &from, ctx.HeadBlockTime, -t.Amount.Amount)
 	default:
 		return fmt.Errorf("%w: transfer_from_savings", ErrUnsupportedSymbol)
 	}
@@ -124,7 +124,7 @@ func (transferFromSavingsEvaluator) Apply(ctx *Context, o op.Operation) error {
 		Amount:    t.Amount.Amount,
 		Symbol:    uint32(t.Amount.Symbol.Num),
 		Memo:      t.Memo,
-		Complete:  ctx.BlockTime + savingsWithdrawTimeSec,
+		Complete:  ctx.HeadBlockTime + savingsWithdrawTimeSec,
 	})
 	// NOTE: the withdraw doesn't auto-finalize after 3 days here. Hived has
 	// a per-block "process_funds" / "process_savings_withdrawals" that
@@ -155,7 +155,7 @@ func (cancelTransferFromSavingsEvaluator) Apply(ctx *Context, o op.Operation) er
 	case asset.HiveSymbol:
 		from.SavingsBalance += w.Amount
 	case asset.HbdSymbol:
-		from.SavingsHBDBalance += w.Amount
+		objects.AdjustSavingsHBDBalance(ctx.DB, &from, ctx.HeadBlockTime, w.Amount)
 	}
 	objects.PutAccount(ctx.DB, &from)
 	objects.DeleteSavingsWithdrawFull(ctx.DB, &w)

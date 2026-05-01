@@ -61,7 +61,7 @@ func (recurrentTransferEvaluator) Apply(ctx *Context, o op.Operation) error {
 		Memo:       rt.Memo,
 		Recurrence: rt.Recurrence,
 		Executions: rt.Executions,
-		Trigger:    ctx.BlockTime + uint32(rt.Recurrence)*3600,
+		Trigger:    ctx.HeadBlockTime + uint32(rt.Recurrence)*3600,
 	})
 	_ = state.ErrNotFound // keep import
 	return nil
