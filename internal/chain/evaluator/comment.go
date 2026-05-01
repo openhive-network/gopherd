@@ -152,6 +152,13 @@ func (commentEvaluator) Apply(ctx *Context, o op.Operation) error {
 					rootAuthor = parent.Author
 					rootPermlink = parent.Permlink
 				}
+				// on_reply: bump parent's children counter (only if its
+				// cashout row still exists — pre-HF19 always; post-HF19
+				// only while not yet paid out, mirrored by CashoutTime!=0).
+				if parent.CashoutTime != 0 {
+					parent.Children++
+					objects.PutComment(ctx.DB, &parent)
+				}
 			}
 		}
 
@@ -217,14 +224,34 @@ func (deleteCommentEvaluator) Apply(ctx *Context, o op.Operation) error {
 	if ctx.Hardforks.Has(hardfork.HF19) && c.CashoutTime == 0 {
 		return fmt.Errorf("%w: cannot delete comment after payout", ErrCommentClosed)
 	}
-	if ctx.Hardforks.Has(hardfork.HF19) {
-		// HF19+: silent no-op if net positive votes (vop in hived).
-		if c.NetRshares > 0 {
-			return nil
+	// "Cannot delete a comment with replies." (hive_evaluator_social.cpp:60).
+	// Pre-HF19 the cashout row is never removed, so the assert is always
+	// active. HF19+ the cashout row goes away at payout, gating the check
+	// behind CashoutTime != 0 (we already returned above when it's 0).
+	if c.Children > 0 {
+		return fmt.Errorf("%w: cannot delete comment with replies", ErrCommentClosed)
+	}
+	// NetRshares > 0 handling (hive_evaluator_social.cpp:67-75):
+	//   - Post-HF19_977 (== HF19): hardfork-assert "Cannot delete a comment
+	//     with net positive votes" (throws an error).
+	//   - Pre-HF19:                silent no-op (push ineffective_delete vop).
+	if c.NetRshares > 0 {
+		if ctx.Hardforks.Has(hardfork.HF19) {
+			return fmt.Errorf("%w: cannot delete comment with net positive votes", ErrCommentClosed)
 		}
+		return nil
 	}
 	if c.CashoutTime != 0 {
 		objects.DeleteCommentCashoutSchedule(ctx.DB, c.CashoutTime, dc.Author, dc.Permlink)
+	}
+	// Decrement parent.Children when removing a reply (on_reply with deleting=true).
+	if c.ParentAuthor != "" {
+		if parent, perr := objects.GetComment(ctx.DB, c.ParentAuthor, c.ParentPermlink); perr == nil {
+			if parent.Children > 0 {
+				parent.Children--
+				objects.PutComment(ctx.DB, &parent)
+			}
+		}
 	}
 	objects.DeleteComment(ctx.DB, dc.Author, dc.Permlink)
 	return nil
@@ -486,7 +513,7 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 		} else if ctx.Hardforks.Has(hardfork.HF7) {
 			lockout = 60 // 1 minute
 		}
-		if lockout > 0 && c.CashoutTime > ctx.HeadBlockTime && c.CashoutTime-ctx.HeadBlockTime < lockout {
+		if lockout > 0 && c.CashoutTime > ctx.HeadBlockTime && c.CashoutTime-ctx.HeadBlockTime <= lockout {
 			return fmt.Errorf("vote: cannot increase payout in last %ds before cashout", lockout)
 		}
 	}

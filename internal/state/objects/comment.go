@@ -73,6 +73,12 @@ type Comment struct {
 	// field to find siblings.
 	RootAuthor   auth.AccountName
 	RootPermlink string
+	// Children counts direct replies. Mirrors comment_cashout_object::children
+	// (libraries/chain/include/.../comment_object.hpp:241). Bumped by
+	// on_reply when a child is created, decremented when a child is
+	// deleted. delete_comment rejects when Children > 0 ("Cannot delete
+	// a comment with replies").
+	Children uint32
 }
 
 // Beneficiary is one row in a comment's beneficiaries list.
@@ -220,6 +226,7 @@ func AppendComment(dst []byte, c *Comment) []byte {
 	dst = append(dst, c.RootAuthor...)
 	dst = fcraw.AppendVarUint(dst, uint32(len(c.RootPermlink)))
 	dst = append(dst, c.RootPermlink...)
+	dst = appendU32LE(dst, c.Children)
 	return dst
 }
 
@@ -329,6 +336,12 @@ func ReadComment(src []byte) (Comment, error) {
 	}
 	if c.RootPermlink, err = r.ReadString(); err != nil {
 		return c, fmt.Errorf("comment.root_permlink: %w", err)
+	}
+	if r.AtEnd() {
+		return c, nil
+	}
+	if c.Children, err = r.ReadUint32(); err != nil {
+		return c, fmt.Errorf("comment.children: %w", err)
 	}
 	if !r.AtEnd() {
 		return c, errors.New("comment: trailing bytes")
