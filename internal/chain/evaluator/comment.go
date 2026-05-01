@@ -512,16 +512,24 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 			}
 		}
 		maxVoteWeight = voteCurationWeight
-		// Reverse-auction (HF6+): early voters get scaled-down weight.
-		// vote_weight *= min(elapsed, window) / window.
+		// Reverse-auction discount: hived gates this on _now >
+		// HIVE_HARDFORK_0_6_REVERSE_AUCTION_TIME (1466776800 = HF6_TIME-6d,
+		// hive_evaluator_social.cpp:544), NOT on the HF6 block flag —
+		// the discount engages 6 days before the HF6 block actually
+		// activates so consensus matches the chain that ran it then.
+		// dgpo.ReverseAuctionSeconds defaults to
+		// HIVE_REVERSE_AUCTION_WINDOW_SECONDS_HF6 (30 min) at chain start
+		// (chain/include/.../global_property_object.hpp:139); we mirror
+		// with a time-based fallback so the discount fires pre-HF6-block.
+		const hf6ReverseAuctionTime uint32 = 1466776800
 		dgpo, _ := objects.GetDGPO(ctx.DB)
 		reverseAuction := uint32(0)
 		if dgpo.ReverseAuctionSeconds > 0 {
 			reverseAuction = dgpo.ReverseAuctionSeconds
-		} else if ctx.Hardforks.Has(hardfork.HF6) {
-			reverseAuction = 30 * 60 // 30 min default
+		} else if ctx.HeadBlockTime > hf6ReverseAuctionTime {
+			reverseAuction = 30 * 60 // HIVE_REVERSE_AUCTION_WINDOW_SECONDS_HF6
 		}
-		if reverseAuction > 0 && voteCurationWeight > 0 {
+		if reverseAuction > 0 && voteCurationWeight > 0 && ctx.HeadBlockTime > hf6ReverseAuctionTime {
 			elapsed := uint32(0)
 			if ctx.HeadBlockTime > c.Created {
 				elapsed = ctx.HeadBlockTime - c.Created
