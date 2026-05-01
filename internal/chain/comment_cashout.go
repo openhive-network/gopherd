@@ -206,6 +206,15 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 		}
 	}
 	c.CashoutTime = rescheduleTime
+	// Mirror comment_cashout_object::on_payout (comment_object.hpp:213-219)
+	// — zero net/vote rshares + total_vote_weight after payout so a re-iteration
+	// of the thread (30d second-cashout window pre-HF12) starts from
+	// post-payout state. Inside `defer` so we capture the post-payout c values.
+	zero := func() {
+		c.NetRshares = 0
+		c.VoteRshares = 0
+		c.TotalVoteWeight = 0
+	}
 	defer func() {
 		objects.PutComment(s, &c)
 		if rescheduleTime != 0 {
@@ -214,6 +223,9 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 	}()
 
 	if !c.AllowCurationRewards || c.NetRshares <= 0 {
+		// Frozen / no-payout comment: still zero the on_payout fields
+		// so the comment row stays consistent with C++.
+		zero()
 		return
 	}
 
@@ -399,6 +411,7 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 	// vote evaluator now also gates votes on CashoutTime==0 comments,
 	// so this cleanup is mostly a memory hygiene measure.
 	deleteCommentVotes(s, author, permlink)
+	zero()
 }
 
 // deleteCommentVotes walks the by-comment secondary index for the
