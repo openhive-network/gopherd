@@ -74,7 +74,7 @@ func (withdrawVestingEvaluator) Apply(ctx *Context, o op.Operation) error {
 
 	available := a.VestingShares - a.DelegatedVestingShares
 	if available < w.VestingShares.Amount {
-		return fmt.Errorf("%w: %q has %d undelegated VESTS", ErrInsufficientBalance, w.Account, available)
+		return fmt.Errorf("%w: %q has %d undelegated VESTS, requested %d (vesting=%d, delegated=%d)", ErrInsufficientBalance, w.Account, available, w.VestingShares.Amount, a.VestingShares, a.DelegatedVestingShares)
 	}
 
 	intervals := int64(vestingWithdrawIntervalsPreHF16)

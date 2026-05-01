@@ -2,6 +2,8 @@ package state
 
 import (
 	"errors"
+
+	"github.com/tidwall/btree"
 )
 
 // Session is an in-memory overlay over Database that buffers reads/writes
@@ -18,12 +20,15 @@ import (
 type Session struct {
 	db      *Database
 	overlay map[string]overlayEntry
-	// touched flags which (table, index) pairs have been written via
-	// Put/Delete in this Session. Range consults this to skip the
-	// overlay walk entirely when no overlay write has hit the table —
-	// the common case for read-only per-block expirer hooks scanning a
-	// by-expiration index that the current block hasn't mutated.
-	touched map[uint32]bool
+	// overlayKeys is a sorted-by-physical-key btree of every key written
+	// via Put/Delete this Session. Range walks this tree from the prefix
+	// lower-bound to its exclusive upper-bound, looking up entries in
+	// the overlay map. Without this, Range scanned the full overlay map
+	// (O(N) per call) — fatal at the HF7 cashout cascade (block
+	// 2,889,019) which processes thousands of comments per block, where
+	// each distributeCuratorPool/deleteCommentVotes call would re-scan a
+	// growing overlay.
+	overlayKeys *btree.BTreeG[string]
 	// dirtyKeys is the append-only list of overlay keys touched this
 	// Session. Commit walks this slice (cheap iteration, cache-friendly)
 	// rather than ranging the overlay map (slow swisstable iter, ~16%
@@ -102,7 +107,20 @@ func (s *Session) DatabaseAuxInvalidate(key string) {
 // cross-Session parsed cache: if the row was just written here, the
 // cache is stale relative to the overlay and must be bypassed.
 func (s *Session) HasOverlayWrite(table TableID, index IndexID) bool {
-	return s.touched[uint32(table)<<16|uint32(index)]
+	if s.overlayKeys == nil || s.overlayKeys.Len() == 0 {
+		return false
+	}
+	prefix := EncodePrefix(table, index)
+	upper := nextPrefix(prefix)
+	hit := false
+	s.overlayKeys.Ascend(string(prefix), func(k string) bool {
+		if k >= string(upper) {
+			return false
+		}
+		hit = true
+		return false
+	})
+	return hit
 }
 
 // GetExpHint forwards to the underlying Database.
@@ -128,9 +146,20 @@ type overlayEntry struct {
 // NewSession returns a fresh in-memory session over db.
 func NewSession(db *Database) *Session {
 	return &Session{
-		db:      db,
-		overlay: make(map[string]overlayEntry, 64),
+		db:          db,
+		overlay:     make(map[string]overlayEntry, 64),
+		overlayKeys: newOverlayKeyTree(),
 	}
+}
+
+// newOverlayKeyTree builds the sorted physical-key btree used to drive
+// Session.Range. Lock-free (single-goroutine Session use), degree 32 to
+// match memBackend.
+func newOverlayKeyTree() *btree.BTreeG[string] {
+	return btree.NewBTreeGOptions[string](
+		func(a, b string) bool { return a < b },
+		btree.Options{Degree: 32, NoLocks: true},
+	)
 }
 
 // Get returns the latest value for (table, index, body) — checking the
@@ -182,12 +211,14 @@ func (s *Session) Put(table TableID, index IndexID, body, value []byte) {
 	cv := make([]byte, len(value))
 	copy(cv, value)
 	fullKey := string(s.scratch)
+	if _, exists := s.overlay[fullKey]; !exists {
+		s.overlayKeys.Set(fullKey)
+	}
 	s.overlay[fullKey] = overlayEntry{value: cv}
 	s.dirtyKeys = append(s.dirtyKeys, fullKey)
 	if s.readCache != nil {
 		delete(s.readCache, fullKey)
 	}
-	s.markTouched(table, index)
 }
 
 // Delete marks (table, index, body) as deleted in the overlay. Subsequent
@@ -195,19 +226,14 @@ func (s *Session) Put(table TableID, index IndexID, body, value []byte) {
 func (s *Session) Delete(table TableID, index IndexID, body []byte) {
 	s.scratch = EncodeKeyInto(s.scratch, table, index, body)
 	fullKey := string(s.scratch)
+	if _, exists := s.overlay[fullKey]; !exists {
+		s.overlayKeys.Set(fullKey)
+	}
 	s.overlay[fullKey] = overlayEntry{tombstone: true}
 	s.dirtyKeys = append(s.dirtyKeys, fullKey)
 	if s.readCache != nil {
 		delete(s.readCache, fullKey)
 	}
-	s.markTouched(table, index)
-}
-
-func (s *Session) markTouched(table TableID, index IndexID) {
-	if s.touched == nil {
-		s.touched = make(map[uint32]bool, 8)
-	}
-	s.touched[uint32(table)<<16|uint32(index)] = true
 }
 
 // Commit flushes the overlay atomically to the backend. After Commit
@@ -228,7 +254,7 @@ func (s *Session) Commit(sync bool) error {
 	if len(s.overlay) == 0 {
 		clear(s.readCache)
 		clear(s.Aux)
-		clear(s.touched)
+		s.overlayKeys.Clear()
 		s.dirtyKeys = s.dirtyKeys[:0]
 		return nil
 	}
@@ -238,7 +264,7 @@ func (s *Session) Commit(sync bool) error {
 	clear(s.overlay)
 	clear(s.readCache)
 	clear(s.Aux)
-	clear(s.touched)
+	s.overlayKeys.Clear()
 	s.dirtyKeys = s.dirtyKeys[:0]
 	return nil
 }
@@ -252,7 +278,7 @@ func (s *Session) Undo() {
 	clear(s.overlay)
 	clear(s.readCache)
 	clear(s.Aux)
-	clear(s.touched)
+	s.overlayKeys.Clear()
 	s.preCommit = s.preCommit[:0]
 	s.dirtyKeys = s.dirtyKeys[:0]
 }
@@ -272,7 +298,7 @@ func (s *Session) Empty() bool { return len(s.overlay) == 0 }
 // reverse log for the common case where tx failure is rare.
 type Savepoint struct {
 	overlay   map[string]overlayEntry
-	touched   map[uint32]bool
+	keys      []string
 	dirtyKeys []string
 }
 
@@ -286,12 +312,10 @@ func (s *Session) Snapshot() Savepoint {
 	for k, v := range s.overlay {
 		cp[k] = v
 	}
-	t := make(map[uint32]bool, len(s.touched))
-	for k, v := range s.touched {
-		t[k] = v
-	}
+	keys := make([]string, 0, s.overlayKeys.Len())
+	s.overlayKeys.Scan(func(k string) bool { keys = append(keys, k); return true })
 	dk := append([]string(nil), s.dirtyKeys...)
-	return Savepoint{overlay: cp, touched: t, dirtyKeys: dk}
+	return Savepoint{overlay: cp, keys: keys, dirtyKeys: dk}
 }
 
 // Restore reverts the overlay to the state captured by sp. Any
@@ -302,11 +326,10 @@ func (s *Session) Restore(sp Savepoint) {
 		cp[k] = v
 	}
 	s.overlay = cp
-	t := make(map[uint32]bool, len(sp.touched))
-	for k, v := range sp.touched {
-		t[k] = v
+	s.overlayKeys.Clear()
+	for _, k := range sp.keys {
+		s.overlayKeys.Set(k)
 	}
-	s.touched = t
 	s.dirtyKeys = append(s.dirtyKeys[:0], sp.dirtyKeys...)
 }
 
@@ -333,28 +356,33 @@ func (s *Session) Range(table TableID, index IndexID, prefix []byte, fn func(bod
 	// scan) silently saw zero candidates as a result.
 	upper := nextPrefix(lower)
 
-	// Collect overlay entries in this range. Skip the entire walk when
-	// no Put/Delete in this Session has hit (table, index) — the common
-	// case for read-only per-block expirer hooks. Entry bodies alias
-	// the overlay map keys (stable for the Session lifetime), and
-	// values alias the overlay value slices (allocated once at Put);
-	// no copy needed.
+	// Collect overlay entries in this range by ascending the sorted-key
+	// btree from `lower` to (exclusive) `upper`. O(log N + matches)
+	// regardless of overlay size. Entry bodies alias the overlay map
+	// keys (stable for the Session lifetime), values alias the overlay
+	// value slices (allocated once at Put); no copy needed.
 	type entry struct {
 		body, value []byte
 		tombstone   bool
 	}
 	var overlayKeys map[string]entry
-	if s.touched[uint32(table)<<16|uint32(index)] {
-		for k, e := range s.overlay {
-			key := []byte(k)
-			if !inRange(key, lower, upper) {
-				continue
+	if s.overlayKeys.Len() > 0 {
+		upperStr := string(upper)
+		s.overlayKeys.Ascend(string(lower), func(k string) bool {
+			if k >= upperStr {
+				return false
+			}
+			e, ok := s.overlay[k]
+			if !ok {
+				return true
 			}
 			if overlayKeys == nil {
 				overlayKeys = make(map[string]entry, 4)
 			}
+			key := []byte(k)
 			overlayKeys[k] = entry{body: key[keyPrefixLen:], value: e.value, tombstone: e.tombstone}
-		}
+			return true
+		})
 	}
 
 	// Pooled Pebble iterator: allocate once per Session, reuse via

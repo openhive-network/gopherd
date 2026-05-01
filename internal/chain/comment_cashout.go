@@ -77,7 +77,7 @@ func processCommentCashouts(s *state.Session, blockTime, blockNum uint32) {
 
 	curationPct := curationPercentForBlock(blockNum)
 	for _, p := range ready {
-		processOneCashout(s, blockTime, p.cashoutTime, p.author, p.permlink, curationPct)
+		processOneCashout(s, blockTime, blockNum, p.cashoutTime, p.author, p.permlink, curationPct)
 	}
 }
 
@@ -96,7 +96,7 @@ func processCommentCashouts(s *state.Session, blockTime, blockNum uint32) {
 //
 // adjust_rshares2 then subtracts the comment's curve value from
 // total_reward_shares2 so the next comment's slice excludes this one.
-func processOneCashout(s *state.Session, blockTime, scheduledTime uint32, author, permlink string, curationPct int64) {
+func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint32, author, permlink string, curationPct int64) {
 	objects.DeleteCommentCashoutSchedule(s, scheduledTime, author, permlink)
 
 	c, err := objects.GetComment(s, author, permlink)
@@ -274,9 +274,18 @@ func processOneCashout(s *state.Session, blockTime, scheduledTime uint32, author
 
 	// Distribute curators using the configured curve weights when
 	// using the reward_fund_object — otherwise the simple rshares²
-	// fallback.
+	// fallback. Pre-HF20, the unclaimed remainder (pool minus actual
+	// curator payouts — non-zero because TotalVoteWeight accumulates
+	// undiscounted weights while individual votes carry the
+	// reverse-auction-discounted weight) is forwarded back to the
+	// author. HF20 (block ~25M) flips this off — unclaimed evaporates.
+	curatorRemainder := int64(0)
 	if curatorPool > 0 {
-		distributeCuratorPool(s, c.Author, c.Permlink, curatorPool)
+		curatorRemainder = distributeCuratorPool(s, c.Author, c.Permlink, curatorPool)
+	}
+	hf := hardfork.SetForBlock(blockNum)
+	if !hf.Has(hardfork.HF20) && curatorRemainder > 0 {
+		authorPool += curatorRemainder
 	}
 
 	// Author payout split: half HBD-style (subject to print rate) +
@@ -445,13 +454,13 @@ func convertHiveToHBD(hiveAmount int64, p asset.Price) int64 {
 // If the comment has total_vote_weight == 0 (no upvotes), the entire
 // pool stays unclaimed and folds back to the author (handled by the
 // caller).
-func distributeCuratorPool(s *state.Session, author, permlink string, pool int64) {
+func distributeCuratorPool(s *state.Session, author, permlink string, pool int64) int64 {
 	c, cerr := objects.GetComment(s, author, permlink)
 	if cerr != nil {
-		return
+		return pool
 	}
 	if c.TotalVoteWeight == 0 || pool <= 0 {
-		return
+		return pool
 	}
 	totalW := new(big.Int).SetUint64(c.TotalVoteWeight)
 	poolBig := big.NewInt(pool)
@@ -492,7 +501,13 @@ func distributeCuratorPool(s *state.Session, author, permlink string, pool int64
 			return true, nil
 		})
 
+	paid := int64(0)
 	for _, p := range pays {
 		_, _ = CreateVesting_via_chain(s, p.voter, p.share, false)
+		paid += p.share
 	}
+	if paid > pool {
+		return 0
+	}
+	return pool - paid
 }

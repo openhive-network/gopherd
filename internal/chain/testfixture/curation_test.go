@@ -29,6 +29,12 @@ func TestCurationVoteWeightRecorded(t *testing.T) {
 		t.Fatalf("comment: %v", err)
 	}
 
+	// Skip past the reverse-auction window so the time-discount factor
+	// equals 1 — `cv.weight` (post-discount) then matches `max_vote_weight`
+	// (pre-discount, accumulated into TotalVoteWeight). The pre-HF20
+	// distinction between the two is exercised in cashout tests below.
+	f.SkipSeconds(60 * 60)
+
 	if err := f.ApplyOp(op.Vote{
 		Voter: "alice", Author: "alice", Permlink: "p", Weight: 10000,
 	}); err != nil {
@@ -50,7 +56,7 @@ func TestCurationVoteWeightRecorded(t *testing.T) {
 		t.Fatal("CommentVote.CurationWeight should be non-zero after upvote")
 	}
 	if cv.CurationWeight != c.TotalVoteWeight {
-		t.Fatalf("single-vote: cv.CurationWeight (%d) should equal c.TotalVoteWeight (%d)",
+		t.Fatalf("single-vote past auction: cv.CurationWeight (%d) should equal c.TotalVoteWeight (%d)",
 			cv.CurationWeight, c.TotalVoteWeight)
 	}
 }
@@ -73,9 +79,11 @@ func TestCurationTwoVotersAccumulate(t *testing.T) {
 		t.Fatalf("comment: %v", err)
 	}
 
+	// Skip past the reverse-auction window so cv.weight matches
+	// max_vote_weight (the latter is what TotalVoteWeight accumulates).
+	f.SkipSeconds(60 * 60)
+
 	for _, voter := range []string{"bob", "carol"} {
-		// Generate a block between votes so reverse-auction scaling
-		// produces different weights.
 		f.GenerateBlock()
 		if err := f.ApplyOp(op.Vote{
 			Voter: voter, Author: "alice", Permlink: "p", Weight: 10000,

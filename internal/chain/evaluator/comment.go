@@ -467,7 +467,15 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 	// Mirrors hive_evaluator_social.cpp:492-554. Only positive
 	// (upvote) rshares contribute to curation weight; downvotes and
 	// recasts get zero curation weight.
-	var voteCurationWeight uint64
+	//
+	// hived distinguishes two values:
+	//   max_vote_weight = bounded-curve delta (pre-discount)
+	//   vote_weight     = max_vote_weight × min(elapsed, window) / window
+	// The CommentVote stores `vote_weight` (post-discount); the
+	// comment's TotalVoteWeight accumulates `max_vote_weight`
+	// (pre-discount). At cashout this gap leaves a curation
+	// "remainder" which forwards to the author pre-HF20.
+	var voteCurationWeight, maxVoteWeight uint64
 	if rshares > 0 && c.AllowCurationRewards && err == state.ErrNotFound {
 		oldVoteRshares := c.VoteRshares
 		newVoteRshares := oldVoteRshares + uint64(rshares)
@@ -481,6 +489,7 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 				voteCurationWeight = ^uint64(0)
 			}
 		}
+		maxVoteWeight = voteCurationWeight
 		// Reverse-auction (HF6+): early voters get scaled-down weight.
 		// vote_weight *= min(elapsed, window) / window.
 		dgpo, _ := objects.GetDGPO(ctx.DB)
@@ -527,7 +536,7 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 		})
 		c.NetRshares += rshares
 		c.VoteCount++
-		c.TotalVoteWeight += voteCurationWeight
+		c.TotalVoteWeight += maxVoteWeight
 	} else {
 		// Recast: subtract the previous vote's curation_weight from
 		// the running total — hived sets the new weight to zero for
