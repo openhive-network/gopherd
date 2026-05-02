@@ -465,7 +465,7 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 	// half VESTS at the dynamic price.
 	hbdHive := authorPool * int64(c.PercentHbd) / 20000
 	vestingHive := authorPool - hbdHive
-	if traceAccount(author) || (os.Getenv("GHIVEDIFF_ALL") != "" && blockNum >= 2888500 && blockNum <= 2897770) {
+	if traceAccount(author) || (os.Getenv("GHIVEDIFF_ALL") != "" && blockNum >= 2888500 && blockNum <= 2910000) {
 		ghiveDiff("GHIVEDIFF CASHOUT-AUTHOR block=%d author=%s permlink=%s author_tokens=%d hbd_hive=%d vesting_hive=%d curator_remainder=%d\n",
 			blockNum, author, permlink, authorPool, hbdHive, vestingHive, curatorRemainder)
 	}

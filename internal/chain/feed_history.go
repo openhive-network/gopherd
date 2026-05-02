@@ -5,6 +5,7 @@ import (
 	"sort"
 
 	"hived-go/internal/protocol/asset"
+	"hived-go/internal/protocol/auth"
 	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
@@ -47,26 +48,36 @@ func updateMedianFeed(s *state.Session, blockNum, blockTime uint32) {
 		return
 	}
 
-	// Collect active feeds (witnesses that published within the
-	// freshness window).
+	// Iterate only the witnesses in the current schedule (top-21 active
+	// set), mirroring C++ database.cpp:2476-2494 which iterates
+	// `wso.current_shuffled_witnesses` rather than the full witness
+	// table. Including non-scheduled witnesses inflates the input set
+	// and drifts the median (e.g. block 2,894,400 — Go computed median
+	// 235/1000 over 39 feeds, C++ computed it over the 21 scheduled
+	// only, yielding a different rolling-window result).
 	var feeds []asset.Price
-	_ = s.Range(objects.WitnessTable, state.PrimaryIndex, nil,
-		func(_, value []byte) (bool, error) {
-			w, err := objects.ReadWitness(value)
-			if err != nil {
-				return true, nil
+	if ws, err := objects.GetWitnessSchedule(s); err == nil && ws.NumScheduledWitnesses > 0 {
+		seen := make(map[string]bool)
+		for i := uint8(0); i < ws.NumScheduledWitnesses && int(i) < len(ws.CurrentShuffledWitnesses); i++ {
+			name := string(ws.CurrentShuffledWitnesses[i])
+			if seen[name] {
+				continue
 			}
-			// Skip witnesses with no feed or a stale feed.
+			seen[name] = true
+			w, werr := objects.GetWitness(s, auth.AccountName(name))
+			if werr != nil {
+				continue
+			}
 			if w.LastHBDExchangeUpdate == 0 ||
 				blockTime > w.LastHBDExchangeUpdate+maxFeedAgeSec {
-				return true, nil
+				continue
 			}
 			if priceIsZero(w.HBDExchangeRate) {
-				return true, nil
+				continue
 			}
 			feeds = append(feeds, w.HBDExchangeRate)
-			return true, nil
-		})
+		}
+	}
 
 	if len(feeds) < minFeeds {
 		return

@@ -97,7 +97,7 @@ func CreateVesting(s *state.Session, accountName string, hiveSatoshi int64, toRe
 	dgpo.TotalVestingFundHive += hiveSatoshi
 	objects.PutDGPO(s, &dgpo)
 	traceAll := os.Getenv("GHIVEDIFF_ALL_VEST") != ""
-	if vestTraceAccount(accountName) || (traceAll && dgpo.HeadBlockNumber >= 2888500 && dgpo.HeadBlockNumber <= 2897770) {
+	if vestTraceAccount(accountName) || (traceAll && dgpo.HeadBlockNumber >= 2888500 && dgpo.HeadBlockNumber <= 2910000) {
 		fmt.Fprintf(os.Stderr, "GHIVEDIFF VEST-CREATE block=%d acct=%s liquid=%d new_vests=%d after_vests=%d fund_pre=%d shares_pre=%d toReward=%v\n",
 			dgpo.HeadBlockNumber, accountName, hiveSatoshi, vestsAmount, a.VestingShares, dgpo.TotalVestingFundHive-hiveSatoshi, dgpo.TotalVestingShares-vestsAmount, toReward)
 	}
