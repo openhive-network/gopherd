@@ -386,7 +386,6 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 	if !ok {
 		return fmt.Errorf("voteEvaluator: unexpected op type %T", o)
 	}
-
 	voterCheck, err := objects.GetAccount(ctx.DB, v.Voter)
 	if err != nil {
 		if err == state.ErrNotFound {
@@ -411,14 +410,16 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 	if v.Weight > 0 && !c.AllowVotes {
 		return fmt.Errorf("%w: votes disabled for comment", ErrCommentClosed)
 	}
-	// Once a comment has cashed out (post-payout) further votes are no-ops.
-	// Mirrors hive_evaluator_social.cpp:328 (!comment_cashout). The
-	// "comment_cashout exists" condition maps to: either still scheduled
-	// (CashoutTime != 0) OR not yet paid (pre-HF12 frozen-at-creation).
-	// Pre-HF19 the cashout row stays around even after payout (rescheduled
-	// for the second window pre-HF12, or set to max post-HF12); HF19+
-	// the row is removed.
-	if c.WasPaid && c.CashoutTime == 0 {
+	// hive_evaluator_social.cpp:328: skip the vote when comment_cashout
+	// is gone OR (HF12+ AND payout_time == max). PRE-HF12 the entire
+	// gate is false (HF12 inactive), so votes on already-paid roots
+	// fall through to the weighted-avg branch and re-pull cashout_time
+	// — this is what re-schedules the comment for a fresh 24h cycle.
+	// Skipping pre-HF12 here over-zeros children_abs_rshares cascades
+	// at HF7 (block 2,889,020 et seq.) and pre-empts thousands of
+	// follow-up votes whose mana drains C++ would otherwise have
+	// captured.
+	if ctx.Hardforks.Has(hardfork.HF12) && c.WasPaid && c.CashoutTime == 0 {
 		return nil
 	}
 

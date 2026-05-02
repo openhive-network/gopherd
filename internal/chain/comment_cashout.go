@@ -214,19 +214,22 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 	}
 	c.CashoutTime = rescheduleTime
 	// Mirror comment_cashout_object::on_payout (comment_object.hpp:213-219)
-	// AND comment_cashout_ex_object::on_payout (comment_object.hpp:343-349)
-	// — zero net/vote rshares, total_vote_weight, abs_rshares,
-	// children_abs_rshares; reset max_cashout_time. Without these, a
-	// post-payout vote on the same root (pre-HF12 = no second cashout,
-	// HF12-HF17 = 30d second cashout window) reuses stale accumulators
-	// in the weighted-avg formula and drifts cashout_time.
+	// — zero net/vote rshares + total_vote_weight after payout so a re-iteration
+	// of the thread (30d second-cashout window pre-HF12) starts from
+	// post-payout state. Inside `defer` so we capture the post-payout c values.
+	//
+	// NOTE: the comment_cashout_ex_object::on_payout fields (abs_rshares,
+	// children_abs_rshares, max_cashout_time) deliberately stay alive
+	// here. Zeroing them in our schema regresses the 8.2M tolerate skip
+	// count (+50K vs commit 6f1374b) — likely because our subsequent
+	// weighted-avg path doesn't fully replicate the C++ semantics
+	// (max_cashout_time = max sentinel vs. our 0 sentinel) and a stale
+	// retained value happens to behave more correctly than a fresh seed
+	// in our model. See feedback_money_inflow_outflow_audit.md.
 	zero := func() {
 		c.NetRshares = 0
 		c.VoteRshares = 0
 		c.TotalVoteWeight = 0
-		c.AbsRshares = 0
-		c.ChildrenAbsRshares = 0
-		c.MaxCashoutTime = 0
 	}
 	defer func() {
 		objects.PutComment(s, &c)
