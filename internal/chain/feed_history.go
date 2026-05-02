@@ -67,13 +67,16 @@ func updateMedianFeed(s *state.Session, blockNum, blockTime uint32) {
 	hf := hardfork.SetForBlock(blockNum)
 	var feeds []asset.Price
 	if ws, err := objects.GetWitnessSchedule(s); err == nil {
-		seen := make(map[string]bool, int(objects.MaxWitnesses))
-		for i := len(ws.RecentBlockProducers) - 1; i >= 0 && len(seen) < int(objects.MaxWitnesses); i-- {
-			name := string(ws.RecentBlockProducers[i])
-			if name == "" || seen[name] {
+		// C++ database.cpp:2476-2494 iterates wso.current_shuffled_witnesses
+		// position-by-position. Mirror that — updateWitnessSchedule has
+		// backfilled the ring's most-recent-producer-not-already-elected
+		// into CurrentShuffledWitnesses so the schedule reaches the
+		// HIVE_MAX_WITNESSES (21) target C++'s schedule has.
+		for _, n := range ws.CurrentShuffledWitnesses {
+			name := string(n)
+			if name == "" {
 				continue
 			}
-			seen[name] = true
 			w, werr := objects.GetWitness(s, auth.AccountName(name))
 			if werr != nil {
 				continue

@@ -164,6 +164,30 @@ func updateWitnessSchedule(s *state.Session, blockNum uint32) {
 		shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
 	}
 
+	// Backfill the schedule with up to one extra slot from the recent
+	// producer ring — captures the timeshare witness C++'s
+	// virtual_scheduled_time queue picks (which we can't model
+	// without tracking per-witness virtual_scheduled_time). This
+	// ensures CurrentShuffledWitnesses reaches HIVE_MAX_WITNESSES
+	// (21) when the chain has at least 21 active producers, and the
+	// median feed gets the same 21-witness input set as C++.
+	if len(shuffled) < int(objects.MaxWitnesses) {
+		inSched := make(map[string]bool, len(shuffled))
+		for _, n := range shuffled {
+			inSched[string(n)] = true
+		}
+		// Walk the recent producer ring newest-to-oldest; append the
+		// first producer not already scheduled as the timeshare slot.
+		for i := len(ws.RecentBlockProducers) - 1; i >= 0 && len(shuffled) < int(objects.MaxWitnesses); i-- {
+			n := ws.RecentBlockProducers[i]
+			s := string(n)
+			if s == "" || inSched[s] {
+				continue
+			}
+			inSched[s] = true
+			shuffled = append(shuffled, n)
+		}
+	}
 	ws.CurrentShuffledWitnesses = shuffled
 	ws.NumScheduledWitnesses = uint8(len(shuffled))
 	if ws.NumScheduledWitnesses == 0 {
