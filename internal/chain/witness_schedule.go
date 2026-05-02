@@ -54,6 +54,23 @@ func updateWitnessSchedule(s *state.Session, blockNum uint32) {
 		objects.PutWitnessSchedule(s, &ws)
 	}
 
+	// Track recent block producers in a HIVE_MAX_WITNESSES-sized window
+	// — used by update_median_feed as the active schedule (we don't
+	// model C++'s miner queue + virtual-time timeshare slot, so we can't
+	// rebuild current_shuffled_witnesses faithfully; the actual block
+	// headers are the canonical record of which 21 witnesses were
+	// scheduled for the most recent round).
+	if dgpo.CurrentWitness != "" {
+		newProd := auth.AccountName(dgpo.CurrentWitness)
+		if len(ws.RecentBlockProducers) == 0 ||
+			ws.RecentBlockProducers[len(ws.RecentBlockProducers)-1] != newProd {
+			ws.RecentBlockProducers = append(ws.RecentBlockProducers, newProd)
+			if len(ws.RecentBlockProducers) > int(objects.MaxWitnesses) {
+				ws.RecentBlockProducers = ws.RecentBlockProducers[len(ws.RecentBlockProducers)-int(objects.MaxWitnesses):]
+			}
+		}
+	}
+
 	// Hardfork-conditional schedule sizing.
 	hf := hardfork.SetForBlock(blockNum)
 	prevMaxVoted := ws.MaxVotedWitnesses
@@ -71,14 +88,12 @@ func updateWitnessSchedule(s *state.Session, blockNum uint32) {
 	}
 
 	// Only re-shuffle once per round, when head_block_num reaches
-	// the next-shuffle marker. On the early-return path persist only
-	// when the hardfork-conditional sizing actually changed; otherwise
-	// the schedule is byte-identical to the cached value and re-Put
-	// would just churn the lazy serializer.
+	// the next-shuffle marker. On the early-return path persist if
+	// hardfork sizing or RecentBlockProducers changed.
 	if blockNum < ws.NextShuffleBlockNum {
-		if ws.MaxVotedWitnesses != prevMaxVoted || ws.MaxMinerWitnesses != prevMaxMiner {
-			objects.PutWitnessSchedule(s, &ws)
-		}
+		objects.PutWitnessSchedule(s, &ws)
+		_ = prevMaxVoted
+		_ = prevMaxMiner
 		_ = dgpo
 		return
 	}

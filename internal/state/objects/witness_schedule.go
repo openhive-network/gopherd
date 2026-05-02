@@ -58,6 +58,18 @@ type WitnessSchedule struct {
 	MinerWeight                 uint32
 	ElectedWeight               uint32
 	WitnessPayNormalizationFactor uint32
+
+	// RecentBlockProducers is a sliding window of producer names from
+	// the most recent HIVE_MAX_WITNESSES blocks (oldest first, newest
+	// last). C++'s update_median_feed iterates the wso schedule which
+	// is rebuilt each round from max_voted/max_miner/timeshare slots —
+	// without modeling the miner queue or virtual-time fairness queue
+	// we can't compute the schedule the same way; instead we track who
+	// actually produced the recent blocks (the producer name comes
+	// from the trusted block header). The set of producers in this
+	// window matches C++'s active schedule by definition since the
+	// chain ran on C++'s schedule.
+	RecentBlockProducers []auth.AccountName
 }
 
 // AppendWitnessSchedule serializes the schedule.
@@ -78,6 +90,11 @@ func AppendWitnessSchedule(dst []byte, w *WitnessSchedule) []byte {
 	dst = appendU32LE(dst, w.MinerWeight)
 	dst = appendU32LE(dst, w.ElectedWeight)
 	dst = appendU32LE(dst, w.WitnessPayNormalizationFactor)
+	dst = fcraw.AppendVarUint(dst, uint32(len(w.RecentBlockProducers)))
+	for _, n := range w.RecentBlockProducers {
+		dst = fcraw.AppendVarUint(dst, uint32(len(n)))
+		dst = append(dst, n...)
+	}
 	return dst
 }
 
@@ -139,6 +156,25 @@ func ReadWitnessSchedule(src []byte) (WitnessSchedule, error) {
 	}
 	if w.WitnessPayNormalizationFactor, err = r.ReadUint32(); err != nil {
 		return w, fmt.Errorf("ws.pay_normalization: %w", err)
+	}
+	// Recent block producers — schema addition; tolerate EOF for older
+	// rows that pre-date this field.
+	if r.AtEnd() {
+		return w, nil
+	}
+	rcount, err := r.ReadVarUint()
+	if err != nil {
+		return w, fmt.Errorf("ws.recent_producers.len: %w", err)
+	}
+	if rcount > 0 {
+		w.RecentBlockProducers = make([]auth.AccountName, rcount)
+		for i := uint32(0); i < rcount; i++ {
+			s, err := r.ReadString()
+			if err != nil {
+				return w, fmt.Errorf("ws.recent_producers[%d]: %w", i, err)
+			}
+			w.RecentBlockProducers[i] = s
+		}
 	}
 	if !r.AtEnd() {
 		return w, errors.New("witness_schedule: trailing bytes")

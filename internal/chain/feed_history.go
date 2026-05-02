@@ -48,19 +48,29 @@ func updateMedianFeed(s *state.Session, blockNum, blockTime uint32) {
 		return
 	}
 
-	// Iterate only the witnesses in the current schedule (top-21 active
-	// set), mirroring C++ database.cpp:2476-2494 which iterates
-	// `wso.current_shuffled_witnesses` rather than the full witness
-	// table. Including non-scheduled witnesses inflates the input set
-	// and drifts the median (e.g. block 2,894,400 — Go computed median
-	// 235/1000 over 39 feeds, C++ computed it over the 21 scheduled
-	// only, yielding a different rolling-window result).
+	// Iterate the witnesses that produced the most recent
+	// HIVE_MAX_WITNESSES (21) blocks. C++ uses
+	// `wso.current_shuffled_witnesses` — the schedule rebuilt every
+	// round from max_voted (19 by-vote) + max_miner (1 from PoW queue)
+	// + timeshare (virtual-time fairness queue). We don't model the
+	// miner queue or virtual-time, so the proper top-by-vote subset
+	// only fills 19/20 entries; the 21st slot is consistently
+	// mis-picked, which drifts the rolling-window median feed (e.g.
+	// block 2,922,000 — Go median 228/1000 vs C++ median 230/1000) and
+	// starves later HBD payouts (fatjawjones limit_order_create at
+	// block 2,924,280, etc.).
+	//
+	// Recover the right SET by reading whoever actually produced the
+	// last 21 blocks — that's C++'s active schedule by definition,
+	// since the chain ran on C++'s schedule and the headers we replay
+	// carry C++'s producer names verbatim.
 	var feeds []asset.Price
-	if ws, err := objects.GetWitnessSchedule(s); err == nil && ws.NumScheduledWitnesses > 0 {
+	if ws, err := objects.GetWitnessSchedule(s); err == nil {
+		hf := hardfork.SetForBlock(blockNum)
 		seen := make(map[string]bool)
-		for i := uint8(0); i < ws.NumScheduledWitnesses && int(i) < len(ws.CurrentShuffledWitnesses); i++ {
-			name := string(ws.CurrentShuffledWitnesses[i])
-			if seen[name] {
+		for i := len(ws.RecentBlockProducers) - 1; i >= 0 && len(seen) < int(objects.MaxWitnesses); i-- {
+			name := string(ws.RecentBlockProducers[i])
+			if name == "" || seen[name] {
 				continue
 			}
 			seen[name] = true
@@ -68,12 +78,18 @@ func updateMedianFeed(s *state.Session, blockNum, blockTime uint32) {
 			if werr != nil {
 				continue
 			}
-			if w.LastHBDExchangeUpdate == 0 ||
-				blockTime > w.LastHBDExchangeUpdate+maxFeedAgeSec {
-				continue
-			}
 			if priceIsZero(w.HBDExchangeRate) {
 				continue
+			}
+			// C++ database.cpp:2483 gates feed-age only post-HF19__822;
+			// pre-HF19 the original `last_hbd_exchange_update < now +
+			// HIVE_MAX_FEED_AGE_SECONDS` test is tautologically true so
+			// every non-null feed is accepted regardless of staleness.
+			if hf.Has(hardfork.HF19) {
+				if w.LastHBDExchangeUpdate == 0 ||
+					blockTime > w.LastHBDExchangeUpdate+maxFeedAgeSec {
+					continue
+				}
 			}
 			feeds = append(feeds, w.HBDExchangeRate)
 		}
