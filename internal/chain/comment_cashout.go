@@ -57,30 +57,35 @@ func processCommentCashouts(s *state.Session, blockTime, blockNum uint32) {
 	}
 	type pending struct {
 		cashoutTime uint32
+		commentID   uint64
 		author      string
 		permlink    string
 	}
 	var ready []pending
 
+	// Schedule keys are (cashout_time_BE, comment_id_BE). Iteration order
+	// matches C++'s composite_key<cashout_time, comment_id>: smallest time
+	// first, then smallest id (insertion order) within the same time. The
+	// (author, permlink) pair sits in the entry's value.
 	_ = s.Range(objects.CommentCashoutScheduleTable, state.PrimaryIndex, nil,
-		func(body, _ []byte) (bool, error) {
-			if len(body) < 4+state.AccountNameKeyLen {
+		func(key, val []byte) (bool, error) {
+			if len(key) < 4+8 {
 				return true, nil
 			}
-			t := uint32(body[0])<<24 | uint32(body[1])<<16 | uint32(body[2])<<8 | uint32(body[3])
+			t := uint32(key[0])<<24 | uint32(key[1])<<16 | uint32(key[2])<<8 | uint32(key[3])
 			if t > blockTime {
 				return false, nil
 			}
-			authorBytes := body[4 : 4+state.AccountNameKeyLen]
-			permlink := body[4+state.AccountNameKeyLen:]
-			n := state.AccountNameKeyLen
-			for n > 0 && authorBytes[n-1] == 0 {
-				n--
+			id := uint64(0)
+			for i := 0; i < 8; i++ {
+				id = (id << 8) | uint64(key[4+i])
 			}
+			author, permlink := objects.DecodeCommentCashoutScheduleValue(val)
 			ready = append(ready, pending{
 				cashoutTime: t,
-				author:      string(authorBytes[:n]),
-				permlink:    string(permlink),
+				commentID:   id,
+				author:      string(author),
+				permlink:    permlink,
 			})
 			return true, nil
 		})
@@ -91,7 +96,7 @@ func processCommentCashouts(s *state.Session, blockTime, blockNum uint32) {
 		// HF17+: pay each due comment individually (matches
 		// database_comment.cpp:466-481).
 		for _, p := range ready {
-			processOneCashout(s, blockTime, blockNum, p.cashoutTime, p.author, p.permlink, curationPct)
+			processOneCashout(s, blockTime, blockNum, p.cashoutTime, p.commentID, p.author, p.permlink, curationPct)
 		}
 		return
 	}
@@ -122,6 +127,7 @@ func processCommentCashouts(s *state.Session, blockTime, blockNum uint32) {
 			author      string
 			permlink    string
 			cashoutTime uint32
+			id          uint64
 		}
 		var siblings []sibling
 		prefix := objects.CommentByRootPrefix(rootAuthor, rootPermlink)
@@ -151,6 +157,7 @@ func processCommentCashouts(s *state.Session, blockTime, blockNum uint32) {
 					author:      author,
 					permlink:    permlink,
 					cashoutTime: sib.CashoutTime,
+					id:          sib.ID,
 				})
 				return true, nil
 			})
@@ -160,7 +167,7 @@ func processCommentCashouts(s *state.Session, blockTime, blockNum uint32) {
 				continue
 			}
 			paid[key] = struct{}{}
-			processOneCashout(s, blockTime, blockNum, sib.cashoutTime, sib.author, sib.permlink, curationPct)
+			processOneCashout(s, blockTime, blockNum, sib.cashoutTime, sib.id, sib.author, sib.permlink, curationPct)
 		}
 	}
 }
@@ -180,8 +187,8 @@ func processCommentCashouts(s *state.Session, blockTime, blockNum uint32) {
 //
 // adjust_rshares2 then subtracts the comment's curve value from
 // total_reward_shares2 so the next comment's slice excludes this one.
-func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint32, author, permlink string, curationPct int64) {
-	objects.DeleteCommentCashoutSchedule(s, scheduledTime, author, permlink)
+func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint32, commentID uint64, author, permlink string, curationPct int64) {
+	objects.DeleteCommentCashoutSchedule(s, scheduledTime, commentID)
 
 	c, err := objects.GetComment(s, author, permlink)
 	if err != nil {
@@ -218,7 +225,7 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 	defer func() {
 		objects.PutComment(s, &c)
 		if rescheduleTime != 0 {
-			objects.PutCommentCashoutSchedule(s, rescheduleTime, c.Author, c.Permlink)
+			objects.PutCommentCashoutSchedule(s, rescheduleTime, c.ID, c.Author, c.Permlink)
 		}
 	}()
 

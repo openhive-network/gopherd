@@ -79,6 +79,25 @@ type Comment struct {
 	// deleted. delete_comment rejects when Children > 0 ("Cannot delete
 	// a comment with replies").
 	Children uint32
+	// ID is a monotonic insertion-order identifier mirroring C++'s
+	// auto-incrementing comment_object::id. Used as the tie-breaker in
+	// the by_cashout_time schedule so cashouts iterate in the same order
+	// as hived (same cashout_time → smaller comment_id first), matching
+	// composite_key<cashout_time, comment_id> at by_cashout_time.
+	// Allocated from dgpo.NextCommentID at create time.
+	ID uint64
+	// ChildrenAbsRshares — sum of |rshares| over every vote across the
+	// whole thread (root + every reply). Lives only on the ROOT post;
+	// pre-HF17 the vote evaluator at hive_evaluator_social.cpp:412-415
+	// reads/writes it via comment_cashout_ex_object on the root_id.
+	// Used as the denominator in the weighted-average cashout_time
+	// formula at line 437.
+	ChildrenAbsRshares uint64
+	// MaxCashoutTime — the upper bound on a thread's cashout_time. Set
+	// on the ROOT post by the FIRST vote to (now + HIVE_MAX_CASHOUT_WINDOW
+	// = 14d). The weighted-average cashout_time clamps to this value
+	// (hive_evaluator_social.cpp:439). 0 == not yet set (treat as max).
+	MaxCashoutTime uint32
 }
 
 // Beneficiary is one row in a comment's beneficiaries list.
@@ -149,25 +168,53 @@ func CommentByRootPrefix(rootAuthor auth.AccountName, rootPermlink string) []byt
 	return append(out, 0x00)
 }
 
-// CommentCashoutScheduleKey encodes (cashoutTime, author, permlink) into
-// the schedule index key. Time is BE-encoded so lex order matches numeric
-// order; author is padded to AccountNameKeyLen; permlink follows raw.
-func CommentCashoutScheduleKey(cashoutTime uint32, author auth.AccountName, permlink string) []byte {
+// CommentCashoutScheduleKey encodes (cashoutTime, commentID) — the
+// schedule iterates in this order, mirroring C++'s
+// composite_key<cashout_time, comment_id> on by_cashout_time. The
+// (author, permlink) pair is stored in the value blob so callers can
+// recover it during iteration without a second lookup.
+//
+// 4 BE bytes time + 8 BE bytes id = 12-byte fixed key.
+func CommentCashoutScheduleKey(cashoutTime uint32, commentID uint64) []byte {
 	out := state.AppendUint32BE(nil, cashoutTime)
-	out = state.AppendAccountName(out, author)
+	return state.AppendUint64BE(out, commentID)
+}
+
+// commentCashoutScheduleValue serializes (author, permlink) into the
+// schedule entry's value: 16-byte padded author + permlink raw. The
+// permlink length is implicit from the value-buffer length.
+func commentCashoutScheduleValue(author auth.AccountName, permlink string) []byte {
+	out := state.AppendAccountName(nil, author)
 	return append(out, permlink...)
 }
 
-// PutCommentCashoutSchedule registers (cashoutTime, author, permlink) in
-// the schedule index.
-func PutCommentCashoutSchedule(s *state.Session, cashoutTime uint32, author auth.AccountName, permlink string) {
-	s.Put(CommentCashoutScheduleTable, state.PrimaryIndex, CommentCashoutScheduleKey(cashoutTime, author, permlink), nil)
+// DecodeCommentCashoutScheduleValue extracts (author, permlink) from a
+// schedule entry's value blob.
+func DecodeCommentCashoutScheduleValue(body []byte) (auth.AccountName, string) {
+	if len(body) < state.AccountNameKeyLen {
+		return "", ""
+	}
+	authorBytes := body[:state.AccountNameKeyLen]
+	n := state.AccountNameKeyLen
+	for n > 0 && authorBytes[n-1] == 0 {
+		n--
+	}
+	return auth.AccountName(authorBytes[:n]), string(body[state.AccountNameKeyLen:])
 }
 
-// DeleteCommentCashoutSchedule removes a (cashoutTime, author, permlink)
+// PutCommentCashoutSchedule registers (cashoutTime, commentID, author,
+// permlink) in the schedule index.
+func PutCommentCashoutSchedule(s *state.Session, cashoutTime uint32, commentID uint64, author auth.AccountName, permlink string) {
+	s.Put(CommentCashoutScheduleTable, state.PrimaryIndex,
+		CommentCashoutScheduleKey(cashoutTime, commentID),
+		commentCashoutScheduleValue(author, permlink))
+}
+
+// DeleteCommentCashoutSchedule removes a (cashoutTime, commentID)
 // schedule entry.
-func DeleteCommentCashoutSchedule(s *state.Session, cashoutTime uint32, author auth.AccountName, permlink string) {
-	s.Delete(CommentCashoutScheduleTable, state.PrimaryIndex, CommentCashoutScheduleKey(cashoutTime, author, permlink))
+func DeleteCommentCashoutSchedule(s *state.Session, cashoutTime uint32, commentID uint64) {
+	s.Delete(CommentCashoutScheduleTable, state.PrimaryIndex,
+		CommentCashoutScheduleKey(cashoutTime, commentID))
 }
 
 // commentKey encodes (author, permlink) as a fixed-width 16-byte author
@@ -227,6 +274,9 @@ func AppendComment(dst []byte, c *Comment) []byte {
 	dst = fcraw.AppendVarUint(dst, uint32(len(c.RootPermlink)))
 	dst = append(dst, c.RootPermlink...)
 	dst = appendU32LE(dst, c.Children)
+	dst = appendU64LE(dst, c.ID)
+	dst = appendU64LE(dst, c.ChildrenAbsRshares)
+	dst = appendU32LE(dst, c.MaxCashoutTime)
 	return dst
 }
 
@@ -342,6 +392,21 @@ func ReadComment(src []byte) (Comment, error) {
 	}
 	if c.Children, err = r.ReadUint32(); err != nil {
 		return c, fmt.Errorf("comment.children: %w", err)
+	}
+	if r.AtEnd() {
+		return c, nil
+	}
+	if c.ID, err = r.ReadUint64(); err != nil {
+		return c, fmt.Errorf("comment.id: %w", err)
+	}
+	if r.AtEnd() {
+		return c, nil
+	}
+	if c.ChildrenAbsRshares, err = r.ReadUint64(); err != nil {
+		return c, fmt.Errorf("comment.children_abs_rshares: %w", err)
+	}
+	if c.MaxCashoutTime, err = r.ReadUint32(); err != nil {
+		return c, fmt.Errorf("comment.max_cashout_time: %w", err)
 	}
 	if !r.AtEnd() {
 		return c, errors.New("comment: trailing bytes")

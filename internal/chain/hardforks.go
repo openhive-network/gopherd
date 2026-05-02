@@ -501,7 +501,7 @@ func applyHardfork12CommentCashoutFix(s *state.Session) {
 		}
 		// Drop the old schedule entry first.
 		if p.oldCashout != 0 {
-			objects.DeleteCommentCashoutSchedule(s, p.oldCashout, p.author, p.permlink)
+			objects.DeleteCommentCashoutSchedule(s, p.oldCashout, c.ID)
 		}
 		var newCashout uint32
 		if c.WasPaid && c.LastPayout > 0 {
@@ -519,7 +519,7 @@ func applyHardfork12CommentCashoutFix(s *state.Session) {
 		c.CashoutTime = newCashout
 		objects.PutComment(s, &c)
 		if newCashout != 0 {
-			objects.PutCommentCashoutSchedule(s, newCashout, p.author, p.permlink)
+			objects.PutCommentCashoutSchedule(s, newCashout, c.ID, p.author, p.permlink)
 		}
 	}
 }
@@ -558,7 +558,7 @@ func applyHardfork17CommentCashoutFix(s *state.Session) {
 			continue
 		}
 		if p.oldCashout != 0 {
-			objects.DeleteCommentCashoutSchedule(s, p.oldCashout, p.author, p.permlink)
+			objects.DeleteCommentCashoutSchedule(s, p.oldCashout, c.ID)
 		}
 		// Skip already-fully-paid comments (CashoutTime == 0 AND no
 		// further activity expected). For replies that were frozen
@@ -577,7 +577,7 @@ func applyHardfork17CommentCashoutFix(s *state.Session) {
 		}
 		objects.PutComment(s, &c)
 		if c.CashoutTime != 0 {
-			objects.PutCommentCashoutSchedule(s, c.CashoutTime, p.author, p.permlink)
+			objects.PutCommentCashoutSchedule(s, c.CashoutTime, c.ID, p.author, p.permlink)
 		}
 	}
 }

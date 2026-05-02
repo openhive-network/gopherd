@@ -95,6 +95,14 @@ type DynamicGlobalProperty struct {
 	// (10000) to issue a free claim instead of charging the fee.
 	// Mirrors dynamic_global_property_object::available_account_subsidies.
 	AvailableAccountSubsidies int64
+	// NextCommentID is a monotonic counter assigned to each newly-created
+	// comment so the cashout schedule can tie-break same-cashout_time
+	// entries by insertion order — matching C++'s
+	// composite_key<cashout_time, comment_id> on by_cashout_time. Without
+	// this, alphabetical (author, permlink) order disagrees with hived
+	// at the HF7 cascade and propagates fund/shares2 drift through every
+	// subsequent cashout.
+	NextCommentID uint64
 }
 
 // AppendDGPO serializes p to dst.
@@ -121,6 +129,7 @@ func AppendDGPO(dst []byte, p *DynamicGlobalProperty) []byte {
 	dst = appendU32LE(dst, p.ReverseAuctionSeconds)
 	dst = appendU32LE(dst, p.DelegationReturnPeriod)
 	dst = appendI64LE(dst, p.AvailableAccountSubsidies)
+	dst = appendU64LE(dst, p.NextCommentID)
 	return dst
 }
 
@@ -212,6 +221,13 @@ func ReadDGPO(src []byte) (DynamicGlobalProperty, error) {
 	}
 	if p.AvailableAccountSubsidies, err = r.ReadInt64(); err != nil {
 		return p, fmt.Errorf("dgpo.available_account_subsidies: %w", err)
+	}
+	// NextCommentID is a later schema addition; tolerate EOF for legacy rows.
+	if r.AtEnd() {
+		return p, nil
+	}
+	if p.NextCommentID, err = r.ReadUint64(); err != nil {
+		return p, fmt.Errorf("dgpo.next_comment_id: %w", err)
 	}
 	if !r.AtEnd() {
 		return p, errors.New("dgpo: trailing bytes after decode (schema mismatch?)")

@@ -30,23 +30,27 @@ const (
 
 // commentCashoutTime returns the cashout time for a new comment given
 // the hardforks active at apply time and whether it has a parent.
+//
+// Mirrors hive_evaluator_social.cpp:247-253:
+//   - HF17+: cashout_time = now + 7d
+//   - HF12+ root post: cashout_time = now + 12h
+//   - else (pre-HF12 ANY comment, or HF12-HF17 reply): cashout_time = max
+//     (frozen at creation; pre-HF17 votes weight-average it down via
+//     hive_evaluator_social.cpp:410-449).
+//
+// We use 0 as our "max/frozen" sentinel.
 func commentCashoutTime(hf hardfork.Set, blockTime uint32, hasParent bool) uint32 {
 	if hf.Has(hardfork.HF17) {
 		return blockTime + cashoutWindowSeconds
 	}
-	if hf.Has(hardfork.HF12) {
-		// HF12-HF17: replies are frozen (cashout_time = max), only
-		// root posts cash out 12h after creation.
-		if hasParent {
-			return 0
-		}
+	if hf.Has(hardfork.HF12) && !hasParent {
+		// HF12-HF17 root post: 12h.
 		return blockTime + cashoutWindowSecondsPreHF17
 	}
-	// Pre-HF12: 24h cashout window for every comment (root or reply).
-	// process_comment_cashout itself doesn't actually fire until HF7
-	// (HIVE_HARDFORK_0_7_FIRST_CASHOUT_TIME); the schedule entries we
-	// queue here just sit in the table until then.
-	return blockTime + cashoutWindowSecondsPreHF12
+	// Pre-HF12 (any comment) or HF12-HF17 reply: frozen at creation;
+	// the vote evaluator pulls cashout_time down via the weighted-avg
+	// formula on every cast.
+	return 0
 }
 
 // Errors specific to comment evaluators.
@@ -162,6 +166,15 @@ func (commentEvaluator) Apply(ctx *Context, o op.Operation) error {
 			}
 		}
 
+		// Allocate a monotonic comment ID from dgpo so the cashout
+		// schedule can tie-break same-time entries by insertion order
+		// (mirrors C++'s comment_object::id auto-increment).
+		commentID := uint64(0)
+		if dgpo, derr := objects.GetDGPO(ctx.DB); derr == nil {
+			commentID = dgpo.NextCommentID
+			dgpo.NextCommentID++
+			objects.PutDGPO(ctx.DB, &dgpo)
+		}
 		objects.PutComment(ctx.DB, &objects.Comment{
 			Author:               c.Author,
 			Permlink:             c.Permlink,
@@ -176,9 +189,10 @@ func (commentEvaluator) Apply(ctx *Context, o op.Operation) error {
 			AllowCurationRewards: true,
 			RootAuthor:           rootAuthor,
 			RootPermlink:         rootPermlink,
+			ID:                   commentID,
 		})
 		if cashoutTime != 0 {
-			objects.PutCommentCashoutSchedule(ctx.DB, cashoutTime, c.Author, c.Permlink)
+			objects.PutCommentCashoutSchedule(ctx.DB, cashoutTime, commentID, c.Author, c.Permlink)
 		}
 		return nil
 	}
@@ -221,7 +235,7 @@ func (deleteCommentEvaluator) Apply(ctx *Context, o op.Operation) error {
 	// row at payout (database_comment.cpp:480), so deletes after payout
 	// trip the assert. Our equivalent: c.CashoutTime==0 = frozen, but
 	// only HF19+ should reject.
-	if ctx.Hardforks.Has(hardfork.HF19) && c.CashoutTime == 0 {
+	if ctx.Hardforks.Has(hardfork.HF19) && c.WasPaid && c.CashoutTime == 0 {
 		return fmt.Errorf("%w: cannot delete comment after payout", ErrCommentClosed)
 	}
 	// "Cannot delete a comment with replies." (hive_evaluator_social.cpp:60).
@@ -242,7 +256,7 @@ func (deleteCommentEvaluator) Apply(ctx *Context, o op.Operation) error {
 		return nil
 	}
 	if c.CashoutTime != 0 {
-		objects.DeleteCommentCashoutSchedule(ctx.DB, c.CashoutTime, dc.Author, dc.Permlink)
+		objects.DeleteCommentCashoutSchedule(ctx.DB, c.CashoutTime, c.ID)
 	}
 	// Decrement parent.Children when removing a reply (on_reply with deleting=true).
 	if c.ParentAuthor != "" {
@@ -280,9 +294,11 @@ func (commentOptionsEvaluator) Apply(ctx *Context, o op.Operation) error {
 		return err
 	}
 	// hived: post-HF24, comment_options on a paid-out comment is a hard
-	// error. Pre-HF24 it's a silent no-op. We use CashoutTime == 0 as our
-	// paid-out sentinel.
-	if c.CashoutTime == 0 {
+	// error. Pre-HF24 it's a silent no-op. WasPaid + CashoutTime==0 is
+	// our "fully paid out / cashout row removed" sentinel — distinct
+	// from "frozen at creation, awaiting first vote" (CashoutTime==0
+	// pre-HF12 / for replies, but WasPaid=false).
+	if c.WasPaid && c.CashoutTime == 0 {
 		return nil
 	}
 
@@ -395,11 +411,14 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 	if v.Weight > 0 && !c.AllowVotes {
 		return fmt.Errorf("%w: votes disabled for comment", ErrCommentClosed)
 	}
-	// Once a comment has cashed out (CashoutTime sentinel = 0 in our
-	// model, time_point_sec::max in hived) further votes are no-ops.
-	// This is the !comment_cashout / paid-out branch at the top of
-	// hived's vote evaluator (hive_evaluator_social.cpp:328).
-	if c.CashoutTime == 0 {
+	// Once a comment has cashed out (post-payout) further votes are no-ops.
+	// Mirrors hive_evaluator_social.cpp:328 (!comment_cashout). The
+	// "comment_cashout exists" condition maps to: either still scheduled
+	// (CashoutTime != 0) OR not yet paid (pre-HF12 frozen-at-creation).
+	// Pre-HF19 the cashout row stays around even after payout (rescheduled
+	// for the second window pre-HF12, or set to max post-HF12); HF19+
+	// the row is removed.
+	if c.WasPaid && c.CashoutTime == 0 {
 		return nil
 	}
 
@@ -650,6 +669,99 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 		c.AbsRshares += absRshares
 	}
 	c.LastUpdate = ctx.HeadBlockTime
+
+	// Pre-HF17 (HARDFORK_0_17__769) cashout-time weighted average.
+	// Mirrors hive_evaluator_social.cpp:403-449. Every cast adjusts the
+	// ROOT post's children_abs_rshares + cashout_time + max_cashout_time
+	// (max_cashout_time gets seeded on first vote to now+14d).
+	//
+	// formula:
+	//   new_cashout_time = (cur_time × old_root_abs + new_time × abs) / new_root_abs
+	//   new_time = HF12 + !HF13_257 ? now + 12h : now + 24h
+	//   capped at root.max_cashout_time
+	//
+	// Pre-HF12: new_time = now + 24h (since HF12 not active).
+	// Frozen-at-creation comments (cashout_time == 0) get pulled to a
+	// real time on the first vote. The schedule entry is removed at
+	// the old cashout_time and re-inserted at the new one.
+	if !ctx.Hardforks.Has(hardfork.HF17) {
+		// Locate the root: replies follow RootAuthor/RootPermlink, root
+		// posts are their own root.
+		rootAuthor := c.RootAuthor
+		rootPermlink := c.RootPermlink
+		rootIsSelf := rootAuthor == c.Author && rootPermlink == c.Permlink
+		if rootAuthor == "" {
+			rootAuthor = c.Author
+			rootPermlink = c.Permlink
+			rootIsSelf = true
+		}
+		var root objects.Comment
+		if rootIsSelf {
+			root = c
+		} else {
+			r, rerr := objects.GetComment(ctx.DB, rootAuthor, rootPermlink)
+			if rerr != nil {
+				goto rootDone
+			}
+			root = r
+		}
+		oldRootCashout := root.CashoutTime
+		oldRootAbsRshares := root.ChildrenAbsRshares
+		newRootAbsRshares := oldRootAbsRshares + uint64(absRshares)
+
+		// max_cashout_time seed (now + HIVE_MAX_CASHOUT_WINDOW = 14d).
+		const hiveMaxCashoutWindowSeconds uint32 = 14 * 24 * 60 * 60
+		if root.MaxCashoutTime == 0 {
+			root.MaxCashoutTime = ctx.HeadBlockTime + hiveMaxCashoutWindowSeconds
+		}
+
+		// Skip dust votes post-HF14 — they contribute zero rshares but
+		// also don't pull cashout time (matches hive_evaluator_social.cpp:426).
+		if !(ctx.Hardforks.Has(hardfork.HF14) && absRshares == 0) {
+			var newCashoutTimeSec uint32
+			if ctx.Hardforks.Has(hardfork.HF12) && !ctx.Hardforks.Has(hardfork.HF13) {
+				newCashoutTimeSec = ctx.HeadBlockTime + cashoutWindowSecondsPreHF17 // 12h
+			} else {
+				newCashoutTimeSec = ctx.HeadBlockTime + cashoutWindowSecondsPreHF12 // 24h
+			}
+			// Weighted average. cur_cashout_time is "discussion payout
+			// time" (root's CashoutTime, capped at MaxCashoutTime).
+			curCashout := uint64(oldRootCashout)
+			if curCashout == 0 || (root.MaxCashoutTime != 0 && curCashout > uint64(root.MaxCashoutTime)) {
+				curCashout = uint64(root.MaxCashoutTime)
+			}
+			var avgCashoutSec uint64
+			if newRootAbsRshares > 0 {
+				num := new(big.Int).Mul(big.NewInt(int64(curCashout)), new(big.Int).SetUint64(oldRootAbsRshares))
+				num.Add(num, new(big.Int).Mul(big.NewInt(int64(newCashoutTimeSec)), big.NewInt(absRshares)))
+				num.Quo(num, new(big.Int).SetUint64(newRootAbsRshares))
+				if num.IsUint64() {
+					avgCashoutSec = num.Uint64()
+				}
+			} else {
+				avgCashoutSec = uint64(newCashoutTimeSec)
+			}
+			if avgCashoutSec > uint64(root.MaxCashoutTime) {
+				avgCashoutSec = uint64(root.MaxCashoutTime)
+			}
+			newCashout := uint32(avgCashoutSec)
+			// Reschedule: drop old schedule entry, insert at new time.
+			if oldRootCashout != 0 && oldRootCashout != newCashout {
+				objects.DeleteCommentCashoutSchedule(ctx.DB, oldRootCashout, root.ID)
+			}
+			root.CashoutTime = newCashout
+			if newCashout != 0 && newCashout != oldRootCashout {
+				objects.PutCommentCashoutSchedule(ctx.DB, newCashout, root.ID, root.Author, root.Permlink)
+			}
+		}
+		root.ChildrenAbsRshares = newRootAbsRshares
+		if rootIsSelf {
+			c = root // mirror updates back into c so PutComment below persists them
+		} else {
+			objects.PutComment(ctx.DB, &root)
+		}
+	}
+rootDone:
 	objects.PutComment(ctx.DB, &c)
 	objects.PutAccount(ctx.DB, &voter)
 	adjustRewardShares2(ctx.DB, oldNetRshares, c.NetRshares)
