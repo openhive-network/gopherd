@@ -64,10 +64,10 @@ func updateMedianFeed(s *state.Session, blockNum, blockTime uint32) {
 	// last 21 blocks — that's C++'s active schedule by definition,
 	// since the chain ran on C++'s schedule and the headers we replay
 	// carry C++'s producer names verbatim.
+	hf := hardfork.SetForBlock(blockNum)
 	var feeds []asset.Price
 	if ws, err := objects.GetWitnessSchedule(s); err == nil {
-		hf := hardfork.SetForBlock(blockNum)
-		seen := make(map[string]bool)
+		seen := make(map[string]bool, int(objects.MaxWitnesses))
 		for i := len(ws.RecentBlockProducers) - 1; i >= 0 && len(seen) < int(objects.MaxWitnesses); i-- {
 			name := string(ws.RecentBlockProducers[i])
 			if name == "" || seen[name] {
@@ -81,10 +81,6 @@ func updateMedianFeed(s *state.Session, blockNum, blockTime uint32) {
 			if priceIsZero(w.HBDExchangeRate) {
 				continue
 			}
-			// C++ database.cpp:2483 gates feed-age only post-HF19__822;
-			// pre-HF19 the original `last_hbd_exchange_update < now +
-			// HIVE_MAX_FEED_AGE_SECONDS` test is tautologically true so
-			// every non-null feed is accepted regardless of staleness.
 			if hf.Has(hardfork.HF19) {
 				if w.LastHBDExchangeUpdate == 0 ||
 					blockTime > w.LastHBDExchangeUpdate+maxFeedAgeSec {
@@ -102,7 +98,6 @@ func updateMedianFeed(s *state.Session, blockNum, blockTime uint32) {
 	sort.Slice(feeds, func(i, j int) bool { return priceLess(feeds[i], feeds[j]) })
 	medianFeed := feeds[len(feeds)/2]
 
-	hf := hardfork.SetForBlock(blockNum)
 	window := feedHistoryWindowPreHF16
 	if hf.Has(hardfork.HF16) {
 		window = feedHistoryWindow

@@ -299,17 +299,6 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 		// fires AFTER processProducerReward but BEFORE processFunds —
 		// matches C++'s trace location inside process_funds (which is
 		// after get_producer_reward but before adjust_supply).
-		if blockNum >= 2920000 && blockNum <= 2925000 {
-			d, _ := objects.GetDGPO(session)
-			fjHive, fjHbd, fjVests := int64(-1), int64(-1), int64(-1)
-			if a, e := objects.GetAccount(session, "fatjawjones"); e == nil {
-				fjHive = a.Balance
-				fjHbd = a.HBDBalance
-				fjVests = a.VestingShares
-			}
-			fmt.Fprintf(os.Stderr, "GHIVEDIFF DBG-BLOCK block=%d fund=%d vfund=%d vshares=%d supply=%d vsupply=%d hbd_supply=%d fj_hive=%d fj_hbd=%d fj_vests=%d\n",
-				blockNum, d.TotalRewardFundHive, d.TotalVestingFundHive, d.TotalVestingShares, d.CurrentSupply, d.VirtualSupply, d.CurrentHBDSupply, fjHive, fjHbd, fjVests)
-		}
 	}
 	processFunds(session, blockNum, hdr.Witness)
 	if os.Getenv("GHIVEDIFF") != "" {

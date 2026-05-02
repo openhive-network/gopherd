@@ -329,7 +329,7 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 		payoutBig.SetInt64(int64(^uint64(0) >> 1))
 	}
 	claimed := payoutBig.Int64()
-	if traceAccount(author) {
+	if traceAccount(author) || (os.Getenv("GHIVEDIFF_ALL") != "" && blockNum >= 2888500 && blockNum <= 2910000) {
 		hi := uint64(0)
 		lo := uint64(0)
 		if shares2.IsUint64() {

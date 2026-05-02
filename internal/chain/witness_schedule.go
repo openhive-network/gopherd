@@ -54,19 +54,19 @@ func updateWitnessSchedule(s *state.Session, blockNum uint32) {
 		objects.PutWitnessSchedule(s, &ws)
 	}
 
-	// Track recent block producers in a HIVE_MAX_WITNESSES-sized window
-	// — used by update_median_feed as the active schedule (we don't
-	// model C++'s miner queue + virtual-time timeshare slot, so we can't
-	// rebuild current_shuffled_witnesses faithfully; the actual block
-	// headers are the canonical record of which 21 witnesses were
-	// scheduled for the most recent round).
+	// Track recent block producers in a 2-round window — used by
+	// update_median_feed as the active schedule. We don't model C++'s
+	// miner queue + virtual-time timeshare slot, so we can't rebuild
+	// current_shuffled_witnesses faithfully; the actual block headers
+	// are the canonical record of who was scheduled.
+	const recentProducerWindow = 2 * int(objects.MaxWitnesses)
 	if dgpo.CurrentWitness != "" {
 		newProd := auth.AccountName(dgpo.CurrentWitness)
 		if len(ws.RecentBlockProducers) == 0 ||
 			ws.RecentBlockProducers[len(ws.RecentBlockProducers)-1] != newProd {
 			ws.RecentBlockProducers = append(ws.RecentBlockProducers, newProd)
-			if len(ws.RecentBlockProducers) > int(objects.MaxWitnesses) {
-				ws.RecentBlockProducers = ws.RecentBlockProducers[len(ws.RecentBlockProducers)-int(objects.MaxWitnesses):]
+			if len(ws.RecentBlockProducers) > recentProducerWindow {
+				ws.RecentBlockProducers = ws.RecentBlockProducers[len(ws.RecentBlockProducers)-recentProducerWindow:]
 			}
 		}
 	}
