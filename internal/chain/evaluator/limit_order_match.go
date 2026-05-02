@@ -118,11 +118,6 @@ func matchOrders(ctx *Context, newOrder, old *objects.LimitOrder) int {
 	// So old_for_sale × match_price = old.ForSaleAmount × old.MinReceiveAmt
 	//                                / old.SellPriceBaseAmount in new's base.
 	oldForSaleInNewBase := mulDiv(old.ForSaleAmount, old.MinReceiveAmt, old.SellPriceBaseAmount)
-	if newOrder.Owner == "abit" && newOrder.OrderID == 52190 {
-		ghiveDiff("GHIVEDIFF MATCH-DBG block=%d new=%s/%d new_for_sale=%d old=%s/%d old_for_sale=%d old_min_recv=%d old_sell_price_base=%d old_for_sale_in_new=%d\n",
-			ctx.BlockNum-1, newOrder.Owner, newOrder.OrderID, newOrder.ForSaleAmount,
-			old.Owner, old.OrderID, old.ForSaleAmount, old.MinReceiveAmt, old.SellPriceBaseAmount, oldForSaleInNewBase)
-	}
 
 	var newOrderPays, newOrderReceives, oldOrderPays, oldOrderReceives int64
 

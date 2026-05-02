@@ -2,12 +2,44 @@ package evaluator
 
 import (
 	"fmt"
+	"math/big"
 
 	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/op"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
 )
+
+// HIVE_POW_APR_PERCENT — POW APR target (libraries/protocol/include/
+// hive/protocol/config.hpp). Used by C++'s
+// calc_percent_reward_per_round< HIVE_POW_APR_PERCENT >(virtual_supply).
+const powAPRPercent int64 = 750
+
+// percentRewardPerRound constants mirror hived's compound.hpp:38 with
+// HIVE_APR_PERCENT_*_PER_ROUND. Computed once at build time.
+const (
+	powAprMultiplyPerRound uint64 = 0x79cc_f5c7_3480
+	powAprShiftPerRound    uint   = 83
+)
+
+// powPercentRewardPerRound mirrors C++'s
+// calc_percent_reward_per_round<percent>(virtual_supply) — supply ×
+// percent × multiply / 2^shift, rounded half-up. Used by get_pow_reward
+// to compute the percent floor before max() with HIVE_MIN_POW_REWARD.
+func powPercentRewardPerRound(virtualSupply, aprPercent int64) int64 {
+	if virtualSupply <= 0 || aprPercent <= 0 {
+		return 0
+	}
+	prod := new(big.Int).Mul(big.NewInt(virtualSupply), big.NewInt(aprPercent))
+	prod.Mul(prod, new(big.Int).SetUint64(powAprMultiplyPerRound))
+	half := new(big.Int).Lsh(big.NewInt(1), powAprShiftPerRound-1)
+	prod.Add(prod, half)
+	prod.Rsh(prod, powAprShiftPerRound)
+	if !prod.IsInt64() {
+		return int64(^uint64(0) >> 1)
+	}
+	return prod.Int64()
+}
 
 // powEvaluator implements the partial-mining-era apply for `pow`.
 //
@@ -108,7 +140,19 @@ func payPowReward(ctx *Context) error {
 		objects.PutDGPO(ctx.DB, &dgpo)
 		return nil
 	}
-	pay := minPowReward
+	// Mirror C++'s get_pow_reward (database.cpp:1933): take the max of
+	// HIVE_MIN_POW_REWARD and calc_percent_reward_per_round< 7.5% >
+	// (virtual_supply). Once virtual_supply gets large (post ~5M blocks),
+	// the percent term overtakes the floor and we'd otherwise underpay
+	// every POW miner by a few satoshi each — quickly diverging supply.
+	virtualSupply := dgpo.VirtualSupply
+	if virtualSupply <= 0 {
+		virtualSupply = dgpo.CurrentSupply
+	}
+	pay := powPercentRewardPerRound(virtualSupply, powAPRPercent)
+	if pay < minPowReward {
+		pay = minPowReward
+	}
 	if ctx.BlockNum < startMinerVotingBlockPow {
 		pay *= maxWitnesses
 	}

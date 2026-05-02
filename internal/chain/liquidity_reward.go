@@ -38,7 +38,16 @@ func payLiquidityReward(s *state.Session, blockNum, blockTime uint32) {
 	if err != nil {
 		return
 	}
-	reward := liquidityRewardForVirtualSupply(dgpo.CurrentSupply)
+	// C++ database.cpp:1877 uses props.virtual_supply.amount (HBD value
+	// included via the median feed). Pre-feed they're equal; post-feed
+	// virtual_supply > current_supply, so using the latter under-rewards
+	// LPs by the HBD share. The floor (HIVE_MIN_LIQUIDITY_REWARD) usually
+	// dominates pre-HF12, so this rarely affects payouts in practice.
+	supplyForLPCalc := dgpo.VirtualSupply
+	if supplyForLPCalc <= 0 {
+		supplyForLPCalc = dgpo.CurrentSupply
+	}
+	reward := liquidityRewardForVirtualSupply(supplyForLPCalc)
 	if reward <= 0 {
 		return
 	}

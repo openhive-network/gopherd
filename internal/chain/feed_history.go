@@ -1,6 +1,7 @@
 package chain
 
 import (
+	"math/big"
 	"sort"
 
 	"hived-go/internal/protocol/asset"
@@ -106,42 +107,23 @@ func priceIsZero(p asset.Price) bool {
 	return p.Base.Amount == 0 || p.Quote.Amount == 0
 }
 
-// priceLess compares two prices `a` and `b`. hived's price comparison
-// is value-based: cross-multiply to avoid divide-by-zero and
-// floating-point noise. a < b iff a.base * b.quote < b.base * a.quote
-// (assuming all amounts positive). Cross-multiplications can overflow
-// int64 for large amounts — for our HBD/HIVE feed rates the amounts
-// are typically small (cents to a few dollars) and easily fit, but
-// guard with a uint128 fallback if either side overflows.
+// priceLess compares two prices via cross-multiply. Mirrors C++'s
+// DEFINE_PRICE_COMPARISON_OPERATOR (libraries/protocol/asset.cpp:291)
+// which casts to uint128 unconditionally — float fallback is wrong
+// because float rounding is non-deterministic across platforms and
+// silently desyncs the median feed at chain head.
+//
+//	a < b  ⇔  a.base × b.quote  <  b.base × a.quote
 func priceLess(a, b asset.Price) bool {
-	// Normalize: if a's base symbol differs from b's base symbol the
-	// cross-multiply isn't meaningful. Inversion happens in hived for
-	// reversed feeds; we follow whatever orientation the publisher
-	// used so the comparison stays self-consistent.
+	// If symbol pairs differ, hived (via std::tie on (base.sym, quote.sym))
+	// orders by the symbol pair lexicographically. We approximate with
+	// the base symbol number — only matters when feeds with mixed
+	// orientations land in the same sort, which we don't expect at
+	// steady state but which the witness-feed gather above can produce.
 	if a.Base.Symbol.Num != b.Base.Symbol.Num {
-		// Different orientation — sort by symbol num for determinism.
 		return a.Base.Symbol.Num < b.Base.Symbol.Num
 	}
-	// Cross multiply, watching for overflow.
-	if absLessThanInt64Sqrt(a.Base.Amount) && absLessThanInt64Sqrt(b.Quote.Amount) &&
-		absLessThanInt64Sqrt(b.Base.Amount) && absLessThanInt64Sqrt(a.Quote.Amount) {
-		return a.Base.Amount*b.Quote.Amount < b.Base.Amount*a.Quote.Amount
-	}
-	// Fall back to ratio comparison (loses some precision but doesn't overflow).
-	if a.Quote.Amount == 0 || b.Quote.Amount == 0 {
-		return false
-	}
-	ar := float64(a.Base.Amount) / float64(a.Quote.Amount)
-	br := float64(b.Base.Amount) / float64(b.Quote.Amount)
-	return ar < br
-}
-
-// absLessThanInt64Sqrt reports whether |v| × |v| can fit in an int64
-// — used to gate the safe cross-multiply path in priceLess.
-func absLessThanInt64Sqrt(v int64) bool {
-	const limit int64 = 3037000499 // floor(sqrt(int64 max))
-	if v < 0 {
-		v = -v
-	}
-	return v <= limit
+	amult := new(big.Int).Mul(big.NewInt(a.Base.Amount), big.NewInt(b.Quote.Amount))
+	bmult := new(big.Int).Mul(big.NewInt(b.Base.Amount), big.NewInt(a.Quote.Amount))
+	return amult.Cmp(bmult) < 0
 }

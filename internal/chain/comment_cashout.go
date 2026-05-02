@@ -214,13 +214,19 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 	}
 	c.CashoutTime = rescheduleTime
 	// Mirror comment_cashout_object::on_payout (comment_object.hpp:213-219)
-	// — zero net/vote rshares + total_vote_weight after payout so a re-iteration
-	// of the thread (30d second-cashout window pre-HF12) starts from
-	// post-payout state. Inside `defer` so we capture the post-payout c values.
+	// AND comment_cashout_ex_object::on_payout (comment_object.hpp:343-349)
+	// — zero net/vote rshares, total_vote_weight, abs_rshares,
+	// children_abs_rshares; reset max_cashout_time. Without these, a
+	// post-payout vote on the same root (pre-HF12 = no second cashout,
+	// HF12-HF17 = 30d second cashout window) reuses stale accumulators
+	// in the weighted-avg formula and drifts cashout_time.
 	zero := func() {
 		c.NetRshares = 0
 		c.VoteRshares = 0
 		c.TotalVoteWeight = 0
+		c.AbsRshares = 0
+		c.ChildrenAbsRshares = 0
+		c.MaxCashoutTime = 0
 	}
 	defer func() {
 		objects.PutComment(s, &c)
@@ -398,7 +404,7 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 	// half VESTS at the dynamic price.
 	hbdHive := authorPool * int64(c.PercentHbd) / 20000
 	vestingHive := authorPool - hbdHive
-	if author == "proskynneo" || author == "hipster" {
+	if author == "proskynneo" || author == "hipster" || author == "acidsun" {
 		ghiveDiff("GHIVEDIFF CASHOUT-AUTHOR block=%d author=%s permlink=%s author_tokens=%d hbd_hive=%d vesting_hive=%d curator_remainder=%d\n",
 			blockNum, author, permlink, authorPool, hbdHive, vestingHive, curatorRemainder)
 	}

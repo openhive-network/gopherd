@@ -1,6 +1,8 @@
 package chain
 
 import (
+	"math/big"
+
 	"hived-go/internal/protocol/asset"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
@@ -104,9 +106,12 @@ func convertHBDToHive(hbdAmount int64, p asset.Price) int64 {
 	return 0
 }
 
-// mulDiv computes (a * b) / c using a uint128 emulation when needed.
-// HBD amounts and price components are typically well within int64
-// range, but the product can overflow on extreme feeds.
+// mulDiv computes (a * b) / c using big.Int for the slow path.
+// HBD amounts × price.amount can hit ~10^19 at chain head — solidly
+// past int64. The previous "slow path" silently overflowed because
+// mulInt64 did not actually widen the multiply, producing wrong
+// HBD↔HIVE conversion amounts and (transitively) wrong supply
+// accounting.
 func mulDiv(a, b, c int64) int64 {
 	if c == 0 {
 		return 0
@@ -116,14 +121,13 @@ func mulDiv(a, b, c int64) int64 {
 	if -half < a && a < half && -half < b && b < half {
 		return a * b / c
 	}
-	// Slow path: use 128-bit math via big.Int.
-	prod := mulInt64(a, b)
-	return prod / c
-}
-
-// mulInt64 returns a×b but does the work in int64 directly when safe,
-// otherwise truncates to int64. For the price feeds we expect, the
-// fast path is always taken.
-func mulInt64(a, b int64) int64 {
-	return a * b
+	prod := new(big.Int).Mul(big.NewInt(a), big.NewInt(b))
+	prod.Quo(prod, big.NewInt(c))
+	if !prod.IsInt64() {
+		if prod.Sign() < 0 {
+			return -(1 << 62)
+		}
+		return 1<<63 - 1
+	}
+	return prod.Int64()
 }

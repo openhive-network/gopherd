@@ -299,12 +299,22 @@ func processFundsHF16(s *state.Session, dgpo *objects.DynamicGlobalProperty, blo
 		virtualSupply = dgpo.CurrentSupply
 	}
 
-	// new_hive = virtual_supply × rate / (10000 × blocks_per_year)
-	prod := virtualSupply / 10000 * rate / blocksPerYear
-	if prod < 0 {
-		prod = 0
+	// new_hive = virtual_supply × rate / (10000 × blocks_per_year). C++
+	// (database.cpp:1738) does this with HIVE_asset arithmetic that
+	// internally widens the multiply to uint128 — the
+	// `virtualSupply / 10000` form below truncates the bottom 4 digits
+	// of the supply before the rate multiply, losing up to ~rate satoshi
+	// per block (cumulating to thousands of satoshis over a full
+	// replay). math/big keeps the full precision.
+	prodBig := new(big.Int).Mul(big.NewInt(virtualSupply), big.NewInt(rate))
+	prodBig.Quo(prodBig, big.NewInt(10000*blocksPerYear))
+	if prodBig.Sign() < 0 {
+		prodBig.SetInt64(0)
 	}
-	newHive := prod
+	newHive := int64(0)
+	if prodBig.IsInt64() {
+		newHive = prodBig.Int64()
+	}
 
 	contentPct := int64(dgpo.ContentRewardPercent)
 	if contentPct == 0 {
