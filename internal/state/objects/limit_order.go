@@ -37,6 +37,15 @@ type LimitOrder struct {
 	MinReceiveAmt       int64
 	MinReceiveSym       uint32
 	SellPriceBaseAmount int64 // immutable; sell_price.base.amount
+	// ID is the auto-incrementing object_id assigned at creation,
+	// mirroring C++'s limit_order_object::id. Used as the tie-break in
+	// the by_price index (composite_key<sell_price desc, id asc> at
+	// limit_order_object_multiindex.hpp). Without this, ties resolve by
+	// (owner, user_orderid) which differs from hived and produces
+	// different match orderings — visible at block 2,890,560 where Go
+	// and C++ pick different makers for the same taker, drifting
+	// individual account balances by 1+ satoshi over subsequent fills.
+	ID uint64
 }
 
 // LimitOrderTable holds the orders.
@@ -76,18 +85,21 @@ const LimitOrderByPriceIndex state.IndexID = 2
 // amounts (mainnet caps are well below that).
 const hivePriceFixedScale = 1_000_000_000_000_000_000
 
-// limitOrderByPriceKey encodes (sell_price, owner, orderID). The price
-// ratio is sell_price.base.amount / sell_price.quote.amount.
+// limitOrderByPriceKey encodes (sell_price, id, owner, orderID). The
+// price ratio is sell_price.base.amount / sell_price.quote.amount. id
+// is the auto-incrementing limit_order_object::id and serves as the
+// tie-break, matching C++'s composite_key<sell_price desc, id asc>.
+// Owner+orderID is appended after id so iteration callers can recover
+// the primary key directly from the index entry without a second
+// lookup.
 //
-// We deliberately accept a small precision loss in the sort key
-// (uint128 fixed-point with 18 fractional digits) — when two orders
-// have prices close enough that the truncated uint128 keys collide,
-// the in-iteration cross-multiply check still gates the actual match,
-// so a minor sort-order drift doesn't change matching outcomes.
-func limitOrderByPriceKey(baseSym uint32, quoteSym uint32, baseAmount, quoteAmount int64, owner auth.AccountName, orderID uint32) []byte {
+// Layout: [base_sym:4][quote_sym:4][price_descending:16][id:8]
+//         [owner_padded:16][orderid:4] — 52 bytes total.
+func limitOrderByPriceKey(baseSym uint32, quoteSym uint32, baseAmount, quoteAmount int64, id uint64, owner auth.AccountName, orderID uint32) []byte {
 	out := state.AppendUint32BE(nil, baseSym)
 	out = state.AppendUint32BE(out, quoteSym)
 	out = append(out, encodePriceDescending(baseAmount, quoteAmount)...)
+	out = state.AppendUint64BE(out, id)
 	out = state.AppendAccountName(out, owner)
 	return state.AppendUint32BE(out, orderID)
 }
@@ -144,6 +156,7 @@ func AppendLimitOrder(dst []byte, lo *LimitOrder) []byte {
 	dst = appendI64LE(dst, lo.MinReceiveAmt)
 	dst = appendU32LE(dst, lo.MinReceiveSym)
 	dst = appendI64LE(dst, lo.SellPriceBaseAmount)
+	dst = appendU64LE(dst, lo.ID)
 	return dst
 }
 
@@ -188,6 +201,12 @@ func ReadLimitOrder(src []byte) (LimitOrder, error) {
 	if lo.SellPriceBaseAmount, err = r.ReadInt64(); err != nil {
 		return lo, err
 	}
+	if r.AtEnd() {
+		return lo, nil
+	}
+	if lo.ID, err = r.ReadUint64(); err != nil {
+		return lo, fmt.Errorf("limit_order.id: %w", err)
+	}
 	if !r.AtEnd() {
 		return lo, errors.New("limit_order: trailing bytes")
 	}
@@ -202,7 +221,7 @@ func PutLimitOrder(s *state.Session, lo *LimitOrder) {
 	s.Put(LimitOrderTable, state.PrimaryIndex, limitOrderKey(lo.Owner, lo.OrderID), AppendLimitOrder(nil, lo))
 	s.Put(LimitOrderTable, LimitOrderByExpirationIndex, limitOrderByExpirationKey(lo.Expiration, lo.Owner, lo.OrderID), nil)
 	s.Put(LimitOrderTable, LimitOrderByPriceIndex,
-		limitOrderByPriceKey(lo.ForSaleSymbol, lo.MinReceiveSym, lo.SellPriceBaseAmount, lo.MinReceiveAmt, lo.Owner, lo.OrderID), nil)
+		limitOrderByPriceKey(lo.ForSaleSymbol, lo.MinReceiveSym, lo.SellPriceBaseAmount, lo.MinReceiveAmt, lo.ID, lo.Owner, lo.OrderID), nil)
 	if lo.Expiration != 0 {
 		s.NudgeExpHint(LimitOrderTable, LimitOrderByExpirationIndex, lo.Expiration)
 	}
@@ -235,7 +254,7 @@ func DeleteLimitOrderFull(s *state.Session, lo *LimitOrder) {
 	s.Delete(LimitOrderTable, state.PrimaryIndex, limitOrderKey(lo.Owner, lo.OrderID))
 	s.Delete(LimitOrderTable, LimitOrderByExpirationIndex, limitOrderByExpirationKey(lo.Expiration, lo.Owner, lo.OrderID))
 	s.Delete(LimitOrderTable, LimitOrderByPriceIndex,
-		limitOrderByPriceKey(lo.ForSaleSymbol, lo.MinReceiveSym, lo.SellPriceBaseAmount, lo.MinReceiveAmt, lo.Owner, lo.OrderID))
+		limitOrderByPriceKey(lo.ForSaleSymbol, lo.MinReceiveSym, lo.SellPriceBaseAmount, lo.MinReceiveAmt, lo.ID, lo.Owner, lo.OrderID))
 }
 
 // silence unused-import on encoding/binary (kept available for future

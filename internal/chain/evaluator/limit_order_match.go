@@ -46,8 +46,9 @@ func applyOrder(ctx *Context, newOrder *objects.LimitOrder) bool {
 	_ = ctx.DB.Range(objects.LimitOrderTable, objects.LimitOrderByPriceIndex, prefix,
 		func(body, _ []byte) (bool, error) {
 			// body layout:
-			//   [base_sym:4][quote_sym:4][price_inv:16][owner:16][orderid:4]
-			const off = 4 + 4 + 16
+			//   [base_sym:4][quote_sym:4][price_inv:16][id:8]
+			//   [owner:16][orderid:4]
+			const off = 4 + 4 + 16 + 8
 			if len(body) < off+state.AccountNameKeyLen+4 {
 				return true, nil
 			}
@@ -117,6 +118,11 @@ func matchOrders(ctx *Context, newOrder, old *objects.LimitOrder) int {
 	// So old_for_sale × match_price = old.ForSaleAmount × old.MinReceiveAmt
 	//                                / old.SellPriceBaseAmount in new's base.
 	oldForSaleInNewBase := mulDiv(old.ForSaleAmount, old.MinReceiveAmt, old.SellPriceBaseAmount)
+	if newOrder.Owner == "abit" && newOrder.OrderID == 52190 {
+		ghiveDiff("GHIVEDIFF MATCH-DBG block=%d new=%s/%d new_for_sale=%d old=%s/%d old_for_sale=%d old_min_recv=%d old_sell_price_base=%d old_for_sale_in_new=%d\n",
+			ctx.BlockNum-1, newOrder.Owner, newOrder.OrderID, newOrder.ForSaleAmount,
+			old.Owner, old.OrderID, old.ForSaleAmount, old.MinReceiveAmt, old.SellPriceBaseAmount, oldForSaleInNewBase)
+	}
 
 	var newOrderPays, newOrderReceives, oldOrderPays, oldOrderReceives int64
 
@@ -230,10 +236,17 @@ func adjustLiquidityVolume(ctx *Context, owner string, delta int64, isHbd bool, 
 // remaining amount_to_receive becomes zero — a dust safety valve from
 // hived). Returns true when the order was fully consumed.
 func fillLimitOrder(ctx *Context, order *objects.LimitOrder, pays, receives int64) bool {
-	if ghiveDiffOwnerMatch(order.Owner) || ghiveDiffWide(ctx.BlockNum) {
-		ghiveDiff("GHIVEDIFF FILL block=%d t=%d seller=%s orderid=%d pays=%d pays_sym=%d receives=%d receives_sym=%d for_sale_before=%d\n",
+	if ctx.BlockNum >= 2889020 && ctx.BlockNum <= 2891791 {
+		preHive := int64(0)
+		preHbd := int64(0)
+		if a, gerr := objects.GetAccount(ctx.DB, order.Owner); gerr == nil {
+			preHive = a.Balance
+			preHbd = a.HBDBalance
+		}
+		ghiveDiff("GHIVEDIFF FILL block=%d t=%d seller=%s orderid=%d pays=%d pays_sym=%d receives=%d receives_sym=%d for_sale_before=%d pre_hive=%d pre_hbd=%d\n",
 			ctx.BlockNum, ctx.HeadBlockTime, order.Owner, order.OrderID,
-			pays, order.ForSaleSymbol, receives, order.MinReceiveSym, order.ForSaleAmount)
+			pays, order.ForSaleSymbol, receives, order.MinReceiveSym, order.ForSaleAmount,
+			preHive, preHbd)
 	}
 	if pays <= 0 || receives <= 0 {
 		return false

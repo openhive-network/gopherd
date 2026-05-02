@@ -160,6 +160,15 @@ func applyLimitOrderCreate(ctx *Context, owner string, orderID uint32, amountToS
 		return fmt.Errorf("%w: %q/%d", ErrLimitOrderExists, owner, orderID)
 	}
 	objects.PutAccount(ctx.DB, &a)
+	// Allocate the auto-incrementing limit_order_object::id from dgpo.
+	// This becomes the by_price tie-break, matching C++'s
+	// composite_key<sell_price desc, id asc>.
+	limitOrderID := uint64(0)
+	if dgpo, derr := objects.GetDGPO(ctx.DB); derr == nil {
+		limitOrderID = dgpo.NextLimitOrderID
+		dgpo.NextLimitOrderID++
+		objects.PutDGPO(ctx.DB, &dgpo)
+	}
 	newOrder := objects.LimitOrder{
 		Owner:               owner,
 		OrderID:             orderID,
@@ -170,6 +179,7 @@ func applyLimitOrderCreate(ctx *Context, owner string, orderID uint32, amountToS
 		MinReceiveAmt:       minToReceive.Amount,
 		MinReceiveSym:       uint32(minToReceive.Symbol.Num),
 		SellPriceBaseAmount: amountToSell.Amount, // immutable, set at create time
+		ID:                  limitOrderID,
 	}
 	objects.PutLimitOrder(ctx.DB, &newOrder)
 

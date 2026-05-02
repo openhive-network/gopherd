@@ -111,6 +111,13 @@ type DynamicGlobalProperty struct {
 	// to the block producer, inflating cur_supply by ~420K vs hived
 	// (1.6% drift visible at the HF7 cashout cascade).
 	NumPowWitnesses uint32
+	// NextLimitOrderID is a monotonic counter assigned to each newly-
+	// created limit_order_object. Used as the by_price index tie-break
+	// — same-price orders match in insertion order, mirroring C++'s
+	// composite_key<sell_price desc, id asc>. Without this, ties break
+	// by (owner, user_orderid) — different match sequences than hived,
+	// drifts account balances over time.
+	NextLimitOrderID uint64
 }
 
 // AppendDGPO serializes p to dst.
@@ -139,6 +146,7 @@ func AppendDGPO(dst []byte, p *DynamicGlobalProperty) []byte {
 	dst = appendI64LE(dst, p.AvailableAccountSubsidies)
 	dst = appendU64LE(dst, p.NextCommentID)
 	dst = appendU32LE(dst, p.NumPowWitnesses)
+	dst = appendU64LE(dst, p.NextLimitOrderID)
 	return dst
 }
 
@@ -243,6 +251,12 @@ func ReadDGPO(src []byte) (DynamicGlobalProperty, error) {
 	}
 	if p.NumPowWitnesses, err = r.ReadUint32(); err != nil {
 		return p, fmt.Errorf("dgpo.num_pow_witnesses: %w", err)
+	}
+	if r.AtEnd() {
+		return p, nil
+	}
+	if p.NextLimitOrderID, err = r.ReadUint64(); err != nil {
+		return p, fmt.Errorf("dgpo.next_limit_order_id: %w", err)
 	}
 	if !r.AtEnd() {
 		return p, errors.New("dgpo: trailing bytes after decode (schema mismatch?)")
