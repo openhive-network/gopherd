@@ -94,11 +94,26 @@ func payPowReward(ctx *Context) error {
 	if witnessName == "" {
 		return nil
 	}
+	// hived bumps num_pow_witnesses on EVERY pow op (pow_apply at
+	// hive_evaluator.cpp:454) — before computing get_pow_reward — so the
+	// 21st pow op overall is the first to pay non-zero. Pre-HIVE_START_
+	// VESTING_BLOCK (201,600), get_pow_reward returns 0 until num >= 21
+	// (database.cpp:1940). Without this gate, pre-201,600 pow ops pay
+	// 21,000 satoshi each from block 1, inflating cur_supply by ~420K
+	// vs hived (visible at the HF7 cashout cascade as a constant 1.6%
+	// drift).
+	dgpo.NumPowWitnesses++
+	const startVestingBlock uint32 = 7 * 28800 // HIVE_START_VESTING_BLOCK
+	if ctx.BlockNum < startVestingBlock && dgpo.NumPowWitnesses < uint32(maxWitnesses) {
+		objects.PutDGPO(ctx.DB, &dgpo)
+		return nil
+	}
 	pay := minPowReward
 	if ctx.BlockNum < startMinerVotingBlockPow {
 		pay *= maxWitnesses
 	}
 	if _, err := objects.GetAccount(ctx.DB, witnessName); err != nil {
+		objects.PutDGPO(ctx.DB, &dgpo)
 		return nil
 	}
 	// hived's adjust_supply(pow_reward, /*adjust_vesting=*/true) at
@@ -106,7 +121,6 @@ func payPowReward(ctx *Context) error {
 	// (7×28800 = 201600) and delta > 0, fund_hive grows by 9× the
 	// reward and supply by 10×. Pre-201600 the vesting leg is
 	// suppressed (only current_supply += pay).
-	const startVestingBlock uint32 = 7 * 28800
 	newVesting := int64(0)
 	if ctx.BlockNum >= startVestingBlock && pay > 0 {
 		newVesting = pay * 9

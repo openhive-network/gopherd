@@ -103,6 +103,14 @@ type DynamicGlobalProperty struct {
 	// at the HF7 cascade and propagates fund/shares2 drift through every
 	// subsequent cashout.
 	NextCommentID uint64
+	// NumPowWitnesses counts pow operations applied so far (mirrors
+	// dynamic_global_property_object::num_pow_witnesses). Pre-HIVE_START_
+	// VESTING_BLOCK (block 201,600) get_pow_reward returns 0 until this
+	// counter reaches HIVE_MAX_WITNESSES (21) — see database.cpp:1940.
+	// Without this gate, every pow op pre-201,600 pays 21K HIVE-satoshi
+	// to the block producer, inflating cur_supply by ~420K vs hived
+	// (1.6% drift visible at the HF7 cashout cascade).
+	NumPowWitnesses uint32
 }
 
 // AppendDGPO serializes p to dst.
@@ -130,6 +138,7 @@ func AppendDGPO(dst []byte, p *DynamicGlobalProperty) []byte {
 	dst = appendU32LE(dst, p.DelegationReturnPeriod)
 	dst = appendI64LE(dst, p.AvailableAccountSubsidies)
 	dst = appendU64LE(dst, p.NextCommentID)
+	dst = appendU32LE(dst, p.NumPowWitnesses)
 	return dst
 }
 
@@ -228,6 +237,12 @@ func ReadDGPO(src []byte) (DynamicGlobalProperty, error) {
 	}
 	if p.NextCommentID, err = r.ReadUint64(); err != nil {
 		return p, fmt.Errorf("dgpo.next_comment_id: %w", err)
+	}
+	if r.AtEnd() {
+		return p, nil
+	}
+	if p.NumPowWitnesses, err = r.ReadUint32(); err != nil {
+		return p, fmt.Errorf("dgpo.num_pow_witnesses: %w", err)
 	}
 	if !r.AtEnd() {
 		return p, errors.New("dgpo: trailing bytes after decode (schema mismatch?)")
