@@ -1,7 +1,10 @@
 package chain
 
 import (
+	"math/big"
+
 	"hived-go/internal/protocol/hardfork"
+	"hived-go/internal/reward"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
 )
@@ -400,10 +403,24 @@ func performVestingShareSplit(s *state.Session, magnitude int64) {
 	rebuildCommentRshares(s, magnitude)
 }
 
-// rebuildCommentRshares scales every comment's NetRshares by magnitude
-// and re-accumulates curve(NetRshares) for the positive-rshares ones
-// into dgpo.TotalRewardShares2. Mirrors the comments-and-rshares loop
-// from perform_vesting_share_split.
+// rebuildCommentRshares scales every comment's NetRshares (and the
+// AbsRshares + VoteRshares accumulators) by magnitude and re-adds
+// curve(NetRshares × magnitude) to dgpo.TotalRewardShares2 for every
+// positive-rshares comment. Mirrors the comments-and-rshares loop in
+// perform_vesting_share_split (database_comment.cpp:681-701).
+//
+// Without the post-scale curve re-add, dgpo.total_reward_shares2 stays
+// at 0 (it was zeroed at the top of the share split) and pre-HF1
+// comments' contributions never come back. The first post-HF1 vote on
+// any pre-HF1 comment then computes
+//
+//	delta = curve(old_net_post_scale + rshares) - curve(old_net_post_scale)
+//
+// against a shares2=0 baseline — i.e., adds only the *delta* of that
+// vote rather than the full curve. Cumulative deficit ≈ sum of
+// curve(pre_HF1_net × magnitude) over every comment that had positive
+// rshares pre-HF1, which is exactly the constant 1.6% gap we saw at
+// the HF7 cashout cascade vs hived.
 func rebuildCommentRshares(s *state.Session, magnitude int64) {
 	type pending struct {
 		author, permlink string
@@ -418,18 +435,47 @@ func rebuildCommentRshares(s *state.Session, magnitude int64) {
 			queue = append(queue, pending{author: c.Author, permlink: c.Permlink})
 			return true, nil
 		})
+	dgpo, dgpoErr := objects.GetDGPO(s)
+	total := reward.Uint128FromBytes(dgpo.TotalRewardShares2)
 	for _, p := range queue {
 		c, err := objects.GetComment(s, p.author, p.permlink)
 		if err != nil {
 			continue
 		}
 		c.NetRshares *= magnitude
+		// AbsRshares + VoteRshares are accumulators with the same
+		// per-vote scale as NetRshares, so they multiply by magnitude
+		// too (mirrors comment_cashout_ex.accumulate_abs_rshares at
+		// database_comment.cpp:693).
+		c.AbsRshares *= magnitude
+		// VoteRshares is uint64; cast through math/big to avoid signed
+		// overflow when magnitude × rshares stays below 2^64.
+		if c.VoteRshares > 0 {
+			vr := new(big.Int).Mul(new(big.Int).SetUint64(c.VoteRshares), big.NewInt(magnitude))
+			if vr.IsUint64() {
+				c.VoteRshares = vr.Uint64()
+			} else {
+				c.VoteRshares = ^uint64(0)
+			}
+		}
+		// children_abs_rshares scales the same way.
+		if c.ChildrenAbsRshares > 0 {
+			cr := new(big.Int).Mul(new(big.Int).SetUint64(c.ChildrenAbsRshares), big.NewInt(magnitude))
+			if cr.IsUint64() {
+				c.ChildrenAbsRshares = cr.Uint64()
+			} else {
+				c.ChildrenAbsRshares = ^uint64(0)
+			}
+		}
 		objects.PutComment(s, &c)
+		if c.NetRshares > 0 {
+			total.Add(total, reward.EvaluateRewardCurveQuadratic(c.NetRshares))
+		}
 	}
-	// total_reward_shares2 will rebuild organically as new votes hit
-	// adjustRewardShares2; we leave it zero here, matching hived's
-	// "reset then re-add" with the re-add deferred to natural vote
-	// flow rather than a hardfork-time scan.
+	if dgpoErr == nil {
+		dgpo.TotalRewardShares2 = reward.Uint128ToBytes(total)
+		objects.PutDGPO(s, &dgpo)
+	}
 }
 
 // applyHardfork12CommentCashoutFix mirrors

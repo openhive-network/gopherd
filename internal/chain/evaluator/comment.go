@@ -481,11 +481,19 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 	if usedPower > currentPower {
 		return fmt.Errorf("vote: %q does not have enough power (%d > %d)", v.Voter, usedPower, currentPower)
 	}
-	// abs_rshares = vesting × used_power / HIVE_100_PERCENT. Pre-HF1 the
-	// product fits comfortably in int64; post-HF1 vesting can reach 1e16
-	// satoshi but used_power ≤ ~50, so 5e17 still fits. big.Int kept for
-	// defensive overflow safety.
-	absRsharesBig := new(big.Int).Mul(big.NewInt(voter.VestingShares), big.NewInt(usedPower))
+	// abs_rshares = effective_vesting_shares × used_power / HIVE_100_PERCENT
+	// (hive_evaluator_social.cpp:364). C++ calls
+	// get_effective_vesting_shares(false), which is
+	// vesting_shares - delegated_vesting_shares + received_vesting_shares
+	// (excludeWeeklyPowerDown=false ⇒ skip the next-withdrawal subtraction).
+	// Voters with active delegations have effective != raw vesting; using
+	// raw VestingShares here over-credits delegators and under-credits
+	// delegatees, drifting shares2 over time.
+	effectiveVesting := voter.VestingShares - voter.DelegatedVestingShares + voter.ReceivedVestingShares
+	if effectiveVesting < 0 {
+		effectiveVesting = 0
+	}
+	absRsharesBig := new(big.Int).Mul(big.NewInt(effectiveVesting), big.NewInt(usedPower))
 	absRsharesBig.Quo(absRsharesBig, big.NewInt(hivePercent))
 	var absRshares int64
 	if absRsharesBig.IsInt64() {

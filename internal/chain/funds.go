@@ -224,7 +224,6 @@ func processFunds(s *state.Session, blockNum uint32, witnessName string) {
 		processFundsHF16(s, &dgpo, blockNum, witnessName)
 		return
 	}
-
 	// Pre-HF16 path: rewards computed off virtual_supply (HIVE + HBD-as-HIVE
 	// at the median feed). C++ database.cpp:2331 calls update_virtual_supply
 	// just before process_funds, so by the time get_content_reward fires
