@@ -68,10 +68,10 @@ func updateMedianFeed(s *state.Session, blockNum, blockTime uint32) {
 	var feeds []asset.Price
 	if ws, err := objects.GetWitnessSchedule(s); err == nil {
 		// C++ database.cpp:2476-2494 iterates wso.current_shuffled_witnesses
-		// position-by-position. Mirror that — updateWitnessSchedule has
-		// backfilled the ring's most-recent-producer-not-already-elected
-		// into CurrentShuffledWitnesses so the schedule reaches the
-		// HIVE_MAX_WITNESSES (21) target C++'s schedule has.
+		// position-by-position. The full-parity update_witness_schedule_4
+		// fills CurrentShuffledWitnesses with 21 entries (max_voted +
+		// max_miner + max_runner timeshare via virtual_scheduled_time)
+		// matching C++'s active set.
 		for _, n := range ws.CurrentShuffledWitnesses {
 			name := string(n)
 			if name == "" {

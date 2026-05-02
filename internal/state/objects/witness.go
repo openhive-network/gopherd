@@ -44,6 +44,24 @@ type Witness struct {
 	// Updated every shuffle by update_witness_schedule. process_funds
 	// reads this to apply the per-slot pay weight.
 	Schedule WitnessScheduleType
+	// VirtualLastUpdate / VirtualPosition / VirtualScheduledTime are the
+	// uint128 trio (16 bytes each, big-endian wire format) used by
+	// hived's update_witness_schedule_4 to pick the timeshare slot.
+	// VirtualScheduledTime is the chain-wide rank ordering: smaller
+	// value = sooner-to-be-scheduled. After being picked as timeshare,
+	// the witness's VST advances by HIVE_VIRTUAL_SCHEDULE_LAP_LENGTH2
+	// / (votes + 1), so high-vote witnesses get re-scheduled sooner.
+	// Mirrors witness_object fields virtual_last_update,
+	// virtual_position, virtual_scheduled_time.
+	VirtualLastUpdate    [16]byte
+	VirtualPosition      [16]byte
+	VirtualScheduledTime [16]byte
+	// PowWorker is a counter set by pow / pow2 ops to put the witness
+	// in hived's `by_pow` index. update_witness_schedule_4 pops the
+	// smallest-PowWorker witness as the miner slot and zeroes their
+	// PowWorker (so the by_pow index drops them). pre-HF13 only.
+	// Mirrors witness_object::pow_worker.
+	PowWorker uint64
 }
 
 // WitnessScheduleType mirrors witness_object::schedule_type:
@@ -79,6 +97,15 @@ const (
 	// without scanning the whole witness table. Key:
 	// [^uint64(votes)_BE_8][owner_padded_16].
 	WitnessByVoteIndex state.IndexID = 2
+	// WitnessByScheduleTimeIndex orders witnesses by VirtualScheduledTime
+	// ASC, owner ASC. Mirrors hived's by_schedule_time multi_index used
+	// by update_witness_schedule_4 to pick the timeshare slot
+	// (smallest virtual_scheduled_time wins). Key: [vst_BE_16][owner_padded_16].
+	WitnessByScheduleTimeIndex state.IndexID = 3
+	// WitnessByPowIndex orders witnesses by PowWorker ASC (excluding
+	// witnesses with PowWorker == 0). Mirrors hived's by_pow
+	// multi_index. Key: [pow_BE_8][owner_padded_16].
+	WitnessByPowIndex state.IndexID = 4
 )
 
 // witnessByVoteKey encodes (votes, owner) so byte-wise lex order
@@ -90,6 +117,21 @@ func witnessByVoteKey(votes int64, owner auth.AccountName) []byte {
 		v = 0
 	}
 	out := state.AppendUint64BE(nil, ^v)
+	return state.AppendAccountName(out, owner)
+}
+
+// witnessByScheduleTimeKey encodes (virtual_scheduled_time, owner) so
+// lex order matches ascending VST then ascending owner. VST is stored
+// big-endian so byte-wise compare matches uint128 numeric compare.
+func witnessByScheduleTimeKey(vst [16]byte, owner auth.AccountName) []byte {
+	out := append(make([]byte, 0, 32), vst[:]...)
+	return state.AppendAccountName(out, owner)
+}
+
+// witnessByPowKey encodes (pow_worker, owner). PowWorker == 0 marks
+// "not in the pow queue" — callers must skip the index entry for those.
+func witnessByPowKey(pow uint64, owner auth.AccountName) []byte {
+	out := state.AppendUint64BE(nil, pow)
 	return state.AppendAccountName(out, owner)
 }
 
@@ -113,6 +155,10 @@ func AppendWitness(dst []byte, w *Witness) []byte {
 	dst = appendU32LE(dst, w.LastHBDExchangeUpdate)
 	dst = appendI64LE(dst, w.AvailableWitnessAccountSubsidies)
 	dst = append(dst, byte(w.Schedule))
+	dst = append(dst, w.VirtualLastUpdate[:]...)
+	dst = append(dst, w.VirtualPosition[:]...)
+	dst = append(dst, w.VirtualScheduledTime[:]...)
+	dst = appendU64LE(dst, w.PowWorker)
 	return dst
 }
 
@@ -186,6 +232,23 @@ func ReadWitness(src []byte) (Witness, error) {
 		return w, fmt.Errorf("witness.schedule: %w", err)
 	}
 	w.Schedule = WitnessScheduleType(sb)
+	// VirtualLastUpdate / VirtualPosition / VirtualScheduledTime / PowWorker
+	// are a later schema addition — tolerate EOF for older rows.
+	if r.AtEnd() {
+		return w, nil
+	}
+	if err := r.ReadInto(w.VirtualLastUpdate[:]); err != nil {
+		return w, fmt.Errorf("witness.virtual_last_update: %w", err)
+	}
+	if err := r.ReadInto(w.VirtualPosition[:]); err != nil {
+		return w, fmt.Errorf("witness.virtual_position: %w", err)
+	}
+	if err := r.ReadInto(w.VirtualScheduledTime[:]); err != nil {
+		return w, fmt.Errorf("witness.virtual_scheduled_time: %w", err)
+	}
+	if w.PowWorker, err = r.ReadUint64(); err != nil {
+		return w, fmt.Errorf("witness.pow_worker: %w", err)
+	}
 	if !r.AtEnd() {
 		return w, errors.New("witness: trailing bytes")
 	}
@@ -197,20 +260,79 @@ func WitnessKey(owner auth.AccountName) []byte {
 	return state.AppendAccountName(nil, owner)
 }
 
-// PutWitness stores w under its owner key and maintains the by-vote
-// secondary index. If a prior record exists with different votes, the
-// stale by-vote entry is removed first.
+// PutWitness stores w under its owner key and maintains the by-vote,
+// by-schedule-time, and by-pow secondary indexes. If a prior record
+// exists with different values for the indexed fields, the stale
+// entries are removed first.
 func PutWitness(s *state.Session, w *Witness) {
-	if oldVotes, ok := readWitnessVotes(s, w.Owner); ok {
-		if oldVotes != w.TotalVotesVests {
-			s.Delete(WitnessTable, WitnessByVoteIndex, witnessByVoteKey(oldVotes, w.Owner))
+	// Read prior row (if any) to know what stale index entries to drop.
+	prev, hadPrev := readWitnessIndexFields(s, w.Owner)
+	if hadPrev {
+		if prev.votes != w.TotalVotesVests {
+			s.Delete(WitnessTable, WitnessByVoteIndex, witnessByVoteKey(prev.votes, w.Owner))
 			s.Put(WitnessTable, WitnessByVoteIndex, witnessByVoteKey(w.TotalVotesVests, w.Owner), nil)
+		}
+		if prev.vst != w.VirtualScheduledTime {
+			if !virtualTimeIsZero(prev.vst) {
+				s.Delete(WitnessTable, WitnessByScheduleTimeIndex, witnessByScheduleTimeKey(prev.vst, w.Owner))
+			}
+			if !virtualTimeIsZero(w.VirtualScheduledTime) {
+				s.Put(WitnessTable, WitnessByScheduleTimeIndex, witnessByScheduleTimeKey(w.VirtualScheduledTime, w.Owner), nil)
+			}
+		}
+		if prev.pow != w.PowWorker {
+			if prev.pow != 0 {
+				s.Delete(WitnessTable, WitnessByPowIndex, witnessByPowKey(prev.pow, w.Owner))
+			}
+			if w.PowWorker != 0 {
+				s.Put(WitnessTable, WitnessByPowIndex, witnessByPowKey(w.PowWorker, w.Owner), nil)
+			}
 		}
 	} else {
 		s.Put(WitnessTable, WitnessByVoteIndex, witnessByVoteKey(w.TotalVotesVests, w.Owner), nil)
+		if !virtualTimeIsZero(w.VirtualScheduledTime) {
+			s.Put(WitnessTable, WitnessByScheduleTimeIndex, witnessByScheduleTimeKey(w.VirtualScheduledTime, w.Owner), nil)
+		}
+		if w.PowWorker != 0 {
+			s.Put(WitnessTable, WitnessByPowIndex, witnessByPowKey(w.PowWorker, w.Owner), nil)
+		}
 	}
 	s.SerScratch = AppendWitness(s.SerScratch[:0], w)
 	s.Put(WitnessTable, state.PrimaryIndex, WitnessKey(w.Owner), s.SerScratch)
+}
+
+// virtualTimeIsZero reports whether all 16 bytes are 0 — meaning the
+// witness has no by_schedule_time index entry yet (typical at row
+// creation; first set when reset_virtual_schedule_time runs or when
+// update_witness_schedule_4 advances them).
+func virtualTimeIsZero(v [16]byte) bool {
+	for _, b := range v {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+type witnessIndexFields struct {
+	votes int64
+	vst   [16]byte
+	pow   uint64
+}
+
+// readWitnessIndexFields fetches the prior index fields for a witness
+// without keeping the whole struct around — used by PutWitness to
+// detect stale index entries that need deletion.
+func readWitnessIndexFields(s *state.Session, owner auth.AccountName) (witnessIndexFields, bool) {
+	v, err := s.Get(WitnessTable, state.PrimaryIndex, WitnessKey(owner))
+	if err != nil {
+		return witnessIndexFields{}, false
+	}
+	w, err := ReadWitness(v)
+	if err != nil {
+		return witnessIndexFields{}, false
+	}
+	return witnessIndexFields{votes: w.TotalVotesVests, vst: w.VirtualScheduledTime, pow: w.PowWorker}, true
 }
 
 // readWitnessVotes returns the stored TotalVotesVests for the named
@@ -227,6 +349,11 @@ func readWitnessVotes(s *state.Session, owner auth.AccountName) (int64, bool) {
 	}
 	return w.TotalVotesVests, true
 }
+
+// _ keeps readWitnessVotes referenced even if no callsite remains
+// after the index-aware PutWitness rewrite — the helper is still
+// useful to other code paths.
+var _ = readWitnessVotes
 
 // GetWitness fetches the witness named owner.
 func GetWitness(s *state.Session, owner auth.AccountName) (Witness, error) {

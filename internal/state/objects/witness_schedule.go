@@ -61,15 +61,24 @@ type WitnessSchedule struct {
 
 	// RecentBlockProducers is a sliding window of producer names from
 	// the most recent HIVE_MAX_WITNESSES blocks (oldest first, newest
-	// last). C++'s update_median_feed iterates the wso schedule which
-	// is rebuilt each round from max_voted/max_miner/timeshare slots —
-	// without modeling the miner queue or virtual-time fairness queue
-	// we can't compute the schedule the same way; instead we track who
-	// actually produced the recent blocks (the producer name comes
-	// from the trusted block header). The set of producers in this
-	// window matches C++'s active schedule by definition since the
-	// chain ran on C++'s schedule.
+	// last). Kept around historically when we hadn't yet ported
+	// virtual_scheduled_time scheduling — the genuine schedule comes
+	// from update_witness_schedule_4 now. Retained on disk for legacy
+	// rows; new rows leave it empty.
 	RecentBlockProducers []auth.AccountName
+	// MajorityVersion is the highest version the schedule's witnesses
+	// have running on (sum across witnesses must reach
+	// HardforkRequiredWitnesses for the version to count). Mirrors
+	// witness_schedule_object::majority_version.
+	MajorityVersion uint32
+	// HardforkRequiredWitnesses defaults to HIVE_HARDFORK_REQUIRED_WITNESSES
+	// (17 of 21). Read by update_witness_schedule_4 when tallying
+	// version votes.
+	HardforkRequiredWitnesses uint8
+	// MaxRunnerWitnesses (a.k.a. timeshare slots count). Pre-HF20: 1;
+	// HF17+: 1. Together with MaxVotedWitnesses + MaxMinerWitnesses
+	// must sum to HIVE_MAX_WITNESSES (21).
+	MaxRunnerWitnesses uint8
 }
 
 // AppendWitnessSchedule serializes the schedule.
@@ -95,6 +104,8 @@ func AppendWitnessSchedule(dst []byte, w *WitnessSchedule) []byte {
 		dst = fcraw.AppendVarUint(dst, uint32(len(n)))
 		dst = append(dst, n...)
 	}
+	dst = appendU32LE(dst, w.MajorityVersion)
+	dst = append(dst, w.HardforkRequiredWitnesses, w.MaxRunnerWitnesses)
 	return dst
 }
 
@@ -175,6 +186,18 @@ func ReadWitnessSchedule(src []byte) (WitnessSchedule, error) {
 			}
 			w.RecentBlockProducers[i] = s
 		}
+	}
+	if r.AtEnd() {
+		return w, nil
+	}
+	if w.MajorityVersion, err = r.ReadUint32(); err != nil {
+		return w, fmt.Errorf("ws.majority_version: %w", err)
+	}
+	if w.HardforkRequiredWitnesses, err = r.ReadByte(); err != nil {
+		return w, fmt.Errorf("ws.hardfork_required_witnesses: %w", err)
+	}
+	if w.MaxRunnerWitnesses, err = r.ReadByte(); err != nil {
+		return w, fmt.Errorf("ws.max_runner_witnesses: %w", err)
 	}
 	if !r.AtEnd() {
 		return w, errors.New("witness_schedule: trailing bytes")

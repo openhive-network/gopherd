@@ -210,17 +210,32 @@ func ensureMinerAccountForPow(ctx *Context, worker string, payReward bool) error
 	}
 	// Register the worker as a witness if missing — hived's pow_apply
 	// calls db.create<witness_object>(...) on first pow from this
-	// account, alongside the account creation.
+	// account, alongside the account creation. Mark them in the
+	// PoW miner queue (witness_object::pow_worker = head_block_num+1
+	// so it's monotonic and never zero) and bump
+	// dgpo.num_pow_witnesses; update_witness_schedule's miner-slot
+	// pass will pop them later. Existing witnesses re-running PoW
+	// also bump the queue position.
 	wExists, err := objects.HasWitness(ctx.DB, worker)
 	if err != nil {
 		return err
 	}
+	var w objects.Witness
 	if !wExists {
-		objects.PutWitness(ctx.DB, &objects.Witness{
+		w = objects.Witness{
 			Owner:   worker,
 			Created: ctx.HeadBlockTime,
-		})
+		}
+		seedVirtualScheduledTime(&w)
+	} else {
+		got, err := objects.GetWitness(ctx.DB, worker)
+		if err != nil {
+			return err
+		}
+		w = got
 	}
+	w.PowWorker = uint64(ctx.BlockNum) + 1
+	objects.PutWitness(ctx.DB, &w)
 	if !payReward {
 		return nil
 	}

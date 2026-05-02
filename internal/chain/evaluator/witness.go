@@ -108,10 +108,40 @@ func (witnessUpdateEvaluator) Apply(ctx *Context, o op.Operation) error {
 			w.HardforkVersionVote = prev.HardforkVersionVote
 			w.HardforkTimeVote = prev.HardforkTimeVote
 			w.RunningVersion = prev.RunningVersion
+			w.VirtualLastUpdate = prev.VirtualLastUpdate
+			w.VirtualPosition = prev.VirtualPosition
+			w.VirtualScheduledTime = prev.VirtualScheduledTime
+			w.PowWorker = prev.PowWorker
 		}
+	} else {
+		// New witness: seed VirtualScheduledTime to LAP_LENGTH2 /
+		// (votes+1) so the by_schedule_time index has them. Mirrors
+		// hived's witness_object construction at create<witness_object>
+		// where the multi_index ctor populates schedule fields based
+		// on votes (=0 for a fresh witness, so VST = LAP_LENGTH2).
+		seedVirtualScheduledTime(&w)
 	}
 	objects.PutWitness(ctx.DB, &w)
 	return nil
+}
+
+// seedVirtualScheduledTime initializes the virtual scheduling fields on
+// a freshly-created witness. Mirrors witness_schedule.cpp:35-38.
+func seedVirtualScheduledTime(w *objects.Witness) {
+	// We don't import math/big here directly to avoid pulling
+	// uint128 helpers — the chain.uint128* helpers live in the chain
+	// package. Instead we hand-roll the simple case: votes is 0 (or
+	// some small value) for a brand-new witness, so VST starts at
+	// LAP_LENGTH2 / (votes+1). For votes=0, that's LAP_LENGTH2 = 2^128-1.
+	// For non-zero votes (existing witnesses being initialized for the
+	// first time post-schema-bump), use the math/big helper at the
+	// scheduler.
+	w.VirtualScheduledTime = [16]byte{
+		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+	}
+	w.VirtualPosition = [16]byte{}
+	w.VirtualLastUpdate = [16]byte{}
 }
 
 // witnessSetPropertiesEvaluator implements HF20+ witness_set_properties.

@@ -1,6 +1,7 @@
 package chain
 
 import (
+	"math/big"
 	"sort"
 
 	"hived-go/internal/protocol/auth"
@@ -9,30 +10,33 @@ import (
 	"hived-go/internal/state/objects"
 )
 
+// HIVE_HARDFORK_REQUIRED_WITNESSES — the number of scheduled witnesses
+// that must run a given version (or vote a given hardfork) for it to
+// take effect. From libraries/protocol/include/hive/protocol/config.hpp.
+const hiveHardforkRequiredWitnesses uint8 = 17
+
+// initMinerName returns the genesis initminer name. Mainnet uses
+// "initminer"; we don't differentiate testnet here since both share
+// the same name.
+func initMinerName(_ uint32) string { return "initminer" }
 
 // updateWitnessSchedule mirrors database::update_witness_schedule
-// (libraries/chain/witness_schedule.cpp:560). Called every block; the
-// schedule actually rotates only when a "round" ends — i.e., when
-// head_block_num + 1 reaches NextShuffleBlockNum.
+// (libraries/chain/witness_schedule.cpp:403). Called every block; the
+// schedule actually rotates only when (head_block_num % HIVE_MAX_WITNESSES)
+// == 0 — i.e., once per round (every 21 blocks).
 //
-// Algorithm (simplified):
+// Two scheduling algorithms exist:
+//   - Pre-HF4: legacy path that locks out the top max_voted-2 witnesses
+//     by setting their VirtualScheduledTime to MAX, then picks ONE
+//     timeshare witness from by_schedule_time, then drains the PoW
+//     queue into the remaining slots.
+//   - Post-HF4: update_witness_schedule_4 — picks max_voted by votes,
+//     max_miner from PoW queue, fills remaining slots from
+//     by_schedule_time, advances each picked timeshare's VST by
+//     LAP_LENGTH2 / (votes+1).
 //
-//  1. select top-N witnesses by total_votes_vests, where N = min(
-//     num_active_witnesses, MaxVotedWitnesses + MaxMinerWitnesses + 1)
-//  2. shuffle deterministically using the current_virtual_time as seed
-//  3. write back to the schedule singleton
-//  4. compute median props from the active set; copy to DGPO
-//
-// We elide the virtual-time scheduling for the timeshare slot (the
-// "fairness queue" that lets low-vote witnesses produce occasionally)
-// — replay correctness only depends on the SET of producers per block,
-// not on the round-robin order vs hived. Block-id parity is preserved
-// because we don't sign blocks during replay; the witness is read
-// from the block header bytes, which we trust verbatim.
-//
-// For the testfixture path, the schedule is consulted by the fixture
-// to pick block.witness; for the on-disk replay path, the witness
-// comes from the parsed block header.
+// Both algorithms then xorshift-shuffle the active set, recompute
+// median witness props, and update next_shuffle_block_num.
 func updateWitnessSchedule(s *state.Session, blockNum uint32) {
 	dgpo, err := objects.GetDGPO(s)
 	if err != nil {
@@ -40,44 +44,54 @@ func updateWitnessSchedule(s *state.Session, blockNum uint32) {
 	}
 
 	ws, err := objects.GetWitnessSchedule(s)
-	if err != nil {
+	if err != nil || ws.NumScheduledWitnesses == 0 {
 		// Bootstrap: create a schedule containing initminer.
 		ws = objects.WitnessSchedule{
 			NumScheduledWitnesses: 1,
 			CurrentShuffledWitnesses: []auth.AccountName{
 				auth.AccountName(initMinerName(blockNum)),
 			},
-			MaxVotedWitnesses: objects.MaxVotedWitnessesHF0,
-			MaxMinerWitnesses: objects.MaxMinerWitnessesHF0,
-			NextShuffleBlockNum: blockNum + 1,
+			MaxVotedWitnesses:         objects.MaxVotedWitnessesHF0,
+			MaxMinerWitnesses:         objects.MaxMinerWitnessesHF0,
+			MaxRunnerWitnesses:        1,
+			HardforkRequiredWitnesses: hiveHardforkRequiredWitnesses,
+			NextShuffleBlockNum:       blockNum + 1,
+			ElectedWeight:             1,
+			MinerWeight:               1,
+			TimeshareWeight:           5,
 		}
 		objects.PutWitnessSchedule(s, &ws)
 	}
 
-	// Track recent block producers in a 2-round window — used by
-	// update_median_feed as the active schedule. We don't model C++'s
-	// miner queue + virtual-time timeshare slot, so we can't rebuild
-	// current_shuffled_witnesses faithfully; the actual block headers
-	// are the canonical record of who was scheduled.
-	const recentProducerWindow = 2 * int(objects.MaxWitnesses)
+	// Track recent block producers for backward compatibility — the
+	// median feed reads CurrentShuffledWitnesses now, but the ring is
+	// kept around for any legacy debugging code that reads it.
 	if dgpo.CurrentWitness != "" {
 		newProd := auth.AccountName(dgpo.CurrentWitness)
 		if len(ws.RecentBlockProducers) == 0 ||
 			ws.RecentBlockProducers[len(ws.RecentBlockProducers)-1] != newProd {
 			ws.RecentBlockProducers = append(ws.RecentBlockProducers, newProd)
-			if len(ws.RecentBlockProducers) > recentProducerWindow {
-				ws.RecentBlockProducers = ws.RecentBlockProducers[len(ws.RecentBlockProducers)-recentProducerWindow:]
+			if len(ws.RecentBlockProducers) > int(objects.MaxWitnesses) {
+				ws.RecentBlockProducers = ws.RecentBlockProducers[len(ws.RecentBlockProducers)-int(objects.MaxWitnesses):]
 			}
 		}
 	}
 
-	// Hardfork-conditional schedule sizing.
+	// Hardfork-conditional schedule sizing (mirrors witness_schedule_object
+	// activation logic at hardfork apply sites).
 	hf := hardfork.SetForBlock(blockNum)
 	prevMaxVoted := ws.MaxVotedWitnesses
 	prevMaxMiner := ws.MaxMinerWitnesses
+	prevMaxRunner := ws.MaxRunnerWitnesses
 	if hf.Has(hardfork.HF20) {
 		ws.MaxVotedWitnesses = objects.MaxVotedWitnessesHF20
 		ws.MaxMinerWitnesses = 0
+		ws.MaxRunnerWitnesses = 1
+	} else if hf.Has(hardfork.HF17) {
+		// HF17 raises elected from 19 → 20 and drops miners.
+		ws.MaxVotedWitnesses = 20
+		ws.MaxMinerWitnesses = 0
+		ws.MaxRunnerWitnesses = 1
 	} else {
 		if ws.MaxVotedWitnesses == 0 {
 			ws.MaxVotedWitnesses = objects.MaxVotedWitnessesHF0
@@ -85,123 +99,13 @@ func updateWitnessSchedule(s *state.Session, blockNum uint32) {
 		if ws.MaxMinerWitnesses == 0 {
 			ws.MaxMinerWitnesses = objects.MaxMinerWitnessesHF0
 		}
-	}
-
-	// Only re-shuffle once per round, when head_block_num reaches
-	// the next-shuffle marker. On the early-return path persist if
-	// hardfork sizing or RecentBlockProducers changed.
-	if blockNum < ws.NextShuffleBlockNum {
-		objects.PutWitnessSchedule(s, &ws)
-		_ = prevMaxVoted
-		_ = prevMaxMiner
-		_ = dgpo
-		return
-	}
-
-	// Walk the by-vote secondary index (votes desc, name asc) and pull
-	// at most `want` candidates. Stops as soon as we have enough valid
-	// ones — avoids scanning the full witness table every shuffle.
-	type entry struct {
-		name  auth.AccountName
-		votes int64
-	}
-	var all []entry
-	cachedWitnesses := make(map[auth.AccountName]objects.Witness, objects.MaxWitnesses)
-	want := int(ws.MaxVotedWitnesses) + int(ws.MaxMinerWitnesses)
-	if want == 0 || want > objects.MaxWitnesses {
-		want = objects.MaxWitnesses
-	}
-	zero := [33]byte{}
-	_ = s.Range(objects.WitnessTable, objects.WitnessByVoteIndex, nil,
-		func(key, _ []byte) (bool, error) {
-			if len(key) < 8+state.AccountNameKeyLen {
-				return true, nil
-			}
-			// Decode owner from the secondary key bytes (votes_8 + name_16).
-			ownerBytes := key[8 : 8+state.AccountNameKeyLen]
-			n := state.AccountNameKeyLen
-			for n > 0 && ownerBytes[n-1] == 0 {
-				n--
-			}
-			owner := auth.AccountName(string(ownerBytes[:n]))
-			w, err := objects.GetWitness(s, owner)
-			if err != nil {
-				return true, nil
-			}
-			if hf.Has(hardfork.HF14) && w.BlockSigningKey == zero {
-				return true, nil
-			}
-			cachedWitnesses[w.Owner] = w
-			all = append(all, entry{name: w.Owner, votes: w.TotalVotesVests})
-			if len(all) >= want {
-				return false, nil
-			}
-			return true, nil
-		})
-	// Index already yields desc-by-votes, asc-by-name; no sort needed.
-	if len(all) > want {
-		all = all[:want]
-	}
-	// If no witnesses are eligible, retain initminer as the sole
-	// producer so the chain doesn't stall.
-	if len(all) == 0 {
-		all = []entry{{name: auth.AccountName(initMinerName(blockNum)), votes: 0}}
-	}
-
-	shuffled := make([]auth.AccountName, len(all))
-	for i, e := range all {
-		shuffled[i] = e.name
-	}
-	// Deterministic "shuffle" via a fast PRNG seeded from blockNum.
-	// hived uses the head_block_id as the seed and a Fisher-Yates pass
-	// driven by halves of the digest. For test parity we use a simple
-	// LCG seeded by blockNum — every node produces the same order
-	// since blockNum is canonical.
-	seed := uint64(blockNum)*6364136223846793005 + 1442695040888963407
-	for i := len(shuffled) - 1; i > 0; i-- {
-		seed = seed*6364136223846793005 + 1442695040888963407
-		j := int(seed >> 32) % (i + 1)
-		shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
-	}
-
-	// Backfill the schedule with up to one extra slot from the recent
-	// producer ring — captures the timeshare witness C++'s
-	// virtual_scheduled_time queue picks (which we can't model
-	// without tracking per-witness virtual_scheduled_time). This
-	// ensures CurrentShuffledWitnesses reaches HIVE_MAX_WITNESSES
-	// (21) when the chain has at least 21 active producers, and the
-	// median feed gets the same 21-witness input set as C++.
-	if len(shuffled) < int(objects.MaxWitnesses) {
-		inSched := make(map[string]bool, len(shuffled))
-		for _, n := range shuffled {
-			inSched[string(n)] = true
-		}
-		// Walk the recent producer ring newest-to-oldest; append the
-		// first producer not already scheduled as the timeshare slot.
-		for i := len(ws.RecentBlockProducers) - 1; i >= 0 && len(shuffled) < int(objects.MaxWitnesses); i-- {
-			n := ws.RecentBlockProducers[i]
-			s := string(n)
-			if s == "" || inSched[s] {
-				continue
-			}
-			inSched[s] = true
-			shuffled = append(shuffled, n)
+		if ws.MaxRunnerWitnesses == 0 {
+			ws.MaxRunnerWitnesses = 1
 		}
 	}
-	ws.CurrentShuffledWitnesses = shuffled
-	ws.NumScheduledWitnesses = uint8(len(shuffled))
-	if ws.NumScheduledWitnesses == 0 {
-		ws.NumScheduledWitnesses = 1
+	if ws.HardforkRequiredWitnesses == 0 {
+		ws.HardforkRequiredWitnesses = hiveHardforkRequiredWitnesses
 	}
-	ws.NextShuffleBlockNum = blockNum + uint32(ws.NumScheduledWitnesses)
-
-	// Mirror C++ witness_schedule.cpp:367-370: every shuffle recomputes
-	// witness_pay_normalization_factor from the per-slot weights and
-	// the number of slots actually filled by each schedule type. The
-	// per-witness schedule labels were assigned during the selection
-	// pass (active_witnesses); without modeling the full virtual-time
-	// queue we approximate by labeling all picks as elected pre-HF17
-	// and elected + 1 timeshare HF17+.
 	if ws.ElectedWeight == 0 {
 		ws.ElectedWeight = 1
 	}
@@ -211,97 +115,635 @@ func updateWitnessSchedule(s *state.Session, blockNum uint32) {
 	if ws.TimeshareWeight == 0 {
 		ws.TimeshareWeight = 5
 	}
-	assignScheduleSlots(s, &ws, hf, cachedWitnesses)
 
-	// Median props from the shuffled set.
-	updateMedianWitnessProps(s, &ws, cachedWitnesses)
+	// Round-boundary check: shuffle only every HIVE_MAX_WITNESSES blocks,
+	// matching C++ witness_schedule.cpp:405. Persist sizing changes
+	// (hardfork transitions) and the recent-producer ring update.
+	if blockNum%uint32(objects.MaxWitnesses) != 0 {
+		if ws.MaxVotedWitnesses != prevMaxVoted ||
+			ws.MaxMinerWitnesses != prevMaxMiner ||
+			ws.MaxRunnerWitnesses != prevMaxRunner ||
+			dgpo.CurrentWitness != "" {
+			objects.PutWitnessSchedule(s, &ws)
+		}
+		_ = dgpo
+		return
+	}
+
+	if hf.Has(hardfork.HF4) {
+		updateWitnessSchedule4(s, &ws, &dgpo, blockNum, hf)
+	} else {
+		updateWitnessSchedulePreHF4(s, &ws, &dgpo, blockNum, hf)
+	}
+
+	// HF20+ pool params for RC. Not modeled at the moment (RC is a
+	// late-chain feature) — the call to db.rc().set_pool_params(wso)
+	// in C++ is a no-op for our pre-HF20 replay window.
 
 	objects.PutWitnessSchedule(s, &ws)
-
-	// Mirror hived's update_global_witness_properties: copy
-	// median_props into DGPO so other evaluators see the new chain
-	// properties immediately. (DGPO doesn't yet track maximum_block_size
-	// in our schema; only HBDInterestRate is mirrored for now.)
-	if ws.MedianHBDInterestRate > 0 {
-		dgpo.HBDInterestRate = ws.MedianHBDInterestRate
-	}
 	objects.PutDGPO(s, &dgpo)
 }
 
-// assignScheduleSlots writes a Schedule (elected/miner/timeshare) onto
-// every witness in ws.CurrentShuffledWitnesses and recomputes
-// ws.WitnessPayNormalizationFactor.
-//
-// Pre-HF17: 19 elected + 1 miner + 1 timeshare.
-// HF17+   : 20 elected + 0 miner + 1 timeshare.
-//
-// We don't model the full PoW miner queue or the virtual-time
-// timeshare rotation, so we approximate by labeling the FIRST N slots
-// elected (N = MaxVotedWitnesses), the next slot miner if MaxMiner > 0
-// and the slot is filled, and the LAST slot timeshare. This keeps the
-// pay-normalization factor consistent with what hived computes
-// (1*num_elected + 1*num_miners + 5*num_timeshare) for the typical
-// fully-populated 21-slot schedule.
-func assignScheduleSlots(s *state.Session, ws *objects.WitnessSchedule, hf hardfork.Set, cached map[auth.AccountName]objects.Witness) {
-	maxElected := int(ws.MaxVotedWitnesses)
-	if maxElected == 0 {
-		maxElected = int(objects.MaxVotedWitnessesHF0)
-		if hf.Has(hardfork.HF20) {
-			maxElected = int(objects.MaxVotedWitnessesHF20)
-		}
+// updateWitnessSchedule4 ports libraries/chain/witness_schedule.cpp:152.
+// Picks max_voted_witnesses by votes, max_miner_witnesses from the PoW
+// queue, then fills the remaining slots from by_schedule_time
+// (smallest VirtualScheduledTime first). Each timeshare-picked witness
+// has its VST advanced by LAP_LENGTH2 / (votes+1). On overflow the
+// chain-wide current_virtual_time and every witness's VST are reset to
+// 0 via reset_virtual_schedule_time.
+func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo *objects.DynamicGlobalProperty, blockNum uint32, hf hardfork.Set) {
+	zero33 := [33]byte{}
+
+	type picked struct {
+		owner auth.AccountName
+		kind  objects.WitnessScheduleType
 	}
-	maxMiner := int(ws.MaxMinerWitnesses)
-	// HF17+ retires the miner slot.
-	if hf.Has(hardfork.HF17) {
-		maxMiner = 0
+	var active []picked
+
+	// 1) Top max_voted by votes (skipping disabled witnesses post-HF14).
+	//    Two-pass: collect candidates from the by-vote index, then mutate
+	//    Schedule + persist outside the iteration so we don't mutate the
+	//    index we're scanning.
+	selectedVoted := make(map[string]bool)
+	type candidate struct {
+		owner auth.AccountName
+	}
+	var voteCands []candidate
+	_ = s.Range(objects.WitnessTable, objects.WitnessByVoteIndex, nil,
+		func(key, _ []byte) (bool, error) {
+			if len(voteCands) >= int(objects.MaxWitnesses) {
+				return false, nil
+			}
+			if len(key) < 8+state.AccountNameKeyLen {
+				return true, nil
+			}
+			ownerBytes := key[8 : 8+state.AccountNameKeyLen]
+			n := state.AccountNameKeyLen
+			for n > 0 && ownerBytes[n-1] == 0 {
+				n--
+			}
+			voteCands = append(voteCands, candidate{owner: auth.AccountName(string(ownerBytes[:n]))})
+			return true, nil
+		})
+	for _, c := range voteCands {
+		if uint8(len(selectedVoted)) >= ws.MaxVotedWitnesses {
+			break
+		}
+		w, err := objects.GetWitness(s, c.owner)
+		if err != nil {
+			continue
+		}
+		if hf.Has(hardfork.HF14) && w.BlockSigningKey == zero33 {
+			continue
+		}
+		selectedVoted[string(w.Owner)] = true
+		active = append(active, picked{owner: w.Owner, kind: objects.WitnessScheduleElected})
+		w.Schedule = objects.WitnessScheduleElected
+		objects.PutWitness(s, &w)
 	}
 
-	var numElected, numMiner, numTimeshare int
-	type slot struct {
-		name auth.AccountName
-		kind objects.WitnessScheduleType
+	// 2) Drain top max_miner_witnesses from by_pow.
+	//    Pre-HF13 only — post-HF13 num_pow_witnesses is 0 and the
+	//    max_miner_witnesses count is 0 for HF17+ anyway.
+	//    Two-pass: collect candidates first, then mutate.
+	selectedMiners := make(map[string]bool)
+	type powEntry struct {
+		owner auth.AccountName
+		pow   uint64
 	}
-	slots := make([]slot, 0, len(ws.CurrentShuffledWitnesses))
-	for i, name := range ws.CurrentShuffledWitnesses {
-		var kind objects.WitnessScheduleType
-		switch {
-		case i < maxElected:
-			kind = objects.WitnessScheduleElected
-			numElected++
-		case i < maxElected+maxMiner:
-			kind = objects.WitnessScheduleMiner
-			numMiner++
-		default:
-			kind = objects.WitnessScheduleTimeshare
-			numTimeshare++
+	var powCandidates []powEntry
+	_ = s.Range(objects.WitnessTable, objects.WitnessByPowIndex, nil,
+		func(key, _ []byte) (bool, error) {
+			// Stop once we've harvested enough candidates to fill all
+			// max_miner slots — matches C++'s mitr advance loop, which
+			// only drops witnesses as far as max_miner_witnesses.
+			if uint8(len(selectedMiners)) >= ws.MaxMinerWitnesses && len(powCandidates) >= int(ws.MaxMinerWitnesses) {
+				return false, nil
+			}
+			if len(key) < 8+state.AccountNameKeyLen {
+				return true, nil
+			}
+			pow := decodeBE64(key[:8])
+			if pow == 0 {
+				return true, nil
+			}
+			ownerBytes := key[8 : 8+state.AccountNameKeyLen]
+			n := state.AccountNameKeyLen
+			for n > 0 && ownerBytes[n-1] == 0 {
+				n--
+			}
+			owner := auth.AccountName(string(ownerBytes[:n]))
+			powCandidates = append(powCandidates, powEntry{owner: owner, pow: pow})
+			if !selectedVoted[string(owner)] {
+				w, err := objects.GetWitness(s, owner)
+				if err != nil {
+					return true, nil
+				}
+				if !(hf.Has(hardfork.HF14) && w.BlockSigningKey == zero33) {
+					selectedMiners[string(owner)] = true
+				}
+			}
+			if uint8(len(selectedMiners)) >= ws.MaxMinerWitnesses {
+				return false, nil
+			}
+			return true, nil
+		})
+	// Now mutate: each visited witness has pow_worker zeroed and
+	// num_pow_witnesses decremented — matches C++ witness_schedule.cpp:194-204
+	// (drops head of the by_pow index whether or not picked as miner).
+	// Among visited, those flagged in selectedMiners get added to active
+	// + Schedule = miner.
+	for _, p := range powCandidates {
+		w, err := objects.GetWitness(s, p.owner)
+		if err != nil {
+			continue
 		}
-		slots = append(slots, slot{name: name, kind: kind})
+		if selectedMiners[string(p.owner)] {
+			active = append(active, picked{owner: w.Owner, kind: objects.WitnessScheduleMiner})
+			w.Schedule = objects.WitnessScheduleMiner
+		}
+		if w.PowWorker != 0 {
+			w.PowWorker = 0
+			if dgpo.NumPowWitnesses > 0 {
+				dgpo.NumPowWitnesses--
+			}
+		}
+		objects.PutWitness(s, &w)
 	}
 
-	for _, sl := range slots {
-		w, ok := cached[sl.name]
-		if !ok {
-			gw, err := objects.GetWitness(s, sl.name)
+	// 3) Fill remaining slots from by_schedule_time (timeshare).
+	//    Iterate ascending VST. For each visited witness:
+	//      - Advance new_virtual_time to their VST.
+	//      - If they're not already elected/miner and not disabled, add
+	//        them as a timeshare slot.
+	//      - Stop when active size reaches HIVE_MAX_WITNESSES.
+	//    Visited witnesses (whether picked or skipped) all get their
+	//    VST re-rolled to current_virtual_time + LAP_LENGTH2 / (votes+1).
+	//    On overflow, reset_virtual_schedule_time fires globally.
+	currentVT := uint128FromBytes(ws.CurrentVirtualTime)
+	newVT := new(big.Int).Set(currentVT)
+	type processed struct {
+		owner auth.AccountName
+		vst   [16]byte
+	}
+	var visited []processed
+	wantedTotal := int(ws.MaxVotedWitnesses) + int(ws.MaxMinerWitnesses) + int(ws.MaxRunnerWitnesses)
+	if wantedTotal == 0 || wantedTotal > int(objects.MaxWitnesses) {
+		wantedTotal = int(objects.MaxWitnesses)
+	}
+	// Two-pass: collect ALL by-schedule-time visits into `visited` first,
+	// then iterate the slice to update Schedule + VirtualScheduledTime.
+	// Stops once `active` reaches wantedTotal (counting added timeshares).
+	tsPicked := 0
+	_ = s.Range(objects.WitnessTable, objects.WitnessByScheduleTimeIndex, nil,
+		func(key, _ []byte) (bool, error) {
+			if len(active)+tsPicked >= wantedTotal {
+				return false, nil
+			}
+			if len(key) < 16+state.AccountNameKeyLen {
+				return true, nil
+			}
+			var vst [16]byte
+			copy(vst[:], key[:16])
+			ownerBytes := key[16 : 16+state.AccountNameKeyLen]
+			n := state.AccountNameKeyLen
+			for n > 0 && ownerBytes[n-1] == 0 {
+				n--
+			}
+			owner := auth.AccountName(string(ownerBytes[:n]))
+			visited = append(visited, processed{owner: owner, vst: vst})
+			// Speculatively count this as a picked timeshare for the
+			// stop condition — we'll discard the count if the witness
+			// turns out to be already-elected or disabled in the
+			// mutation pass.
+			if !selectedVoted[string(owner)] && !selectedMiners[string(owner)] {
+				tsPicked++
+			}
+			return true, nil
+		})
+
+	// Mutation pass: assign Schedule = timeshare for the picked ones,
+	// advance new_virtual_time to each visited entry's VST (per C++
+	// line 218), and re-roll each visited witness's VST.
+	resetVT := false
+	lap2 := hiveVirtualScheduleLapLength2()
+	for _, p := range visited {
+		newVT.SetBytes(p.vst[:])
+		w, err := objects.GetWitness(s, p.owner)
+		if err != nil {
+			continue
+		}
+		// Pick as timeshare if eligible.
+		if !(hf.Has(hardfork.HF14) && w.BlockSigningKey == zero33) &&
+			!selectedVoted[string(p.owner)] && !selectedMiners[string(p.owner)] &&
+			!resetVT {
+			if len(active) < wantedTotal {
+				active = append(active, picked{owner: w.Owner, kind: objects.WitnessScheduleTimeshare})
+				w.Schedule = objects.WitnessScheduleTimeshare
+			}
+		}
+		// Advance VST: new_vst = new_virtual_time + LAP_LENGTH2 / (votes + 1).
+		votesPlus1 := big.NewInt(w.TotalVotesVests + 1)
+		if votesPlus1.Sign() <= 0 {
+			votesPlus1 = big.NewInt(1)
+		}
+		advance := new(big.Int).Quo(lap2, votesPlus1)
+		newVST := new(big.Int).Add(newVT, advance)
+		if newVST.Cmp(newVT) < 0 || newVST.BitLen() > 128 {
+			resetVT = true
+		} else {
+			w.VirtualPosition = [16]byte{}
+			w.VirtualLastUpdate = uint128ToBytes(newVT)
+			w.VirtualScheduledTime = uint128ToBytes(newVST)
+		}
+		objects.PutWitness(s, &w)
+		if resetVT {
+			break
+		}
+	}
+	if resetVT {
+		newVT.SetInt64(0)
+		resetVirtualScheduleTime(s, ws)
+	}
+
+	// 4) Hardfork-version vote tally (post-HF5__54). The schedule's
+	//    current_shuffled_witnesses is read by C++; we use the active
+	//    set we just built (it's about to overwrite the schedule
+	//    anyway). Iterate witnesses, tally running_version and
+	//    (hardfork_version_vote, hardfork_time_vote). Pick the
+	//    majority — the highest running_version with at least
+	//    hardfork_required_witnesses votes — and bump the hardfork
+	//    property object's next_hardfork to the most-voted (version,
+	//    time) tuple.
+	majorityVersion := ws.MajorityVersion
+	if hf.Has(hardfork.HF5) {
+		type verCount struct {
+			version uint32
+			count   uint32
+		}
+		var vers []verCount
+		type hfvKey struct {
+			version uint32
+			t       uint32
+		}
+		hfvCounts := make(map[hfvKey]uint32)
+		for _, p := range active {
+			w, err := objects.GetWitness(s, p.owner)
 			if err != nil {
 				continue
 			}
-			w = gw
+			found := false
+			for i := range vers {
+				if vers[i].version == w.RunningVersion {
+					vers[i].count++
+					found = true
+					break
+				}
+			}
+			if !found {
+				vers = append(vers, verCount{version: w.RunningVersion, count: 1})
+			}
+			k := hfvKey{version: w.HardforkVersionVote, t: w.HardforkTimeVote}
+			hfvCounts[k]++
 		}
-		if w.Schedule != sl.kind {
-			w.Schedule = sl.kind
-			objects.PutWitness(s, &w)
+		// Sort vers by version DESC.
+		sort.Slice(vers, func(i, j int) bool { return vers[i].version > vers[j].version })
+		var sumCount uint32
+		for _, v := range vers {
+			sumCount += v.count
+			if sumCount >= uint32(ws.HardforkRequiredWitnesses) {
+				majorityVersion = v.version
+				break
+			}
 		}
+		// Hardfork-version vote bump: the first (version, time) tuple
+		// with >= required votes wins. C++ iterates the map in
+		// std::map order; map iteration in Go is random, so pick the
+		// MIN tuple deterministically.
+		type hfvEntry struct {
+			version uint32
+			t       uint32
+			count   uint32
+		}
+		var hfvs []hfvEntry
+		for k, c := range hfvCounts {
+			hfvs = append(hfvs, hfvEntry{version: k.version, t: k.t, count: c})
+		}
+		sort.Slice(hfvs, func(i, j int) bool {
+			if hfvs[i].version != hfvs[j].version {
+				return hfvs[i].version < hfvs[j].version
+			}
+			return hfvs[i].t < hfvs[j].t
+		})
+		// We don't track hardfork_property_object yet; the next-hardfork
+		// bump is consensus-cosmetic at our replay window (hardfork
+		// activation is by block number not by witness vote in this era).
+		_ = hfvs
 	}
 
+	// 5) Write the active witnesses into the schedule, recompute pay
+	//    normalization, and xorshift-shuffle.
+	numElected := 0
+	numMiner := 0
+	numTimeshare := 0
+	for _, p := range active {
+		switch p.kind {
+		case objects.WitnessScheduleElected:
+			numElected++
+		case objects.WitnessScheduleMiner:
+			numMiner++
+		case objects.WitnessScheduleTimeshare:
+			numTimeshare++
+		}
+	}
+	shuffled := make([]auth.AccountName, len(active))
+	for i, p := range active {
+		shuffled[i] = p.owner
+	}
+	xorshiftShuffleSchedule(shuffled, dgpo.Time)
+
+	ws.CurrentShuffledWitnesses = shuffled
+	if len(shuffled) > 0 {
+		ws.NumScheduledWitnesses = uint8(len(shuffled))
+	} else {
+		ws.NumScheduledWitnesses = 1
+	}
 	ws.WitnessPayNormalizationFactor = ws.ElectedWeight*uint32(numElected) +
 		ws.MinerWeight*uint32(numMiner) +
 		ws.TimeshareWeight*uint32(numTimeshare)
+	ws.CurrentVirtualTime = uint128ToBytes(newVT)
+	ws.NextShuffleBlockNum = blockNum + uint32(ws.NumScheduledWitnesses)
+	ws.MajorityVersion = majorityVersion
+
+	updateMedianWitnessProps(s, ws)
+
+	// Mirror hived's update_global_witness_properties: copy median_props
+	// into DGPO so other evaluators see the new chain properties immediately.
+	if ws.MedianHBDInterestRate > 0 {
+		dgpo.HBDInterestRate = ws.MedianHBDInterestRate
+	}
 }
 
-// updateMedianWitnessProps computes medians of account_creation_fee,
-// maximum_block_size, and hbd_interest_rate over the shuffled set.
-// Mirrors update_median_witness_props (witness_schedule.cpp:58).
-func updateMedianWitnessProps(s *state.Session, ws *objects.WitnessSchedule, cached map[auth.AccountName]objects.Witness) {
+// updateWitnessSchedulePreHF4 ports the legacy update_witness_schedule
+// path at libraries/chain/witness_schedule.cpp:441-569. The differences
+// from update_witness_schedule_4:
+//   - Lock out the top (HIVE_MAX_WITNESSES - 2) witnesses by setting their
+//     VirtualScheduledTime to MAX so they're never picked as timeshare.
+//   - Pick exactly ONE timeshare from by_schedule_time (skip pow workers).
+//     Advance their VST by LAP_LENGTH (= 2^64-1) / (votes+1) pre-HF2 OR
+//     LAP_LENGTH2 (= 2^128-1) / (votes+1) post-HF2.
+//   - Pop ALL pow workers from the queue (not just one) up to
+//     HIVE_MAX_WITNESSES total active.
+func updateWitnessSchedulePreHF4(s *state.Session, ws *objects.WitnessSchedule, dgpo *objects.DynamicGlobalProperty, blockNum uint32, hf hardfork.Set) {
+	zero33 := [33]byte{}
+	var active []auth.AccountName
+	newVT := new(big.Int)
+
+	// Vote-based scheduling kicks in once 1M HIVE has been minted OR
+	// no PoW miners are queued. Pre-201600 we relied on PoW only.
+	const hiveStartMinerVotingBlock uint32 = 864_000
+	useVoteBased := dgpo.NumPowWitnesses == 0 || blockNum > hiveStartMinerVotingBlock
+
+	if useVoteBased {
+		// Two-pass: collect by-vote candidates first, then mutate.
+		// Lock out the top (HIVE_MAX_WITNESSES - 2) by setting VST = MAX.
+		var byVoteCands []auth.AccountName
+		_ = s.Range(objects.WitnessTable, objects.WitnessByVoteIndex, nil,
+			func(key, _ []byte) (bool, error) {
+				if len(byVoteCands) >= int(objects.MaxWitnesses)-2 {
+					return false, nil
+				}
+				if len(key) < 8+state.AccountNameKeyLen {
+					return true, nil
+				}
+				ownerBytes := key[8 : 8+state.AccountNameKeyLen]
+				n := state.AccountNameKeyLen
+				for n > 0 && ownerBytes[n-1] == 0 {
+					n--
+				}
+				byVoteCands = append(byVoteCands, auth.AccountName(string(ownerBytes[:n])))
+				return true, nil
+			})
+		picked := 0
+		for _, owner := range byVoteCands {
+			if picked >= int(objects.MaxWitnesses)-2 {
+				break
+			}
+			w, err := objects.GetWitness(s, owner)
+			if err != nil {
+				continue
+			}
+			if w.PowWorker != 0 {
+				continue
+			}
+			active = append(active, w.Owner)
+			w.VirtualScheduledTime = uint128MaxBytes
+			objects.PutWitness(s, &w)
+			picked++
+		}
+
+		// Pick exactly one timeshare witness from by_schedule_time
+		// (skip pow workers). Two-pass: first non-pow candidate.
+		var tsCand auth.AccountName
+		var tsCandFound bool
+		_ = s.Range(objects.WitnessTable, objects.WitnessByScheduleTimeIndex, nil,
+			func(key, _ []byte) (bool, error) {
+				if len(key) < 16+state.AccountNameKeyLen {
+					return true, nil
+				}
+				ownerBytes := key[16 : 16+state.AccountNameKeyLen]
+				n := state.AccountNameKeyLen
+				for n > 0 && ownerBytes[n-1] == 0 {
+					n--
+				}
+				owner := auth.AccountName(string(ownerBytes[:n]))
+				w, err := objects.GetWitness(s, owner)
+				if err != nil {
+					return true, nil
+				}
+				if w.PowWorker != 0 {
+					return true, nil
+				}
+				tsCand = owner
+				tsCandFound = true
+				return false, nil
+			})
+		if tsCandFound {
+			w, err := objects.GetWitness(s, tsCand)
+			if err == nil {
+				active = append(active, w.Owner)
+				w.VirtualPosition = [16]byte{}
+				newVT.SetBytes(w.VirtualScheduledTime[:])
+				if newVT.Cmp(uint128Max()) == 0 {
+					newVT.SetInt64(0)
+				}
+				votesPlus1 := big.NewInt(w.TotalVotesVests + 1)
+				if votesPlus1.Sign() <= 0 {
+					votesPlus1 = big.NewInt(1)
+				}
+				var lap *big.Int
+				if hf.Has(hardfork.HF2) {
+					lap = hiveVirtualScheduleLapLength2()
+				} else {
+					lap = hiveVirtualScheduleLapLength()
+				}
+				advance := new(big.Int).Quo(lap, votesPlus1)
+				newVST := uint128FromBytes(w.VirtualScheduledTime)
+				newVST.Add(newVST, advance)
+				if newVST.BitLen() > 128 {
+					newVST.SetInt64(0)
+				}
+				w.VirtualScheduledTime = uint128ToBytes(newVST)
+				objects.PutWitness(s, &w)
+				_ = zero33
+			}
+		}
+	}
+
+	// Drain the PoW queue. If num_pow_witnesses > HIVE_MAX_WITNESSES,
+	// pop the lowest-PoW miner (zeroing their pow_worker + decrementing
+	// num_pow_witnesses) before scheduling. Two-pass.
+	if dgpo.NumPowWitnesses > uint32(objects.MaxWitnesses) {
+		var firstPow auth.AccountName
+		var firstPowFound bool
+		_ = s.Range(objects.WitnessTable, objects.WitnessByPowIndex, nil,
+			func(key, _ []byte) (bool, error) {
+				if len(key) < 8+state.AccountNameKeyLen {
+					return true, nil
+				}
+				pow := decodeBE64(key[:8])
+				if pow == 0 {
+					return true, nil
+				}
+				ownerBytes := key[8 : 8+state.AccountNameKeyLen]
+				n := state.AccountNameKeyLen
+				for n > 0 && ownerBytes[n-1] == 0 {
+					n--
+				}
+				firstPow = auth.AccountName(string(ownerBytes[:n]))
+				firstPowFound = true
+				return false, nil
+			})
+		if firstPowFound {
+			w, err := objects.GetWitness(s, firstPow)
+			if err == nil && w.PowWorker != 0 {
+				w.PowWorker = 0
+				objects.PutWitness(s, &w)
+				if dgpo.NumPowWitnesses > 0 {
+					dgpo.NumPowWitnesses--
+				}
+			}
+		}
+	}
+
+	// Add PoW miners until we hit HIVE_MAX_WITNESSES OR (post-START_MINER_VOTING)
+	// just one PoW miner per round. Two-pass: collect, then check stop.
+	var powOwners []auth.AccountName
+	_ = s.Range(objects.WitnessTable, objects.WitnessByPowIndex, nil,
+		func(key, _ []byte) (bool, error) {
+			if len(key) < 8+state.AccountNameKeyLen {
+				return true, nil
+			}
+			pow := decodeBE64(key[:8])
+			if pow == 0 {
+				return true, nil
+			}
+			ownerBytes := key[8 : 8+state.AccountNameKeyLen]
+			n := state.AccountNameKeyLen
+			for n > 0 && ownerBytes[n-1] == 0 {
+				n--
+			}
+			powOwners = append(powOwners, auth.AccountName(string(ownerBytes[:n])))
+			if len(powOwners) >= int(objects.MaxWitnesses) {
+				return false, nil
+			}
+			return true, nil
+		})
+	for _, owner := range powOwners {
+		active = append(active, owner)
+		if blockNum > hiveStartMinerVotingBlock || len(active) >= int(objects.MaxWitnesses) {
+			break
+		}
+	}
+
+	// Cap to MaxWitnesses (active may have come over).
+	if len(active) > int(objects.MaxWitnesses) {
+		active = active[:int(objects.MaxWitnesses)]
+	}
+
+	xorshiftShuffleSchedule(active, dgpo.Time)
+	ws.CurrentShuffledWitnesses = active
+	if len(active) > 0 {
+		ws.NumScheduledWitnesses = uint8(len(active))
+	} else {
+		ws.NumScheduledWitnesses = 1
+	}
+	if useVoteBased {
+		ws.CurrentVirtualTime = uint128ToBytes(newVT)
+	}
+	ws.NextShuffleBlockNum = blockNum + uint32(ws.NumScheduledWitnesses)
+	ws.WitnessPayNormalizationFactor = uint32(len(active))
+	updateMedianWitnessProps(s, ws)
+}
+
+// resetVirtualScheduleTime mirrors witness_schedule.cpp:21-40. Sets
+// the chain-wide current_virtual_time to 0 and re-seeds every
+// witness's VST to LAP_LENGTH2 / (votes+1) (with virtual_position
+// reset to 0 and virtual_last_update to 0).
+func resetVirtualScheduleTime(s *state.Session, ws *objects.WitnessSchedule) {
+	ws.CurrentVirtualTime = [16]byte{}
+	type entry struct {
+		owner auth.AccountName
+	}
+	var owners []entry
+	_ = s.Range(objects.WitnessTable, state.PrimaryIndex, nil,
+		func(_, value []byte) (bool, error) {
+			w, err := objects.ReadWitness(value)
+			if err != nil {
+				return true, nil
+			}
+			owners = append(owners, entry{owner: w.Owner})
+			return true, nil
+		})
+	lap2 := hiveVirtualScheduleLapLength2()
+	zeroVT := new(big.Int)
+	for _, e := range owners {
+		w, err := objects.GetWitness(s, e.owner)
+		if err != nil {
+			continue
+		}
+		w.VirtualPosition = [16]byte{}
+		w.VirtualLastUpdate = uint128ToBytes(zeroVT)
+		votesPlus1 := big.NewInt(w.TotalVotesVests + 1)
+		if votesPlus1.Sign() <= 0 {
+			votesPlus1 = big.NewInt(1)
+		}
+		w.VirtualScheduledTime = uint128ToBytes(new(big.Int).Quo(lap2, votesPlus1))
+		objects.PutWitness(s, &w)
+	}
+}
+
+// xorshiftShuffleSchedule applies hived's per-block deterministic shuffle
+// over the active set (witness_schedule.cpp:373-388). Seeded by
+// head_block_time << 32 + i*KNUTH_C, then 3 xorshifts and KNUTH_C.
+func xorshiftShuffleSchedule(witnesses []auth.AccountName, headBlockTime uint32) {
+	const knuthC uint64 = 2685821657736338717
+	nowHi := uint64(headBlockTime) << 32
+	for i := uint32(0); i < uint32(len(witnesses)); i++ {
+		k := nowHi + uint64(i)*knuthC
+		k ^= k >> 12
+		k ^= k << 25
+		k ^= k >> 27
+		k *= knuthC
+		jmax := uint32(len(witnesses)) - i
+		j := i + uint32(k%uint64(jmax))
+		witnesses[i], witnesses[j] = witnesses[j], witnesses[i]
+	}
+}
+
+// updateMedianWitnessProps mirrors witness_schedule.cpp:58. Sorts the
+// active set by each witness-property field and picks the median.
+func updateMedianWitnessProps(s *state.Session, ws *objects.WitnessSchedule) {
 	if len(ws.CurrentShuffledWitnesses) == 0 {
 		return
 	}
@@ -311,14 +753,10 @@ func updateMedianWitnessProps(s *state.Session, ws *objects.WitnessSchedule, cac
 		rate uint16
 	}
 	all := make([]props, 0, len(ws.CurrentShuffledWitnesses))
-	for _, name := range ws.CurrentShuffledWitnesses {
-		w, ok := cached[name]
-		if !ok {
-			gw, err := objects.GetWitness(s, name)
-			if err != nil {
-				continue
-			}
-			w = gw
+	for i := uint8(0); i < ws.NumScheduledWitnesses && int(i) < len(ws.CurrentShuffledWitnesses); i++ {
+		w, err := objects.GetWitness(s, ws.CurrentShuffledWitnesses[i])
+		if err != nil {
+			continue
 		}
 		all = append(all, props{
 			acf:  w.AccountCreationFee,
@@ -337,7 +775,11 @@ func updateMedianWitnessProps(s *state.Session, ws *objects.WitnessSchedule, cac
 	ws.MedianHBDInterestRate = all[len(all)/2].rate
 }
 
-// initMinerName returns the genesis initminer name. Mainnet uses
-// "initminer"; we don't differentiate testnet here since both share
-// the same name.
-func initMinerName(_ uint32) string { return "initminer" }
+// decodeBE64 reads 8 big-endian bytes as a uint64.
+func decodeBE64(b []byte) uint64 {
+	var v uint64
+	for i := 0; i < 8 && i < len(b); i++ {
+		v = v<<8 | uint64(b[i])
+	}
+	return v
+}
