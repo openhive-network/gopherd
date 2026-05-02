@@ -6,6 +6,7 @@ package chain
 import (
 	"encoding/binary"
 	"fmt"
+	"os"
 
 	"hived-go/internal/chain/evaluator"
 	"hived-go/internal/fcraw"
@@ -293,7 +294,55 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	updateVirtualSupply(session, blockNum)
 	clearNullAccountBalance(session, blockNum)
 	processProducerReward(session, hdr.Witness, blockNum)
+	if os.Getenv("GHIVEDIFF") != "" {
+		// Per-block dump in the HF7-cascade-divergence window. Trace
+		// fires AFTER processProducerReward but BEFORE processFunds —
+		// matches C++'s trace location inside process_funds (which is
+		// after get_producer_reward but before adjust_supply).
+		if blockNum >= 2888500 && blockNum <= 2897770 {
+			d, _ := objects.GetDGPO(session)
+			pfunkVests := int64(-1)
+			pfunkHbd := int64(-1)
+			if a, e := objects.GetAccount(session, "pfunk"); e == nil {
+				pfunkVests = a.VestingShares
+				pfunkHbd = a.HBDBalance
+			}
+			fmt.Fprintf(os.Stderr, "GHIVEDIFF DBG-BLOCK block=%d fund=%d vfund=%d vshares=%d supply=%d vsupply=%d pfunk_vests=%d pfunk_hbd=%d\n",
+				blockNum, d.TotalRewardFundHive, d.TotalVestingFundHive, d.TotalVestingShares, d.CurrentSupply, d.VirtualSupply, pfunkVests, pfunkHbd)
+		}
+	}
 	processFunds(session, blockNum, hdr.Witness)
+	if os.Getenv("GHIVEDIFF") != "" {
+		switch blockNum {
+		case 100000, 500000, 1000000, 1500000, 2000000, 2500000, 2700000, 2800000, 2850000, 2880000, 2885000, 2889000, 2889020, 2890000, 2891000, 2892000, 2893000, 2894000, 2895000, 2896000, 2896500, 2896680, 2896682, 2897000, 2897356, 2897358, 2897500, 2897700, 2897750, 2897769, 2897770:
+			if a, e := objects.GetAccount(session, "pfunk"); e == nil {
+				fmt.Fprintf(os.Stderr, "GHIVEDIFF PFUNK-AT block=%d vesting_shares=%d delegated=%d received=%d hive=%d hbd=%d\n",
+					blockNum, a.VestingShares, a.DelegatedVestingShares, a.ReceivedVestingShares, a.Balance, a.HBDBalance)
+			}
+		}
+		switch blockNum {
+		case 2896680, 2896682, 2897356, 2897358:
+			d, _ := objects.GetDGPO(session)
+			fmt.Fprintf(os.Stderr, "GHIVEDIFF VEST-PRICE block=%d vesting_fund=%d vesting_shares=%d\n",
+				blockNum, d.TotalVestingFundHive, d.TotalVestingShares)
+		}
+		switch blockNum {
+		case 2889100, 2889110, 2889120, 2889130, 2889140, 2889150, 2889160, 2889170, 2889180, 2889190, 2889200:
+			d, _ := objects.GetDGPO(session)
+			shares2 := d.TotalRewardShares2
+			hi := uint64(shares2[0])<<56 | uint64(shares2[1])<<48 | uint64(shares2[2])<<40 | uint64(shares2[3])<<32 |
+				uint64(shares2[4])<<24 | uint64(shares2[5])<<16 | uint64(shares2[6])<<8 | uint64(shares2[7])
+			lo := uint64(shares2[8])<<56 | uint64(shares2[9])<<48 | uint64(shares2[10])<<40 | uint64(shares2[11])<<32 |
+				uint64(shares2[12])<<24 | uint64(shares2[13])<<16 | uint64(shares2[14])<<8 | uint64(shares2[15])
+			abitHive, abitHbd := int64(0), int64(0)
+			if a, e := objects.GetAccount(session, "abit"); e == nil {
+				abitHive = a.Balance
+				abitHbd = a.HBDBalance
+			}
+			fmt.Fprintf(os.Stderr, "GHIVEDIFF SHARES2-AT block=%d shares2_hi=%d shares2_lo=%d fund=%d cur_supply=%d virt_supply=%d abit_hive=%d abit_hbd=%d\n",
+				blockNum, hi, lo, d.TotalRewardFundHive, d.CurrentSupply, d.VirtualSupply, abitHive, abitHbd)
+		}
+	}
 	processConversions(session, hdr.Timestamp)
 	processCommentCashouts(session, hdr.Timestamp, blockNum)
 	processVestingWithdrawals(session, hdr.Timestamp)

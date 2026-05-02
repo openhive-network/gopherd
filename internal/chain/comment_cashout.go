@@ -5,6 +5,7 @@ import (
 	"math/big"
 	"os"
 	"sort"
+	"strings"
 
 	"hived-go/internal/protocol/asset"
 	"hived-go/internal/protocol/hardfork"
@@ -18,6 +19,31 @@ func ghiveDiff(format string, args ...any) {
 		return
 	}
 	fmt.Fprintf(os.Stderr, format, args...)
+}
+
+// traceAccount returns true when the given account name should be traced.
+// GHIVEDIFF="" disables all trace; GHIVEDIFF="1" or any non-list value
+// traces a default set (hipster, proskynneo, abit, pfunk); a comma-separated
+// list (e.g. GHIVEDIFF="pfunk,abit,acidsun") restricts tracing to those.
+func traceAccount(name string) bool {
+	v := os.Getenv("GHIVEDIFF")
+	if v == "" {
+		return false
+	}
+	if v == "1" || !strings.ContainsRune(v, ',') && len(v) <= 2 {
+		// Default set.
+		switch name {
+		case "hipster", "proskynneo", "abit", "pfunk":
+			return true
+		}
+		return false
+	}
+	for _, n := range strings.Split(v, ",") {
+		if n == name {
+			return true
+		}
+	}
+	return false
 }
 
 // curationRewardsPercentPreHF8 — pre-HF8, curators get 50% of the
@@ -120,9 +146,12 @@ func processCommentCashouts(s *state.Session, blockTime, blockNum uint32) {
 			rootPermlink = c.Permlink
 		}
 		// Snapshot every comment under this root so we don't mutate the
-		// by-root index while iterating. Ordered by (author, permlink)
-		// since that's the secondary key — close enough to hived's
-		// by_root iteration order for the cascade.
+		// by-root index while iterating. C++'s comment_cashout_ex_index
+		// is composite_key(root_id, id) — within a root, comments cash
+		// out in comment-id (creation) order. We must sort by ID to
+		// match: the order in which create_vesting calls fire mutates
+		// the global vesting share price between calls, so a different
+		// order produces different per-curator/author VESTS amounts.
 		type sibling struct {
 			author      string
 			permlink    string
@@ -161,6 +190,7 @@ func processCommentCashouts(s *state.Session, blockTime, blockNum uint32) {
 				})
 				return true, nil
 			})
+		sort.Slice(siblings, func(i, j int) bool { return siblings[i].id < siblings[j].id })
 		for _, sib := range siblings {
 			key := sib.author + "/" + sib.permlink
 			if _, dup := paid[key]; dup {
@@ -214,22 +244,23 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 	}
 	c.CashoutTime = rescheduleTime
 	// Mirror comment_cashout_object::on_payout (comment_object.hpp:213-219)
-	// — zero net/vote rshares + total_vote_weight after payout so a re-iteration
-	// of the thread (30d second-cashout window pre-HF12) starts from
-	// post-payout state. Inside `defer` so we capture the post-payout c values.
-	//
-	// NOTE: the comment_cashout_ex_object::on_payout fields (abs_rshares,
-	// children_abs_rshares, max_cashout_time) deliberately stay alive
-	// here. Zeroing them in our schema regresses the 8.2M tolerate skip
-	// count (+50K vs commit 6f1374b) — likely because our subsequent
-	// weighted-avg path doesn't fully replicate the C++ semantics
-	// (max_cashout_time = max sentinel vs. our 0 sentinel) and a stale
-	// retained value happens to behave more correctly than a fresh seed
-	// in our model. See feedback_money_inflow_outflow_audit.md.
+	// + comment_cashout_ex_object::on_payout (comment_object.hpp:343-349):
+	// after a payout, zero the cashout-side accumulators (NetRshares,
+	// VoteRshares, TotalVoteWeight) AND the ex-side accumulators
+	// (AbsRshares, ChildrenAbsRshares, MaxCashoutTime). Without zeroing
+	// the ex-side fields, a post-payout vote runs the weighted-avg
+	// against stale pre-payout abs/children values, and Go's MaxCashoutTime
+	// substitution (== 0 → MaxCashoutTime) lets stale max values pull the
+	// avg into the past — the cashout fires immediately at the same block
+	// and double-pays the author. C++ resets to maximum/0 here so the
+	// post-payout vote behaves like the first vote on a fresh comment.
 	zero := func() {
 		c.NetRshares = 0
 		c.VoteRshares = 0
 		c.TotalVoteWeight = 0
+		c.AbsRshares = 0
+		c.ChildrenAbsRshares = 0
+		c.MaxCashoutTime = 0
 	}
 	defer func() {
 		objects.PutComment(s, &c)
@@ -298,6 +329,26 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 		payoutBig.SetInt64(int64(^uint64(0) >> 1))
 	}
 	claimed := payoutBig.Int64()
+	if traceAccount(author) {
+		hi := uint64(0)
+		lo := uint64(0)
+		if shares2.IsUint64() {
+			lo = shares2.Uint64()
+		} else {
+			b := shares2.Bytes()
+			pad := make([]byte, 16)
+			if len(b) > 16 {
+				b = b[len(b)-16:]
+			}
+			copy(pad[16-len(b):], b)
+			for i := 0; i < 8; i++ {
+				hi = hi<<8 | uint64(pad[i])
+				lo = lo<<8 | uint64(pad[i+8])
+			}
+		}
+		ghiveDiff("GHIVEDIFF CASHOUT-CALC block=%d author=%s permlink=%s id=%d cashoutTime=%d rshares=%d fundBalance=%d shares2_hi=%d shares2_lo=%d claimed_pre_clip=%d\n",
+			blockNum, author, permlink, c.ID, scheduledTime, c.NetRshares, fundBalance, hi, lo, claimed)
+	}
 	if claimed > c.MaxAcceptedPayout {
 		claimed = c.MaxAcceptedPayout
 	}
@@ -337,6 +388,13 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 		} else {
 			objects.PutDGPO(s, &dgpo)
 		}
+		// C++ cashout_comment_helper runs comment_cashout_ex::on_payout
+		// (zeroing abs_rshares + children_abs_rshares + max_cashout_time)
+		// unconditionally — see database_comment.cpp:391-396 — regardless
+		// of whether reward was actually paid. We must do the same so a
+		// dust-zeroed cashout doesn't leave stale ex-side accumulators
+		// that the next vote then mis-uses in weighted-avg.
+		zero()
 		return
 	}
 
@@ -407,7 +465,7 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 	// half VESTS at the dynamic price.
 	hbdHive := authorPool * int64(c.PercentHbd) / 20000
 	vestingHive := authorPool - hbdHive
-	if author == "proskynneo" || author == "hipster" || author == "acidsun" {
+	if traceAccount(author) || (os.Getenv("GHIVEDIFF_ALL") != "" && blockNum >= 2888500 && blockNum <= 2897770) {
 		ghiveDiff("GHIVEDIFF CASHOUT-AUTHOR block=%d author=%s permlink=%s author_tokens=%d hbd_hive=%d vesting_hive=%d curator_remainder=%d\n",
 			blockNum, author, permlink, authorPool, hbdHive, vestingHive, curatorRemainder)
 	}
@@ -419,6 +477,12 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 	}
 	if vestingHive > 0 {
 		_, _ = CreateVesting_via_chain(s, author, vestingHive, false)
+	}
+	if traceAccount(author) {
+		if a, gerr := objects.GetAccount(s, author); gerr == nil {
+			ghiveDiff("GHIVEDIFF CASHOUT-POST-VEST block=%d author=%s permlink=%s vesting_shares=%d hive=%d hbd=%d\n",
+				blockNum, author, permlink, a.VestingShares, a.Balance, a.HBDBalance)
+		}
 	}
 
 	// Drop all CommentVote rows for this comment — hived's cashout
@@ -637,7 +701,7 @@ func distributeCuratorPool(s *state.Session, author, permlink string, pool int64
 	paid := int64(0)
 	dgpoNow, _ := objects.GetDGPO(s)
 	for _, p := range pays {
-		if p.voter == "proskynneo" || p.voter == "hipster" {
+		if traceAccount(p.voter) || traceAccount(author) {
 			ghiveDiff("GHIVEDIFF CASHOUT-CURATOR block=%d author=%s permlink=%s voter=%s weight=%d total_weight=%d pool=%d claim=%d\n",
 				dgpoNow.HeadBlockNumber, author, permlink, p.voter, p.weight, c.TotalVoteWeight, pool, p.share)
 		}

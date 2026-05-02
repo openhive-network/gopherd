@@ -458,15 +458,20 @@ func rebuildCommentRshares(s *state.Session, magnitude int64) {
 				c.VoteRshares = ^uint64(0)
 			}
 		}
-		// children_abs_rshares scales the same way.
-		if c.ChildrenAbsRshares > 0 {
-			cr := new(big.Int).Mul(new(big.Int).SetUint64(c.ChildrenAbsRshares), big.NewInt(magnitude))
-			if cr.IsUint64() {
-				c.ChildrenAbsRshares = cr.Uint64()
-			} else {
-				c.ChildrenAbsRshares = ^uint64(0)
-			}
-		}
+		// NOTE: children_abs_rshares is NOT scaled. C++'s
+		// perform_vesting_share_split (database_comment.cpp:697-707)
+		// scales c.net_rshares, c.vote_rshares, and c_ex.abs_rshares,
+		// but leaves children_abs_rshares alone. Post-HF1 votes drown
+		// out the pre-HF1 children_abs_rshares (they're 1M× larger),
+		// so the weighted-avg cashout-time pulls toward the late
+		// vote — matching how the chain ran. If we scale
+		// children_abs_rshares × magnitude, the post-HF1 vote becomes
+		// comparable to the historical cumulative pre-HF1 abs and
+		// barely moves cashout_time, causing pre-HF7 abit posts (and
+		// many others) to land in the cashout cascade in the wrong
+		// order, which compounds into per-cashout fund/shares2
+		// divergence and a ~10M VESTS shortfall on pfunk by the
+		// withdraw_vesting at block 2,897,769.
 		objects.PutComment(s, &c)
 		if c.NetRshares > 0 {
 			total.Add(total, reward.EvaluateRewardCurveQuadratic(c.NetRshares))
