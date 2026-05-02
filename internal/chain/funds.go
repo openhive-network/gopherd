@@ -225,8 +225,16 @@ func processFunds(s *state.Session, blockNum uint32, witnessName string) {
 		return
 	}
 
-	// Pre-HF16 path: floor-based rewards.
-	virtualSupply := dgpo.CurrentSupply
+	// Pre-HF16 path: rewards computed off virtual_supply (HIVE + HBD-as-HIVE
+	// at the median feed). C++ database.cpp:2331 calls update_virtual_supply
+	// just before process_funds, so by the time get_content_reward fires
+	// virtual_supply already reflects HBD growth. Using current_supply here
+	// produces under-rewards once HBD circulates (pre-HF1) and once a feed
+	// is published.
+	virtualSupply := dgpo.VirtualSupply
+	if virtualSupply <= 0 {
+		virtualSupply = dgpo.CurrentSupply
+	}
 
 	contentReward := percentRewardPerBlock(virtualSupply, contentAPRPercent)
 	if contentReward < minContentReward {

@@ -23,10 +23,13 @@ func processHardforks(s *state.Session, blockNum uint32) {
 	if blockNum == 0 {
 		return
 	}
-	prev := hardfork.SetForBlock(blockNum - 1)
-	cur := hardfork.SetForBlock(blockNum)
+	// Fire applyHardfork at the END of the activation block (matches C++
+	// process_hardforks at database.cpp:2368, after all per-block hooks).
+	// State effects (e.g. HF1's 1M× vesting share split) become visible to
+	// the NEXT block's evaluators — which is exactly when SetForBlock first
+	// flags the HF as active (strict `>`, see hardfork.go:SetForBlock).
 	for id := hardfork.ID(1); id <= hardfork.NumHardforks; id++ {
-		if !prev.Has(id) && cur.Has(id) {
+		if blockNum == hardfork.MainnetActivationBlock[id] {
 			applyHardfork(s, id)
 		}
 	}

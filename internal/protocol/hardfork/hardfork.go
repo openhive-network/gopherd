@@ -92,14 +92,18 @@ var MainnetActivationBlock = [NumHardforks + 1]uint32{
 // (genesis is always implicitly active).
 type Set uint32
 
-// SetForBlock returns the set of hardforks active at the given mainnet block
-// number. Activation is "block_num >= activation" (matches C++ semantics).
+// SetForBlock returns the set of hardforks active during the given mainnet
+// block's apply pipeline. C++ runs process_hardforks at the END of apply_block
+// (database.cpp:2368, after process_funds/process_comment_cashout), so during
+// block N's evaluators and per-block hooks `has_hardfork(HFn)` is FALSE iff
+// HFn activates at block N — its effects only land for block N+1 onward. We
+// match with strict `>`: HFn is active iff blockNum > activation.
 func SetForBlock(blockNum uint32) Set {
 	var s Set
 	// HF0 always active.
 	s |= 1
 	for i := ID(1); i <= NumHardforks; i++ {
-		if blockNum >= MainnetActivationBlock[i] {
+		if blockNum > MainnetActivationBlock[i] {
 			s |= 1 << i
 		}
 	}

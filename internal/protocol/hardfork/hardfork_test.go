@@ -25,25 +25,26 @@ func TestSetForBlock(t *testing.T) {
 		t.Fatal("HF1 must not be active at block 0")
 	}
 
-	// At HF20 activation, HF20 active and HF21 not.
+	// At HF20 activation, HF20 NOT yet active during evaluators (process_hardforks
+	// runs at end of block apply); HF20 first active for block N+1 onward.
 	at20 := SetForBlock(MainnetActivationBlock[HF20])
-	if !at20.Has(HF20) {
-		t.Fatal("HF20 must be active at its activation block")
+	if at20.Has(HF20) {
+		t.Fatal("HF20 must NOT be active during its activation block (process_hardforks runs at end of apply)")
 	}
-	if at20.Has(HF21) {
-		t.Fatal("HF21 must not be active at HF20 activation")
-	}
-	if at20.HighestActive() != HF20 {
-		t.Fatalf("HighestActive at HF20 block: got %d, want %d", at20.HighestActive(), HF20)
+	if !at20.Has(HF19) {
+		t.Fatal("HF19 must already be active during HF20 activation block")
 	}
 
-	// One block before HF20 activation, HF20 must NOT be active.
-	just := SetForBlock(MainnetActivationBlock[HF20] - 1)
-	if just.Has(HF20) {
-		t.Fatal("HF20 must not yet be active one block before activation")
+	// At activation_block + 1, HF20 active.
+	at20Next := SetForBlock(MainnetActivationBlock[HF20] + 1)
+	if !at20Next.Has(HF20) {
+		t.Fatal("HF20 must be active one block after activation")
 	}
-	if !just.Has(HF19) {
-		t.Fatal("HF19 must already be active one block before HF20 activation")
+	if at20Next.Has(HF21) {
+		t.Fatal("HF21 must not be active at HF20 activation+1")
+	}
+	if at20Next.HighestActive() != HF20 {
+		t.Fatalf("HighestActive at HF20 activation+1: got %d, want %d", at20Next.HighestActive(), HF20)
 	}
 
 	// Far in the future: all 28 hardforks active.
