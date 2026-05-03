@@ -1,7 +1,9 @@
 package chain
 
 import (
+	"fmt"
 	"math/big"
+	"os"
 	"sort"
 
 	"hived-go/internal/protocol/auth"
@@ -382,6 +384,9 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 		objects.PutWitness(s, &w)
 	}
 	if resetVT {
+		if os.Getenv("GHIVEDIFF_RESET") != "" {
+			fmt.Fprintf(os.Stderr, "GHIVEDIFF RESET-VST block=%d\n", blockNum)
+		}
 		newVT.SetInt64(0)
 		resetVirtualScheduleTime(s, ws)
 	}

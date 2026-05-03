@@ -130,45 +130,31 @@ func (witnessUpdateEvaluator) Apply(ctx *Context, o op.Operation) error {
 }
 
 // seedVirtualScheduledTime initializes the virtual scheduling fields on
-// a freshly-created witness. Mirrors witness_schedule.cpp:35-38:
+// a freshly-created witness to match C++ witness_object's default-init
+// (witness_objects.hpp:147-149):
 //
-//	new.virtual_last_update    = current_virtual_time
-//	new.virtual_scheduled_time = current_virtual_time +
-//	                             VIRTUAL_SCHEDULE_LAP_LENGTH2 / (votes + 1)
+//	virtual_last_update    = 0
+//	virtual_position       = 0
+//	virtual_scheduled_time = fc::uint128_max_value()  (= 2^128 - 1)
 //
-// The addition is plain uint128 arithmetic — when current_virtual_time
-// is non-zero it intentionally overflows past 2^128 - 1, wrapping the
-// VST to a small value (current_virtual_time - 1 for votes=0) so the
-// new witness appears at the FRONT of the by_schedule_time index and
-// is picked as the next timeshare slot.
+// This puts the new witness at the END of the by_schedule_time index,
+// so they're NOT immediately visited by update_witness_schedule's
+// timeshare loop. Their VST gets adjusted to a real value via
+// adjust_witness_vote when a voter casts a witness vote on them (or
+// when their proxied power propagates).
+//
+// (Pre-fix this function computed VST = current_vt - 1, putting fresh
+// witnesses at the FRONT of the index. With votes = 0, the rebuild's
+// VST advance = LAP/1 = LAP, overflowing newVT + LAP and triggering a
+// chain-wide reset — observed at 2,423 spurious resets between genesis
+// and block 2.92 M.)
 func seedVirtualScheduledTime(ctx *Context, w *objects.Witness) {
-	// Load current_virtual_time from the witness schedule (zero if no
-	// schedule object yet; the genesis seeder populates one).
-	var cvtLo, cvtHi uint64
-	if ws, err := objects.GetWitnessSchedule(ctx.DB); err == nil {
-		hi, lo := decodeUint128BE(ws.CurrentVirtualTime)
-		cvtHi, cvtLo = hi, lo
-	}
-	// VST = current_virtual_time + LAP_LENGTH2 (votes+1=1 for fresh
-	// witness with no votes). LAP_LENGTH2 = 2^128 - 1. In uint128 wrap:
-	//   if current_vt == 0: result = 2^128 - 1 (all-ones).
-	//   else:               result = current_vt - 1 (mod 2^128).
-	var newLo, newHi uint64
-	if cvtHi == 0 && cvtLo == 0 {
-		newLo = ^uint64(0)
-		newHi = ^uint64(0)
-	} else {
-		if cvtLo == 0 {
-			newLo = ^uint64(0) // borrow
-			newHi = cvtHi - 1
-		} else {
-			newLo = cvtLo - 1
-			newHi = cvtHi
-		}
-	}
-	w.VirtualScheduledTime = encodeUint128BE(newHi, newLo)
+	w.VirtualLastUpdate = [16]byte{}
 	w.VirtualPosition = [16]byte{}
-	w.VirtualLastUpdate = ctx.witnessScheduleVirtualTimeBytes()
+	// virtual_scheduled_time = uint128_max_value
+	for i := range w.VirtualScheduledTime {
+		w.VirtualScheduledTime[i] = 0xff
+	}
 }
 
 func decodeUint128BE(b [16]byte) (hi, lo uint64) {
