@@ -127,6 +127,17 @@ func Apply(db *state.Database) error {
 		ReverseAuctionSeconds: 0,
 		// Pre-HF20 default delegation return period is 5 days.
 		DelegationReturnPeriod: 5 * 24 * 60 * 60,
+		// hived's dynamic_global_property_object inits total_pow = -1
+		// (= uint64::max) on purpose so the FIRST pow op's `++total_pow`
+		// wraps to 0. That makes the first ever pow_worker for any
+		// account land at 0, which is exactly what the
+		//   HIVE_CHAIN_STATE_ASSERT( cur_witness->pow_worker == 0, … )
+		// check at hive_evaluator.cpp:461 expects on a same-block re-pow
+		// (admin block 1092 has two consecutive pow ops). Without this
+		// init, Go's TotalPow runs +1 ahead of C++'s and every witness's
+		// pow_worker is shifted by +1. See feedback memory
+		// `pow_worker_minus_one_init` for the bisection that nailed this.
+		TotalPow: ^uint64(0),
 	})
 
 	// Hardfork property object: at genesis processed_hardforks holds

@@ -3,6 +3,7 @@ package evaluator
 import (
 	"fmt"
 	"math/big"
+	"os"
 
 	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/op"
@@ -226,6 +227,9 @@ func ensureMinerAccountForPow(ctx *Context, worker string, payReward bool) error
 		if err != nil {
 			return err
 		}
+		if got.PowWorker != 0 && os.Getenv("GHIVEDIFF_POWBUMP") != "" {
+			fmt.Fprintf(os.Stderr, "DUPPOW block=%d worker=%s prev=%d\n", ctx.BlockNum, worker, got.PowWorker)
+		}
 		w = got
 	}
 	// Match C++ pow_apply (hive_evaluator.cpp:451-455, 465, 477):
@@ -241,6 +245,10 @@ func ensureMinerAccountForPow(ctx *Context, worker string, payReward bool) error
 	objects.PutDGPO(ctx.DB, &dgpoForPow)
 	w.PowWorker = dgpoForPow.TotalPow
 	objects.PutWitness(ctx.DB, &w)
+	if os.Getenv("GHIVEDIFF_POWBUMP") != "" {
+		fmt.Fprintf(os.Stderr, "POWBUMP block=%d worker=%s total=%d num=%d\n",
+			ctx.BlockNum, worker, dgpoForPow.TotalPow, dgpoForPow.NumPowWitnesses)
+	}
 	if !payReward {
 		return nil
 	}

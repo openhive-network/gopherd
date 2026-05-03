@@ -54,8 +54,11 @@ func TestWitnessScheduleAdditionalWitnesses(t *testing.T) {
 		}
 	}
 
-	// Generate enough blocks so the schedule reshuffles.
-	f.GenerateBlocks(5)
+	// Reshuffle gating in update_witness_schedule fires only when
+	// blockNum % HIVE_MAX_WITNESSES == 0 (hived hardcodes 21), so we
+	// need to generate at least one full 21-block round before the
+	// new witnesses land in the active schedule.
+	f.GenerateBlocks(25)
 
 	ws, err := objects.GetWitnessSchedule(state.NewSession(f.State))
 	if err != nil {
@@ -103,16 +106,18 @@ func TestWitnessScheduleBlockProducerRotates(t *testing.T) {
 	}
 	// Force a re-shuffle then walk a round of blocks; the head witness
 	// should change between consecutive blocks (most of the time).
-	f.GenerateBlocks(5)
+	// Schedule reshuffles only on blocks divisible by HIVE_MAX_WITNESSES
+	// (21), so generate one full round + a sampling round.
+	f.GenerateBlocks(25)
 
 	witnesses := make(map[string]bool)
-	for i := 0; i < 12; i++ {
+	for i := 0; i < 25; i++ {
 		f.GenerateBlock()
 		dgpo := f.DGPO()
 		witnesses[dgpo.CurrentWitness] = true
 	}
 	if len(witnesses) < 2 {
-		t.Fatalf("expected at least 2 distinct producers across 12 blocks, got %v",
+		t.Fatalf("expected at least 2 distinct producers across 25 blocks, got %v",
 			witnesses)
 	}
 }

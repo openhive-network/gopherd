@@ -55,11 +55,13 @@ func TestPowApplyCreatesAccountAndWitness(t *testing.T) {
 	if has, _ := objects.HasWitness(state.NewSession(f.State), "miner1"); !has {
 		t.Error("miner1 witness should exist post pow")
 	}
-	// pow_worker > 0 (in by_pow index).
-	w, _ := objects.GetWitness(state.NewSession(f.State), "miner1")
-	if w.PowWorker == 0 {
-		t.Error("miner1 PowWorker should be non-zero after pow")
-	}
+	// pow_worker is set to the post-bump dgp.total_pow value. hived
+	// inits total_pow = uint64::max so the first ever pow op wraps to
+	// 0; that's intentional — the first-bump witness's pow_worker is
+	// 0 in C++ as well. Subsequent pow ops yield 1, 2, … and the
+	// schedule's miner-pick uses lower_bound(1) so pow_worker==0 is
+	// effectively "not in queue" until the next bump.
+	_, _ = objects.GetWitness(state.NewSession(f.State), "miner1")
 }
 
 // TestPowApplyReturningWorkerOverwritesPowWorker verifies the C++ pow_apply
@@ -73,19 +75,22 @@ func TestPowApplyReturningWorkerOverwritesPowWorker(t *testing.T) {
 	f := New(t)
 	f.GenerateBlock()
 
+	// First pow: dgp.total_pow wraps from -1 → 0, witness gets pow_worker=0.
 	f.MustApplyOp(op.Pow{WorkerAccount: "miner1", Props: validPowProps()})
 	w1, _ := objects.GetWitness(state.NewSession(f.State), "miner1")
 	pow1 := w1.PowWorker
-	if pow1 == 0 {
-		t.Fatalf("first pow should leave pow_worker > 0")
-	}
+
+	// Second pow on same witness in same block: dgp.total_pow bumps
+	// to 1, witness's pow_worker overwrites to 1. C++ asserts pow_worker
+	// == 0 before this modify (hive_evaluator.cpp:461) — that check
+	// passes here because the first pow left it at 0.
 	f.MustApplyOp(op.Pow{WorkerAccount: "miner1", Props: validPowProps()})
 	w2, _ := objects.GetWitness(state.NewSession(f.State), "miner1")
 	if w2.PowWorker == pow1 {
 		t.Errorf("second pow should have re-bumped pow_worker (still %d)", w2.PowWorker)
 	}
-	if w2.PowWorker <= pow1 {
-		t.Errorf("pow_worker should monotonically increase: %d → %d", pow1, w2.PowWorker)
+	if w2.PowWorker == 0 {
+		t.Errorf("second pow should leave pow_worker > 0, got %d", w2.PowWorker)
 	}
 }
 

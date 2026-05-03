@@ -325,11 +325,10 @@ func dumpFullWitnessTSV(s *state.Session, blockNum uint32, ws *objects.WitnessSc
 		if err != nil {
 			continue
 		}
-		// Skip witnesses with VST == uint128_max AND votes == 0 AND
-		// pow_worker == 0 — they're at the END of by_schedule_time and
-		// never visited in rebuild iter. Including them produces ~50K
-		// rows per rebuild × ~138K rebuilds = ~7B rows (15 GB+). Skipping
-		// cuts to a few hundred rows/rebuild.
+		// Skip witnesses with VST == uint128_max AND votes == 0 — they're
+		// at the END of by_schedule_time and never visited in rebuild
+		// iter. Mirrors hived's GHIVEDIFF_DUMP filter exactly so cross-
+		// side TSV diff aligns row-for-row.
 		isMaxVST := true
 		for _, b := range w.VirtualScheduledTime {
 			if b != 0xff {
@@ -337,7 +336,7 @@ func dumpFullWitnessTSV(s *state.Session, blockNum uint32, ws *objects.WitnessSc
 				break
 			}
 		}
-		if isMaxVST && w.TotalVotesVests == 0 && w.PowWorker == 0 {
+		if isMaxVST && w.TotalVotesVests == 0 {
 			continue
 		}
 		// Remap Go's WitnessScheduleType (None=0, Elected=1, Timeshare=2,

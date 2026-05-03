@@ -118,18 +118,17 @@ func updateWitnessSchedule(s *state.Session, blockNum uint32) {
 		ws.TimeshareWeight = 5
 	}
 
-	// Round-boundary check: shuffle only every num_scheduled_witnesses
-	// blocks, matching C++ witness_schedule.cpp:405
-	// (`block_num % wso.num_scheduled_witnesses != 0`). Note this is the
-	// CURRENT scheduled count, NOT HIVE_MAX_WITNESSES — early in the
-	// chain (or in single-witness tests) the schedule has 1 entry, so
-	// every block triggers a re-shuffle. Persist sizing changes
-	// (hardfork transitions) and the recent-producer ring update.
-	scheduleSize := uint32(ws.NumScheduledWitnesses)
-	if scheduleSize == 0 {
-		scheduleSize = 1
-	}
-	if blockNum%scheduleSize != 0 {
+	// Round-boundary check: hived's update_witness_schedule
+	// (witness_schedule.cpp:511) gates on `head_block_num %
+	// HIVE_MAX_WITNESSES == 0` — a HARDCODED 21, *not* the live
+	// num_scheduled_witnesses. The commented-out `wso.next_shuffle_block_num`
+	// in that file shows that's the older behavior that was replaced.
+	// Using the dynamic value here makes Go rebuild more often when the
+	// schedule is below 21 (early chain, etc.), which means Go runs
+	// over-cap drains at rebuilds C++ skips, which permanently shrinks
+	// Go's by_pow vs C++'s and feeds back into divergent miner picks.
+	const rebuildPeriod = uint32(objects.MaxWitnesses) // 21
+	if blockNum%rebuildPeriod != 0 {
 		if ws.MaxVotedWitnesses != prevMaxVoted ||
 			ws.MaxMinerWitnesses != prevMaxMiner ||
 			ws.MaxRunnerWitnesses != prevMaxRunner ||
@@ -292,6 +291,9 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 			w.PowWorker = 0
 			if dgpo.NumPowWitnesses > 0 {
 				dgpo.NumPowWitnesses--
+				if os.Getenv("GHIVEDIFF_POWBUMP") != "" {
+					fmt.Fprintf(os.Stderr, "POWDRAIN block=%d num=%d\n", blockNum, dgpo.NumPowWitnesses)
+				}
 			}
 		}
 		objects.PutWitness(s, &w)
@@ -705,6 +707,9 @@ func updateWitnessSchedulePreHF4(s *state.Session, ws *objects.WitnessSchedule, 
 				objects.PutWitness(s, &w)
 				if dgpo.NumPowWitnesses > 0 {
 					dgpo.NumPowWitnesses--
+				if os.Getenv("GHIVEDIFF_POWBUMP") != "" {
+					fmt.Fprintf(os.Stderr, "POWDRAIN block=%d num=%d\n", blockNum, dgpo.NumPowWitnesses)
+				}
 				}
 			}
 		}
