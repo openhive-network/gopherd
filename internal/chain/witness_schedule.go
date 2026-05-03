@@ -332,11 +332,10 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 			return true, nil
 		})
 
-	// Mutation pass: assign Schedule = timeshare for the picked ones,
-	// advance new_virtual_time to each visited entry's VST (per C++
-	// line 218), and re-roll each visited witness's VST.
-	resetVT := false
-	lap2 := hiveVirtualScheduleLapLength2()
+	// First pass: walk visited in ASC order, advancing new_virtual_time
+	// to each visited witness's OLD VST. After the loop, new_virtual_time
+	// equals the LAST visited's old VST. Mark eligible visits as
+	// timeshare. Mirrors C++ witness_schedule.cpp:243-260 exactly.
 	for _, p := range visited {
 		newVT.SetBytes(p.vst[:])
 		w, err := objects.GetWitness(s, p.owner)
@@ -345,14 +344,28 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 		}
 		// Pick as timeshare if eligible.
 		if !(hf.Has(hardfork.HF14) && w.BlockSigningKey == zero33) &&
-			!selectedVoted[string(p.owner)] && !selectedMiners[string(p.owner)] &&
-			!resetVT {
+			!selectedVoted[string(p.owner)] && !selectedMiners[string(p.owner)] {
 			if len(active) < wantedTotal {
 				active = append(active, picked{owner: w.Owner, kind: objects.WitnessScheduleTimeshare})
 				w.Schedule = objects.WitnessScheduleTimeshare
+				objects.PutWitness(s, &w)
 			}
 		}
-		// Advance VST: new_vst = new_virtual_time + LAP_LENGTH2 / (votes + 1).
+	}
+
+	// Second pass: re-roll each visited witness's VST using the SAME
+	// new_virtual_time (= last visited's old VST). Mirrors C++
+	// witness_schedule.cpp:265-275 exactly: every processed witness gets
+	// virtual_position=0, virtual_last_update=new_virtual_time, and
+	// virtual_scheduled_time=new_virtual_time + LAP/(votes+1). This is
+	// THE source of subsequent timeshare ordering.
+	resetVT := false
+	lap2 := hiveVirtualScheduleLapLength2()
+	for _, p := range visited {
+		w, err := objects.GetWitness(s, p.owner)
+		if err != nil {
+			continue
+		}
 		votesPlus1 := big.NewInt(w.TotalVotesVests + 1)
 		if votesPlus1.Sign() <= 0 {
 			votesPlus1 = big.NewInt(1)
@@ -361,15 +374,12 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 		newVST := new(big.Int).Add(newVT, advance)
 		if newVST.Cmp(newVT) < 0 || newVST.BitLen() > 128 {
 			resetVT = true
-		} else {
-			w.VirtualPosition = [16]byte{}
-			w.VirtualLastUpdate = uint128ToBytes(newVT)
-			w.VirtualScheduledTime = uint128ToBytes(newVST)
-		}
-		objects.PutWitness(s, &w)
-		if resetVT {
 			break
 		}
+		w.VirtualPosition = [16]byte{}
+		w.VirtualLastUpdate = uint128ToBytes(newVT)
+		w.VirtualScheduledTime = uint128ToBytes(newVST)
+		objects.PutWitness(s, &w)
 	}
 	if resetVT {
 		newVT.SetInt64(0)

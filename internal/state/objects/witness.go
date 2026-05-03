@@ -499,15 +499,19 @@ func AdjustWitnessVote(s *state.Session, w *Witness, delta int64, hf hardfork.Se
 		}
 		return
 	}
+	mod128 := uint128Modulus()
 	currentVT := new(big.Int).SetBytes(ws.CurrentVirtualTime[:])
 	virtualLastUpdate := new(big.Int).SetBytes(w.VirtualLastUpdate[:])
 	virtualPosition := new(big.Int).SetBytes(w.VirtualPosition[:])
 
 	// delta_pos = OLD votes * (current_vt - virtual_last_update).
+	// virtual_position += delta_pos — wraps mod 2^128 in C++. Mirror
+	// that wrap explicitly with big.Int + Mod.
 	if currentVT.Cmp(virtualLastUpdate) > 0 {
 		dt := new(big.Int).Sub(currentVT, virtualLastUpdate)
 		dp := new(big.Int).Mul(big.NewInt(w.TotalVotesVests), dt)
 		virtualPosition.Add(virtualPosition, dp)
+		virtualPosition.Mod(virtualPosition, mod128)
 	}
 	// virtual_last_update = current_virtual_time
 	w.VirtualLastUpdate = packBig128(currentVT)
@@ -524,36 +528,45 @@ func AdjustWitnessVote(s *state.Session, w *Witness, delta int64, hf hardfork.Se
 	if !hf.Has(hardfork.HF2) {
 		lap = lapLength()
 	}
-	// virtual_scheduled_time = virtual_last_update + (lap - virtual_position) / (votes + 1)
-	advance := new(big.Int)
-	if lap.Cmp(virtualPosition) > 0 {
-		advance.Sub(lap, virtualPosition)
-		advance.Quo(advance, big.NewInt(w.TotalVotesVests+1))
-	}
+	// virtual_scheduled_time = virtual_last_update + (lap - virtual_position) / (votes + 1).
+	// In C++ this is uint128 subtraction — when virtual_position > lap
+	// it wraps to a huge value, the divide gives a huge advance, then
+	// VST overflows past current_vt and the HF4+ clamp catches it.
+	advance := new(big.Int).Sub(lap, virtualPosition)
+	advance.Mod(advance, mod128)
+	advance.Quo(advance, big.NewInt(w.TotalVotesVests+1))
 	newVST := new(big.Int).Add(currentVT, advance)
-	// HF4+: if VST < current_vt (overflow), clamp to uint128 max.
+	newVST.Mod(newVST, mod128)
+	// HF4+: if VST < current_vt (mod-128 overflow), clamp to uint128 max.
 	if hf.Has(hardfork.HF4) {
-		if newVST.Cmp(currentVT) < 0 || newVST.BitLen() > 128 {
+		if newVST.Cmp(currentVT) < 0 {
 			newVST = lap128Max()
 		}
 	}
 	w.VirtualScheduledTime = packBig128(newVST)
 }
 
-// packBig128 returns the 16-byte big-endian uint128 representation of v
-// (saturating at 2^128-1 for overflow; clamping negatives to 0).
+// packBig128 returns the 16-byte big-endian uint128 representation of v.
+// Caller is responsible for keeping v in the [0, 2^128) range — values
+// outside the range are silently truncated to the low 128 bits.
 func packBig128(v *big.Int) [16]byte {
 	var out [16]byte
 	if v == nil || v.Sign() <= 0 {
 		return out
 	}
-	if v.BitLen() > 128 {
-		return [16]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-			0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
-	}
 	src := v.Bytes()
+	if len(src) > 16 {
+		src = src[len(src)-16:]
+	}
 	copy(out[16-len(src):], src)
 	return out
+}
+
+// uint128Modulus returns 2^128 — the modulus for wrapping uint128 math.
+// Used to keep virtual_position and virtual_scheduled_time in
+// [0, 2^128) like C++'s native uint128 wraparound.
+func uint128Modulus() *big.Int {
+	return new(big.Int).Lsh(big.NewInt(1), 128)
 }
 
 func lapLength2() *big.Int {

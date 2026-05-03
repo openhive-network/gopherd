@@ -110,6 +110,44 @@ func updateMedianFeed(s *state.Session, blockNum, blockTime uint32) {
 		sort.Strings(sched)
 		fmt.Fprintf(os.Stderr, "GHIVEDIFF FEED-SCHED block=%d feeds=%d schedule=[%s]\n",
 			blockNum, len(feeds), strings.Join(sched, ","))
+		// Also dump top-25 witnesses by votes to compare voted-set composition.
+		var entries []string
+		_ = s.Range(objects.WitnessTable, objects.WitnessByVoteIndex, nil,
+			func(key, _ []byte) (bool, error) {
+				if len(entries) >= 25 || len(key) < 8+state.AccountNameKeyLen {
+					return len(entries) < 25, nil
+				}
+				ownerBytes := key[8 : 8+state.AccountNameKeyLen]
+				n := state.AccountNameKeyLen
+				for n > 0 && ownerBytes[n-1] == 0 {
+					n--
+				}
+				name := string(ownerBytes[:n])
+				w, _ := objects.GetWitness(s, auth.AccountName(name))
+				entries = append(entries, fmt.Sprintf("%s=%d", name, w.TotalVotesVests))
+				return true, nil
+			})
+		fmt.Fprintf(os.Stderr, "GHIVEDIFF SCHED-VOTES block=%d top25=[%s]\n",
+			blockNum, strings.Join(entries, ","))
+		// Top-30 by smallest VST (timeshare candidates).
+		var vstEntries []string
+		_ = s.Range(objects.WitnessTable, objects.WitnessByScheduleTimeIndex, nil,
+			func(key, _ []byte) (bool, error) {
+				if len(vstEntries) >= 30 || len(key) < 16+state.AccountNameKeyLen {
+					return len(vstEntries) < 30, nil
+				}
+				vstHex := fmt.Sprintf("%x", key[:16])
+				ownerBytes := key[16 : 16+state.AccountNameKeyLen]
+				n := state.AccountNameKeyLen
+				for n > 0 && ownerBytes[n-1] == 0 {
+					n--
+				}
+				name := string(ownerBytes[:n])
+				vstEntries = append(vstEntries, fmt.Sprintf("%s=%s", name, vstHex))
+				return true, nil
+			})
+		fmt.Fprintf(os.Stderr, "GHIVEDIFF SCHED-VSTS block=%d top30=[%s]\n",
+			blockNum, strings.Join(vstEntries, ","))
 	}
 
 	if len(feeds) < minFeeds {
