@@ -111,6 +111,15 @@ type DynamicGlobalProperty struct {
 	// to the block producer, inflating cur_supply by ~420K vs hived
 	// (1.6% drift visible at the HF7 cashout cascade).
 	NumPowWitnesses uint32
+	// TotalPow is a monotonic counter incremented on every pow / pow2
+	// op (mirrors dynamic_global_property_object::total_pow). The
+	// receiving witness's pow_worker is set to this value, giving each
+	// pow op a UNIQUE pow_worker even when multiple pow ops land in
+	// the same block. Without this (using e.g. blockNum as pow_worker),
+	// same-block pow ops collide and by_pow ordering diverges from
+	// hived's sequence — which feeds back into miner-slot picks at
+	// schedule rebuilds and skews the timeshare iter's stop point.
+	TotalPow uint64
 	// NextLimitOrderID is a monotonic counter assigned to each newly-
 	// created limit_order_object. Used as the by_price index tie-break
 	// — same-price orders match in insertion order, mirroring C++'s
@@ -160,6 +169,7 @@ func AppendDGPO(dst []byte, p *DynamicGlobalProperty) []byte {
 	dst = appendU64LE(dst, p.NextLimitOrderID)
 	dst = appendU32LE(dst, p.LastIrreversibleBlockNum)
 	dst = append(dst, byte(p.DownvotePoolPercent), byte(p.DownvotePoolPercent>>8))
+	dst = appendU64LE(dst, p.TotalPow)
 	return dst
 }
 
@@ -284,6 +294,13 @@ func ReadDGPO(src []byte) (DynamicGlobalProperty, error) {
 	}
 	if p.DownvotePoolPercent, err = r.ReadUint16(); err != nil {
 		return p, fmt.Errorf("dgpo.downvote_pool_percent: %w", err)
+	}
+	// TotalPow is a later schema addition; tolerate EOF for legacy rows.
+	if r.AtEnd() {
+		return p, nil
+	}
+	if p.TotalPow, err = r.ReadUint64(); err != nil {
+		return p, fmt.Errorf("dgpo.total_pow: %w", err)
 	}
 	if !r.AtEnd() {
 		return p, errors.New("dgpo: trailing bytes after decode (schema mismatch?)")

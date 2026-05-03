@@ -282,6 +282,129 @@ func applyHBDHardCap(s *state.Session, fh *objects.FeedHistory, hf hardfork.Set)
 	}
 }
 
+// dumpFullWitnessTSV writes ALL witnesses' state (block, name, votes,
+// position, last_update, scheduled_time, schedule) as TSV to a file.
+// One run captures everything we need for cross-side per-witness diff —
+// no block-list gating, no recompile loops.
+//
+// Format: tab-separated, one row per witness per block. A trailing
+// `__ws__` row carries ws.current_virtual_time so consumers can recover
+// the chain-wide virtual time at each rebuild.
+//
+// File is opened in append mode and written for every call. The chain
+// caller is single-threaded, so there's no locking overhead.
+var fullDumpFp *os.File
+var fullDumpPath string
+
+func dumpFullWitnessTSV(s *state.Session, blockNum uint32, ws *objects.WitnessSchedule, path string) {
+	if fullDumpFp == nil || fullDumpPath != path {
+		if fullDumpFp != nil {
+			fullDumpFp.Close()
+		}
+		f, err := os.Create(path)
+		if err != nil {
+			return
+		}
+		fullDumpFp = f
+		fullDumpPath = path
+		fmt.Fprintln(fullDumpFp, "block\tname\tvotes\tposition\tlast_update\tscheduled_time\tschedule\tpow_worker")
+	}
+	var names []string
+	_ = s.Range(objects.WitnessTable, state.PrimaryIndex, nil,
+		func(_, value []byte) (bool, error) {
+			w, err := objects.ReadWitness(value)
+			if err != nil {
+				return true, nil
+			}
+			names = append(names, string(w.Owner))
+			return true, nil
+		})
+	sort.Strings(names) // deterministic order, matches hived by_name iter
+	for _, name := range names {
+		w, err := objects.GetWitness(s, auth.AccountName(name))
+		if err != nil {
+			continue
+		}
+		// Skip witnesses with VST == uint128_max AND votes == 0 AND
+		// pow_worker == 0 — they're at the END of by_schedule_time and
+		// never visited in rebuild iter. Including them produces ~50K
+		// rows per rebuild × ~138K rebuilds = ~7B rows (15 GB+). Skipping
+		// cuts to a few hundred rows/rebuild.
+		isMaxVST := true
+		for _, b := range w.VirtualScheduledTime {
+			if b != 0xff {
+				isMaxVST = false
+				break
+			}
+		}
+		if isMaxVST && w.TotalVotesVests == 0 && w.PowWorker == 0 {
+			continue
+		}
+		// Remap Go's WitnessScheduleType (None=0, Elected=1, Timeshare=2,
+		// Miner=3) to C++'s enum order (elected=0, timeshare=1, miner=2,
+		// none=3) so the diff tool sees equal values for equal states.
+		schedCpp := 3
+		switch w.Schedule {
+		case objects.WitnessScheduleElected:
+			schedCpp = 0
+		case objects.WitnessScheduleTimeshare:
+			schedCpp = 1
+		case objects.WitnessScheduleMiner:
+			schedCpp = 2
+		}
+		fmt.Fprintf(fullDumpFp, "%d\t%s\t%d\t%x\t%x\t%x\t%d\t%d\n",
+			blockNum, name, w.TotalVotesVests,
+			w.VirtualPosition, w.VirtualLastUpdate, w.VirtualScheduledTime,
+			schedCpp, w.PowWorker)
+	}
+	// __ws__ row carrying ws.current_virtual_time + dgpo num_pow_witnesses
+	dgpo, _ := objects.GetDGPO(s)
+	fmt.Fprintf(fullDumpFp, "%d\t__ws__\t0\t%032x\t%032x\t%x\t0\t%d\n",
+		blockNum, []byte{}, []byte{}, ws.CurrentVirtualTime, dgpo.NumPowWitnesses)
+}
+
+// dumpSchedVSTs prints SCHED-VSTS and SCHED-POS for the top-30 witnesses
+// by smallest VST. Used at checkpoint blocks for cross-side parity diff.
+func dumpSchedVSTs(s *state.Session, blockNum uint32) {
+	var vstEntries []string
+	_ = s.Range(objects.WitnessTable, objects.WitnessByScheduleTimeIndex, nil,
+		func(key, _ []byte) (bool, error) {
+			if len(vstEntries) >= 30 || len(key) < 16+state.AccountNameKeyLen {
+				return len(vstEntries) < 30, nil
+			}
+			vstHex := fmt.Sprintf("%x", key[:16])
+			ownerBytes := key[16 : 16+state.AccountNameKeyLen]
+			n := state.AccountNameKeyLen
+			for n > 0 && ownerBytes[n-1] == 0 {
+				n--
+			}
+			name := string(ownerBytes[:n])
+			vstEntries = append(vstEntries, fmt.Sprintf("%s=%s", name, vstHex))
+			return true, nil
+		})
+	fmt.Fprintf(os.Stderr, "GHIVEDIFF SCHED-VSTS block=%d top30=[%s]\n",
+		blockNum, strings.Join(vstEntries, ","))
+	var posEntries []string
+	_ = s.Range(objects.WitnessTable, objects.WitnessByScheduleTimeIndex, nil,
+		func(key, _ []byte) (bool, error) {
+			if len(posEntries) >= 30 || len(key) < 16+state.AccountNameKeyLen {
+				return len(posEntries) < 30, nil
+			}
+			ownerBytes := key[16 : 16+state.AccountNameKeyLen]
+			n := state.AccountNameKeyLen
+			for n > 0 && ownerBytes[n-1] == 0 {
+				n--
+			}
+			name := string(ownerBytes[:n])
+			w, _ := objects.GetWitness(s, auth.AccountName(name))
+			posEntries = append(posEntries, fmt.Sprintf("%s:pos=%x,lu=%x,votes=%d",
+				name, w.VirtualPosition, w.VirtualLastUpdate, w.TotalVotesVests))
+			return true, nil
+		})
+	fmt.Fprintf(os.Stderr, "GHIVEDIFF SCHED-POS block=%d top30=[%s]\n",
+		blockNum, strings.Join(posEntries, ","))
+}
+
 // priceIsZero reports whether either side of a price has zero amount.
 // We treat that as "no feed yet".
 func priceIsZero(p asset.Price) bool {

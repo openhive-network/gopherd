@@ -70,6 +70,8 @@ func main() {
 		os.Exit(cmdValidateState(os.Args[2:]))
 	case "dumpvotes":
 		runDumpVotes()
+	case "witness-diff":
+		os.Exit(cmdWitnessDiff(os.Args[2:]))
 	case "version":
 		fmt.Println("ghive-tools 0.0.1 (P0)")
 	case "-h", "--help", "help":

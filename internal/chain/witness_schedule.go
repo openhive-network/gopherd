@@ -214,6 +214,20 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 		objects.PutWitness(s, &w)
 	}
 
+	// Comprehensive per-rebuild full-state dump matching hived's
+	// placement (right after voted iter, before miner + timeshare passes).
+	if dumpPath := os.Getenv("GHIVEDIFF_DUMP_FILE"); dumpPath != "" {
+		dumpFullWitnessTSV(s, blockNum, ws, dumpPath)
+	}
+	// Legacy block-list-gated dumps kept for compatibility.
+	if os.Getenv("GHIVEDIFF_VSTS") != "" {
+		if (blockNum >= 1041495 && blockNum <= 1050000) ||
+			(blockNum >= 2880000 && blockNum <= 2910000) ||
+			(blockNum%21000 == 0 && blockNum >= 1050000 && blockNum <= 2888500) {
+			dumpSchedVSTs(s, blockNum)
+		}
+	}
+
 	// 2) Drain top max_miner_witnesses from by_pow.
 	//    Pre-HF13 only — post-HF13 num_pow_witnesses is 0 and the
 	//    max_miner_witnesses count is 0 for HF17+ anyway.

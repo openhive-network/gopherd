@@ -126,18 +126,11 @@ func payPowReward(ctx *Context) error {
 	if witnessName == "" {
 		return nil
 	}
-	// hived bumps num_pow_witnesses on EVERY pow op (pow_apply at
-	// hive_evaluator.cpp:454) — before computing get_pow_reward — so the
-	// 21st pow op overall is the first to pay non-zero. Pre-HIVE_START_
-	// VESTING_BLOCK (201,600), get_pow_reward returns 0 until num >= 21
-	// (database.cpp:1940). Without this gate, pre-201,600 pow ops pay
-	// 21,000 satoshi each from block 1, inflating cur_supply by ~420K
-	// vs hived (visible at the HF7 cashout cascade as a constant 1.6%
-	// drift).
-	dgpo.NumPowWitnesses++
+	// dgpo.NumPowWitnesses is bumped in ensureMinerAccountForPow
+	// (alongside TotalPow) to match C++'s unconditional dgp.modify.
+	// Here we only USE the post-bump value to gate early payouts.
 	const startVestingBlock uint32 = 7 * 28800 // HIVE_START_VESTING_BLOCK
 	if ctx.BlockNum < startVestingBlock && dgpo.NumPowWitnesses < uint32(maxWitnesses) {
-		objects.PutDGPO(ctx.DB, &dgpo)
 		return nil
 	}
 	// Mirror C++'s get_pow_reward (database.cpp:1933): take the max of
@@ -212,8 +205,8 @@ func ensureMinerAccountForPow(ctx *Context, worker string, payReward bool) error
 	// Register the worker as a witness if missing — hived's pow_apply
 	// calls db.create<witness_object>(...) on first pow from this
 	// account, alongside the account creation. Mark them in the
-	// PoW miner queue (witness_object::pow_worker = head_block_num+1
-	// so it's monotonic and never zero) and bump
+	// PoW miner queue (witness_object::pow_worker = ++dgp.total_pow,
+	// guaranteeing a unique value per pow op) and bump
 	// dgpo.num_pow_witnesses; update_witness_schedule's miner-slot
 	// pass will pop them later. Existing witnesses re-running PoW
 	// also bump the queue position.
@@ -235,7 +228,18 @@ func ensureMinerAccountForPow(ctx *Context, worker string, payReward bool) error
 		}
 		w = got
 	}
-	w.PowWorker = uint64(ctx.BlockNum) + 1
+	// Match C++ pow_apply (hive_evaluator.cpp:451-455, 465, 477):
+	//   ++dgp.total_pow; ++dgp.num_pow_witnesses; w.pow_worker = dgp.total_pow.
+	// Both counters bump UNCONDITIONALLY — C++ does it in a single
+	// db.modify before deciding payment. Don't move num_pow_witnesses
+	// into payPowReward: pre-HF13 pow1 and pre-HF16 pow2 always pay so
+	// it didn't show, but on HF16+ pow2 (no payment) C++ still bumps
+	// while Go would not.
+	dgpoForPow, _ := objects.GetDGPO(ctx.DB)
+	dgpoForPow.TotalPow++
+	dgpoForPow.NumPowWitnesses++
+	objects.PutDGPO(ctx.DB, &dgpoForPow)
+	w.PowWorker = dgpoForPow.TotalPow
 	objects.PutWitness(ctx.DB, &w)
 	if !payReward {
 		return nil

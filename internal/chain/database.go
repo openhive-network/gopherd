@@ -411,6 +411,8 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 			d.CurrentSupply, d.VirtualSupply, d.CurrentHBDSupply,
 			fh.CurrentMedianHistory.Base.Amount, fh.CurrentMedianHistory.Quote.Amount)
 	}
+	// (Per-witness VST dump moved into updateWitnessSchedule4 to align
+	// with hived's GHIVEDIFF_VSTS dump location.)
 	// GHIVEDIFF_ACCOUNTS=acc1,acc2 — per-block balance dump for each
 	// listed account. Mirrors hived's diagnostic block at
 	// database.cpp:1832-1853.

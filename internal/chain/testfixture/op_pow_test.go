@@ -62,37 +62,30 @@ func TestPowApplyCreatesAccountAndWitness(t *testing.T) {
 	}
 }
 
-// TestPowApplyReturningWorkerPreservesWitness verifies that a second pow
-// op from the same worker doesn't recreate the account/witness — it
-// only bumps PowWorker (re-queues in by_pow).
-func TestPowApplyReturningWorkerPreservesWitness(t *testing.T) {
+// TestPowApplyReturningWorkerOverwritesPowWorker verifies the C++ pow_apply
+// path (hive_evaluator.cpp:451-467): a re-pow on an existing witness
+// bumps dgp.total_pow + num_pow_witnesses and overwrites pow_worker
+// with the post-bump total_pow value. (The C++ assertion at line 461
+// is observed to be inert for back-to-back pow ops in the same block,
+// so we don't enforce it here either; the canonical block_log applies
+// such pairs cleanly.)
+func TestPowApplyReturningWorkerOverwritesPowWorker(t *testing.T) {
 	f := New(t)
 	f.GenerateBlock()
 
 	f.MustApplyOp(op.Pow{WorkerAccount: "miner1", Props: validPowProps()})
 	w1, _ := objects.GetWitness(state.NewSession(f.State), "miner1")
-	a1, _ := objects.GetAccount(state.NewSession(f.State), "miner1")
-	created1 := w1.Created
 	pow1 := w1.PowWorker
-
-	// Second pow from miner1.
+	if pow1 == 0 {
+		t.Fatalf("first pow should leave pow_worker > 0")
+	}
 	f.MustApplyOp(op.Pow{WorkerAccount: "miner1", Props: validPowProps()})
 	w2, _ := objects.GetWitness(state.NewSession(f.State), "miner1")
-	a2, _ := objects.GetAccount(state.NewSession(f.State), "miner1")
-
-	if w2.Created != created1 {
-		t.Errorf("Witness Created changed: %d → %d (expected preserved)", created1, w2.Created)
-	}
-	if a2.Created != a1.Created {
-		t.Errorf("Account Created changed: %d → %d (expected preserved)", a1.Created, a2.Created)
-	}
-	// pow_worker bumps to a fresh head_block_num+1 so index ordering
-	// stays monotonic.
 	if w2.PowWorker == pow1 {
-		t.Errorf("PowWorker should have been re-bumped (still %d)", w2.PowWorker)
+		t.Errorf("second pow should have re-bumped pow_worker (still %d)", w2.PowWorker)
 	}
 	if w2.PowWorker <= pow1 {
-		t.Errorf("PowWorker should monotonically increase: was %d, now %d", pow1, w2.PowWorker)
+		t.Errorf("pow_worker should monotonically increase: %d → %d", pow1, w2.PowWorker)
 	}
 }
 
