@@ -142,7 +142,6 @@ func (witnessUpdateEvaluator) Apply(ctx *Context, o op.Operation) error {
 // new witness appears at the FRONT of the by_schedule_time index and
 // is picked as the next timeshare slot.
 func seedVirtualScheduledTime(ctx *Context, w *objects.Witness) {
-	const uint128MaxLowMask uint64 = ^uint64(0)
 	// Load current_virtual_time from the witness schedule (zero if no
 	// schedule object yet; the genesis seeder populates one).
 	var cvtLo, cvtHi uint64
@@ -150,16 +149,23 @@ func seedVirtualScheduledTime(ctx *Context, w *objects.Witness) {
 		hi, lo := decodeUint128BE(ws.CurrentVirtualTime)
 		cvtHi, cvtLo = hi, lo
 	}
-	// VST = current_virtual_time + LAP_LENGTH2  (votes+1=1 for fresh
-	// witness with no votes). LAP_LENGTH2 = 2^128 - 1, i.e. all-ones.
-	// Sum = (cvtHi:cvtLo) + (^0:^0) = (cvtHi-1+overflow:cvtLo-1+overflow).
-	newLo := cvtLo - 1
-	carryFromLo := uint64(0)
-	if cvtLo == 0 {
-		carryFromLo = ^uint64(0) // borrow into hi
+	// VST = current_virtual_time + LAP_LENGTH2 (votes+1=1 for fresh
+	// witness with no votes). LAP_LENGTH2 = 2^128 - 1. In uint128 wrap:
+	//   if current_vt == 0: result = 2^128 - 1 (all-ones).
+	//   else:               result = current_vt - 1 (mod 2^128).
+	var newLo, newHi uint64
+	if cvtHi == 0 && cvtLo == 0 {
+		newLo = ^uint64(0)
+		newHi = ^uint64(0)
+	} else {
+		if cvtLo == 0 {
+			newLo = ^uint64(0) // borrow
+			newHi = cvtHi - 1
+		} else {
+			newLo = cvtLo - 1
+			newHi = cvtHi
+		}
 	}
-	_ = uint128MaxLowMask
-	newHi := cvtHi - 1 - carryFromLo
 	w.VirtualScheduledTime = encodeUint128BE(newHi, newLo)
 	w.VirtualPosition = [16]byte{}
 	w.VirtualLastUpdate = ctx.witnessScheduleVirtualTimeBytes()
