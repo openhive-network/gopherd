@@ -66,6 +66,16 @@ func applyHardfork(s *state.Session, id hardfork.ID) {
 		// reset witness.votes / TotalVotesVests from scratch.
 		// libraries/chain/database_hardfork.cpp:192,196.
 		retallyWitnessVotes(s)
+	case hardfork.HF4:
+		// HF4 (database_hardfork.cpp:199) calls
+		// reset_virtual_schedule_time which zeros ws.current_virtual_time
+		// and re-seeds every witness's VST = LAP_LENGTH2 / (votes+1).
+		// Without this, Go's pre-HF4 VST evolution drifts permanently
+		// from C++'s post-HF4 baseline.
+		if ws, err := objects.GetWitnessSchedule(s); err == nil {
+			resetVirtualScheduleTime(s, &ws)
+			objects.PutWitnessSchedule(s, &ws)
+		}
 	case hardfork.HF6:
 		// HF6 calls retally_witness_vote_counts(force=false) which only
 		// repairs proxy-holding accounts. We don't model proxy chains
