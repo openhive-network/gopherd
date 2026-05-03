@@ -82,14 +82,24 @@ func Apply(db *state.Database) error {
 	// init_genesis_witnesses (database.cpp::init_genesis_witnesses).
 	// Without this, the witness schedule re-shuffle drops initminer
 	// the moment any other account registers as a witness.
+	//
+	// VirtualScheduledTime is initialized to uint128_max_value to
+	// match C++'s witness_object default-init (witness_objects.hpp:149).
+	// That keeps initminer at the END of by_schedule_time until votes
+	// arrive and adjust_witness_vote sets a real VST.
+	var vstMax [16]byte
+	for i := range vstMax {
+		vstMax[i] = 0xff
+	}
 	objects.PutWitness(s, &objects.Witness{
-		Owner:              MainnetInitminer,
-		Created:            network.GenesisTimeUnix,
-		URL:                "",
-		BlockSigningKey:    memoKey,
-		AccountCreationFee: 0,
-		MaximumBlockSize:   65536,
-		HBDInterestRate:    1000,
+		Owner:                MainnetInitminer,
+		Created:              network.GenesisTimeUnix,
+		URL:                  "",
+		BlockSigningKey:      memoKey,
+		AccountCreationFee:   0,
+		MaximumBlockSize:     65536,
+		HBDInterestRate:      1000,
+		VirtualScheduledTime: vstMax,
 	})
 
 	objects.PutDGPO(s, &objects.DynamicGlobalProperty{
