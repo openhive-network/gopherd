@@ -371,16 +371,14 @@ func (accountWitnessVoteEvaluator) Apply(ctx *Context, o op.Operation) error {
 		return err
 	}
 
-	// Effective vote weight: pre-HF24, the full VestingShares applies
-	// immediately. Post-HF24, votes still in the DelayedVotes queue
-	// don't count toward the witness's total — only matured votes do.
-	// Mirrors hived's account_object::get_governance_vote_power().
-	effectiveVests := voter.VestingShares
-	if ctx.Hardforks.Has(hardfork.HF24) {
-		effectiveVests -= int64(voter.SumDelayedVotes)
-		if effectiveVests < 0 {
-			effectiveVests = 0
-		}
+	// Effective vote weight: pre-HF24 == VestingShares; HF24+ subtract
+	// SumDelayedVotes. PLUS the voter's proxied_vsf_votes — vests
+	// proxied THROUGH this voter from other accounts. Mirrors
+	// account_object::get_governance_vote_power() = direct + accumulate
+	// (proxied_vsf_votes).
+	effectiveVests := directGovernanceVotePower(ctx, &voter)
+	for _, v := range voter.ProxiedVSFVotes {
+		effectiveVests += v
 	}
 
 	if wv.Approve {
