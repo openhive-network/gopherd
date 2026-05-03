@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
+	"strings"
 
 	"hived-go/internal/chain/evaluator"
 	"hived-go/internal/fcraw"
@@ -409,6 +410,22 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 			blockNum, d.TotalRewardFundHive, d.TotalVestingFundHive, d.TotalVestingShares,
 			d.CurrentSupply, d.VirtualSupply, d.CurrentHBDSupply,
 			fh.CurrentMedianHistory.Base.Amount, fh.CurrentMedianHistory.Quote.Amount)
+	}
+	// GHIVEDIFF_ACCOUNTS=acc1,acc2 — per-block balance dump for each
+	// listed account. Mirrors hived's diagnostic block at
+	// database.cpp:1832-1853.
+	if accEnv := os.Getenv("GHIVEDIFF_ACCOUNTS"); accEnv != "" {
+		for _, name := range strings.Split(accEnv, ",") {
+			if name == "" {
+				continue
+			}
+			a, err := objects.GetAccount(session, name)
+			if err != nil {
+				continue
+			}
+			fmt.Fprintf(os.Stderr, "GHIVEDIFF ACCT block=%d name=%s hive=%d hbd=%d vests=%d\n",
+				blockNum, name, a.Balance, a.HBDBalance, a.VestingShares)
+		}
 	}
 	processFunds(session, blockNum, hdr.Witness)
 	if os.Getenv("GHIVEDIFF") != "" {
