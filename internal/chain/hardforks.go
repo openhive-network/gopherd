@@ -724,12 +724,18 @@ func retallyWitnessVotes(s *state.Session) {
 			witnesses = append(witnesses, wRec{owner: w.Owner})
 			return true, nil
 		})
+	// C++ retally_witness_votes (database_witness.cpp:113) zeros
+	// w.votes AND w.virtual_position; it does NOT touch
+	// virtual_last_update or virtual_scheduled_time. The subsequent
+	// per-account adjust_witness_vote calls re-derive both from the
+	// current virtual time.
 	for _, wr := range witnesses {
 		w, err := objects.GetWitness(s, wr.owner)
 		if err != nil {
 			continue
 		}
 		w.TotalVotesVests = 0
+		w.VirtualPosition = [16]byte{}
 		objects.PutWitness(s, &w)
 	}
 
@@ -747,6 +753,8 @@ func retallyWitnessVotes(s *state.Session) {
 			accounts = append(accounts, acctRec{name: a.Name})
 			return true, nil
 		})
+	dgpo, _ := objects.GetDGPO(s)
+	hf := hardfork.SetForBlock(dgpo.HeadBlockNumber)
 	for _, ar := range accounts {
 		a, err := objects.GetAccount(s, ar.name)
 		if err != nil {
@@ -777,7 +785,10 @@ func retallyWitnessVotes(s *state.Session) {
 				if gerr != nil {
 					return true, nil
 				}
-				w.TotalVotesVests += power
+				// C++ retally calls adjust_witness_vote per voter,
+				// which advances virtual_position / virtual_last_update
+				// / virtual_scheduled_time alongside the vote bump.
+				objects.AdjustWitnessVote(s, &w, power, hf)
 				objects.PutWitness(s, &w)
 				return true, nil
 			})

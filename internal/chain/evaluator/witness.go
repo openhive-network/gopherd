@@ -429,10 +429,7 @@ func (accountWitnessVoteEvaluator) Apply(ctx *Context, o op.Operation) error {
 // caller's PutWitness doesn't overwrite the table-walk's mutation.
 func applyWitnessVoteDelta(ctx *Context, voter *objects.Account, w *objects.Witness, delta int64) {
 	if !ctx.Hardforks.Has(hardfork.HF2) || ctx.Hardforks.Has(hardfork.HF3) {
-		w.TotalVotesVests += delta
-		if w.TotalVotesVests < 0 {
-			w.TotalVotesVests = 0
-		}
+		objects.AdjustWitnessVote(ctx.DB, w, delta, ctx.Hardforks)
 		return
 	}
 	objects.AdjustProxiedWitnessVotes(ctx.DB, voter, delta)

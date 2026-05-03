@@ -3,11 +3,13 @@ package objects
 import (
 	"errors"
 	"fmt"
+	"math/big"
 
 	"hived-go/internal/crypto"
 	"hived-go/internal/fcraw"
 	"hived-go/internal/protocol/asset"
 	"hived-go/internal/protocol/auth"
+	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/state"
 )
 
@@ -461,18 +463,110 @@ func AdjustWitnessVotesForVoter(s *state.Session, account auth.AccountName, delt
 			votes = append(votes, pair{witness: string(witnessBytes[:n])})
 			return true, nil
 		})
+	dgpo, _ := GetDGPO(s)
+	hf := hardfork.SetForBlock(dgpo.HeadBlockNumber)
 	for _, v := range votes {
 		w, err := GetWitness(s, v.witness)
 		if err != nil {
 			continue
 		}
+		AdjustWitnessVote(s, &w, delta, hf)
+		PutWitness(s, &w)
+	}
+}
+
+// AdjustWitnessVote mirrors C++ database::adjust_witness_vote
+// (database_witness.cpp:69) — applies `delta` to w.TotalVotesVests and
+// also advances the virtual-time bookkeeping that the timeshare scheduler
+// (update_witness_schedule_4) reads:
+//
+//	delta_pos = old_votes * (current_virtual_time - virtual_last_update)
+//	virtual_position += delta_pos
+//	virtual_last_update = current_virtual_time
+//	votes += delta
+//	virtual_scheduled_time = virtual_last_update + (LAP - virtual_position)/(votes+1)
+//	HF4+: if virtual_scheduled_time < current_virtual_time → set to MAX
+//
+// Without this, by_schedule_time becomes stale and timeshare picks
+// drift from C++ even when total vesting matches.
+func AdjustWitnessVote(s *state.Session, w *Witness, delta int64, hf hardfork.Set) {
+	ws, err := GetWitnessSchedule(s)
+	if err != nil {
+		// No schedule yet (genesis) — fall back to plain vote bump.
 		w.TotalVotesVests += delta
 		if w.TotalVotesVests < 0 {
 			w.TotalVotesVests = 0
 		}
-		PutWitness(s, &w)
+		return
 	}
+	currentVT := new(big.Int).SetBytes(ws.CurrentVirtualTime[:])
+	virtualLastUpdate := new(big.Int).SetBytes(w.VirtualLastUpdate[:])
+	virtualPosition := new(big.Int).SetBytes(w.VirtualPosition[:])
+
+	// delta_pos = OLD votes * (current_vt - virtual_last_update).
+	if currentVT.Cmp(virtualLastUpdate) > 0 {
+		dt := new(big.Int).Sub(currentVT, virtualLastUpdate)
+		dp := new(big.Int).Mul(big.NewInt(w.TotalVotesVests), dt)
+		virtualPosition.Add(virtualPosition, dp)
+	}
+	// virtual_last_update = current_virtual_time
+	w.VirtualLastUpdate = packBig128(currentVT)
+
+	w.TotalVotesVests += delta
+	if w.TotalVotesVests < 0 {
+		w.TotalVotesVests = 0
+	}
+	w.VirtualPosition = packBig128(virtualPosition)
+
+	// Lap length: HF2+ uses LAP_LENGTH2 (2^128-1); pre-HF2 uses
+	// LAP_LENGTH (2^64-1).
+	lap := lapLength2()
+	if !hf.Has(hardfork.HF2) {
+		lap = lapLength()
+	}
+	// virtual_scheduled_time = virtual_last_update + (lap - virtual_position) / (votes + 1)
+	advance := new(big.Int)
+	if lap.Cmp(virtualPosition) > 0 {
+		advance.Sub(lap, virtualPosition)
+		advance.Quo(advance, big.NewInt(w.TotalVotesVests+1))
+	}
+	newVST := new(big.Int).Add(currentVT, advance)
+	// HF4+: if VST < current_vt (overflow), clamp to uint128 max.
+	if hf.Has(hardfork.HF4) {
+		if newVST.Cmp(currentVT) < 0 || newVST.BitLen() > 128 {
+			newVST = lap128Max()
+		}
+	}
+	w.VirtualScheduledTime = packBig128(newVST)
 }
+
+// packBig128 returns the 16-byte big-endian uint128 representation of v
+// (saturating at 2^128-1 for overflow; clamping negatives to 0).
+func packBig128(v *big.Int) [16]byte {
+	var out [16]byte
+	if v == nil || v.Sign() <= 0 {
+		return out
+	}
+	if v.BitLen() > 128 {
+		return [16]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+			0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
+	}
+	src := v.Bytes()
+	copy(out[16-len(src):], src)
+	return out
+}
+
+func lapLength2() *big.Int {
+	// 2^128 - 1
+	return new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 128), big.NewInt(1))
+}
+
+func lapLength() *big.Int {
+	// 2^64 - 1
+	return new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 64), big.NewInt(1))
+}
+
+func lap128Max() *big.Int { return lapLength2() }
 
 // ClearWitnessVotesForAccount walks every witness_vote row keyed under
 // account and removes it, decrementing each affected witness's
