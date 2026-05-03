@@ -647,9 +647,12 @@ func updateWitnessSchedulePreHF4(s *state.Session, ws *objects.WitnessSchedule, 
 				advance := new(big.Int).Quo(lap, votesPlus1)
 				newVST := uint128FromBytes(w.VirtualScheduledTime)
 				newVST.Add(newVST, advance)
-				if newVST.BitLen() > 128 {
-					newVST.SetInt64(0)
-				}
+				// C++ pre-HF4 (witness_schedule.cpp:520) does plain
+				// `wo.virtual_scheduled_time += LAP/(votes+1)` in fc::uint128
+				// which wraps mod 2^128. uint128ToBytes truncates to the
+				// low 128 bits naturally, so just rely on that. Don't
+				// reset to 0 on overflow (the previous code did, which
+				// produced a different result than C++'s wrap).
 				w.VirtualScheduledTime = uint128ToBytes(newVST)
 				objects.PutWitness(s, &w)
 				_ = zero33
