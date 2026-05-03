@@ -1,8 +1,11 @@
 package chain
 
 import (
+	"fmt"
 	"math/big"
+	"os"
 	"sort"
+	"strings"
 
 	"hived-go/internal/protocol/asset"
 	"hived-go/internal/protocol/auth"
@@ -94,12 +97,31 @@ func updateMedianFeed(s *state.Session, blockNum, blockTime uint32) {
 		}
 	}
 
+	if os.Getenv("GHIVEDIFF_FEED") != "" {
+		var sched []string
+		if ws, err := objects.GetWitnessSchedule(s); err == nil {
+			for _, n := range ws.CurrentShuffledWitnesses {
+				name := string(n)
+				if name != "" {
+					sched = append(sched, name)
+				}
+			}
+		}
+		sort.Strings(sched)
+		fmt.Fprintf(os.Stderr, "GHIVEDIFF FEED-SCHED block=%d feeds=%d schedule=[%s]\n",
+			blockNum, len(feeds), strings.Join(sched, ","))
+	}
+
 	if len(feeds) < minFeeds {
 		return
 	}
 
 	sort.Slice(feeds, func(i, j int) bool { return priceLess(feeds[i], feeds[j]) })
 	medianFeed := feeds[len(feeds)/2]
+	if os.Getenv("GHIVEDIFF_FEED") != "" {
+		fmt.Fprintf(os.Stderr, "GHIVEDIFF FEED-MEDIAN block=%d median_base=%d median_quote=%d\n",
+			blockNum, medianFeed.Base.Amount, medianFeed.Quote.Amount)
+	}
 
 	window := feedHistoryWindowPreHF16
 	if hf.Has(hardfork.HF16) {
@@ -118,6 +140,12 @@ func updateMedianFeed(s *state.Session, blockNum, blockTime uint32) {
 		copyHist := make([]asset.Price, len(fh.PriceHistory))
 		copy(copyHist, fh.PriceHistory)
 		sort.Slice(copyHist, func(i, j int) bool { return priceLess(copyHist[i], copyHist[j]) })
+		if os.Getenv("GHIVEDIFF_FEED") != "" {
+			fmt.Fprintf(os.Stderr, "GHIVEDIFF FEED-HIST block=%d hist_len=%d cmh_base=%d cmh_quote=%d\n",
+				blockNum, len(fh.PriceHistory),
+				copyHist[len(copyHist)/2].Base.Amount,
+				copyHist[len(copyHist)/2].Quote.Amount)
+		}
 		fh.CurrentMedianHistory = copyHist[len(copyHist)/2]
 		fh.MarketMedianHistory = fh.CurrentMedianHistory
 		fh.CurrentMinHistory = copyHist[0]

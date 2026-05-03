@@ -399,6 +399,17 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 		// matches C++'s trace location inside process_funds (which is
 		// after get_producer_reward but before adjust_supply).
 	}
+	// GHIVEDIFF_ALL dump matches C++'s placement inside process_funds:
+	// AFTER get_producer_reward (= our processProducerReward) but
+	// BEFORE the content/curate/vesting inflation slice modify.
+	if os.Getenv("GHIVEDIFF_ALL") != "" {
+		d, _ := objects.GetDGPO(session)
+		fh, _ := objects.GetFeedHistory(session)
+		fmt.Fprintf(os.Stderr, "GHIVEDIFF GLOBAL block=%d fund=%d vfund=%d vshares=%d supply=%d vsupply=%d hbd_supply=%d median=%d/%d\n",
+			blockNum, d.TotalRewardFundHive, d.TotalVestingFundHive, d.TotalVestingShares,
+			d.CurrentSupply, d.VirtualSupply, d.CurrentHBDSupply,
+			fh.CurrentMedianHistory.Base.Amount, fh.CurrentMedianHistory.Quote.Amount)
+	}
 	processFunds(session, blockNum, hdr.Witness)
 	if os.Getenv("GHIVEDIFF") != "" {
 		switch blockNum {
@@ -429,6 +440,22 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 			}
 			fmt.Fprintf(os.Stderr, "GHIVEDIFF SHARES2-AT block=%d shares2_hi=%d shares2_lo=%d fund=%d cur_supply=%d virt_supply=%d abit_hive=%d abit_hbd=%d\n",
 				blockNum, hi, lo, d.TotalRewardFundHive, d.CurrentSupply, d.VirtualSupply, abitHive, abitHbd)
+		}
+		// One-shot witness vote total dump at block 2,920,000 (after
+		// processFunds but before cashouts) for parity comparison.
+		if blockNum == 2920000 {
+			for _, name := range []string{"blocktrades", "steempty", "smooth.witness", "abit", "wackou", "riverhead", "witness.svk", "silversteem", "complexring", "kushed", "arhag", "clayop", "xeldal", "bitcube", "good-karma", "pfunk", "datasecuritynode"} {
+				if w, e := objects.GetWitness(session, name); e == nil {
+					fmt.Fprintf(os.Stderr, "GHIVEDIFF WITNESS block=%d name=%s votes=%d\n",
+						blockNum, name, w.TotalVotesVests)
+				}
+			}
+			d, _ := objects.GetDGPO(session)
+			fh, _ := objects.GetFeedHistory(session)
+			fmt.Fprintf(os.Stderr, "GHIVEDIFF GLOBAL block=%d fund=%d vfund=%d vshares=%d supply=%d vsupply=%d hbd_supply=%d median=%d/%d\n",
+				blockNum, d.TotalRewardFundHive, d.TotalVestingFundHive, d.TotalVestingShares,
+				d.CurrentSupply, d.VirtualSupply, d.CurrentHBDSupply,
+				fh.CurrentMedianHistory.Base.Amount, fh.CurrentMedianHistory.Quote.Amount)
 		}
 	}
 	processConversions(session, hdr.Timestamp)

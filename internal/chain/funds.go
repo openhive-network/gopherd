@@ -161,18 +161,13 @@ func processProducerReward(s *state.Session, witnessName string, blockNum uint32
 	}
 	pay := minProducerReward
 	// Hived: VESTS path if head_block >= 864000 OR witness has 0 vesting.
-	// hived's adjust_supply runs before either branch, so dgpo.current_supply
-	// always rises by `pay`. Inside the VESTS path, create_vesting moves
-	// `pay` HIVE into total_vesting_fund_hive and credits the resulting
-	// VESTS to the witness.
+	// We DON'T bump current_supply here — C++ adds witness_pay to
+	// current_supply inside process_funds's modify block (matching the
+	// content/vesting modifications). Adding it twice in two places
+	// races the GHIVEDIFF dump timing; instead processFunds owns the
+	// supply increment so the dump (between this and processFunds)
+	// observes pre-modify state matching C++.
 	asVests := blockNum >= startMinerVotingBlock || a.VestingShares == 0
-
-	dgpo, err := objects.GetDGPO(s)
-	if err != nil && err != state.ErrNotFound {
-		return
-	}
-	dgpo.CurrentSupply += pay
-	objects.PutDGPO(s, &dgpo)
 
 	if asVests {
 		// CreateVesting moves `pay` HIVE into the vesting fund, computes
@@ -243,7 +238,7 @@ func processFunds(s *state.Session, blockNum uint32, witnessName string) {
 	if curateReward < minCurateReward {
 		curateReward = minCurateReward
 	}
-	witnessPay := minProducerReward // already paid in processProducerReward
+	witnessPay := minProducerReward
 
 	vestingReward := contentReward + curateReward + witnessPay
 	if blockNum < startVestingBlock {
@@ -253,13 +248,11 @@ func processFunds(s *state.Session, blockNum uint32, witnessName string) {
 	}
 
 	dgpo.TotalVestingFundHive += vestingReward
-	// hived: total_reward_fund_hive grows by the per-block content_reward;
-	// processCommentCashouts later draws from this fund to pay authors
-	// and curators.
 	dgpo.TotalRewardFundHive += contentReward + curateReward
-	// content_reward + vesting_reward; witness_pay is added in
-	// processProducerReward to avoid double-counting.
-	dgpo.CurrentSupply += contentReward + curateReward + vestingReward
+	// Mirror C++ database.cpp:1909:
+	//   p.current_supply += content_reward + witness_pay + vesting_reward
+	// (where content_reward is the curate-folded value).
+	dgpo.CurrentSupply += contentReward + curateReward + witnessPay + vestingReward
 	objects.PutDGPO(s, &dgpo)
 }
 

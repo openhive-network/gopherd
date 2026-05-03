@@ -35,6 +35,9 @@ func cmdReplay(args []string) int {
 	pprofAddr := fs.String("pprof", "", "if set, expose net/http/pprof on this addr (e.g. localhost:6060)")
 	cacheMB := fs.Int("cache-mb", 256, "Pebble block cache size in MiB (ignored for --backend=mem)")
 	backend := fs.String("backend", "pebble", "state backend: pebble (persistent) or mem (in-memory btree, faster)")
+	loadSnapshot := fs.String("load-snapshot", "", "if set, load state from this snapshot file (skips genesis + replay before snapshot block)")
+	saveSnapshotAt := fs.Uint("save-snapshot-at", 0, "block number after which to save a snapshot (0 = don't save)")
+	saveSnapshotTo := fs.String("save-snapshot-to", "", "snapshot output path (used with --save-snapshot-at)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -85,9 +88,23 @@ func cmdReplay(args []string) int {
 	}
 	defer stateDB.Close()
 
-	if err := genesis.Apply(stateDB); err != nil {
-		fmt.Fprintf(os.Stderr, "replay: genesis: %v\n", err)
-		return 1
+	if *loadSnapshot != "" {
+		head, err := stateDB.LoadSnapshot(*loadSnapshot)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "replay: load snapshot: %v\n", err)
+			return 1
+		}
+		fmt.Printf("replay: loaded snapshot %s at block %d\n", *loadSnapshot, head)
+		// If --start was left at the default 1, advance to head+1 so the
+		// loop picks up where the snapshot left off.
+		if *startBlock == 1 {
+			*startBlock = uint(head) + 1
+		}
+	} else {
+		if err := genesis.Apply(stateDB); err != nil {
+			fmt.Fprintf(os.Stderr, "replay: genesis: %v\n", err)
+			return 1
+		}
 	}
 
 	bl, err := blocklog.Open(logPath)
@@ -175,6 +192,13 @@ func cmdReplay(args []string) int {
 			rate := float64(applied) / elapsed.Seconds()
 			fmt.Printf("  block %d ok — %.0f blocks/s, %d applied, %d ops_applied, %d ops_skipped\n",
 				n, rate, applied, stats.OpsApplied, stats.OpsSkipped)
+		}
+		if *saveSnapshotAt != 0 && n == uint32(*saveSnapshotAt) && *saveSnapshotTo != "" {
+			if err := stateDB.SaveSnapshot(*saveSnapshotTo, n); err != nil {
+				fmt.Fprintf(os.Stderr, "replay: save snapshot: %v\n", err)
+				return 1
+			}
+			fmt.Printf("replay: saved snapshot to %s at block %d\n", *saveSnapshotTo, n)
 		}
 	}
 
