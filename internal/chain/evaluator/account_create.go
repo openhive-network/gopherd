@@ -106,6 +106,16 @@ func (accountCreateEvaluator) Apply(ctx *Context, o op.Operation) error {
 		objects.InitRCManabar(&newAcct, ctx.HeadBlockTime)
 	}
 	objects.PutAccount(ctx.DB, &newAcct)
+	// Persist the per-account authority record. Mirrors hived's
+	// create<account_authority_object> in account_create_evaluator.
+	objects.PutAccountAuthority(ctx.DB, &objects.AccountAuthority{
+		Account:             ac.NewAccountName,
+		Owner:               ac.Owner,
+		Active:              ac.Active,
+		Posting:             ac.Posting,
+		LastOwnerUpdate:     ctx.HeadBlockTime,
+		PreviousOwnerUpdate: ctx.HeadBlockTime,
+	})
 	if ac.Fee.Amount > 0 {
 		if _, err := CreateVesting(ctx.DB, ac.NewAccountName, ac.Fee.Amount, false); err != nil {
 			return err

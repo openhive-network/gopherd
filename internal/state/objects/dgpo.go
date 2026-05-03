@@ -118,6 +118,17 @@ type DynamicGlobalProperty struct {
 	// by (owner, user_orderid) — different match sequences than hived,
 	// drifts account balances over time.
 	NextLimitOrderID uint64
+	// LastIrreversibleBlockNum is the chain-wide irreversibility height.
+	// Recomputed each block from the median of the active witness
+	// schedule's last_confirmed_block_num values (75% threshold). Mirrors
+	// dynamic_global_property_object::last_irreversible_block_num.
+	LastIrreversibleBlockNum uint32
+	// DownvotePoolPercent (HF21+) — basis points (× HIVE_1_PERCENT) of
+	// the post reward pool routed to a separate downvote_reward pool.
+	// Default HIVE_DOWNVOTE_POOL_PERCENT_HF21 = 25 × HIVE_1_PERCENT = 2500.
+	// Mirrors dynamic_global_property_object::downvote_pool_percent
+	// (libraries/chain/include/hive/chain/global_property_object.hpp:160).
+	DownvotePoolPercent uint16
 }
 
 // AppendDGPO serializes p to dst.
@@ -147,6 +158,8 @@ func AppendDGPO(dst []byte, p *DynamicGlobalProperty) []byte {
 	dst = appendU64LE(dst, p.NextCommentID)
 	dst = appendU32LE(dst, p.NumPowWitnesses)
 	dst = appendU64LE(dst, p.NextLimitOrderID)
+	dst = appendU32LE(dst, p.LastIrreversibleBlockNum)
+	dst = append(dst, byte(p.DownvotePoolPercent), byte(p.DownvotePoolPercent>>8))
 	return dst
 }
 
@@ -257,6 +270,20 @@ func ReadDGPO(src []byte) (DynamicGlobalProperty, error) {
 	}
 	if p.NextLimitOrderID, err = r.ReadUint64(); err != nil {
 		return p, fmt.Errorf("dgpo.next_limit_order_id: %w", err)
+	}
+	// LastIrreversibleBlockNum is a later schema addition; tolerate EOF.
+	if r.AtEnd() {
+		return p, nil
+	}
+	if p.LastIrreversibleBlockNum, err = r.ReadUint32(); err != nil {
+		return p, fmt.Errorf("dgpo.last_irreversible_block_num: %w", err)
+	}
+	// DownvotePoolPercent is a later schema addition; tolerate EOF.
+	if r.AtEnd() {
+		return p, nil
+	}
+	if p.DownvotePoolPercent, err = r.ReadUint16(); err != nil {
+		return p, fmt.Errorf("dgpo.downvote_pool_percent: %w", err)
 	}
 	if !r.AtEnd() {
 		return p, errors.New("dgpo: trailing bytes after decode (schema mismatch?)")

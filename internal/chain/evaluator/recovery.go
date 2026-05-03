@@ -53,8 +53,28 @@ func (recoverAccountEvaluator) Apply(ctx *Context, o op.Operation) error {
 		objects.DeleteAccountRecoveryRequestFull(ctx.DB, &req)
 		return fmt.Errorf("recover_account: request expired")
 	}
-	// Owner authority rotation requires the account_authority_object;
-	// for now we just delete the recovery request to mark it consumed.
+	// Rotate owner authority on the account_authority_object. Mirrors
+	// hived's recover_account_evaluator (hive_evaluator_account.cpp:402).
+	authObj, authErr := objects.GetAccountAuthority(ctx.DB, r.AccountToRecover)
+	if authErr != nil {
+		// Bootstrap if missing.
+		authObj = objects.AccountAuthority{Account: r.AccountToRecover}
+	}
+	objects.PutOwnerAuthorityHistory(ctx.DB, &objects.OwnerAuthorityHistory{
+		Account:                r.AccountToRecover,
+		PreviousOwnerAuthority: authObj.Owner,
+		LastValidTime:          ctx.HeadBlockTime,
+	})
+	authObj.Owner = r.NewOwnerAuthority
+	authObj.PreviousOwnerUpdate = authObj.LastOwnerUpdate
+	authObj.LastOwnerUpdate = ctx.HeadBlockTime
+	objects.PutAccountAuthority(ctx.DB, &authObj)
+	if a, aErr := objects.GetAccount(ctx.DB, r.AccountToRecover); aErr == nil {
+		a.PreviousOwnerUpdate = a.LastOwnerUpdate
+		a.LastOwnerUpdate = ctx.HeadBlockTime
+		a.BlockLastAccountRecovery = ctx.BlockNum
+		objects.PutAccount(ctx.DB, &a)
+	}
 	objects.DeleteAccountRecoveryRequestFull(ctx.DB, &req)
 	return nil
 }

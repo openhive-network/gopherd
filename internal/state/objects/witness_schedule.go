@@ -264,7 +264,12 @@ func GetWitnessSchedule(s *state.Session) (WitnessSchedule, error) {
 	if err != nil {
 		return WitnessSchedule{}, err
 	}
-	s.DatabaseAuxStore(witnessScheduleAuxKey, w)
+	// Only cache backend reads. An overlay-derived value can be Undone
+	// later, leaving the cross-Session cache pointing at an abandoned
+	// state.
+	if !s.HasOverlayWrite(WitnessScheduleTable, state.PrimaryIndex) {
+		s.DatabaseAuxStore(witnessScheduleAuxKey, w)
+	}
 	return w, nil
 }
 

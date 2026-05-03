@@ -2,9 +2,15 @@ package chain
 
 import (
 	"errors"
+	"fmt"
 
+	"hived-go/internal/crypto"
+	"hived-go/internal/protocol/auth"
+	"hived-go/internal/protocol/network"
 	"hived-go/internal/protocol/op"
 	"hived-go/internal/protocol/tx"
+	"hived-go/internal/state"
+	"hived-go/internal/state/objects"
 )
 
 // AuthorityLevel is a coarse categorization of which authority a given
@@ -22,11 +28,6 @@ const (
 // the union of accounts whose authority must sign, grouped by level.
 // Mirrors transaction::get_required_authorities (libraries/protocol/
 // transaction.cpp:122).
-//
-// For replay this is informational only (we skip verification). For
-// live sync / witness production, callers verify each (account,
-// level) pair against the signing keys recovered from the tx
-// signatures.
 func RequiredAuthorities(signedTx *tx.SignedTransaction) map[AuthorityLevel]map[string]struct{} {
 	out := map[AuthorityLevel]map[string]struct{}{
 		AuthorityActive:  make(map[string]struct{}),
@@ -64,19 +65,120 @@ func authorityLevelFor(o op.Operation) AuthorityLevel {
 }
 
 // VerifyAuthority is the entry point for live-mode signature
-// verification. Pre-replay we always skip; this is a stub for the
-// live-sync path that the P2 phase will fill in by:
+// verification. It:
 //
-//   1. Recovering signing public keys from each tx.signatures via secp256k1.
-//   2. Looking up each required authority's key set.
-//   3. Confirming the recovered keys cover the required threshold.
+//  1. Recovers signing public keys from each tx.Signatures via secp256k1.
+//  2. Looks up each required authority via the supplied state session.
+//  3. Confirms the recovered keys cover each required authority's threshold
+//     (with up to HIVE_MAX_SIG_CHECK_DEPTH levels of account_auths recursion).
 //
-// Returns nil on accept, an error otherwise. SkipSig short-circuits
-// to nil to mirror hived's skip_transaction_signatures behavior.
-func VerifyAuthority(signedTx *tx.SignedTransaction, skipSig bool) error {
+// Returns nil on accept, an error otherwise. SkipSig short-circuits to
+// nil to mirror hived's skip_transaction_signatures behavior. `chainID`
+// is the chain identifier that gets prepended to the unsigned tx bytes
+// in the sig digest; pass network.ChainID for HF24+ and network.OldChainID
+// (zero) pre-HF24.
+func VerifyAuthority(s *state.Session, signedTx *tx.SignedTransaction, unsignedBytes []byte, chainID network.Hash32, skipSig bool) error {
 	if skipSig {
 		return nil
 	}
-	// Real verification: stubbed pending P2 sigverify port.
-	return errors.New("verify_authority: signature verification not yet implemented (P2 milestone)")
+	digest := crypto.SHA256Of2(chainID[:], unsignedBytes)
+	keys := make([]crypto.PublicKey, 0, len(signedTx.Signatures))
+	for i, sig := range signedTx.Signatures {
+		var compact crypto.CompactSignature
+		copy(compact[:], sig[:])
+		if !compact.IsCanonical() {
+			return fmt.Errorf("verify_authority: signature %d non-canonical", i)
+		}
+		k, err := crypto.RecoverPublicKey(digest, compact)
+		if err != nil {
+			return fmt.Errorf("verify_authority: recover signature %d: %w", i, err)
+		}
+		keys = append(keys, k)
+	}
+	if len(keys) == 0 {
+		return errors.New("verify_authority: transaction has no signatures")
+	}
+
+	required := RequiredAuthorities(signedTx)
+	fetcher := &sessionAuthFetcher{s: s}
+	state := newSignState(keys, fetcher)
+
+	// Walk required authorities by level. Each must be satisfied. Hived
+	// allows higher-power authorities to substitute for lower
+	// (active/owner can sign for posting; owner can sign for active),
+	// modelled by retrying upward when the strict level fails.
+	for _, name := range sortedSet(required[AuthorityOwner]) {
+		if !state.checkAuthority(AuthorityOwner, name, 0) {
+			return fmt.Errorf("verify_authority: missing owner authority for %q", name)
+		}
+	}
+	for _, name := range sortedSet(required[AuthorityActive]) {
+		if !state.checkAuthority(AuthorityActive, name, 0) {
+			// Owner can substitute for active.
+			if !state.checkAuthority(AuthorityOwner, name, 0) {
+				return fmt.Errorf("verify_authority: missing active authority for %q", name)
+			}
+		}
+	}
+	for _, name := range sortedSet(required[AuthorityPosting]) {
+		if !state.checkAuthority(AuthorityPosting, name, 0) {
+			// Active or owner can substitute for posting.
+			if !state.checkAuthority(AuthorityActive, name, 0) &&
+				!state.checkAuthority(AuthorityOwner, name, 0) {
+				return fmt.Errorf("verify_authority: missing posting authority for %q", name)
+			}
+		}
+	}
+	return nil
+}
+
+// sessionAuthFetcher resolves authority lookups against a state.Session
+// via the AccountAuthority table.
+type sessionAuthFetcher struct{ s *state.Session }
+
+func (f *sessionAuthFetcher) OwnerAuthority(name auth.AccountName) (*auth.Authority, error) {
+	a, err := objects.GetAccountAuthority(f.s, name)
+	if err != nil {
+		return nil, err
+	}
+	o := a.Owner
+	return &o, nil
+}
+func (f *sessionAuthFetcher) ActiveAuthority(name auth.AccountName) (*auth.Authority, error) {
+	a, err := objects.GetAccountAuthority(f.s, name)
+	if err != nil {
+		return nil, err
+	}
+	o := a.Active
+	return &o, nil
+}
+func (f *sessionAuthFetcher) PostingAuthority(name auth.AccountName) (*auth.Authority, error) {
+	a, err := objects.GetAccountAuthority(f.s, name)
+	if err != nil {
+		return nil, err
+	}
+	o := a.Posting
+	return &o, nil
+}
+
+// sortedSet flattens a string-set into a sorted slice. Sorting makes
+// errors deterministic for callers and avoids iteration-order-dependent
+// behavior in the recursion's `visited` map.
+func sortedSet(m map[string]struct{}) []string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	// Local insertion sort — small N, avoids importing sort just for this.
+	for i := 1; i < len(out); i++ {
+		j := i
+		for j > 0 && out[j-1] > out[j] {
+			out[j-1], out[j] = out[j], out[j-1]
+			j--
+		}
+	}
+	return out
 }

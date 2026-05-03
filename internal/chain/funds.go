@@ -351,8 +351,21 @@ func processFundsHF16(s *state.Session, dgpo *objects.DynamicGlobalProperty, blo
 	hf := hardfork.SetForBlock(blockNum)
 	if hf.Has(hardfork.HF17) {
 		// HF17+: content_reward goes into post reward_fund.
+		// HF21+: dgpo.downvote_pool_percent slice is carved into the
+		// fund's downvote_reward_balance instead. Mirrors C++
+		// process_funds (database.cpp) at HF21.
 		if fund, err := objects.GetRewardFund(s, objects.PostRewardFundName); err == nil {
-			fund.RewardBalance += contentReward
+			upvoteShare := contentReward
+			downvoteShare := int64(0)
+			if hf.Has(hardfork.HF21) && dgpo.DownvotePoolPercent > 0 {
+				// reward_split_pct = ((100% - downvote_pool_percent) ×
+				// content_reward + 5000) / 100% — round-half-up.
+				num := int64(hundredPercentBP) - int64(dgpo.DownvotePoolPercent)
+				upvoteShare = (num*contentReward + 5000) / int64(hundredPercentBP)
+				downvoteShare = contentReward - upvoteShare
+			}
+			fund.RewardBalance += upvoteShare
+			fund.DownvoteRewardBalance += downvoteShare
 			objects.PutRewardFund(s, &fund)
 		}
 	} else {

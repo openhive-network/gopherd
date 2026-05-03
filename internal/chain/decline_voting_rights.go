@@ -8,8 +8,11 @@ import (
 // processDeclineVotingRights mirrors database::process_decline_voting_rights
 // (libraries/chain/database_dhf.cpp:207). For every
 // decline_voting_rights_request whose effective_date has passed:
-//   - clear the account's witness votes (and decrement each affected
-//     witness's total_votes_vests)
+//   - nullify_proxied_witness_votes: subtract the account's full proxy
+//     propagation (direct vest + proxied_vsf_votes[*]) from every
+//     witness it votes for (or from its proxy chain's terminal voter)
+//   - clear_witness_votes: remove the witness_vote rows and zero
+//     witnesses_voted_for
 //   - clear any proxy
 //   - mark the account VoteRevoked = true
 //   - remove the request
@@ -51,7 +54,16 @@ func processDeclineVotingRights(s *state.Session, blockTime uint32) {
 		}
 		a, aerr := objects.GetAccount(s, p.account)
 		if aerr == nil {
-			objects.ClearWitnessVotesForAccount(s, p.account, a.VestingShares)
+			// nullify_proxied_witness_votes: subtract the account's full
+			// propagation (direct + proxied_vsf_votes[*]) from each
+			// witness it votes for or from its proxy chain. Mirrors
+			// database.cpp:1131.
+			directVotePower := a.VestingShares
+			objects.NullifyProxiedWitnessVotes(s, &a, directVotePower)
+			// clear_witness_votes: remove vote rows. Pass voterVesting=0
+			// so the rows are removed without further subtraction (the
+			// nullify call above already adjusted witness totals).
+			objects.ClearWitnessVotesForAccount(s, p.account, 0)
 			a.WitnessesVotedFor = 0
 			a.Proxy = ""
 			a.VoteRevoked = true

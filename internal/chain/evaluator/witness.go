@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 
+	"hived-go/internal/fcraw"
+	"hived-go/internal/protocol/asset"
 	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/op"
 	"hived-go/internal/state"
@@ -114,44 +116,102 @@ func (witnessUpdateEvaluator) Apply(ctx *Context, o op.Operation) error {
 			w.PowWorker = prev.PowWorker
 		}
 	} else {
-		// New witness: seed VirtualScheduledTime to LAP_LENGTH2 /
-		// (votes+1) so the by_schedule_time index has them. Mirrors
-		// hived's witness_object construction at create<witness_object>
-		// where the multi_index ctor populates schedule fields based
-		// on votes (=0 for a fresh witness, so VST = LAP_LENGTH2).
-		seedVirtualScheduledTime(&w)
+		// New witness: seed VirtualScheduledTime to
+		// (current_virtual_time + LAP_LENGTH2 / (votes+1)) mod 2^128.
+		// Mirrors witness_schedule.cpp:35-38 — the modular wrap is
+		// load-bearing: starting from a non-zero current_virtual_time
+		// the addition overflows uint128 by LAP_LENGTH2 - 1, placing
+		// the new witness JUST BEFORE current_virtual_time so they're
+		// the next timeshare candidate.
+		seedVirtualScheduledTime(ctx, &w)
 	}
 	objects.PutWitness(ctx.DB, &w)
 	return nil
 }
 
 // seedVirtualScheduledTime initializes the virtual scheduling fields on
-// a freshly-created witness. Mirrors witness_schedule.cpp:35-38.
-func seedVirtualScheduledTime(w *objects.Witness) {
-	// We don't import math/big here directly to avoid pulling
-	// uint128 helpers — the chain.uint128* helpers live in the chain
-	// package. Instead we hand-roll the simple case: votes is 0 (or
-	// some small value) for a brand-new witness, so VST starts at
-	// LAP_LENGTH2 / (votes+1). For votes=0, that's LAP_LENGTH2 = 2^128-1.
-	// For non-zero votes (existing witnesses being initialized for the
-	// first time post-schema-bump), use the math/big helper at the
-	// scheduler.
-	w.VirtualScheduledTime = [16]byte{
-		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+// a freshly-created witness. Mirrors witness_schedule.cpp:35-38:
+//
+//	new.virtual_last_update    = current_virtual_time
+//	new.virtual_scheduled_time = current_virtual_time +
+//	                             VIRTUAL_SCHEDULE_LAP_LENGTH2 / (votes + 1)
+//
+// The addition is plain uint128 arithmetic — when current_virtual_time
+// is non-zero it intentionally overflows past 2^128 - 1, wrapping the
+// VST to a small value (current_virtual_time - 1 for votes=0) so the
+// new witness appears at the FRONT of the by_schedule_time index and
+// is picked as the next timeshare slot.
+func seedVirtualScheduledTime(ctx *Context, w *objects.Witness) {
+	const uint128MaxLowMask uint64 = ^uint64(0)
+	// Load current_virtual_time from the witness schedule (zero if no
+	// schedule object yet; the genesis seeder populates one).
+	var cvtLo, cvtHi uint64
+	if ws, err := objects.GetWitnessSchedule(ctx.DB); err == nil {
+		hi, lo := decodeUint128BE(ws.CurrentVirtualTime)
+		cvtHi, cvtLo = hi, lo
 	}
+	// VST = current_virtual_time + LAP_LENGTH2  (votes+1=1 for fresh
+	// witness with no votes). LAP_LENGTH2 = 2^128 - 1, i.e. all-ones.
+	// Sum = (cvtHi:cvtLo) + (^0:^0) = (cvtHi-1+overflow:cvtLo-1+overflow).
+	newLo := cvtLo - 1
+	carryFromLo := uint64(0)
+	if cvtLo == 0 {
+		carryFromLo = ^uint64(0) // borrow into hi
+	}
+	_ = uint128MaxLowMask
+	newHi := cvtHi - 1 - carryFromLo
+	w.VirtualScheduledTime = encodeUint128BE(newHi, newLo)
 	w.VirtualPosition = [16]byte{}
-	w.VirtualLastUpdate = [16]byte{}
+	w.VirtualLastUpdate = ctx.witnessScheduleVirtualTimeBytes()
+}
+
+func decodeUint128BE(b [16]byte) (hi, lo uint64) {
+	for i := 0; i < 8; i++ {
+		hi = (hi << 8) | uint64(b[i])
+	}
+	for i := 8; i < 16; i++ {
+		lo = (lo << 8) | uint64(b[i])
+	}
+	return
+}
+
+func encodeUint128BE(hi, lo uint64) [16]byte {
+	var out [16]byte
+	for i := 7; i >= 0; i-- {
+		out[i] = byte(hi)
+		hi >>= 8
+	}
+	for i := 15; i >= 8; i-- {
+		out[i] = byte(lo)
+		lo >>= 8
+	}
+	return out
+}
+
+// witnessScheduleVirtualTimeBytes is a tiny helper that returns the
+// current schedule's virtual_time as the 16-byte big-endian encoding,
+// or zero when no schedule exists yet.
+func (c *Context) witnessScheduleVirtualTimeBytes() [16]byte {
+	if ws, err := objects.GetWitnessSchedule(c.DB); err == nil {
+		return ws.CurrentVirtualTime
+	}
+	return [16]byte{}
 }
 
 // witnessSetPropertiesEvaluator implements HF20+ witness_set_properties.
 //
-// hived parses the flat_map<string, vector<char>> against ~14 known keys
-// (account_creation_fee, maximum_block_size, hbd_interest_rate, key,
-// new_signing_key, url, account_subsidy_budget, etc.). For ghive's
-// minimum-viable implementation we touch the three keys that map to
-// existing Witness fields; unknown keys are accepted silently so the
-// pipeline doesn't reject otherwise-valid blocks.
+// Mirrors witness_set_properties_evaluator::do_apply at
+// libraries/chain/hive_evaluator.cpp:113. hived parses each known key
+// out of the flat_map<string, vector<char>> with fc::raw::unpack_from_vector.
+// The "key" prop is a self-attestation: it MUST equal the witness's
+// current signing key, since witness_set_properties has no signature
+// metadata of its own — the chain trusts the op only because the sender
+// proves they hold the witness's current signing key.
+//
+// HF24 (block 47,797,680) renames sbd_* aliases to hbd_*; pre-HF24 ops
+// use the sbd_* names, post-HF24 ops use hbd_* (sbd_* is still tolerated
+// per C++ fallback at hive_evaluator.cpp:150). We accept either name
+// throughout — the first present wins.
 type witnessSetPropertiesEvaluator struct{}
 
 func (witnessSetPropertiesEvaluator) Apply(ctx *Context, o op.Operation) error {
@@ -167,52 +227,112 @@ func (witnessSetPropertiesEvaluator) Apply(ctx *Context, o op.Operation) error {
 		return err
 	}
 
-	// hived: the "key" prop MUST match the witness's current signing
-	// key — it's a self-attestation that this op came from the holder
-	// of that key (libraries/chain/hive_evaluator.cpp:130). The op has
-	// no signature meta, so this `key` is the only proof.
+	// Collect props into a map for ergonomic lookup. C++ uses flat_map.
+	props := make(map[string][]byte, len(wsp.Props))
 	for _, p := range wsp.Props {
-		if p.Key == "key" {
-			if len(p.Value) >= 33 {
-				var supplied [33]byte
-				copy(supplied[:], p.Value[:33])
-				if supplied != w.BlockSigningKey {
-					return fmt.Errorf("witness_set_properties: 'key' does not match witness signing key for %q", wsp.Owner)
-				}
-			}
+		props[p.Key] = p.Value
+	}
+
+	// "key" is mandatory and verifies witness identity.
+	keyVal, hasKey := props["key"]
+	if !hasKey || len(keyVal) < 33 {
+		return fmt.Errorf("witness_set_properties: missing 'key' prop for %q", wsp.Owner)
+	}
+	var supplied [33]byte
+	copy(supplied[:], keyVal[:33])
+	if supplied != w.BlockSigningKey {
+		return fmt.Errorf("witness_set_properties: 'key' does not match witness signing key for %q", wsp.Owner)
+	}
+
+	// account_creation_fee: legacy_chain_properties::account_creation_fee
+	// is a HIVE asset (8 bytes amount LE + 8 bytes symbol_struct).
+	if v, ok := props["account_creation_fee"]; ok && len(v) >= 8 {
+		w.AccountCreationFee = int64(le64(v[:8]))
+	}
+
+	// maximum_block_size: uint32.
+	if v, ok := props["maximum_block_size"]; ok && len(v) >= 4 {
+		w.MaximumBlockSize = le32(v[:4])
+	}
+
+	// hbd_interest_rate (or sbd_interest_rate pre-HF24): uint16.
+	if v, ok := props["hbd_interest_rate"]; ok && len(v) >= 2 {
+		w.HBDInterestRate = uint16(v[0]) | uint16(v[1])<<8
+	} else if v, ok := props["sbd_interest_rate"]; ok && len(v) >= 2 {
+		w.HBDInterestRate = uint16(v[0]) | uint16(v[1])<<8
+	}
+
+	// account_subsidy_budget: int32 (HIVE_MIN_ACCOUNT_SUBSIDY_BUDGET = 1,
+	// HIVE_MAX_ACCOUNT_SUBSIDY_BUDGET = HIVE_100_PERCENT * HIVE_BLOCKS_PER_DAY).
+	if v, ok := props["account_subsidy_budget"]; ok && len(v) >= 4 {
+		w.AccountSubsidyBudget = int32(le32(v[:4]))
+	}
+
+	// account_subsidy_decay: uint32 (per-block exponential decay rate).
+	if v, ok := props["account_subsidy_decay"]; ok && len(v) >= 4 {
+		w.AccountSubsidyDecay = le32(v[:4])
+	}
+
+	// new_signing_key: rotates BlockSigningKey. Note that "key" is the
+	// *current* signing key (already verified above); "new_signing_key"
+	// is the replacement.
+	if v, ok := props["new_signing_key"]; ok && len(v) >= 33 {
+		copy(w.BlockSigningKey[:], v[:33])
+	}
+
+	// hbd_exchange_rate (or sbd_exchange_rate pre-HF24): packed price.
+	// Updates LastHBDExchangeUpdate to head_block_time per C++ line 178.
+	exchangeVal, hasExchange := props["hbd_exchange_rate"]
+	if !hasExchange {
+		exchangeVal, hasExchange = props["sbd_exchange_rate"]
+	}
+	if hasExchange {
+		// Price serializes as base.amount(8) + base.symbol(8) +
+		// quote.amount(8) + quote.symbol(8) = 32 bytes minimum.
+		if p, perr := decodeFCPrice(exchangeVal); perr == nil {
+			w.HBDExchangeRate = p
+			w.LastHBDExchangeUpdate = ctx.HeadBlockTime
 		}
 	}
 
-	for _, p := range wsp.Props {
-		switch p.Key {
-		case "account_creation_fee":
-			// 8 bytes amount + 4 or 8 bytes symbol — for legacy_hive_asset.
-			// We're lenient here since the symbol form varies.
-			if len(p.Value) >= 8 {
-				w.AccountCreationFee = int64(le64(p.Value[:8]))
-			}
-		case "maximum_block_size":
-			if len(p.Value) >= 4 {
-				w.MaximumBlockSize = le32(p.Value[:4])
-			}
-		case "hbd_interest_rate":
-			if len(p.Value) >= 2 {
-				w.HBDInterestRate = uint16(p.Value[0]) | uint16(p.Value[1])<<8
-			}
-		case "key", "new_signing_key":
-			if len(p.Value) >= 33 {
-				copy(w.BlockSigningKey[:], p.Value[:33])
-			}
-		case "url":
-			// vector<char> = varint length + bytes; for url the value is the
-			// payload bytes verbatim.
-			w.URL = string(p.Value)
+	// url: string — the raw value bytes ARE the string per fc::raw::pack
+	// of std::string (varuint len + bytes). pack_from_vector strips
+	// the length prefix, so we follow suit.
+	if v, ok := props["url"]; ok {
+		// Strip leading varuint length if present (C++ fc::raw::pack of
+		// string prepends the length); fall back to raw bytes if not.
+		if s, derr := decodeFCString(v); derr == nil {
+			w.URL = s
+		} else {
+			w.URL = string(v)
 		}
-		// Other keys (account_subsidy_budget, etc.) are silently accepted
-		// until corresponding Witness fields land.
 	}
+
 	objects.PutWitness(ctx.DB, &w)
 	return nil
+}
+
+// decodeFCPrice parses an fc::raw-packed price (base + quote, each an
+// asset = int64 amount LE + 8-byte symbol). Returns the decoded price
+// or an error if the buffer is too short.
+func decodeFCPrice(buf []byte) (asset.Price, error) {
+	if len(buf) < 32 {
+		return asset.Price{}, fmt.Errorf("price: short buffer (%d)", len(buf))
+	}
+	r := fcraw.NewReader(buf)
+	var p asset.Price
+	var err error
+	if p, err = asset.ReadPrice(r); err != nil {
+		return p, err
+	}
+	return p, nil
+}
+
+// decodeFCString parses an fc::raw-packed std::string (varuint length +
+// bytes). Returns the decoded string.
+func decodeFCString(buf []byte) (string, error) {
+	r := fcraw.NewReader(buf)
+	return r.ReadString()
 }
 
 // accountWitnessVoteEvaluator implements account_witness_vote.
@@ -372,8 +492,10 @@ func (accountWitnessProxyEvaluator) Apply(ctx *Context, o op.Operation) error {
 	if pr.Proxy != "" {
 		// Setting a new proxy: also drop all direct witness votes
 		// (clear_witness_votes in C++ — sets witnesses_voted_for=0
-		// and removes each row).
-		objects.ClearWitnessVotesForAccount(ctx.DB, pr.Account, a.VestingShares)
+		// and removes each row). Pass voterVesting=0 since the
+		// preceding Nullify already subtracted the full propagation
+		// (direct + proxied_vsf_votes[*]) from each witness.
+		objects.ClearWitnessVotesForAccount(ctx.DB, pr.Account, 0)
 		a.WitnessesVotedFor = 0
 		a.Proxy = pr.Proxy
 		// Re-read after Nullify possibly mutated `a` (proxy chain

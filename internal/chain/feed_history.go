@@ -122,8 +122,78 @@ func updateMedianFeed(s *state.Session, blockNum, blockTime uint32) {
 		fh.MarketMedianHistory = fh.CurrentMedianHistory
 		fh.CurrentMinHistory = copyHist[0]
 		fh.CurrentMaxHistory = copyHist[len(copyHist)-1]
+
+		// HF14+ HBD hard-cap clamp on current_median_history. Mirrors
+		// libraries/chain/database.cpp:2549-2602. If the chain's HBD
+		// market cap exceeds HIVE_HBD_HARD_LIMIT (10% pre-HF26, 30%
+		// HF26+) of the combined HBD+HIVE market cap at the median
+		// price, clamp the median UP to the price that would cap HBD
+		// at the limit. Prevents an HBD whale from converting to
+		// HIVE during a price crash.
+		//
+		// Formula:
+		//   limit_pct = 100 (HIVE_100_PERCENT/HIVE_1_PERCENT)
+		//   limit     = 10 (PRE-HF26) or 30 (HF26+)
+		//   min_price = ((100 - limit) × hbd_supply) HBD
+		//             / ( limit × current_supply ) HIVE
+		//   if min_price > current_median_history → clamp up.
+		//
+		// HF25+ subtracts treasury HBD from hbd_supply (treasury's
+		// HBD doesn't sit on user balances, so it shouldn't be
+		// counted toward the hard-cap calculation).
+		if hf.Has(hardfork.HF14) {
+			applyHBDHardCap(s, &fh, hf)
+		}
 	}
 	objects.PutFeedHistory(s, &fh)
+}
+
+// applyHBDHardCap clamps fh.CurrentMedianHistory upward when the chain's
+// HBD supply share exceeds the hard-cap limit at the current median.
+// Mirrors database.cpp:2549-2602. Also clamps CurrentMaxHistory if
+// min_price exceeds it; never modifies MarketMedianHistory.
+func applyHBDHardCap(s *state.Session, fh *objects.FeedHistory, hf hardfork.Set) {
+	dgpo, err := objects.GetDGPO(s)
+	if err != nil {
+		return
+	}
+	hbdSupply := dgpo.CurrentHBDSupply
+	if hf.Has(hardfork.HF25) {
+		// Subtract treasury balance (treasury's HBD is held outside
+		// the open market). Mirrors the HIVE_HARDFORK_1_25_HBD_HARD_CAP
+		// gate at database.cpp:2573. We don't yet model the treasury
+		// account explicitly here, so the subtraction is a no-op
+		// pre-HF25 and we'll wire it when HF25 lands.
+		_ = hbdSupply
+	}
+	if hbdSupply <= 0 {
+		return
+	}
+	// HIVE_HBD_HARD_LIMIT_PRE_HF26 = 1000 (10%)
+	// HIVE_HBD_HARD_LIMIT          = 3000 (30%)  — HF26+
+	// HIVE_1_PERCENT = 100, HIVE_100_PERCENT = 10000
+	// So limit_pct (in /HIVE_1_PERCENT units) = HIVE_HBD_HARD_LIMIT / 100.
+	limit := int64(10) // 10% pre-HF26 (= HIVE_HBD_HARD_LIMIT_PRE_HF26 / HIVE_1_PERCENT)
+	if hf.Has(hardfork.HF26) {
+		limit = 30
+	}
+	// min_price.base  = (100 - limit) × hbd_supply  in HBD-sat units
+	// min_price.quote = limit         × current_supply in HIVE-sat units
+	minBaseAmt := (100 - limit) * hbdSupply
+	minQuoteAmt := limit * dgpo.CurrentSupply
+	if minQuoteAmt == 0 {
+		return
+	}
+	minPrice := asset.Price{
+		Base:  asset.Asset{Amount: minBaseAmt, Symbol: asset.Symbol{Num: asset.HbdSymbol}},
+		Quote: asset.Asset{Amount: minQuoteAmt, Symbol: asset.Symbol{Num: asset.HiveSymbol}},
+	}
+	if priceLess(fh.CurrentMedianHistory, minPrice) {
+		fh.CurrentMedianHistory = minPrice
+	}
+	if priceLess(fh.CurrentMaxHistory, minPrice) {
+		fh.CurrentMaxHistory = minPrice
+	}
 }
 
 // priceIsZero reports whether either side of a price has zero amount.

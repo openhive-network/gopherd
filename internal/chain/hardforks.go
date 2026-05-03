@@ -51,6 +51,11 @@ func RunHardforkActivation(s *state.Session, id hardfork.ID, blockNum uint32) {
 // the ones we model here are the ones whose state mutations are
 // observable post-activation.
 func applyHardfork(s *state.Session, id hardfork.ID) {
+	// Mirror C++ apply_hardfork's bookkeeping: push processed_hardforks,
+	// bump last_hardfork, and update current_hardfork_version. Done
+	// before per-HF effects so any code reading the property object
+	// during a hook sees the new state.
+	bumpHardforkPropertyObject(s, id)
 	switch id {
 	case hardfork.HF1:
 		performVestingShareSplit(s, 1_000_000)
@@ -167,6 +172,9 @@ func applyHardfork(s *state.Session, id hardfork.ID) {
 			dgpo.ContentRewardPercent = 6500    // 65 %
 			dgpo.ProposalFundPercent = 1000     // 10 %
 			dgpo.ReverseAuctionSeconds = 5 * 60 // 5 min
+			// HIVE_DOWNVOTE_POOL_PERCENT_HF21 = 25 × HIVE_1_PERCENT
+			// = 2500 (25 %). Mirrors database_hardfork.cpp HF21 init.
+			dgpo.DownvotePoolPercent = 2500
 			objects.PutDGPO(s, &dgpo)
 		}
 		// HF21 also creates the treasury account ("steem.dao") if absent
@@ -244,6 +252,40 @@ func applyHardfork(s *state.Session, id hardfork.ID) {
 		// by walking all accounts and checking VoteRevoked.
 		removeProposalVotesForRevokedAccounts(s)
 	}
+}
+
+// bumpHardforkPropertyObject mirrors the per-apply_hardfork housekeeping
+// from C++ database::apply_hardfork — push the activation timestamp into
+// processed_hardforks, bump last_hardfork by one, and update
+// current_hardfork_version. Idempotent against double-fire: if last_hardfork
+// already equals id, no-op.
+func bumpHardforkPropertyObject(s *state.Session, id hardfork.ID) {
+	hpo, err := objects.GetHardforkPropertyObject(s)
+	if err != nil {
+		return
+	}
+	if hpo.LastHardfork >= uint32(id) {
+		return
+	}
+	dgpo, err := objects.GetDGPO(s)
+	t := uint32(0)
+	if err == nil {
+		t = dgpo.Time
+	}
+	if t == 0 {
+		t = hardfork.MainnetActivationTime[id]
+	}
+	hpo.ProcessedHardforks = append(hpo.ProcessedHardforks, t)
+	hpo.LastHardfork = uint32(id)
+	hpo.CurrentHardforkVersion = hardfork.PackedVersion(id)
+	// next_hardfork tracks the latest applied version when no
+	// vote-driven future fork is queued. Once update_witness_schedule_4
+	// votes a future (version, time) tuple, those overwrite this.
+	if hpo.NextHardfork < hpo.CurrentHardforkVersion {
+		hpo.NextHardfork = hpo.CurrentHardforkVersion
+		hpo.NextHardforkTime = t
+	}
+	objects.PutHardforkPropertyObject(s, &hpo)
 }
 
 // removeProposalVotesForRevokedAccounts walks the proposal_vote table

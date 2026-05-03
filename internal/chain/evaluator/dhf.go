@@ -49,15 +49,36 @@ func (createProposalEvaluator) Apply(ctx *Context, o op.Operation) error {
 	if !ok {
 		return fmt.Errorf("createProposalEvaluator: unexpected op type %T", o)
 	}
+	if err := cp.Validate(); err != nil {
+		return err
+	}
 	if cp.DailyPay.Symbol.Num != asset.HbdSymbol {
 		return fmt.Errorf("%w: daily_pay must be HBD", ErrUnsupportedSymbol)
 	}
 	if cp.DailyPay.Amount < 0 {
 		return ErrTransferAmountNotPos
 	}
+	// end_date must be in the future of head_block_time
+	// (dhf_evaluator.cpp:73). start_date can predate head_time slightly
+	// to absorb tx submission latency.
+	if cp.EndDate <= ctx.HeadBlockTime {
+		return fmt.Errorf("create_proposal: end_date must be > head_block_time")
+	}
 	if cp.StartDate >= cp.EndDate {
 		return fmt.Errorf("create_proposal: start_date must precede end_date")
 	}
+	// Treasury fee: HIVE_TREASURY_FEE = 10 HBD = 10000 satoshi.
+	const treasuryFeeHBD int64 = 10000
+	creator, cerr := objects.GetAccount(ctx.DB, cp.Creator)
+	if cerr != nil {
+		return fmt.Errorf("%w: creator=%q", ErrAccountNotFound, cp.Creator)
+	}
+	if creator.HBDBalance < treasuryFeeHBD {
+		return fmt.Errorf("create_proposal: creator %q has insufficient HBD for treasury fee (%d < %d)",
+			cp.Creator, creator.HBDBalance, treasuryFeeHBD)
+	}
+	creator.HBDBalance -= treasuryFeeHBD
+	objects.PutAccount(ctx.DB, &creator)
 	if has, err := objects.HasAccount(ctx.DB, cp.Creator); err != nil {
 		return err
 	} else if !has {
@@ -88,6 +109,9 @@ func (updateProposalVotesEvaluator) Apply(ctx *Context, o op.Operation) error {
 	uv, ok := o.(op.UpdateProposalVotes)
 	if !ok {
 		return fmt.Errorf("updateProposalVotesEvaluator: unexpected op type %T", o)
+	}
+	if err := uv.Validate(); err != nil {
+		return err
 	}
 	voter, err := objects.GetAccount(ctx.DB, uv.Voter)
 	if err != nil {
@@ -133,6 +157,9 @@ func (removeProposalEvaluator) Apply(ctx *Context, o op.Operation) error {
 	rp, ok := o.(op.RemoveProposal)
 	if !ok {
 		return fmt.Errorf("removeProposalEvaluator: unexpected op type %T", o)
+	}
+	if err := rp.Validate(); err != nil {
+		return err
 	}
 	for _, id := range rp.ProposalIDs {
 		p, err := objects.GetProposal(ctx.DB, id)

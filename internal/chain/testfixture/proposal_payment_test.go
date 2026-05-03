@@ -25,6 +25,7 @@ func TestProposalDailyPaymentBasic(t *testing.T) {
 	f := New(t)
 	f.HardforksUpTo(hardfork.HF21)
 	f.Actors("alice", "bob", "carol")
+	f.FundLiquidHBD("alice", 1_000_000)
 	f.FundVesting("carol", 100_000_000) // carol votes
 	f.GenerateBlock()
 
@@ -87,6 +88,7 @@ func TestProposalZeroVotesNoPayment(t *testing.T) {
 	f := New(t)
 	f.HardforksUpTo(hardfork.HF21)
 	f.Actors("alice", "bob")
+	f.FundLiquidHBD("alice", 1_000_000)
 	f.GenerateBlock()
 	seedTreasury(t, f, "steem.dao", 100_000_000)
 
@@ -115,6 +117,7 @@ func TestProposalDailyBudgetCap(t *testing.T) {
 	f := New(t)
 	f.HardforksUpTo(hardfork.HF21)
 	f.Actors("alice", "bob", "carol")
+	f.FundLiquidHBD("alice", 1_000_000)
 	f.FundVesting("carol", 100_000_000)
 	f.GenerateBlock()
 	// Treasury 1000 HBD → daily budget 10 HBD → hourly budget ~0.4 HBD.
@@ -157,6 +160,7 @@ func TestProposalPaymentVoteOrderRanking(t *testing.T) {
 	f := New(t)
 	f.HardforksUpTo(hardfork.HF21)
 	f.Actors("alice", "bob", "carol", "dave", "eve")
+	f.FundLiquidHBD("alice", 1_000_000)
 	f.FundVesting("dave", 100_000_000)
 	f.FundVesting("eve", 50_000_000)
 	f.GenerateBlock()
@@ -212,6 +216,7 @@ func TestProposalPreHF21NoOp(t *testing.T) {
 	// HF20 only.
 	f.HardforksUpTo(hardfork.HF20)
 	f.Actors("alice", "bob", "carol", "steem.dao")
+	f.FundLiquidHBD("alice", 1_000_000)
 	f.FundLiquidHBD("steem.dao", 100_000_000)
 	f.FundVesting("carol", 100_000_000)
 	f.GenerateBlock()

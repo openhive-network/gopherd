@@ -123,6 +123,14 @@ func (createClaimedAccountEvaluator) Apply(ctx *Context, o op.Operation) error {
 		objects.InitRCManabar(&newAcct, ctx.HeadBlockTime)
 	}
 	objects.PutAccount(ctx.DB, &newAcct)
+	objects.PutAccountAuthority(ctx.DB, &objects.AccountAuthority{
+		Account:             cc.NewAccountName,
+		Owner:               cc.Owner,
+		Active:              cc.Active,
+		Posting:             cc.Posting,
+		LastOwnerUpdate:     ctx.HeadBlockTime,
+		PreviousOwnerUpdate: ctx.HeadBlockTime,
+	})
 	return nil
 }
 
@@ -191,6 +199,14 @@ func (accountCreateWithDelegationEvaluator) Apply(ctx *Context, o op.Operation) 
 		objects.InitRCManabar(&newAcct, ctx.HeadBlockTime)
 	}
 	objects.PutAccount(ctx.DB, &newAcct)
+	objects.PutAccountAuthority(ctx.DB, &objects.AccountAuthority{
+		Account:             ac.NewAccountName,
+		Owner:               ac.Owner,
+		Active:              ac.Active,
+		Posting:             ac.Posting,
+		LastOwnerUpdate:     ctx.HeadBlockTime,
+		PreviousOwnerUpdate: ctx.HeadBlockTime,
+	})
 	// Convert the fee to starter VESTS for the new account, matching
 	// hived's account_create_with_delegation_evaluator (libraries/chain/
 	// hive_evaluator.cpp) which calls db.create_vesting2 on the fee.

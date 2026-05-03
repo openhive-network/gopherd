@@ -139,6 +139,7 @@ func (commentEvaluator) Apply(ctx *Context, o op.Operation) error {
 		if !hasParent {
 			authorAcct.LastRootPost = ctx.HeadBlockTime
 		}
+		authorAcct.PostCount++
 		objects.PutAccount(ctx.DB, &authorAcct)
 
 		// Root-tracking: replies inherit Root from parent; root posts are
@@ -545,8 +546,42 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 			return fmt.Errorf("vote: cannot increase payout in last %ds before cashout", lockout)
 		}
 	}
-	// Update the voter's manabar.
-	voter.VotingManaCurrent = currentPower - usedPower
+	// HF20+ downvote routing: a downvote first draws from the
+	// downvote_manabar (capped at downvote_pool_size); only the
+	// remainder hits the upvote pool. Mirrors hived's
+	// hf20_vote_evaluator (hive_evaluator_social.cpp:712-755).
+	usedFromUpvote := usedPower
+	if ctx.Hardforks.Has(hardfork.HF20) && v.Weight < 0 {
+		dgpo, _ := objects.GetDGPO(ctx.DB)
+		// Downvote pool size: HF20 = max/4 (25%), HF21+ scales by
+		// dgpo.DownvotePoolPercent × max / 100%.
+		downvotePool := hivePercent / 4
+		if ctx.Hardforks.Has(hardfork.HF21) && dgpo.DownvotePoolPercent > 0 {
+			downvotePool = hivePercent * int64(dgpo.DownvotePoolPercent) / hivePercent
+		}
+		// Regenerate downvote_manabar to its (capped) max.
+		dvElapsed := int64(ctx.HeadBlockTime) - int64(voter.DownvoteManaLastUpdate)
+		if dvElapsed < 0 {
+			dvElapsed = 0
+		}
+		dvRegen := downvotePool * dvElapsed / votingManaRegenerationSec
+		dvCurrent := voter.DownvoteManaCurrent + dvRegen
+		if dvCurrent > downvotePool {
+			dvCurrent = downvotePool
+		}
+		if dvCurrent < 0 {
+			dvCurrent = 0
+		}
+		take := usedPower
+		if take > dvCurrent {
+			take = dvCurrent
+		}
+		voter.DownvoteManaCurrent = dvCurrent - take
+		voter.DownvoteManaLastUpdate = ctx.HeadBlockTime
+		usedFromUpvote = usedPower - take
+	}
+	// Update the voter's (upvote) manabar.
+	voter.VotingManaCurrent = currentPower - usedFromUpvote
 	voter.VotingManaLastUpdate = ctx.HeadBlockTime
 
 	// Compute curation weight for this vote — the W(R_N) - W(R_N-1)
@@ -772,6 +807,7 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 	}
 rootDone:
 	objects.PutComment(ctx.DB, &c)
+	voter.LastVoteTime = ctx.HeadBlockTime
 	objects.PutAccount(ctx.DB, &voter)
 	adjustRewardShares2(ctx.DB, oldNetRshares, c.NetRshares)
 	return nil

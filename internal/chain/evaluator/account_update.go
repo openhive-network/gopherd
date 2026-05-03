@@ -57,20 +57,34 @@ func (accountUpdateEvaluator) Apply(ctx *Context, o op.Operation) error {
 	// owner authority is rotated, record the OLD owner_authority in
 	// owner_authority_history_object and bump previous_owner_update /
 	// last_owner_update timestamps.
+	// Maintain account_authority_object: rotate owner/active/posting
+	// when supplied. Mirrors hived's update_owner_authority +
+	// account_update_evaluator at hive_evaluator_account.cpp:325.
+	authObj, authErr := objects.GetAccountAuthority(ctx.DB, au.Account)
+	if authErr != nil {
+		// Bootstrap if missing (legacy genesis accounts).
+		authObj = objects.AccountAuthority{Account: au.Account}
+	}
 	if au.Owner != nil {
 		objects.PutOwnerAuthorityHistory(ctx.DB, &objects.OwnerAuthorityHistory{
 			Account:                au.Account,
-			PreviousOwnerAuthority: *au.Owner, // best-effort: we don't
-			// track the prior owner authority on the account, so we
-			// record the new one as a structural placeholder. The
-			// recovery flow doesn't validate signatures (replay-mode),
-			// so this row's primary purpose is the existence-check
-			// gate for the owner-update-rate-limit (HIVE_OWNER_UPDATE_LIMIT).
-			LastValidTime: ctx.HeadBlockTime,
+			PreviousOwnerAuthority: authObj.Owner,
+			LastValidTime:          ctx.HeadBlockTime,
 		})
+		authObj.Owner = *au.Owner
+		authObj.PreviousOwnerUpdate = authObj.LastOwnerUpdate
+		authObj.LastOwnerUpdate = ctx.HeadBlockTime
 		a.PreviousOwnerUpdate = a.LastOwnerUpdate
 		a.LastOwnerUpdate = ctx.HeadBlockTime
 	}
+	if au.Active != nil {
+		authObj.Active = *au.Active
+	}
+	if au.Posting != nil {
+		authObj.Posting = *au.Posting
+	}
+	objects.PutAccountAuthority(ctx.DB, &authObj)
+	a.LastAccountUpdate = ctx.HeadBlockTime
 	objects.PutAccount(ctx.DB, &a)
 	return nil
 }
@@ -98,6 +112,30 @@ func (accountUpdate2Evaluator) Apply(ctx *Context, o op.Operation) error {
 	if au.JSONMetadata != "" {
 		a.JSONMetadata = au.JSONMetadata
 	}
+	// Rotate authorities on the account_authority_object.
+	authObj, authErr := objects.GetAccountAuthority(ctx.DB, au.Account)
+	if authErr != nil {
+		authObj = objects.AccountAuthority{Account: au.Account}
+	}
+	if au.Owner != nil {
+		objects.PutOwnerAuthorityHistory(ctx.DB, &objects.OwnerAuthorityHistory{
+			Account:                au.Account,
+			PreviousOwnerAuthority: authObj.Owner,
+			LastValidTime:          ctx.HeadBlockTime,
+		})
+		authObj.Owner = *au.Owner
+		authObj.PreviousOwnerUpdate = authObj.LastOwnerUpdate
+		authObj.LastOwnerUpdate = ctx.HeadBlockTime
+		a.PreviousOwnerUpdate = a.LastOwnerUpdate
+		a.LastOwnerUpdate = ctx.HeadBlockTime
+	}
+	if au.Active != nil {
+		authObj.Active = *au.Active
+	}
+	if au.Posting != nil {
+		authObj.Posting = *au.Posting
+	}
+	objects.PutAccountAuthority(ctx.DB, &authObj)
 	// posting_json_metadata is a separate field on the C++ account; we
 	// merge it into JSONMetadata for now since we don't yet split storage.
 	objects.PutAccount(ctx.DB, &a)

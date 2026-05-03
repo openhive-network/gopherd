@@ -5,6 +5,7 @@ import (
 
 	"hived-go/internal/chain/evaluator"
 	"hived-go/internal/protocol/block"
+	"hived-go/internal/protocol/network"
 	"hived-go/internal/protocol/op"
 	"hived-go/internal/protocol/tx"
 	"hived-go/internal/state"
@@ -45,7 +46,7 @@ func TestApplyBlockEmpty(t *testing.T) {
 
 	chain := New(db)
 	raw := buildBlock(t, 1, "initminer", 1_700_000_000, nil)
-	if _, err := chain.ApplyBlock(raw, 1, ApplyOptions{}, nil); err != nil {
+	if _, err := chain.ApplyBlock(raw, 1, ApplyOptions{SkipTransactionSignatures: true, SkipBlockSignature: true}, nil); err != nil {
 		t.Fatalf("ApplyBlock: %v", err)
 	}
 	head, err := chain.HeadBlock()
@@ -91,10 +92,15 @@ func TestApplyBlockWithTransfer(t *testing.T) {
 		Amount: hiveAsset(250),
 		Memo:   "lunch",
 	}
-	st := tx.SignedTransaction{Transaction: tx.Transaction{Operations: []op.Operation{transferOp}}}
-	raw := buildBlock(t, 1, "initminer", 1_700_000_000, []tx.SignedTransaction{st})
+	// Expiration must lie inside [head_block_time, +1h]; for block 1
+	// dgpo.Time is genesis_time, so any value within that hour works.
+	st := tx.SignedTransaction{Transaction: tx.Transaction{
+		Operations: []op.Operation{transferOp},
+		Expiration: network.GenesisTimeUnix + 60,
+	}}
+	raw := buildBlock(t, 1, "initminer", network.GenesisTimeUnix+3, []tx.SignedTransaction{st})
 
-	if _, err := chain.ApplyBlock(raw, 1, ApplyOptions{}, nil); err != nil {
+	if _, err := chain.ApplyBlock(raw, 1, ApplyOptions{SkipTransactionSignatures: true, SkipBlockSignature: true}, nil); err != nil {
 		t.Fatalf("ApplyBlock: %v", err)
 	}
 
@@ -124,11 +130,14 @@ func TestApplyBlockStubsRunWithoutError(t *testing.T) {
 		ID:                   "test",
 		JSON:                 `{"k":1}`,
 	}
-	st := tx.SignedTransaction{Transaction: tx.Transaction{Operations: []op.Operation{customOp}}}
-	raw := buildBlock(t, 1, "initminer", 1_700_000_000, []tx.SignedTransaction{st})
+	st := tx.SignedTransaction{Transaction: tx.Transaction{
+		Operations: []op.Operation{customOp},
+		Expiration: network.GenesisTimeUnix + 60,
+	}}
+	raw := buildBlock(t, 1, "initminer", network.GenesisTimeUnix+3, []tx.SignedTransaction{st})
 
 	chain := New(db)
-	if _, err := chain.ApplyBlock(raw, 1, ApplyOptions{}, nil); err != nil {
+	if _, err := chain.ApplyBlock(raw, 1, ApplyOptions{SkipTransactionSignatures: true, SkipBlockSignature: true}, nil); err != nil {
 		t.Fatalf("ApplyBlock with stub custom_json: %v", err)
 	}
 }

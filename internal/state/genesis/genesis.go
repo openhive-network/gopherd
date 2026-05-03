@@ -6,6 +6,7 @@ package genesis
 import (
 	"hived-go/internal/crypto"
 	"hived-go/internal/protocol/auth"
+	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/network"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
@@ -39,18 +40,41 @@ func Apply(db *state.Database) error {
 		VotingManaCurrent:    10000, // HIVE_100_PERCENT — starts at full
 		VotingManaLastUpdate: network.GenesisTimeUnix,
 	})
+	// Genesis account_authority_object for initminer — owner/active/
+	// posting all carry the canonical init key as a 1-of-1 authority.
+	initAuth := auth.Authority{
+		WeightThreshold: 1,
+		KeyAuths:        []auth.KeyAuth{{Key: memoKey, Weight: 1}},
+	}
+	objects.PutAccountAuthority(s, &objects.AccountAuthority{
+		Account:             MainnetInitminer,
+		Owner:               initAuth,
+		Active:              initAuth,
+		Posting:             initAuth,
+		LastOwnerUpdate:     network.GenesisTimeUnix,
+		PreviousOwnerUpdate: network.GenesisTimeUnix,
+	})
 
 	// Mirror init_genesis (database_init.cpp:195-291): hived seeds the
 	// system accounts (null/temp/miner) plus the legacy "steem" account
 	// at genesis. Pre-HF14 transfers may target "null" before any
 	// hardfork seed runs, and clearNullAccountBalance / null transfer
 	// burn paths depend on these existing.
+	systemAuth := auth.Authority{WeightThreshold: 1}
 	for _, name := range []string{"null", "temp", "miner", "steem"} {
 		objects.PutAccount(s, &objects.Account{
 			Name:                 name,
 			Created:              network.GenesisTimeUnix,
 			VotingManaCurrent:    10000,
 			VotingManaLastUpdate: network.GenesisTimeUnix,
+		})
+		objects.PutAccountAuthority(s, &objects.AccountAuthority{
+			Account:             name,
+			Owner:               systemAuth,
+			Active:              systemAuth,
+			Posting:             systemAuth,
+			LastOwnerUpdate:     network.GenesisTimeUnix,
+			PreviousOwnerUpdate: network.GenesisTimeUnix,
 		})
 	}
 
@@ -93,6 +117,17 @@ func Apply(db *state.Database) error {
 		ReverseAuctionSeconds: 0,
 		// Pre-HF20 default delegation return period is 5 days.
 		DelegationReturnPeriod: 5 * 24 * 60 * 60,
+	})
+
+	// Hardfork property object: at genesis processed_hardforks holds
+	// only the genesis time and last_hardfork=0. apply_hardfork
+	// pushes additional entries on each activation.
+	objects.PutHardforkPropertyObject(s, &objects.HardforkPropertyObject{
+		ProcessedHardforks:     []uint32{network.GenesisTimeUnix},
+		LastHardfork:           0,
+		CurrentHardforkVersion: hardfork.PackedVersion(hardfork.HF0),
+		NextHardfork:           hardfork.PackedVersion(hardfork.HF0),
+		NextHardforkTime:       network.GenesisTimeUnix,
 	})
 
 	// Treasury accounts ("steem.dao" pre-HF24, "hive.fund" HF24+) are

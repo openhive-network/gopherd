@@ -73,22 +73,21 @@ func (transferToVestingEvaluator) Apply(ctx *Context, o op.Operation) error {
 		return fmt.Errorf("%w: to=%q", ErrAccountNotFound, toName)
 	}
 
-	// CreateVesting handles fund_hive += amount, shares += new_vesting,
-	// and recipient.vesting_shares += new_vesting at the dynamic price.
-	newVests, err := CreateVesting(ctx.DB, toName, tv.Amount.Amount, false)
+	// HF24+: voting is deferred via delayed_votes — call the no-vote-adjust
+	// helper. Pre-HF24: CreateVesting (matches C++ create_vesting2) does
+	// the balance update AND propagates the new vest into witness votes.
+	var newVests int64
+	if ctx.Hardforks.Has(hardfork.HF24) {
+		newVests, err = AdjustAccountVestingBalance(ctx.DB, toName, tv.Amount.Amount, false)
+	} else {
+		newVests, err = CreateVesting(ctx.DB, toName, tv.Amount.Amount, false)
+	}
 	if err != nil {
 		return err
 	}
 	if newVests <= 0 {
 		return nil
 	}
-	// HF24+: vesting from transfer_to_vesting is voting-deferred for 30
-	// days. The new VESTS go into the recipient's DelayedVotes queue;
-	// witness vote weight is not adjusted yet. The per-block
-	// delayed_voting hook calls AdjustWitnessVotesForVoter when a
-	// bucket matures.
-	//
-	// Pre-HF24: apply immediately to witness vote totals.
 	if ctx.Hardforks.Has(hardfork.HF24) {
 		to, err := objects.GetAccount(ctx.DB, toName)
 		if err != nil {
@@ -98,14 +97,6 @@ func (transferToVestingEvaluator) Apply(ctx *Context, o op.Operation) error {
 			return fmt.Errorf("transfer_to_vesting: delayed_voting add: %w", err)
 		}
 		objects.PutAccount(ctx.DB, &to)
-	} else {
-		// Mirror C++ create_vesting2 → adjust_proxied_witness_votes.
-		// If the recipient has a proxy, the new vest cascades up the
-		// chain; otherwise it lands on the witnesses they vote for.
-		to, err := objects.GetAccount(ctx.DB, toName)
-		if err == nil {
-			objects.AdjustProxiedWitnessVotes(ctx.DB, &to, newVests)
-		}
 	}
 	// HF20+: recipient's effective_vests went up → refresh RC cap.
 	if ctx.Hardforks.Has(hardfork.HF20) {

@@ -62,6 +62,21 @@ type Witness struct {
 	// PowWorker (so the by_pow index drops them). pre-HF13 only.
 	// Mirrors witness_object::pow_worker.
 	PowWorker uint64
+	// Account subsidy parameters voted by this witness via
+	// witness_set_properties — mirror chain_properties::account_subsidy_budget
+	// and account_subsidy_decay (libraries/protocol/include/hive/protocol/
+	// chain_properties.hpp). Used by update_median_witness_props at HF20+
+	// to seed the account_subsidy_witness_rd parameters and the global
+	// account_subsidy_rd. Defaults match HIVE_DEFAULT_ACCOUNT_SUBSIDY_*
+	// constants (797 / 347321).
+	AccountSubsidyBudget int32
+	AccountSubsidyDecay  uint32
+	// LastConfirmedBlockNum — the block number this witness most recently
+	// produced. Used by update_last_irreversible_block_num to derive the
+	// chain-wide LIB from the median of the active schedule's
+	// last_confirmed values. Mirrors witness_object::last_confirmed_block_num
+	// (libraries/chain/include/hive/chain/witness_objects.hpp).
+	LastConfirmedBlockNum uint32
 }
 
 // WitnessScheduleType mirrors witness_object::schedule_type:
@@ -159,6 +174,9 @@ func AppendWitness(dst []byte, w *Witness) []byte {
 	dst = append(dst, w.VirtualPosition[:]...)
 	dst = append(dst, w.VirtualScheduledTime[:]...)
 	dst = appendU64LE(dst, w.PowWorker)
+	dst = appendU32LE(dst, uint32(w.AccountSubsidyBudget))
+	dst = appendU32LE(dst, w.AccountSubsidyDecay)
+	dst = appendU32LE(dst, w.LastConfirmedBlockNum)
 	return dst
 }
 
@@ -248,6 +266,26 @@ func ReadWitness(src []byte) (Witness, error) {
 	}
 	if w.PowWorker, err = r.ReadUint64(); err != nil {
 		return w, fmt.Errorf("witness.pow_worker: %w", err)
+	}
+	// AccountSubsidyBudget / AccountSubsidyDecay are a later schema
+	// addition; tolerate EOF for older rows.
+	if r.AtEnd() {
+		return w, nil
+	}
+	asb, err := r.ReadUint32()
+	if err != nil {
+		return w, fmt.Errorf("witness.account_subsidy_budget: %w", err)
+	}
+	w.AccountSubsidyBudget = int32(asb)
+	if w.AccountSubsidyDecay, err = r.ReadUint32(); err != nil {
+		return w, fmt.Errorf("witness.account_subsidy_decay: %w", err)
+	}
+	// LastConfirmedBlockNum is a later schema addition; tolerate EOF.
+	if r.AtEnd() {
+		return w, nil
+	}
+	if w.LastConfirmedBlockNum, err = r.ReadUint32(); err != nil {
+		return w, fmt.Errorf("witness.last_confirmed_block_num: %w", err)
 	}
 	if !r.AtEnd() {
 		return w, errors.New("witness: trailing bytes")

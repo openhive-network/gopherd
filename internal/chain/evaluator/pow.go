@@ -206,6 +206,7 @@ func ensureMinerAccountForPow(ctx *Context, worker string, payReward bool) error
 			Created:              ctx.HeadBlockTime,
 			VotingManaCurrent:    10000,
 			VotingManaLastUpdate: ctx.HeadBlockTime,
+			Mined:                true,
 		})
 	}
 	// Register the worker as a witness if missing — hived's pow_apply
@@ -226,7 +227,7 @@ func ensureMinerAccountForPow(ctx *Context, worker string, payReward bool) error
 			Owner:   worker,
 			Created: ctx.HeadBlockTime,
 		}
-		seedVirtualScheduledTime(&w)
+		seedVirtualScheduledTime(ctx, &w)
 	} else {
 		got, err := objects.GetWitness(ctx.DB, worker)
 		if err != nil {

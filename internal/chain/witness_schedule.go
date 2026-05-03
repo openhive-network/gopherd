@@ -116,10 +116,18 @@ func updateWitnessSchedule(s *state.Session, blockNum uint32) {
 		ws.TimeshareWeight = 5
 	}
 
-	// Round-boundary check: shuffle only every HIVE_MAX_WITNESSES blocks,
-	// matching C++ witness_schedule.cpp:405. Persist sizing changes
+	// Round-boundary check: shuffle only every num_scheduled_witnesses
+	// blocks, matching C++ witness_schedule.cpp:405
+	// (`block_num % wso.num_scheduled_witnesses != 0`). Note this is the
+	// CURRENT scheduled count, NOT HIVE_MAX_WITNESSES — early in the
+	// chain (or in single-witness tests) the schedule has 1 entry, so
+	// every block triggers a re-shuffle. Persist sizing changes
 	// (hardfork transitions) and the recent-producer ring update.
-	if blockNum%uint32(objects.MaxWitnesses) != 0 {
+	scheduleSize := uint32(ws.NumScheduledWitnesses)
+	if scheduleSize == 0 {
+		scheduleSize = 1
+	}
+	if blockNum%scheduleSize != 0 {
 		if ws.MaxVotedWitnesses != prevMaxVoted ||
 			ws.MaxMinerWitnesses != prevMaxMiner ||
 			ws.MaxRunnerWitnesses != prevMaxRunner ||
@@ -136,9 +144,11 @@ func updateWitnessSchedule(s *state.Session, blockNum uint32) {
 		updateWitnessSchedulePreHF4(s, &ws, &dgpo, blockNum, hf)
 	}
 
-	// HF20+ pool params for RC. Not modeled at the moment (RC is a
-	// late-chain feature) — the call to db.rc().set_pool_params(wso)
-	// in C++ is a no-op for our pre-HF20 replay window.
+	// HF20+: refresh the rc_pool_object's per-resource params from the
+	// new median chain_properties. Mirrors hived's
+	// db.rc().set_pool_params(wso) at update_witness_schedule_4. Pre-HF20
+	// the call short-circuits inside.
+	rcSetPoolParams(s, blockNum, dgpo.Time)
 
 	objects.PutWitnessSchedule(s, &ws)
 	objects.PutDGPO(s, &dgpo)
@@ -435,10 +445,42 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 			}
 			return hfvs[i].t < hfvs[j].t
 		})
-		// We don't track hardfork_property_object yet; the next-hardfork
-		// bump is consensus-cosmetic at our replay window (hardfork
-		// activation is by block number not by witness vote in this era).
-		_ = hfvs
+		// Mirror C++ witness_schedule.cpp:289-348. Special-case HF22→HF23
+		// where C++ forces the bump regardless of vote tally. Otherwise:
+		// pick the first (version, time) tuple with >= required votes
+		// (hfvs is sorted ascending; std::map order in C++); if no
+		// majority, reset next_hardfork to current_hardfork_version.
+		if hpo, hpoErr := objects.GetHardforkPropertyObject(s); hpoErr == nil {
+			hf22Version := hardfork.PackedVersion(hardfork.HF22)
+			hf23Version := hardfork.PackedVersion(hardfork.HF23)
+			hf23Time := hardfork.MainnetActivationTime[hardfork.HF23]
+			if hpo.CurrentHardforkVersion == hf22Version {
+				if hpo.NextHardfork != hf23Version {
+					hpo.NextHardfork = hf23Version
+					hpo.NextHardforkTime = hf23Time
+					objects.PutHardforkPropertyObject(s, &hpo)
+				}
+			} else {
+				picked := false
+				for _, e := range hfvs {
+					if e.count >= uint32(ws.HardforkRequiredWitnesses) {
+						if hpo.NextHardfork != e.version || hpo.NextHardforkTime != e.t {
+							hpo.NextHardfork = e.version
+							hpo.NextHardforkTime = e.t
+							objects.PutHardforkPropertyObject(s, &hpo)
+						}
+						picked = true
+						break
+					}
+				}
+				if !picked {
+					if hpo.NextHardfork != hpo.CurrentHardforkVersion {
+						hpo.NextHardfork = hpo.CurrentHardforkVersion
+						objects.PutHardforkPropertyObject(s, &hpo)
+					}
+				}
+			}
+		}
 	}
 
 	// 5) Write the active witnesses into the schedule, recompute pay

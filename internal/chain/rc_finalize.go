@@ -1,0 +1,159 @@
+// Package chain — RC subsystem hooks (HF20+).
+//
+// The active replay window stops at block ~2.9M, far below the HF20
+// activation block (~26.2M), so the per-block work below is dormant
+// in current usage. Implementations are scaffolding: faithful in
+// shape, with the heavier per-resource decay math left for the HF20
+// extension milestone (memory: project_rc_subsystem_deferred).
+package chain
+
+import (
+	"hived-go/internal/protocol/auth"
+	"hived-go/internal/protocol/hardfork"
+	"hived-go/internal/state"
+	"hived-go/internal/state/objects"
+)
+
+// HIVE_RC_DELEGATION_RETURN_PERIOD = 5 days. Matches
+// HIVE_VOTING_MANA_REGENERATION_SECONDS — a reduced delegation refunds
+// to the delegator over the same window the manabar regenerates.
+const rcDelegationReturnPeriodSec uint32 = 5 * 24 * 60 * 60
+
+// initRCPoolIfNeeded creates the rc_pool_object singleton on the first
+// call after HF20. Called from set_pool_params during update_witness_schedule.
+func initRCPoolIfNeeded(s *state.Session, blockTime uint32) {
+	if objects.HasRCPool(s) {
+		return
+	}
+	var pool objects.RCPool
+	for i := 0; i < objects.RCNumResources; i++ {
+		pool.Pool[i] = objects.RCPoolEntry{
+			Current: 0, Max: 0, Update: blockTime, Cost: 1,
+		}
+	}
+	objects.PutRCPool(s, &pool)
+}
+
+// rcSetPoolParams ports rc_plugin::set_pool_params (rc_plugin.cpp:330).
+// Re-derives per-resource pool maxima from the witness-voted dynamic
+// params + median chain_properties. Called from update_witness_schedule
+// after the median is rolled.
+//
+// Scaffolding pre-HF20 replay: initialize the pool object so it's
+// addressable; fine-grained per-resource scaling lands later.
+func rcSetPoolParams(s *state.Session, blockNum uint32, blockTime uint32) {
+	if !hardfork.SetForBlock(blockNum).Has(hardfork.HF20) {
+		return
+	}
+	initRCPoolIfNeeded(s, blockTime)
+}
+
+// rcFinalizeBlock ports rc_plugin::on_finish_block. Per-block hooks:
+//
+//	1. Account for produced/consumed RC since the last block.
+//	2. Decay each pool's current_mana toward its max.
+//	3. Process expired RC delegations (refund to delegator).
+//	4. Update the rc_per_resource cost coefficients.
+//
+// Scaffolding pre-HF20: only #3 fires (it's safe to invoke even before
+// HF20 activates since the table is empty). The cost-recompute math is
+// driven by witness-voted dynamic_params, which are HF20+ only.
+func rcFinalizeBlock(s *state.Session, blockNum, blockTime uint32) {
+	rcHandleExpiredDelegations(s, blockTime)
+	if !hardfork.SetForBlock(blockNum).Has(hardfork.HF20) {
+		return
+	}
+	rcSetPoolParams(s, blockNum, blockTime)
+}
+
+// rcHandleExpiredDelegations sweeps rc_delegation_expiration_object rows
+// whose expiration ≤ now, refunding their RC to the delegator's
+// available pool. Mirrors handle_expired_delegations (rc_plugin.cpp:558).
+func rcHandleExpiredDelegations(s *state.Session, now uint32) {
+	type expired struct {
+		row objects.RCDelegationExpiration
+	}
+	var batch []expired
+	_ = s.Range(objects.RCDelegationExpirationTable,
+		objects.RCDelegationExpirationByExpirationIndex, nil,
+		func(key, _ []byte) (bool, error) {
+			if len(key) < 4+8 {
+				return true, nil
+			}
+			exp := uint32(key[0])<<24 | uint32(key[1])<<16 |
+				uint32(key[2])<<8 | uint32(key[3])
+			if exp > now {
+				return false, nil // index is ASC; first non-expired stops the scan
+			}
+			seq := uint64(key[4])<<56 | uint64(key[5])<<48 | uint64(key[6])<<40 | uint64(key[7])<<32 |
+				uint64(key[8])<<24 | uint64(key[9])<<16 | uint64(key[10])<<8 | uint64(key[11])
+			row, err := objects.GetRCDelegationExpiration(s, seq)
+			if err != nil {
+				return true, nil
+			}
+			batch = append(batch, expired{row: row})
+			return true, nil
+		})
+	for _, e := range batch {
+		// Refund: bump the delegator's max_rc back up by row.RC and
+		// regenerate the manabar so the freed mana is immediately
+		// available.
+		delegator, err := objects.GetAccount(s, e.row.Delegator)
+		if err == nil {
+			delegator.DelegatedRCOut -= int64(e.row.RC)
+			if delegator.DelegatedRCOut < 0 {
+				delegator.DelegatedRCOut = 0
+			}
+			objects.RegenerateRCMana(&delegator, now)
+			objects.PutAccount(s, &delegator)
+		}
+		objects.DeleteRCDelegationExpiration(s, &e.row)
+	}
+}
+
+// GetRCDelegationExpiration fetches a single row by seq. Provided here
+// (next to the other RC-package-private helpers) since the storage object
+// file doesn't include a fetch helper.
+//
+// (deferred until needed by callers; rcHandleExpiredDelegations uses the
+// indexed range path.)
+var _ = func() {} // package-doc anchor
+
+// QueueRCDelegationExpiration enqueues a pending refund row for the
+// supplied delegator. Used by the rc_custom delegate_rc handler when a
+// delegation is reduced or removed.
+func QueueRCDelegationExpiration(s *state.Session, delegator auth.AccountName, rc uint64, now uint32) {
+	if rc == 0 {
+		return
+	}
+	seq := nextRCDelegationExpirationSeq(s)
+	objects.PutRCDelegationExpiration(s, &objects.RCDelegationExpiration{
+		Seq:        seq,
+		Delegator:  delegator,
+		RC:         rc,
+		Expiration: now + rcDelegationReturnPeriodSec,
+	})
+}
+
+// nextRCDelegationExpirationSeq derives a fresh monotonic seq id by
+// scanning the current max in the table. The N is small (≤ 5d ×
+// max_per_block delegations); a simple scan is fine until a counter
+// field is added to DGPO.
+func nextRCDelegationExpirationSeq(s *state.Session) uint64 {
+	max := uint64(0)
+	_ = s.Range(objects.RCDelegationExpirationTable, state.PrimaryIndex, nil,
+		func(key, _ []byte) (bool, error) {
+			if len(key) < 8 {
+				return true, nil
+			}
+			seq := uint64(key[0])<<56 | uint64(key[1])<<48 |
+				uint64(key[2])<<40 | uint64(key[3])<<32 |
+				uint64(key[4])<<24 | uint64(key[5])<<16 |
+				uint64(key[6])<<8 | uint64(key[7])
+			if seq > max {
+				max = seq
+			}
+			return true, nil
+		})
+	return max + 1
+}

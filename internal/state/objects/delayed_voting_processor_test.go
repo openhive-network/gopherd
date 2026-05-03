@@ -2,6 +2,110 @@ package objects
 
 import "testing"
 
+// TestDelayedVotingProcessor03 ports delayed_voting_tests.cpp::
+// delayed_voting_processor_03. Exercises the no-op edges:
+//   - erase(0) on empty queue is fine
+//   - add(val=0) is fine (and doesn't append)
+//   - erase_front on empty queue is fine
+//   - erase(1) on empty queue must FAIL (not enough votes)
+//   - add(val) then erase(val) leaves an empty queue
+//   - erase across multiple buckets consumes from the end first
+func TestDelayedVotingProcessor03(t *testing.T) {
+	var dq []DelayedVoteEntry
+	var sum uint64
+	const time uint32 = 1580611445 // 2020-02-02T03:04:05 UTC
+
+	// nothing-to-do edges.
+	if err := DelayedVotingErase(&dq, &sum, 0); err != nil {
+		t.Fatalf("erase(0) on empty: %v", err)
+	}
+	if err := DelayedVotingAdd(&dq, &sum, time, 0); err != nil {
+		t.Fatalf("add(val=0): %v", err)
+	}
+	if err := DelayedVotingEraseFront(&dq, &sum); err != nil {
+		t.Fatalf("erase_front on empty: %v", err)
+	}
+	if len(dq) != 0 {
+		t.Fatalf("after no-ops: len=%d, want 0", len(dq))
+	}
+
+	// erase(1) on empty must FAIL.
+	if err := DelayedVotingErase(&dq, &sum, 1); err == nil {
+		t.Fatal("erase(1) on empty queue should fail")
+	}
+
+	// add(666) then erase(666) returns to empty.
+	if err := DelayedVotingAdd(&dq, &sum, time, 666); err != nil {
+		t.Fatalf("add(666): %v", err)
+	}
+	if err := DelayedVotingErase(&dq, &sum, 666); err != nil {
+		t.Fatalf("erase(666): %v", err)
+	}
+	if len(dq) != 0 {
+		t.Fatalf("after add(666)+erase(666): len=%d, want 0", len(dq))
+	}
+
+	// add two on different days, erase the full sum (55) — empty queue.
+	dayInSec := uint32(24 * 60 * 60)
+	if err := DelayedVotingAdd(&dq, &sum, time+dayInSec, 22); err != nil {
+		t.Fatalf("add 22: %v", err)
+	}
+	if err := DelayedVotingAdd(&dq, &sum, time+2*dayInSec, 33); err != nil {
+		t.Fatalf("add 33: %v", err)
+	}
+	if err := DelayedVotingErase(&dq, &sum, 55); err != nil {
+		t.Fatalf("erase 55: %v", err)
+	}
+	if len(dq) != 0 {
+		t.Fatalf("after erase-all: len=%d, want 0", len(dq))
+	}
+}
+
+// TestDelayedVotingEraseAcrossBuckets ports the "two-bucket erase from
+// back" portion of delayed_voting_processor_02. Erasing partial votes
+// shrinks the LAST bucket; once it reaches 0 the bucket is removed.
+func TestDelayedVotingEraseAcrossBuckets(t *testing.T) {
+	var dq []DelayedVoteEntry
+	var sum uint64
+	const base uint32 = 1577934245
+
+	dayInSec := uint32(24 * 60 * 60)
+	for i := uint32(1); i <= 10; i++ {
+		if err := DelayedVotingAdd(&dq, &sum, base+i*dayInSec, uint64(i)); err != nil {
+			t.Fatalf("add %d: %v", i, err)
+		}
+	}
+	if len(dq) != 10 {
+		t.Fatalf("after 10 adds: len=%d, want 10", len(dq))
+	}
+	// sum = 1+2+...+10 = 55.
+	if sum != 55 {
+		t.Fatalf("sum: got %d, want 55", sum)
+	}
+
+	// Erase 1 vote → last bucket goes from 10 → 9.
+	if err := DelayedVotingErase(&dq, &sum, 1); err != nil {
+		t.Fatalf("erase 1: %v", err)
+	}
+	if dq[9].Val != 9 {
+		t.Errorf("last bucket Val: got %d, want 9", dq[9].Val)
+	}
+	if sum != 54 {
+		t.Errorf("sum after erase 1: got %d, want 54", sum)
+	}
+
+	// Erase 9 more → last bucket reaches 0, gets removed.
+	if err := DelayedVotingErase(&dq, &sum, 9); err != nil {
+		t.Fatalf("erase 9: %v", err)
+	}
+	if len(dq) != 9 {
+		t.Errorf("after last bucket drained: len=%d, want 9", len(dq))
+	}
+	if sum != 45 {
+		t.Errorf("sum: got %d, want 45", sum)
+	}
+}
+
 func cmpDV(t *testing.T, items []DelayedVoteEntry, idx int, time uint32, val uint64) {
 	t.Helper()
 	if idx >= len(items) {

@@ -85,6 +85,10 @@ var MainnetActivationBlock = [NumHardforks + 1]uint32{
 	HF25: 55235767,
 	HF26: 68676505,
 	HF27: 69050084,
+	// HF28 activated Nov 19, 2025; the exact mainnet activation block is
+	// pending lookup. Replay window is 8.22M blocks so this placeholder
+	// has no effect yet — fill from chain history before extending replay
+	// past 100M blocks.
 	HF28: 100000000,
 }
 
@@ -127,4 +131,53 @@ func (s Set) HighestActive() ID {
 		}
 	}
 	return HF0
+}
+
+// MainnetActivationTime maps hardfork ID to the canonical UNIX timestamp
+// from libraries/protocol/hardfork.d/*.hf. Used by hardfork_property_object
+// to populate processed_hardforks. Index 0 is genesis time
+// (HIVE_GENESIS_TIME = 1458835200).
+var MainnetActivationTime = [NumHardforks + 1]uint32{
+	HF0:  1458835200,
+	HF1:  1461605400,
+	HF2:  1461693600,
+	HF3:  1461762000,
+	HF4:  1462028400,
+	HF5:  1464714000,
+	HF6:  1467295200,
+	HF7:  1467590400,
+	HF8:  1467594000,
+	HF9:  1468454400,
+	HF10: 1468584000,
+	HF11: 1468767600,
+	HF12: 1469545200,
+	HF13: 1471269600,
+	HF14: 1474383600,
+	HF15: 1478620800,
+	HF16: 1481040000,
+	HF17: 1490886000,
+	HF18: 1490886000,
+	HF19: 1497970800,
+	HF20: 1537887600,
+	HF21: 1566918000,
+	HF22: 1567090800,
+	HF23: 1584712800,
+	HF24: 1601992800,
+	HF25: 1625061600,
+	HF26: 1665489600,
+	HF27: 1666612800,
+	HF28: 1763557200, // Wed Nov 19 2025 13:00:00 UTC (next_hf_time() in database.cpp)
+}
+
+// PackedVersion returns the C++ hardfork_version v_num for an HF id.
+// hardfork_version( major, minor ) packs as (major<<24) | (minor<<16).
+// HF0..HF23 have major=0; HF24..HF28 have major=1 with minor=id.
+func PackedVersion(id ID) uint32 {
+	if id == HF0 {
+		return 0
+	}
+	if id <= HF23 {
+		return uint32(id) << 16
+	}
+	return (uint32(1) << 24) | (uint32(id) << 16)
 }

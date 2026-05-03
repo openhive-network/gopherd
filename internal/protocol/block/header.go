@@ -12,12 +12,78 @@ import (
 //	tag 0 = void_t                  → 0 bytes
 //	tag 1 = version                 → 4 bytes (uint32 v_num LE)
 //	tag 2 = hardfork_version_vote   → 8 bytes (uint32 v_num LE + uint32 time_point_sec LE)
-//
-// We don't decode the bodies into typed values yet (they're not needed for
-// block_id computation, which is the current consumer). We only need to know
-// each entry's byte length so we can correctly find the end of the
-// extensions vector.
 var blockHeaderExtensionBodySize = [...]int{0, 4, 8}
+
+// HeaderExtensionTag enumerates the static_variant tags inside
+// block_header_extensions.
+type HeaderExtensionTag uint8
+
+const (
+	HeaderExtVoid                HeaderExtensionTag = 0
+	HeaderExtVersion             HeaderExtensionTag = 1
+	HeaderExtHardforkVersionVote HeaderExtensionTag = 2
+)
+
+// HeaderExtension is a typed view of one entry in block_header_extensions.
+// Only the variant indicated by Tag carries a meaningful payload.
+type HeaderExtension struct {
+	Tag                  HeaderExtensionTag
+	Version              uint32 // packed v_num for HeaderExtVersion
+	HardforkVersion      uint32 // packed v_num for HeaderExtHardforkVersionVote
+	HardforkVersionTime  uint32 // time_point_sec for HeaderExtHardforkVersionVote
+}
+
+// ParseHeaderExtensions decodes the opaque Extensions byte range into
+// typed entries. Returns nil for the empty case (the common 0x00 marker).
+// Mirrors hive::protocol::block_header_extensions static_variant decode.
+func ParseHeaderExtensions(raw []byte) ([]HeaderExtension, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	r := fcraw.NewReader(raw)
+	count, err := r.ReadVarUint()
+	if err != nil {
+		return nil, fmt.Errorf("ParseHeaderExtensions count: %w", err)
+	}
+	if count == 0 {
+		return nil, nil
+	}
+	out := make([]HeaderExtension, 0, count)
+	for i := uint32(0); i < count; i++ {
+		tag, err := r.ReadVarUint()
+		if err != nil {
+			return nil, fmt.Errorf("ParseHeaderExtensions extension %d tag: %w", i, err)
+		}
+		if int(tag) >= len(blockHeaderExtensionBodySize) {
+			return nil, fmt.Errorf("ParseHeaderExtensions extension %d unknown tag %d", i, tag)
+		}
+		var ext HeaderExtension
+		ext.Tag = HeaderExtensionTag(tag)
+		switch ext.Tag {
+		case HeaderExtVoid:
+			// no body
+		case HeaderExtVersion:
+			v, err := r.ReadUint32()
+			if err != nil {
+				return nil, fmt.Errorf("ParseHeaderExtensions version body: %w", err)
+			}
+			ext.Version = v
+		case HeaderExtHardforkVersionVote:
+			v, err := r.ReadUint32()
+			if err != nil {
+				return nil, fmt.Errorf("ParseHeaderExtensions hardfork v_num: %w", err)
+			}
+			t, err := r.ReadUint32()
+			if err != nil {
+				return nil, fmt.Errorf("ParseHeaderExtensions hardfork time: %w", err)
+			}
+			ext.HardforkVersion = v
+			ext.HardforkVersionTime = t
+		}
+		out = append(out, ext)
+	}
+	return out, nil
+}
 
 // SignatureSize is the on-wire size of a witness signature
 // (fc::ecc::compact_signature = fc::array<unsigned char, 65>).

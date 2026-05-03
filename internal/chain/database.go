@@ -12,6 +12,7 @@ import (
 	"hived-go/internal/fcraw"
 	"hived-go/internal/protocol/block"
 	"hived-go/internal/protocol/hardfork"
+	"hived-go/internal/protocol/network"
 	"hived-go/internal/protocol/tx"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
@@ -156,8 +157,34 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	// only advances dgpo.time after tx application. Read it now and pass
 	// to evaluators so they match C++.
 	headBlockTime := hdr.Timestamp
+	prevHeadBlockNum := uint32(0)
 	if dgpo, err := objects.GetDGPO(session); err == nil {
 		headBlockTime = dgpo.Time
+		prevHeadBlockNum = dgpo.HeadBlockNumber
+	}
+
+	// Witness-scheduling assert + block-level invariants (chain
+	// continuity, block size, merkle root, running_version). All
+	// skipped on the replay path where the canonical block_log is
+	// already validated; live sync sets opts.SkipBlockSignature=false
+	// to engage them. Mirrors database.cpp:2335-2403.
+	if !opts.SkipBlockSignature {
+		if err := validateBlock(session, &hdr, rawBlock, hdrLen, blockNum, hf); err != nil {
+			return objects.DynamicGlobalProperty{}, err
+		}
+		if blockNum > 1 {
+			slot := slotNumForBlockTime(headBlockTime, hdr.Timestamp)
+			if slot > 0 {
+				if ws, wErr := objects.GetWitnessSchedule(session); wErr == nil {
+					expected := ws.ScheduledWitnessForSlot(prevHeadBlockNum, slot)
+					if expected != "" && expected != hdr.Witness {
+						return objects.DynamicGlobalProperty{}, fmt.Errorf(
+							"apply_block %d: witness mismatch: header=%q expected=%q (slot=%d)",
+							blockNum, hdr.Witness, expected, slot)
+					}
+				}
+			}
+		}
 	}
 	ctx := &evaluator.Context{
 		DB:            session,
@@ -188,6 +215,58 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 		txFailed := false
 		var failOp string
 		var failErr error
+
+		// Compute the tx_id (first 20 bytes of sha256 over the unsigned
+		// transaction body). Used by both TaPOS and dedup checks below.
+		unsignedBytes := rawBlock[hdrLen+txRes.UnsignedStart : hdrLen+txRes.UnsignedEnd]
+		txID := tx.IDFromDigest(tx.DigestFromBytes(unsignedBytes))
+
+		// Pre-flight checks: expiration window + dedup + TaPOS slot
+		// existence. Pass `headBlockTime` (= dgpo.Time at start of
+		// apply_block, i.e. PREVIOUS block's timestamp) — this is what
+		// hived's push_transaction sees, NOT the current block's
+		// timestamp. Using hdr.Timestamp here would make the expiration
+		// window 3 seconds tighter than C++ and reject the trailing
+		// edge of legitimate txs.
+		// Signature verification (live-sync only — replay sets
+		// SkipTransactionSignatures since the canonical block_log was
+		// already validated upstream). Pre-HF24 the sig digest is
+		// over OldChainID || unsigned_tx; HF24+ uses ChainID.
+		if !opts.SkipTransactionSignatures {
+			chainID := network.OldChainID
+			if hf.Has(hardfork.HF24) {
+				chainID = network.ChainID
+			}
+			unsignedBytes := rawBlock[hdrLen+txRes.UnsignedStart : hdrLen+txRes.UnsignedEnd]
+			if err := VerifyAuthority(session, &txRes.SignedTx, unsignedBytes, chainID, false); err != nil {
+				txFailed = true
+				failOp = "tx-sigverify"
+				failErr = err
+				session.Restore(txSnap)
+				if stats != nil {
+					stats.recordSkip(failOp, failErr)
+				}
+				skippedThisBlock++
+				if opts.TolerateFailingOps {
+					continue
+				}
+				return objects.DynamicGlobalProperty{}, fmt.Errorf("apply_block %d tx %d: %w", blockNum, i, failErr)
+			}
+		}
+		if err := validateTxPreFlight(session, &txRes.SignedTx, blockNum, headBlockTime, txID, !opts.SkipBlockSignature); err != nil {
+			txFailed = true
+			failOp = "tx-preflight"
+			failErr = err
+			session.Restore(txSnap)
+			if stats != nil {
+				stats.recordSkip(failOp, failErr)
+			}
+			skippedThisBlock++
+			if opts.TolerateFailingOps {
+				continue
+			}
+			return objects.DynamicGlobalProperty{}, fmt.Errorf("apply_block %d tx %d: %w", blockNum, i, failErr)
+		}
 		for j, o := range txRes.SignedTx.Operations {
 			if err := evaluator.Apply(ctx, o); err != nil {
 				txFailed = true
@@ -236,6 +315,12 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 			}
 			return objects.DynamicGlobalProperty{}, fmt.Errorf("apply_block %d tx %d: %w", blockNum, i, failErr)
 		}
+		// Tx applied cleanly: record it in the dedup window so a future
+		// rebroadcast of the same trx_id is rejected.
+		objects.PutTransactionRecord(session, &objects.TransactionRecord{
+			TrxID:      txID,
+			Expiration: txRes.SignedTx.Expiration,
+		})
 	}
 	if stats != nil {
 		stats.OpsSkipped += skippedThisBlock
@@ -244,6 +329,15 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 		} else {
 			stats.BlocksDirty++
 		}
+	}
+
+	// Block-level updates that mirror C++ apply_block: process header
+	// extensions BEFORE per-block hooks run so the witness's running
+	// version + hardfork vote are current when update_witness_schedule
+	// rolls medians and process_hardforks tallies. Mirrors
+	// database.cpp:2402.
+	if err := processHeaderExtensions(session, &hdr); err != nil {
+		return objects.DynamicGlobalProperty{}, fmt.Errorf("apply_block %d header_extensions: %w", blockNum, err)
 	}
 
 	// Roll forward the DGPO BEFORE per-block hooks — hived calls
@@ -287,6 +381,11 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	//   remove_expired_governance_votes
 	//   process_recurrent_transfers
 	//   process_hardforks             → applies HF state effects last
+	// Producer's last_confirmed_block_num is bumped immediately on
+	// successful block apply (mirrors C++ update_signing_witness which
+	// updates the producer's record before the LIB recompute below).
+	updateProducerLastConfirmed(session, hdr.Witness, blockNum)
+
 	clearExpiredOrders(session, hdr.Timestamp)
 	clearExpiredDelegations(session, hdr.Timestamp)
 	updateWitnessSchedule(session, blockNum)
@@ -348,6 +447,18 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	processRecurrentTransfers(session, hdr.Timestamp, blockNum)
 	processHardforks(session, blockNum)
 
+	objects.PutBlockSummary(session, blockNum, dgpo.HeadBlockID)
+	objects.PruneExpiredTransactions(session, hdr.Timestamp)
+
+	// RC subsystem finalize_block hook (HF20+). Runs the per-block
+	// pool decay + expired-delegation refund. Pre-HF20 only the
+	// expiration sweep fires (safe — table is empty).
+	rcFinalizeBlock(session, blockNum, hdr.Timestamp)
+
+	// LIB recompute runs after the new schedule + producer-confirm are
+	// in place. Mirrors database.cpp:2870 update_last_irreversible_block.
+	updateLastIrreversibleBlock(session)
+
 	// Re-read dgpo so the returned value reflects per-block hook
 	// updates (supply, vesting fund, etc.).
 	if updated, err := objects.GetDGPO(session); err == nil {
@@ -388,6 +499,25 @@ func (d *Database) ScheduledWitness(slotNum uint32) (string, error) {
 		return "", err
 	}
 	return string(ws.ScheduledWitnessForSlot(dgpo.HeadBlockNumber, slotNum)), nil
+}
+
+// HIVE_BLOCK_INTERVAL: seconds between blocks (libraries/protocol/include/
+// hive/protocol/config.hpp).
+const blockIntervalSec uint32 = 3
+
+// slotNumForBlockTime computes the slot number of a block whose timestamp
+// is `blockTime`, given that the chain head is at `headTime`. slot 1 = the
+// next contiguous block; slot 2 = one missed; etc. Returns 0 if the block
+// is at or before head_time (which would be a clock-rewind error upstream).
+func slotNumForBlockTime(headTime, blockTime uint32) uint32 {
+	if blockTime <= headTime {
+		return 0
+	}
+	delta := blockTime - headTime
+	if delta < blockIntervalSec {
+		return 0
+	}
+	return delta / blockIntervalSec
 }
 
 // isNotImplemented reports whether err wraps evaluator.ErrNotImplemented.

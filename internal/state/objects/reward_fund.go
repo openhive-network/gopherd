@@ -49,6 +49,13 @@ type RewardFund struct {
 	PercentContentRewards  uint16 // basis points
 	AuthorRewardCurve   CurveID
 	CurationRewardCurve CurveID
+	// DownvoteRewardBalance (HF21+) — HIVE-satoshi pool that the
+	// dgpo.DownvotePoolPercent share of inflation is routed to. Drained
+	// at cashout in proportion to the comment's downvote weight.
+	// Mirrors hived's reward_fund_object_ex::downvote_reward_balance
+	// (post-HF21 it lives in a separate companion object; we fold it
+	// in here for storage simplicity).
+	DownvoteRewardBalance int64
 }
 
 func rewardFundKey(name string) []byte {
@@ -67,6 +74,7 @@ func AppendRewardFund(dst []byte, f *RewardFund) []byte {
 	dst = append(dst, byte(f.PercentContentRewards), byte(f.PercentContentRewards>>8))
 	dst = append(dst, byte(f.AuthorRewardCurve))
 	dst = append(dst, byte(f.CurationRewardCurve))
+	dst = appendI64LE(dst, f.DownvoteRewardBalance)
 	return dst
 }
 
@@ -106,6 +114,13 @@ func ReadRewardFund(src []byte) (RewardFund, error) {
 		return f, err
 	}
 	f.CurationRewardCurve = CurveID(curveCur[0])
+	// DownvoteRewardBalance is a later schema addition; tolerate EOF.
+	if r.AtEnd() {
+		return f, nil
+	}
+	if f.DownvoteRewardBalance, err = r.ReadInt64(); err != nil {
+		return f, fmt.Errorf("reward_fund.downvote_reward_balance: %w", err)
+	}
 	if !r.AtEnd() {
 		return f, errors.New("reward_fund: trailing bytes")
 	}

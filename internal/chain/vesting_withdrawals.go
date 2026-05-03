@@ -239,6 +239,17 @@ func processWithdrawRoutes(s *state.Session, fromAccount string, toWithdraw int6
 			}
 			if autoVest {
 				to.VestingShares += toDeposit
+				objects.PutAccount(s, &to)
+				// C++ database_vesting.cpp:215 — auto_vest deposit
+				// propagates the new vest into witness vote totals
+				// (HF24+ uses delayed_voting instead, which we'll
+				// wire up separately when needed).
+				dgpoNow, _ := objects.GetDGPO(s)
+				if !hardfork.SetForBlock(dgpoNow.HeadBlockNumber).Has(hardfork.HF24) {
+					if fresh, ferr := objects.GetAccount(s, route.To); ferr == nil {
+						objects.AdjustProxiedWitnessVotes(s, &fresh, toDeposit)
+					}
+				}
 			} else {
 				dgpo, derr := objects.GetDGPO(s)
 				if derr == nil {
@@ -248,8 +259,8 @@ func processWithdrawRoutes(s *state.Session, fromAccount string, toWithdraw int6
 					dgpo.TotalVestingShares -= toDeposit
 					objects.PutDGPO(s, &dgpo)
 				}
+				objects.PutAccount(s, &to)
 			}
-			objects.PutAccount(s, &to)
 			deposited += toDeposit
 			return true, nil
 		})

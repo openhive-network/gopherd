@@ -151,3 +151,19 @@ func DeleteChangeRecoveryRequestFull(s *state.Session, r *ChangeRecoveryAccountR
 	s.Delete(ChangeRecoveryAccountRequestTable, ChangeRecoveryByEffectiveDateIndex,
 		changeRecoveryByEffectiveDateKey(r.EffectiveOn, r.AccountToRecover))
 }
+
+// GetChangeRecoveryRequest fetches a pending change_recovery_account
+// request by account name. Returns ErrNotFound if no pending request
+// exists.
+func GetChangeRecoveryRequest(s *state.Session, account auth.AccountName) (ChangeRecoveryAccountRequest, error) {
+	v, err := s.Get(ChangeRecoveryAccountRequestTable, state.PrimaryIndex, recoveryRequestKey(account))
+	if err != nil {
+		return ChangeRecoveryAccountRequest{}, err
+	}
+	return ReadChangeRecoveryRequest(v)
+}
+
+// HasChangeRecoveryRequest reports whether a pending request exists.
+func HasChangeRecoveryRequest(s *state.Session, account auth.AccountName) (bool, error) {
+	return s.Has(ChangeRecoveryAccountRequestTable, state.PrimaryIndex, recoveryRequestKey(account))
+}

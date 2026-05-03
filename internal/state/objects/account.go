@@ -97,6 +97,13 @@ type Account struct {
 	// stores both regimes.
 	VotingManaCurrent    int64
 	VotingManaLastUpdate uint32
+	// downvote_manabar (HF20+) — separate 5-day-regen pool for downvotes.
+	// Mirrors account_object::downvote_manabar. Pre-HF21 the cap is
+	// max_voting_mana / 4; HF21+ scales with dgpo.downvote_pool_percent.
+	// When a downvote runs the pool dry, the remainder pulls from
+	// voting_manabar. Pre-HF20 the field is unused (zero).
+	DownvoteManaCurrent    int64
+	DownvoteManaLastUpdate uint32
 	// CanVote — set false by decline_voting_rights effective-date hook.
 	// Default true (the FC-decoded zero value would be false; we shift
 	// the sense to "VoteRevoked" to keep the zero value harmless).
@@ -155,6 +162,23 @@ type Account struct {
 	// (database.cpp:1077-1138). Pre-HF24 the direct portion (delta[0]) is
 	// vesting_shares; HF24+ it's vesting_shares - sum_delayed_votes.
 	ProxiedVSFVotes [5]int64
+	// API-tracking fields (no consensus impact). Mirror hived's
+	// account_object equivalents so chain-history APIs can be served
+	// without reconstructing them from operation history.
+	//
+	//   LastVoteTime              — timestamp of most recent vote_operation
+	//   PostCount                 — number of comments authored
+	//   PostBandwidth             — recent post bandwidth (used pre-HF20 for
+	//                               post-rate limiting; cosmetic post-HF20)
+	//   Mined                     — true if account was created via pow op
+	//   LastAccountUpdate         — timestamp of most recent account_update*
+	//   BlockLastAccountRecovery  — block number of last successful recovery
+	LastVoteTime             uint32
+	PostCount                uint32
+	PostBandwidth            uint32
+	Mined                    bool
+	LastAccountUpdate        uint32
+	BlockLastAccountRecovery uint32
 }
 
 // CanVote returns whether the account is allowed to cast votes
@@ -223,6 +247,18 @@ func AppendAccount(dst []byte, a *Account) []byte {
 	for _, v := range a.ProxiedVSFVotes {
 		dst = appendI64LE(dst, v)
 	}
+	dst = appendI64LE(dst, a.DownvoteManaCurrent)
+	dst = appendU32LE(dst, a.DownvoteManaLastUpdate)
+	dst = appendU32LE(dst, a.LastVoteTime)
+	dst = appendU32LE(dst, a.PostCount)
+	dst = appendU32LE(dst, a.PostBandwidth)
+	if a.Mined {
+		dst = append(dst, 1)
+	} else {
+		dst = append(dst, 0)
+	}
+	dst = appendU32LE(dst, a.LastAccountUpdate)
+	dst = appendU32LE(dst, a.BlockLastAccountRecovery)
 	return dst
 }
 
@@ -409,6 +445,37 @@ func ReadAccount(src []byte) (Account, error) {
 		if a.ProxiedVSFVotes[i], err = r.ReadInt64(); err != nil {
 			return a, fmt.Errorf("account.proxied_vsf_votes[%d]: %w", i, err)
 		}
+	}
+	// downvote_manabar + API-tracking fields are a later schema addition;
+	// tolerate EOF.
+	if r.AtEnd() {
+		return a, nil
+	}
+	if a.DownvoteManaCurrent, err = r.ReadInt64(); err != nil {
+		return a, fmt.Errorf("account.downvote_mana_current: %w", err)
+	}
+	if a.DownvoteManaLastUpdate, err = r.ReadUint32(); err != nil {
+		return a, fmt.Errorf("account.downvote_mana_last_update: %w", err)
+	}
+	if a.LastVoteTime, err = r.ReadUint32(); err != nil {
+		return a, fmt.Errorf("account.last_vote_time: %w", err)
+	}
+	if a.PostCount, err = r.ReadUint32(); err != nil {
+		return a, fmt.Errorf("account.post_count: %w", err)
+	}
+	if a.PostBandwidth, err = r.ReadUint32(); err != nil {
+		return a, fmt.Errorf("account.post_bandwidth: %w", err)
+	}
+	mb, err := r.ReadByte()
+	if err != nil {
+		return a, fmt.Errorf("account.mined: %w", err)
+	}
+	a.Mined = mb != 0
+	if a.LastAccountUpdate, err = r.ReadUint32(); err != nil {
+		return a, fmt.Errorf("account.last_account_update: %w", err)
+	}
+	if a.BlockLastAccountRecovery, err = r.ReadUint32(); err != nil {
+		return a, fmt.Errorf("account.block_last_account_recovery: %w", err)
 	}
 	if !r.AtEnd() {
 		return a, errors.New("account: trailing bytes after decode (schema mismatch?)")

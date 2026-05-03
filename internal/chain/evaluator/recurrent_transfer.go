@@ -3,6 +3,7 @@ package evaluator
 import (
 	"fmt"
 
+	"hived-go/internal/fcraw"
 	"hived-go/internal/protocol/asset"
 	"hived-go/internal/protocol/op"
 	"hived-go/internal/state"
@@ -11,13 +12,53 @@ import (
 
 type recurrentTransferEvaluator struct{}
 
+// extractRecurrentTransferPairID parses the pair_id extension from a
+// recurrent_transfer op. The extension wire format is a flat_set of
+// static_variant<void_t, recurrent_transfer_pair_id>:
+//   varint count
+//   for each: varint tag (0 = void, 1 = pair_id), uint8 body if tag=1
+// Returns the pair_id (0 if no pair_id extension is present).
+func extractRecurrentTransferPairID(raw []byte) uint8 {
+	if len(raw) == 0 {
+		return 0
+	}
+	r := fcraw.NewReader(raw)
+	count, err := r.ReadVarUint()
+	if err != nil {
+		return 0
+	}
+	for i := uint32(0); i < count; i++ {
+		tag, err := r.ReadVarUint()
+		if err != nil {
+			return 0
+		}
+		switch tag {
+		case 0:
+			// void_t — no body
+		case 1:
+			// recurrent_transfer_pair_id — uint8
+			b, err := r.ReadByte()
+			if err != nil {
+				return 0
+			}
+			return b
+		default:
+			return 0
+		}
+	}
+	return 0
+}
+
 // recurrent_transfer creates / updates / deletes a recurrence schedule.
 // Hived's per-block hook fires the actual periodic transfers; we record
-// the schedule and let the hook (when wired up) execute it.
+// the schedule and let the hook execute it.
 //
 // Op semantics:
-//   - amount = 0 AND executions = 0 → delete schedule
-//   - otherwise update or create schedule
+//   - amount = 0 AND executions = 0 → delete schedule (CRUD delete)
+//   - otherwise update or create schedule keyed by (from, to, pair_id)
+//
+// pair_id (HF26+) lets one (from, to) pair carry multiple parallel
+// schedules, parsed from the extensions field.
 func (recurrentTransferEvaluator) Apply(ctx *Context, o op.Operation) error {
 	rt, ok := o.(op.RecurrentTransfer)
 	if !ok {
@@ -29,8 +70,7 @@ func (recurrentTransferEvaluator) Apply(ctx *Context, o op.Operation) error {
 	if rt.Amount.Amount < 0 {
 		return ErrTransferAmountNotPos
 	}
-	// pair_id is in the extensions; for now use 0.
-	pairID := uint8(0)
+	pairID := extractRecurrentTransferPairID(rt.Extensions)
 
 	if rt.Amount.Amount == 0 && rt.Executions == 0 {
 		// Delete the schedule.

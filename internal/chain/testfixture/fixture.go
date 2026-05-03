@@ -197,9 +197,11 @@ func (f *Fixture) GenerateBlock() uint32 {
 	blockNum := f.BlockNum + 1
 	stats := chain.Stats{}
 	dgpo, err := f.Chain.ApplyBlock(rawBlock, blockNum, chain.ApplyOptions{
-		Sync:               false,
-		SkipUnknownOps:     false,
-		TolerateFailingOps: false,
+		Sync:                      false,
+		SkipUnknownOps:            false,
+		TolerateFailingOps:        false,
+		SkipTransactionSignatures: true,
+		SkipBlockSignature:        true,
 	}, &stats)
 	if err != nil {
 		f.t.Fatalf("testfixture: ApplyBlock %d: %v", blockNum, err)
@@ -416,9 +418,11 @@ func (f *Fixture) tryGenerateBlock() error {
 	blockNum := f.BlockNum + 1
 	stats := chain.Stats{}
 	dgpo, err := f.Chain.ApplyBlock(rawBlock, blockNum, chain.ApplyOptions{
-		Sync:               false,
-		SkipUnknownOps:     false,
-		TolerateFailingOps: false,
+		Sync:                      false,
+		SkipUnknownOps:            false,
+		TolerateFailingOps:        false,
+		SkipTransactionSignatures: true,
+		SkipBlockSignature:        true,
 	}, &stats)
 	if err != nil {
 		// Increment the block counter even on failure so the next call

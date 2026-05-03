@@ -112,6 +112,13 @@ func GetFeedHistory(s *state.Session) (FeedHistory, error) {
 	if err != nil {
 		return FeedHistory{}, err
 	}
-	s.DatabaseAuxStore(feedHistoryAuxKey, h)
+	// Only cache if the read came from the backend (no overlay write).
+	// Caching an overlay-derived value is unsafe: if the session is
+	// later Undone (mid-block tx failure, test fixture rollback), the
+	// cross-Session cache would retain the abandoned value and serve
+	// it to subsequent sessions until the next backend write.
+	if !s.HasOverlayWrite(FeedHistoryTable, state.PrimaryIndex) {
+		s.DatabaseAuxStore(feedHistoryAuxKey, h)
+	}
 	return h, nil
 }

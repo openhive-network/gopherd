@@ -254,8 +254,19 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 	// avg into the past — the cashout fires immediately at the same block
 	// and double-pays the author. C++ resets to maximum/0 here so the
 	// post-payout vote behaves like the first vote on a fresh comment.
+	//
+	// Pre-HF19 also retains the NEGATIVE portion of net_rshares: hived
+	// runs c.on_payout() (zero) and then c.accumulate_vote_rshares(
+	// negative_rshares, 0) so downvote-driven negative net_rshares
+	// "hangs around" for future post-payout upvotes (database_comment.cpp:
+	// 384-405). HF19+ removes the cashout row entirely and skips this.
+	hfCashout := hardfork.SetForBlock(blockNum)
+	preservedNegative := int64(0)
+	if !hfCashout.Has(hardfork.HF19) && c.NetRshares < 0 {
+		preservedNegative = c.NetRshares
+	}
 	zero := func() {
-		c.NetRshares = 0
+		c.NetRshares = preservedNegative
 		c.VoteRshares = 0
 		c.TotalVoteWeight = 0
 		c.AbsRshares = 0
@@ -418,7 +429,13 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 
 	// Beneficiaries (HF17+): take their share OFF THE TOP of authorPool.
 	// Each beneficiary's slice is paid as if the beneficiary were the
-	// author — half via create_hbd, half via create_vesting.
+	// author — half via create_hbd, half via create_vesting. HF21+ has a
+	// special branch when the beneficiary is the treasury: the entire
+	// share is converted HIVE→HBD via current_median_history and credited
+	// to the treasury account (no vesting leg). Mirrors
+	// libraries/chain/database_comment.cpp:278-286.
+	hfBene := hardfork.SetForBlock(blockNum)
+	treasuryName := currentTreasuryName(s, hfBene)
 	totalBeneficiary := int64(0)
 	for _, b := range c.Beneficiaries {
 		share := authorPool * int64(b.Weight) / 10000
@@ -427,6 +444,25 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 		}
 		bAcct, berr := objects.GetAccount(s, b.Account)
 		if berr != nil {
+			continue
+		}
+		if hfBene.Has(hardfork.HF21) && b.Account == treasuryName {
+			// Treasury branch: convert HIVE→HBD at current median.
+			fh, ferr := objects.GetFeedHistory(s)
+			if ferr != nil || priceIsZero(fh.CurrentMedianHistory) {
+				totalBeneficiary += share
+				continue
+			}
+			hbdPayout := convertHiveToHBD(share, fh.CurrentMedianHistory)
+			objects.AdjustHBDBalance(s, &bAcct, blockTime, hbdPayout)
+			objects.PutAccount(s, &bAcct)
+			if dgpo, derr := objects.GetDGPO(s); derr == nil {
+				dgpo.CurrentSupply -= share
+				dgpo.CurrentHBDSupply += hbdPayout
+				dgpo.VirtualSupply -= share
+				objects.PutDGPO(s, &dgpo)
+			}
+			totalBeneficiary += share
 			continue
 		}
 		hbdSlice := share * int64(c.PercentHbd) / 20000

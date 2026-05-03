@@ -17,6 +17,16 @@ const proposalMaintenancePeriodSec uint32 = 60 * 60
 // pay out at most 1%/day to proposals collectively.
 const proposalTotalAmountDivider int64 = 100
 
+// currentTreasuryName returns the canonical treasury account name at the
+// given hardfork set. HF24+ = "hive.fund"; pre-HF24 = "steem.dao".
+// Mirrors hived's database::get_treasury_name (database.cpp).
+func currentTreasuryName(s *state.Session, hf hardfork.Set) string {
+	if hf.Has(hardfork.HF24) {
+		return "hive.fund"
+	}
+	return "steem.dao"
+}
+
 // dailySeconds = 86400. Used to scale daily_pay → period_pay
 // (period_pay = daily_pay × elapsed / day).
 const dailySecondsConst int64 = 24 * 60 * 60

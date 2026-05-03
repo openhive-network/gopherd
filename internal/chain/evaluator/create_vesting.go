@@ -52,13 +52,29 @@ func vestTraceAccount(name string) bool {
 // new VESTS by ~1000x relative to hived, starving every later payout
 // that reads the resulting state.
 //
-// Side effects:
+// Side effects (matches C++ create_vesting2):
 //   - account.VestingShares += new_vesting (or RewardVests if toReward)
 //   - dgpo.TotalVestingShares += new_vesting
 //   - dgpo.TotalVestingFundHive += hiveSatoshi
+//   - witness votes get +new_vesting via AdjustProxiedWitnessVotes
+//     (only when toReward is false — reward vests count when claimed,
+//     not when accumulated)
 //
 // Returns the VESTS-satoshi amount credited.
 func CreateVesting(s *state.Session, accountName string, hiveSatoshi int64, toReward bool) (int64, error) {
+	return createVestingImpl(s, accountName, hiveSatoshi, toReward, true)
+}
+
+// AdjustAccountVestingBalance mirrors hived's adjust_account_vesting_balance
+// helper — does the balance/dgpo update WITHOUT the witness vote
+// adjustment. Used by the HF24+ transfer_to_vesting path where the
+// vest is queued in delayed_votes instead of crediting witness totals
+// immediately.
+func AdjustAccountVestingBalance(s *state.Session, accountName string, hiveSatoshi int64, toReward bool) (int64, error) {
+	return createVestingImpl(s, accountName, hiveSatoshi, toReward, false)
+}
+
+func createVestingImpl(s *state.Session, accountName string, hiveSatoshi int64, toReward, adjustVotes bool) (int64, error) {
 	dgpo, err := objects.GetDGPO(s)
 	if err != nil && err != state.ErrNotFound {
 		return 0, err
@@ -66,13 +82,8 @@ func CreateVesting(s *state.Session, accountName string, hiveSatoshi int64, toRe
 
 	var vestsAmount int64
 	if dgpo.TotalVestingFundHive == 0 || dgpo.TotalVestingShares == 0 {
-		// Genesis price = 1_000_000 VESTS-sat per 1_000 HIVE-sat = 1000:1.
 		vestsAmount = hiveSatoshi * 1000
 	} else {
-		// Dynamic price: vests = hive * shares / fund. shares × hive can
-		// exceed int64 (post-HF1 vesting share split puts shares around
-		// 10^17 satoshi at chain-head); use math/big to mirror hived's
-		// fc::uint128 multiply step in price::operator*.
 		prod := new(big.Int).Mul(big.NewInt(hiveSatoshi), big.NewInt(dgpo.TotalVestingShares))
 		prod.Quo(prod, big.NewInt(dgpo.TotalVestingFundHive))
 		if !prod.IsInt64() {
@@ -100,6 +111,16 @@ func CreateVesting(s *state.Session, accountName string, hiveSatoshi int64, toRe
 	if vestTraceAccount(accountName) || (traceAll && dgpo.HeadBlockNumber >= 2888500 && dgpo.HeadBlockNumber <= 2910000) {
 		fmt.Fprintf(os.Stderr, "GHIVEDIFF VEST-CREATE block=%d acct=%s liquid=%d new_vests=%d after_vests=%d fund_pre=%d shares_pre=%d toReward=%v\n",
 			dgpo.HeadBlockNumber, accountName, hiveSatoshi, vestsAmount, a.VestingShares, dgpo.TotalVestingFundHive-hiveSatoshi, dgpo.TotalVestingShares-vestsAmount, toReward)
+	}
+
+	// C++ create_vesting2 calls adjust_proxied_witness_votes when
+	// !to_reward_balance. Re-fetch the account to pick up any prior
+	// proxy/vote state changes from the same operation, then propagate.
+	if adjustVotes && !toReward && vestsAmount != 0 {
+		fresh, gerr := objects.GetAccount(s, accountName)
+		if gerr == nil {
+			objects.AdjustProxiedWitnessVotes(s, &fresh, vestsAmount)
+		}
 	}
 	return vestsAmount, nil
 }
