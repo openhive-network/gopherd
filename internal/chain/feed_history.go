@@ -148,6 +148,26 @@ func updateMedianFeed(s *state.Session, blockNum, blockTime uint32) {
 			})
 		fmt.Fprintf(os.Stderr, "GHIVEDIFF SCHED-VSTS block=%d top30=[%s]\n",
 			blockNum, strings.Join(vstEntries, ","))
+		// Per-witness position + last_update + votes for cross-side diff.
+		var posEntries []string
+		_ = s.Range(objects.WitnessTable, objects.WitnessByScheduleTimeIndex, nil,
+			func(key, _ []byte) (bool, error) {
+				if len(posEntries) >= 30 || len(key) < 16+state.AccountNameKeyLen {
+					return len(posEntries) < 30, nil
+				}
+				ownerBytes := key[16 : 16+state.AccountNameKeyLen]
+				n := state.AccountNameKeyLen
+				for n > 0 && ownerBytes[n-1] == 0 {
+					n--
+				}
+				name := string(ownerBytes[:n])
+				w, _ := objects.GetWitness(s, auth.AccountName(name))
+				posEntries = append(posEntries, fmt.Sprintf("%s:pos=%x,lu=%x,votes=%d",
+					name, w.VirtualPosition, w.VirtualLastUpdate, w.TotalVotesVests))
+				return true, nil
+			})
+		fmt.Fprintf(os.Stderr, "GHIVEDIFF SCHED-POS block=%d top30=[%s]\n",
+			blockNum, strings.Join(posEntries, ","))
 	}
 
 	if len(feeds) < minFeeds {
