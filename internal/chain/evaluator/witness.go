@@ -420,13 +420,28 @@ func (accountWitnessVoteEvaluator) Apply(ctx *Context, o op.Operation) error {
 // stale afterwards, so on that path we re-read from storage so the
 // caller's PutWitness doesn't overwrite the table-walk's mutation.
 func applyWitnessVoteDelta(ctx *Context, voter *objects.Account, w *objects.Witness, delta int64) {
-	if !ctx.Hardforks.Has(hardfork.HF2) || ctx.Hardforks.Has(hardfork.HF3) {
+	// Mirror hive_evaluator.cpp:289-299:
+	//   pre-HF2  : w.votes += delta (NO virtual_position/VST update)
+	//   HF2 only : adjust_proxied_witness_votes(voter, delta) — walks
+	//              every witness_vote row for voter, calling
+	//              adjust_witness_vote on each (full VST update)
+	//   HF3+     : adjust_witness_vote(w, delta) — full VST update on
+	//              just this witness
+	if ctx.Hardforks.Has(hardfork.HF3) {
 		objects.AdjustWitnessVote(ctx.DB, w, delta, ctx.Hardforks)
 		return
 	}
-	objects.AdjustProxiedWitnessVotes(ctx.DB, voter, delta)
-	if fresh, ferr := objects.GetWitness(ctx.DB, w.Owner); ferr == nil {
-		*w = fresh
+	if ctx.Hardforks.Has(hardfork.HF2) {
+		objects.AdjustProxiedWitnessVotes(ctx.DB, voter, delta)
+		if fresh, ferr := objects.GetWitness(ctx.DB, w.Owner); ferr == nil {
+			*w = fresh
+		}
+		return
+	}
+	// pre-HF2: just bump votes; do NOT advance virtual_position or VST.
+	w.TotalVotesVests += delta
+	if w.TotalVotesVests < 0 {
+		w.TotalVotesVests = 0
 	}
 }
 
