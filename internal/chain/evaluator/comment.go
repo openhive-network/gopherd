@@ -602,7 +602,12 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 	// (hive_evaluator_social.cpp:502-516); after, the bounded W(R) curve.
 	const hf6ReverseAuctionTimeCubed uint32 = 1466776800
 	var voteCurationWeight, maxVoteWeight uint64
-	if rshares > 0 && c.AllowCurationRewards && err == state.ErrNotFound {
+	// hive_evaluator_social.cpp:515-517: curation_reward_eligible is also
+	// gated on !was_paid — votes cast on a comment that has already paid
+	// out (in its second-cashout window) accumulate zero curation weight,
+	// so the curator_pool stays unclaimed and folds back to the author.
+	curationEligible := rshares > 0 && c.AllowCurationRewards && err == state.ErrNotFound && !c.WasPaid
+	if curationEligible {
 		oldVoteRshares := c.VoteRshares
 		newVoteRshares := oldVoteRshares + uint64(rshares)
 		if c.Created < hf6ReverseAuctionTimeCubed {

@@ -14,6 +14,7 @@ coverage.txt
 .vscode/
 *.swp
 .DS_Store
+.claude/
 
 # Generated FC codecs (committed, but allow override)
 # (none yet)

@@ -92,6 +92,68 @@ func main() {
 		for _, p := range fh.PriceHistory[start:] {
 			fmt.Printf("  %d/%d\n", p.Base.Amount, p.Quote.Amount)
 		}
+	case "comment-votes":
+		// usage: getws <snap> comment-votes <author> <permlink>
+		author := auth.AccountName(os.Args[3])
+		permlink := os.Args[4]
+		c, err := objects.GetComment(s, author, permlink)
+		if err != nil {
+			fmt.Printf("comment NOT FOUND: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("comment author=%s permlink=%q id=%d net_rshares=%d total_vote_weight=%d\n",
+			author, permlink, c.ID, c.NetRshares, c.TotalVoteWeight)
+		var totalW uint64
+		var n int
+		prefix := objects.CommentVoteByCommentPrefix(author, permlink)
+		_ = s.Range(objects.CommentVoteTable, objects.CommentVoteByCommentIndex, prefix,
+			func(body, _ []byte) (bool, error) {
+				if len(body) < state.AccountNameKeyLen {
+					return true, nil
+				}
+				vb := body[len(body)-state.AccountNameKeyLen:]
+				j := state.AccountNameKeyLen
+				for j > 0 && vb[j-1] == 0 {
+					j--
+				}
+				voter := auth.AccountName(string(vb[:j]))
+				cv, gerr := objects.GetCommentVote(s, voter, author, permlink)
+				if gerr != nil {
+					return true, nil
+				}
+				fmt.Printf("  voter=%s rshares=%d weight=%d curation_weight=%d last_update=%d num_changes=%d\n",
+					voter, cv.Rshares, cv.Weight, cv.CurationWeight, cv.LastUpdate, cv.NumChanges)
+				totalW += cv.CurationWeight
+				n++
+				return true, nil
+			})
+		fmt.Printf("voter_count=%d sum_curation_weight=%d (vs comment.total_vote_weight=%d) diff=%d\n",
+			n, totalW, c.TotalVoteWeight, int64(c.TotalVoteWeight)-int64(totalW))
+	case "pending-cashouts":
+		// Iterate the cashout schedule, filter by author, dump full comment
+		// state for each pending entry.
+		target := os.Args[3]
+		_ = s.Range(objects.CommentCashoutScheduleTable, state.PrimaryIndex, nil,
+			func(key, body []byte) (bool, error) {
+				if len(key) < 12 {
+					return true, nil
+				}
+				cashoutTime := uint32(key[0])<<24 | uint32(key[1])<<16 | uint32(key[2])<<8 | uint32(key[3])
+				author, permlink := objects.DecodeCommentCashoutScheduleValue(body)
+				if string(author) != target {
+					return true, nil
+				}
+				c, err := objects.GetComment(s, author, permlink)
+				if err != nil {
+					fmt.Printf("schedule_time=%d author=%s permlink=%q ERR=%v\n", cashoutTime, author, permlink, err)
+					return true, nil
+				}
+				fmt.Printf("schedule_time=%d author=%s permlink=%q id=%d net_rshares=%d total_vote_weight=%d percent_hbd=%d max_payout=%d allow_curation=%v cashout_time=%d last_payout=%d was_paid=%v num_beneficiaries=%d\n",
+					cashoutTime, author, permlink, c.ID, c.NetRshares, c.TotalVoteWeight,
+					c.PercentHbd, c.MaxAcceptedPayout, c.AllowCurationRewards,
+					c.CashoutTime, c.LastPayout, c.WasPaid, len(c.Beneficiaries))
+				return true, nil
+			})
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand: %q\n", os.Args[2])
 		os.Exit(2)

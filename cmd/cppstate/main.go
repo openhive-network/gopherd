@@ -153,7 +153,7 @@ func cmdListWitnesses(endpoint string) int {
 		return 1
 	}
 	for _, w := range ws {
-		fmt.Printf("%s\t%d\t%d\t%s\n", w.Owner, w.PowWorker, w.Votes, w.VirtualScheduledTime)
+		fmt.Printf("%s\t%d\t%s\t%s\n", w.Owner, w.PowWorker, w.Votes, w.VirtualScheduledTime)
 	}
 	fmt.Fprintf(os.Stderr, "total: %d witnesses\n", len(ws))
 	return 0
