@@ -91,31 +91,39 @@ func (witnessUpdateEvaluator) Apply(ctx *Context, o op.Operation) error {
 		return err
 	}
 
-	w := objects.Witness{
-		Owner:              wu.Owner,
-		Created:            ctx.HeadBlockTime,
-		URL:                wu.URL,
-		BlockSigningKey:    wu.BlockSigningKey,
-		AccountCreationFee: wu.Props.AccountCreationFee.Amount,
-		MaximumBlockSize:   wu.Props.MaximumBlockSize,
-		HBDInterestRate:    wu.Props.HBDInterestRate,
-	}
+	// hived's witness_update_evaluator at hive_evaluator.cpp:139 modifies
+	// the existing witness in place, only setting url, signing_key, and
+	// chain_properties — every other field is left alone. Mirror that
+	// by loading prev and overlaying just those four fields. Earlier
+	// versions of this evaluator built a fresh Witness{} and copied a
+	// hand-picked subset of fields back from prev, which silently
+	// dropped HBDExchangeRate / LastHBDExchangeUpdate every time a
+	// witness called witness_update — that broke update_median_feed
+	// (rate=0/0 is filtered) and was the source of the post-HF7
+	// cashout-amount drift that surfaced as acidsun's HBD short at
+	// block 2,904,813.
+	var w objects.Witness
 	if exists {
-		// Preserve cumulative counters that aren't in the op.
 		prev, err := objects.GetWitness(ctx.DB, wu.Owner)
-		if err == nil {
-			w.Created = prev.Created
-			w.TotalVotesVests = prev.TotalVotesVests
-			w.TotalMissedBlocks = prev.TotalMissedBlocks
-			w.HardforkVersionVote = prev.HardforkVersionVote
-			w.HardforkTimeVote = prev.HardforkTimeVote
-			w.RunningVersion = prev.RunningVersion
-			w.VirtualLastUpdate = prev.VirtualLastUpdate
-			w.VirtualPosition = prev.VirtualPosition
-			w.VirtualScheduledTime = prev.VirtualScheduledTime
-			w.PowWorker = prev.PowWorker
+		if err != nil {
+			return err
 		}
+		w = prev
+		w.URL = wu.URL
+		w.BlockSigningKey = wu.BlockSigningKey
+		w.AccountCreationFee = wu.Props.AccountCreationFee.Amount
+		w.MaximumBlockSize = wu.Props.MaximumBlockSize
+		w.HBDInterestRate = wu.Props.HBDInterestRate
 	} else {
+		w = objects.Witness{
+			Owner:              wu.Owner,
+			Created:            ctx.HeadBlockTime,
+			URL:                wu.URL,
+			BlockSigningKey:    wu.BlockSigningKey,
+			AccountCreationFee: wu.Props.AccountCreationFee.Amount,
+			MaximumBlockSize:   wu.Props.MaximumBlockSize,
+			HBDInterestRate:    wu.Props.HBDInterestRate,
+		}
 		// New witness: seed VirtualScheduledTime to
 		// (current_virtual_time + LAP_LENGTH2 / (votes+1)) mod 2^128.
 		// Mirrors witness_schedule.cpp:35-38 — the modular wrap is
