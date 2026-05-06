@@ -295,11 +295,15 @@ func (commentOptionsEvaluator) Apply(ctx *Context, o op.Operation) error {
 		return err
 	}
 	// hived: post-HF24, comment_options on a paid-out comment is a hard
-	// error. Pre-HF24 it's a silent no-op. WasPaid + CashoutTime==0 is
-	// our "fully paid out / cashout row removed" sentinel — distinct
-	// from "frozen at creation, awaiting first vote" (CashoutTime==0
-	// pre-HF12 / for replies, but WasPaid=false).
+	// error (hive_evaluator_social.cpp:149). Pre-HF24 it's a silent
+	// no-op. WasPaid + CashoutTime==0 is our "fully paid out / cashout
+	// row removed" sentinel — distinct from "frozen at creation,
+	// awaiting first vote" (CashoutTime==0 pre-HF12 / for replies, but
+	// WasPaid=false).
 	if c.WasPaid && c.CashoutTime == 0 {
+		if ctx.Hardforks.Has(hardfork.HF24) {
+			return fmt.Errorf("comment_options: cannot update parameters for paid-out comment")
+		}
 		return nil
 	}
 
@@ -434,6 +438,14 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 	isNew := err == state.ErrNotFound
 	if isNew && v.Weight == 0 {
 		return ErrVoteWeightZero
+	}
+	// HF6+ rejects recasts with the same percent as the prior vote
+	// (hive_evaluator_social.cpp:592-593, "You have already voted in
+	// a similar way."). Requires cv-delete fix at cashout to be in
+	// place — otherwise stale cv rows trigger false same-percent
+	// rejections on later votes that C++ treats as fresh.
+	if !isNew && ctx.Hardforks.Has(hardfork.HF6) && prev.Weight == v.Weight {
+		return fmt.Errorf("vote: %q has already voted in a similar way", v.Voter)
 	}
 
 	// Compute rshares using hived's voting-manabar formula
@@ -678,12 +690,24 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 		}
 		c.VoteRshares = newVoteRshares
 	}
+	// hived's accumulate_vote_rshares (hive_evaluator_social.cpp:485)
+	// always adds (rshares > 0 ? rshares : 0) to vote_rshares for new
+	// votes — UNCONDITIONALLY, regardless of curation eligibility,
+	// allows_curation, or was_paid. Our curationEligible block above
+	// gates VoteRshares update on those flags; for new positive votes
+	// where curationEligible is FALSE (e.g., post-cashout votes pre-HF12,
+	// !AllowCurationRewards), we still need to bump VoteRshares so
+	// future curation_weight calcs match C++.
+	if !curationEligible && err == state.ErrNotFound && rshares > 0 {
+		c.VoteRshares += uint64(rshares)
+	}
 
 	// hived's adjust_rshares2: the global total_reward_shares2 must move
 	// by curve(new_net_rshares) - curve(old_net_rshares) on every cast/
 	// recast so the comment's slice of the reward fund reflects the
 	// updated total at cashout.
 	oldNetRshares := c.NetRshares
+	voteDebug := v.Author == "bitbo" && v.Permlink == "some-photos-from-magadan-russia"
 	if err == state.ErrNotFound {
 		objects.PutCommentVote(ctx.DB, &objects.CommentVote{
 			Voter:          v.Voter,
@@ -698,13 +722,21 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 		c.NetRshares += rshares
 		c.VoteCount++
 		c.TotalVoteWeight += maxVoteWeight
-	} else {
-		// Recast: subtract the previous vote's curation_weight from
-		// the running total — hived sets the new weight to zero for
-		// recasts (HF20+) so we don't recompute.
-		if prev.CurationWeight > 0 && c.TotalVoteWeight >= prev.CurationWeight {
-			c.TotalVoteWeight -= prev.CurationWeight
+		if voteDebug {
+			ghiveDiff("GHIVEDIFF VOTE block=%d t=%d voter=%s author=%s permlink=%s weight=%d rshares=%d abs_rshares=%d max_vote_weight=%d vote_weight=%d total_vote_weight_after=%d vote_rshares_after=%d eligible=%t\n",
+				ctx.BlockNum, ctx.HeadBlockTime, v.Voter, v.Author, v.Permlink,
+				v.Weight, rshares, absRshares, maxVoteWeight, voteCurationWeight,
+				c.TotalVoteWeight, c.VoteRshares, curationEligible)
 		}
+	} else {
+		// Recast: subtract the previous vote's curation_weight from the
+		// running total. C++ `c.accumulate_vote_weight(-itr->get_weight())`
+		// (hive_evaluator_social.cpp:600) which is `total += -prev` — a
+		// uint64 += int64 (negative). When total < prev, this WRAPS
+		// to ~2^64. Mirror the wraparound (no guard) — the defensive
+		// `>= prev` guard we had skipped the subtraction in that case,
+		// drifting state from C++ over millions of recasts.
+		c.TotalVoteWeight -= prev.CurationWeight
 		c.NetRshares += rshares - prev.Rshares
 		prev.Rshares = rshares
 		prev.Weight = v.Weight
@@ -712,6 +744,11 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 		prev.LastUpdate = ctx.HeadBlockTime
 		prev.CurationWeight = 0
 		objects.PutCommentVote(ctx.DB, &prev)
+		if voteDebug {
+			ghiveDiff("GHIVEDIFF VOTE-RECAST block=%d t=%d voter=%s author=%s permlink=%s weight=%d rshares=%d prev_rshares=%d prev_curation_weight=%d total_vote_weight_after=%d\n",
+				ctx.BlockNum, ctx.HeadBlockTime, v.Voter, v.Author, v.Permlink,
+				v.Weight, rshares, prev.Rshares, prev.CurationWeight, c.TotalVoteWeight)
+		}
 	}
 	// Track AbsRshares for the beneficiary "no votes yet" gate.
 	if absRshares > 0 {
@@ -846,16 +883,25 @@ func curationWeightCurve(ctx *Context, c *objects.Comment, voteRshares uint64) *
 			case objects.CurveSquareRoot:
 				return new(big.Int).Sqrt(r)
 			case objects.CurveConvergentLinear:
-				num := new(big.Int).Mul(r, r)
-				den := new(big.Int).Add(new(big.Int).Lsh(s, 1), r)
+				// C++ reward.cpp:63 — ((r+s)² - s²) / (r + 4s).
+				rPlusS := new(big.Int).Add(r, s)
+				num := new(big.Int).Mul(rPlusS, rPlusS)
+				s2 := new(big.Int).Mul(s, s)
+				num.Sub(num, s2)
+				fourS := new(big.Int).Lsh(s, 2)
+				den := new(big.Int).Add(r, fourS)
 				return new(big.Int).Quo(num, den)
 			case objects.CurveConvergentSquareRoot:
-				num := new(big.Int).Set(r)
-				den := new(big.Int).Add(s, new(big.Int).Sqrt(r))
-				return new(big.Int).Quo(num, den)
+				// C++ reward.cpp:69 — rshares / sqrt(rshares + 2s).
+				twoS := new(big.Int).Lsh(s, 1)
+				den := new(big.Int).Sqrt(new(big.Int).Add(r, twoS))
+				if den.Sign() == 0 {
+					return new(big.Int)
+				}
+				return new(big.Int).Quo(r, den)
 			default:
-				// bounded_curation: rshares / (2s + rshares) × 2^64
-				// (the C++ uses `to_uint128(low_bits, 0)` which is a left-shift by 64).
+				// bounded_curation: (low64(rshares) << 64) / (2s + rshares).
+				// Go holds rshares in int64 so low64==value for nonneg.
 				twoS := new(big.Int).Lsh(s, 1)
 				num := new(big.Int).Lsh(r, 64)
 				den := new(big.Int).Add(twoS, r)
@@ -928,14 +974,29 @@ func evaluateCurveForFund(rshares int64, f *objects.RewardFund) *big.Int {
 		return new(big.Int).Set(r)
 	case objects.CurveSquareRoot:
 		return new(big.Int).Sqrt(r)
+	case objects.CurveBoundedCurve:
+		// (low64(rshares) << 64) / (2s + rshares).
+		twoS := new(big.Int).Lsh(s, 1)
+		num := new(big.Int).Lsh(r, 64)
+		den := new(big.Int).Add(twoS, r)
+		return new(big.Int).Quo(num, den)
 	case objects.CurveConvergentLinear:
-		num := new(big.Int).Mul(r, r)
-		den := new(big.Int).Add(new(big.Int).Lsh(s, 1), r)
+		// C++ reward.cpp:63 — ((r+s)² - s²) / (r + 4s).
+		rPlusS := new(big.Int).Add(r, s)
+		num := new(big.Int).Mul(rPlusS, rPlusS)
+		s2 := new(big.Int).Mul(s, s)
+		num.Sub(num, s2)
+		fourS := new(big.Int).Lsh(s, 2)
+		den := new(big.Int).Add(r, fourS)
 		return new(big.Int).Quo(num, den)
 	case objects.CurveConvergentSquareRoot:
-		num := new(big.Int).Set(r)
-		den := new(big.Int).Add(s, new(big.Int).Sqrt(r))
-		return new(big.Int).Quo(num, den)
+		// C++ reward.cpp:69 — rshares / sqrt(rshares + 2s).
+		twoS := new(big.Int).Lsh(s, 1)
+		den := new(big.Int).Sqrt(new(big.Int).Add(r, twoS))
+		if den.Sign() == 0 {
+			return new(big.Int)
+		}
+		return new(big.Int).Quo(r, den)
 	default:
 		rPlusS := new(big.Int).Add(r, s)
 		out := new(big.Int).Mul(rPlusS, rPlusS)

@@ -14,19 +14,33 @@ import (
 	"hived-go/internal/state/objects"
 )
 
+// GHIVEDIFF env vars are read ONCE at process start so the per-block hot
+// path doesn't pay map-lookup cost. Replay sets these at exec time and
+// they don't change mid-process, so caching is safe.
+var (
+	envGhivediff         = os.Getenv("GHIVEDIFF")
+	envGhivediffAll      = os.Getenv("GHIVEDIFF_ALL")
+	envGhivediffAccounts = os.Getenv("GHIVEDIFF_ACCOUNTS")
+	envGhivediffFeed     = os.Getenv("GHIVEDIFF_FEED")
+	envGhivediffDumpFile = os.Getenv("GHIVEDIFF_DUMP_FILE")
+	envGhivediffVsts     = os.Getenv("GHIVEDIFF_VSTS")
+	envGhivediffPowbump  = os.Getenv("GHIVEDIFF_POWBUMP")
+	envGhivediffReset    = os.Getenv("GHIVEDIFF_RESET")
+)
+
 func ghiveDiff(format string, args ...any) {
-	if os.Getenv("GHIVEDIFF") == "" {
+	if envGhivediff == "" {
 		return
 	}
 	fmt.Fprintf(os.Stderr, format, args...)
 }
 
 // traceAccount returns true when the given account name should be traced.
-// GHIVEDIFF="" disables all trace; GHIVEDIFF="1" or any non-list value
+// envGhivediff="" disables all trace; envGhivediff="1" or any non-list value
 // traces a default set (hipster, proskynneo, abit, pfunk); a comma-separated
-// list (e.g. GHIVEDIFF="pfunk,abit,acidsun") restricts tracing to those.
+// list (e.g. envGhivediff="pfunk,abit,acidsun") restricts tracing to those.
 func traceAccount(name string) bool {
-	v := os.Getenv("GHIVEDIFF")
+	v := envGhivediff
 	if v == "" {
 		return false
 	}
@@ -281,9 +295,14 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 	}()
 
 	if !c.AllowCurationRewards || c.NetRshares <= 0 {
-		// Frozen / no-payout comment: still zero the on_payout fields
-		// so the comment row stays consistent with C++.
+		// Frozen / no-payout comment: zero the on_payout fields AND
+		// delete cv rows. C++ database_comment.cpp:417-424 deletes ALL
+		// comment_vote rows at the end of cashout_helper, OUTSIDE the
+		// `if (net_rshares > 0)` reward gate. Without this, NetRshares<=0
+		// cashouts leave stale cv rows behind, so subsequent votes look
+		// like recasts in our state but NEW votes in C++.
 		zero()
+		deleteCommentVotes(s, author, permlink)
 		return
 	}
 
@@ -340,7 +359,7 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 		payoutBig.SetInt64(int64(^uint64(0) >> 1))
 	}
 	claimed := payoutBig.Int64()
-	if traceAccount(author) || (os.Getenv("GHIVEDIFF_ALL") != "" && blockNum >= 2888500 && blockNum <= 2910000) {
+	if traceAccount(author) || (envGhivediffAll != "" && blockNum >= 2888500 && blockNum <= 2910000) {
 		hi := uint64(0)
 		lo := uint64(0)
 		if shares2.IsUint64() {
@@ -406,6 +425,17 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 		// dust-zeroed cashout doesn't leave stale ex-side accumulators
 		// that the next vote then mis-uses in weighted-avg.
 		zero()
+		// C++ also deletes ALL comment_vote rows at the end of every
+		// cashout (database_comment.cpp:417-424), regardless of whether
+		// any reward was paid. Without deleting here, a dust-zero cashout
+		// leaves the per-voter rows behind, so the NEXT cast by the same
+		// voter looks like a "recast" (only the delta vs the prior rshares
+		// is added to net_rshares) instead of a fresh +rshares — caused
+		// pharesim/steemdollar-casino's 2nd cashout to be 250B rshares
+		// short, dropping his hbd_payout from 487 to 460 sat HBD and
+		// cascading into the 25-sat HBD insufficient-balance failure at
+		// block 3,076,587 (limit_order_create vs bittrex transfer).
+		deleteCommentVotes(s, author, permlink)
 		return
 	}
 
@@ -501,7 +531,7 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 	// half VESTS at the dynamic price.
 	hbdHive := authorPool * int64(c.PercentHbd) / 20000
 	vestingHive := authorPool - hbdHive
-	if traceAccount(author) || (os.Getenv("GHIVEDIFF_ALL") != "" && blockNum >= 2888500 && blockNum <= 2910000) {
+	if traceAccount(author) || (envGhivediffAll != "" && blockNum >= 2888500 && blockNum <= 2910000) {
 		ghiveDiff("GHIVEDIFF CASHOUT-AUTHOR block=%d author=%s permlink=%s author_tokens=%d hbd_hive=%d vesting_hive=%d curator_remainder=%d\n",
 			blockNum, author, permlink, authorPool, hbdHive, vestingHive, curatorRemainder)
 	}
@@ -554,6 +584,18 @@ func deleteCommentVotes(s *state.Session, author, permlink string) {
 	}
 }
 
+// evaluateRewardCurveBoundedCuration mirrors C++ reward.cpp:50-52
+// `bounded_curation`: (low64(rshares) << 64) / (rshares + 2s).
+// Used when a reward_fund.curve == bounded_curation. In Go we hold
+// rshares in int64, so low64(rshares) == rshares for nonnegative
+// values, and the left-shift simply scales numerator by 2^64.
+func evaluateRewardCurveBoundedCuration(r, s *big.Int) *big.Int {
+	twoS := new(big.Int).Lsh(s, 1)
+	num := new(big.Int).Lsh(r, 64)
+	den := new(big.Int).Add(twoS, r)
+	return new(big.Int).Quo(num, den)
+}
+
 // evaluateRewardCurve dispatches between the curve types selectable
 // for a reward_fund_object. Mirrors libraries/chain/util/reward.cpp:
 //
@@ -577,18 +619,28 @@ func evaluateRewardCurve(rshares int64, curve objects.CurveID, contentConstant i
 	case objects.CurveSquareRoot:
 		out := new(big.Int).Sqrt(r)
 		return out
+	case objects.CurveBoundedCurve:
+		return evaluateRewardCurveBoundedCuration(r, s)
 	case objects.CurveConvergentLinear:
-		// rshares² / (2s + rshares)
-		num := new(big.Int).Mul(r, r)
-		den := new(big.Int).Add(new(big.Int).Lsh(s, 1), r)
+		// C++ reward.cpp:63 — ((r+s)² - s²) / (r + 4s).
+		// Algebraically equivalent to r(r+2s)/(r+4s).
+		rPlusS := new(big.Int).Add(r, s)
+		num := new(big.Int).Mul(rPlusS, rPlusS)
+		s2 := new(big.Int).Mul(s, s)
+		num.Sub(num, s2)
+		fourS := new(big.Int).Lsh(s, 2)
+		den := new(big.Int).Add(r, fourS)
 		return new(big.Int).Quo(num, den)
 	case objects.CurveConvergentSquareRoot:
-		// rshares / (s + sqrt(rshares))
-		num := new(big.Int).Set(r)
-		den := new(big.Int).Add(s, new(big.Int).Sqrt(r))
-		return new(big.Int).Quo(num, den)
+		// C++ reward.cpp:69 — rshares / sqrt(rshares + 2s).
+		twoS := new(big.Int).Lsh(s, 1)
+		den := new(big.Int).Sqrt(new(big.Int).Add(r, twoS))
+		if den.Sign() == 0 {
+			return new(big.Int)
+		}
+		return new(big.Int).Quo(r, den)
 	default:
-		// quadratic / bounded_curve: (r+s)² - s²
+		// quadratic: (r+s)² - s²
 		rPlusS := new(big.Int).Add(r, s)
 		out := new(big.Int).Mul(rPlusS, rPlusS)
 		s2 := new(big.Int).Mul(s, s)
