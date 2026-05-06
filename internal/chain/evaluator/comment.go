@@ -259,6 +259,14 @@ func (deleteCommentEvaluator) Apply(ctx *Context, o op.Operation) error {
 	if c.CashoutTime != 0 {
 		objects.DeleteCommentCashoutSchedule(ctx.DB, c.CashoutTime, c.ID)
 	}
+	// C++ delete_comment_evaluator (hive_evaluator_social.cpp:77-85)
+	// removes ALL comment_vote rows for this comment. Without this, an
+	// author who deletes then re-creates a comment with the same
+	// (author, permlink) sees a stale cv from the deleted comment when
+	// they vote on the new one — our same-percent gate (HF6+) then
+	// rejects it as "already voted in a similar way" though C++ accepts
+	// it as a fresh first-cast.
+	deleteAllCommentVotes(ctx.DB, dc.Author, dc.Permlink)
 	// Decrement parent.Children when removing a reply (on_reply with deleting=true).
 	if c.ParentAuthor != "" {
 		if parent, perr := objects.GetComment(ctx.DB, c.ParentAuthor, c.ParentPermlink); perr == nil {
@@ -270,6 +278,31 @@ func (deleteCommentEvaluator) Apply(ctx *Context, o op.Operation) error {
 	}
 	objects.DeleteComment(ctx.DB, dc.Author, dc.Permlink)
 	return nil
+}
+
+// deleteAllCommentVotes mirrors the comment_vote_index iteration in
+// C++ delete_comment_evaluator. Walks every cv row for this comment
+// (by-comment secondary index) and removes it.
+func deleteAllCommentVotes(s *state.Session, author, permlink string) {
+	type voterKey struct{ voter string }
+	var votes []voterKey
+	prefix := objects.CommentVoteByCommentPrefix(author, permlink)
+	_ = s.Range(objects.CommentVoteTable, objects.CommentVoteByCommentIndex, prefix,
+		func(body, _ []byte) (bool, error) {
+			if len(body) < state.AccountNameKeyLen {
+				return true, nil
+			}
+			vb := body[len(body)-state.AccountNameKeyLen:]
+			n := state.AccountNameKeyLen
+			for n > 0 && vb[n-1] == 0 {
+				n--
+			}
+			votes = append(votes, voterKey{voter: string(vb[:n])})
+			return true, nil
+		})
+	for _, v := range votes {
+		objects.DeleteCommentVote(s, v.voter, author, permlink)
+	}
 }
 
 // commentOptionsEvaluator implements comment_options.
