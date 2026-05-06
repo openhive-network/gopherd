@@ -39,8 +39,9 @@ const (
 // HIVE_*_APR_PERCENT — basis-points-of-100% APR figures from
 // libraries/protocol/include/hive/protocol/config.hpp.
 const (
-	contentAPRPercent int64 = 3875 // 38.75%
-	curateAPRPercent  int64 = 3875
+	contentAPRPercent  int64 = 3875 // 38.75%
+	curateAPRPercent   int64 = 3875
+	producerAPRPercent int64 = 750 // 7.5%
 )
 
 // HIVE_BLOCKS_PER_YEAR = 365 × 24 × 60 × 60 / 3.
@@ -159,7 +160,24 @@ func processProducerReward(s *state.Session, witnessName string, blockNum uint32
 		// Witness account hasn't been created yet — nothing to credit.
 		return
 	}
+	// hived: pay = max(virtual_supply × 7.5% / blocks_per_year, MIN).
+	// Until virtual_supply grows past ~140M HIVE the formula stays at the
+	// floor; after that (~block 1.7M) C++ pays a percent-of-supply slice
+	// and creates that many VESTS at vest_price. Treating the formula as
+	// a flat MIN under-credits the witness by hundreds of sat-HIVE per
+	// block, drifting TVF/TVS at the rate of compounding inflation.
+	dgpo, derr := objects.GetDGPO(s)
 	pay := minProducerReward
+	if derr == nil {
+		virtualSupply := dgpo.VirtualSupply
+		if virtualSupply <= 0 {
+			virtualSupply = dgpo.CurrentSupply
+		}
+		percent := percentRewardPerBlock(virtualSupply, producerAPRPercent)
+		if percent > pay {
+			pay = percent
+		}
+	}
 	// Hived: VESTS path if head_block >= 864000 OR witness has 0 vesting.
 	// We DON'T bump current_supply here — C++ adds witness_pay to
 	// current_supply inside process_funds's modify block (matching the
@@ -238,7 +256,10 @@ func processFunds(s *state.Session, blockNum uint32, witnessName string) {
 	if curateReward < minCurateReward {
 		curateReward = minCurateReward
 	}
-	witnessPay := minProducerReward
+	witnessPay := percentRewardPerBlock(virtualSupply, producerAPRPercent)
+	if witnessPay < minProducerReward {
+		witnessPay = minProducerReward
+	}
 
 	vestingReward := contentReward + curateReward + witnessPay
 	if blockNum < startVestingBlock {
