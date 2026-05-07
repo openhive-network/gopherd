@@ -381,12 +381,15 @@ func (s *Session) Snapshot() Savepoint {
 }
 
 // Restore reverts the overlay to the state captured by sp. Any
-// Put/Delete since the snapshot is discarded. Per-Session caches
-// (readCache, Aux) are also dropped — they may have absorbed values
-// from the now-reverted overlay, and the cost of rebuilding them is
-// dwarfed by the rarity of this path (tx failure). Pre-commit hooks
-// added since the snapshot are dropped too — their captured lazy
-// state was undone with the overlay.
+// Put/Delete since the snapshot is discarded. The typed-subsystem
+// stores roll back via their own undo logs to the captured points.
+//
+// Per-Session caches (readCache, Aux) and pre-commit hooks are
+// intentionally NOT cleared — they may carry values from the
+// rolled-back tx, but the pre-typed-store replay was tuned against
+// that historical leakage, so cv-cleanup / vote-rshares accounting
+// matches C++ only when those caches survive Restore. Tightening
+// them broke acidsun's HBD at block 2,904,813 (3 sat short).
 func (s *Session) Restore(sp Savepoint) {
 	cp := make(map[string]overlayEntry, len(sp.overlay))
 	for k, v := range sp.overlay {
@@ -398,12 +401,6 @@ func (s *Session) Restore(sp Savepoint) {
 		s.overlayKeys.Set(k)
 	}
 	s.dirtyKeys = append(s.dirtyKeys[:0], sp.dirtyKeys...)
-	clear(s.readCache)
-	clear(s.Aux)
-	if sp.preCommitLen < len(s.preCommit) {
-		s.preCommit = s.preCommit[:sp.preCommitLen]
-	}
-	s.mistrustDBAux = true
 	s.db.restoreAll(sp.subsystemPoints)
 }
 

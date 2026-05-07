@@ -698,15 +698,10 @@ func resetVirtualScheduleTime(s *state.Session, ws *objects.WitnessSchedule) {
 		owner auth.AccountName
 	}
 	var owners []entry
-	_ = s.Range(objects.WitnessTable, state.PrimaryIndex, nil,
-		func(_, value []byte) (bool, error) {
-			w, err := objects.ReadWitness(value)
-			if err != nil {
-				return true, nil
-			}
-			owners = append(owners, entry{owner: w.Owner})
-			return true, nil
-		})
+	_ = objects.EnsureWitnessStore(s).RangePrimary(func(w *objects.Witness) (bool, error) {
+		owners = append(owners, entry{owner: w.Owner})
+		return true, nil
+	})
 	lap2 := hiveVirtualScheduleLapLength2()
 	zeroVT := new(big.Int)
 	for _, e := range owners {
