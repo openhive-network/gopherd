@@ -836,6 +836,13 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 
 		// Skip dust votes post-HF14 — they contribute zero rshares but
 		// also don't pull cashout time (matches hive_evaluator_social.cpp:426).
+		// TODO: also missing C++'s `was_paid` branch at hive_evaluator_social.cpp:418
+		// (post-cashout votes pin to LastPayout+30d). Tested 2026-05-07: adding
+		// it didn't fix craig-grant 3-HBD-sat shortfall at block 3,540,652
+		// (heaven is on FIRST cashout, branch doesn't apply) and caused 2x
+		// perf regression. Real bug must be in vote-time-update of UNPAID
+		// posts — likely mana-drain accumulation drift or missing rejection
+		// of recasts on already-rewarded curation. Investigation continues.
 		if !(ctx.Hardforks.Has(hardfork.HF14) && absRshares == 0) {
 			var newCashoutTimeSec uint32
 			if ctx.Hardforks.Has(hardfork.HF12) && !ctx.Hardforks.Has(hardfork.HF13) {
