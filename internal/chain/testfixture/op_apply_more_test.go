@@ -157,6 +157,7 @@ func TestRecurrentTransferMaxOpenTransfersSmoke(t *testing.T) {
 	f.Actors("alice", "bob", "carol")
 	f.FundLiquid("alice", 1_000_000)
 	f.GenerateBlock()
+	f.HardforksUpTo(hardfork.HF25)
 
 	// Two valid transfers should both apply.
 	for _, dst := range []string{"bob", "carol"} {

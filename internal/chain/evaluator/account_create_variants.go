@@ -31,6 +31,10 @@ func (claimAccountEvaluator) Apply(ctx *Context, o op.Operation) error {
 	if !ok {
 		return fmt.Errorf("claimAccountEvaluator: unexpected op type %T", o)
 	}
+	// HF20__1771 — claim_account is HF20+ only.
+	if !ctx.Hardforks.Has(hardfork.HF20) {
+		return fmt.Errorf("claim_account: requires HF20")
+	}
 	if ca.Fee.Symbol.Num != asset.HiveSymbol {
 		return ErrInvalidAccountFee
 	}
@@ -91,6 +95,10 @@ func (createClaimedAccountEvaluator) Apply(ctx *Context, o op.Operation) error {
 	if !ok {
 		return fmt.Errorf("createClaimedAccountEvaluator: unexpected op type %T", o)
 	}
+	// HF20__1771 — create_claimed_account is HF20+ only.
+	if !ctx.Hardforks.Has(hardfork.HF20) {
+		return fmt.Errorf("create_claimed_account: requires HF20")
+	}
 	creator, err := objects.GetAccount(ctx.DB, cc.Creator)
 	if err != nil {
 		if err == state.ErrNotFound {
@@ -143,6 +151,11 @@ func (accountCreateWithDelegationEvaluator) Apply(ctx *Context, o op.Operation) 
 	ac, ok := o.(op.AccountCreateWithDelegation)
 	if !ok {
 		return fmt.Errorf("accountCreateWithDelegationEvaluator: unexpected op type %T", o)
+	}
+	// HF20__1760 deprecates account_create_with_delegation; the op must
+	// be rejected post-HF20 (hive_evaluator_account.cpp:212).
+	if ctx.Hardforks.Has(hardfork.HF20) {
+		return fmt.Errorf("account_create_with_delegation: deprecated post-HF20")
 	}
 	if ac.Fee.Symbol.Num != asset.HiveSymbol {
 		return ErrInvalidAccountFee

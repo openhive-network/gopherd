@@ -11,6 +11,8 @@
 //	if hf.Has(HF20)
 package hardfork
 
+import "sync/atomic"
+
 // ID identifies a Hive hardfork. The integer value matches the ordinal used
 // throughout the C++ code (HF1 == 1, ... HF28 == 28).
 type ID uint8
@@ -102,7 +104,23 @@ type Set uint32
 // block N's evaluators and per-block hooks `has_hardfork(HFn)` is FALSE iff
 // HFn activates at block N — its effects only land for block N+1 onward. We
 // match with strict `>`: HFn is active iff blockNum > activation.
+//
+// Hot path: per-block hooks call this 20+ times with the same blockNum. We
+// pack (blockNum, set) into a single atomic.Uint64 so the common case is one
+// load + one compare instead of a 28-iteration scan. Replay is single-threaded
+// but the API is reachable from goroutine-heavy server code, so we keep it
+// race-free via atomics.
+// setForBlockCache packs (blockNum+1)<<32 | set. The +1 offset ensures the
+// zero value (atomic.Uint64 default) never matches a real blockNum lookup —
+// otherwise SetForBlock(0) would always cache-hit on the zero value and
+// return Set(0), missing HF0's always-on bit.
+var setForBlockCache atomic.Uint64
+
 func SetForBlock(blockNum uint32) Set {
+	cached := setForBlockCache.Load()
+	if uint32(cached>>32) == blockNum+1 {
+		return Set(cached)
+	}
 	var s Set
 	// HF0 always active.
 	s |= 1
@@ -111,6 +129,7 @@ func SetForBlock(blockNum uint32) Set {
 			s |= 1 << i
 		}
 	}
+	setForBlockCache.Store(uint64(blockNum+1)<<32 | uint64(s))
 	return s
 }
 

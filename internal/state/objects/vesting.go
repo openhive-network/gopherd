@@ -173,3 +173,23 @@ func GetWithdrawRoute(s *state.Session, from, to auth.AccountName) (WithdrawRout
 	}
 	return ReadWithdrawRoute(v)
 }
+
+// SumWithdrawRoutePercentFrom returns the total percent across all
+// withdraw_vesting_route rows whose from_account == from. Used by the
+// evaluator to enforce the HIVE_100_PERCENT cap (hive_evaluator_transfer.cpp:453).
+func SumWithdrawRoutePercentFrom(s *state.Session, from auth.AccountName) (uint32, error) {
+	prefix := state.AppendAccountName(nil, from)
+	var total uint32
+	err := s.Range(WithdrawRouteTable, state.PrimaryIndex, prefix, func(_, value []byte) (bool, error) {
+		wr, rerr := ReadWithdrawRoute(value)
+		if rerr != nil {
+			return false, rerr
+		}
+		if wr.From != from {
+			return false, nil
+		}
+		total += uint32(wr.Percent)
+		return true, nil
+	})
+	return total, err
+}

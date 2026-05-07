@@ -3,6 +3,7 @@ package chain
 import (
 	"math/big"
 
+	"hived-go/internal/protocol/auth"
 	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/reward"
 	"hived-go/internal/state"
@@ -92,6 +93,15 @@ func applyHardfork(s *state.Session, id hardfork.ID) {
 		// HF8 calls retally_witness_vote_counts(true) — repairs every
 		// account by re-walking the witness_vote table.
 		retallyWitnessVoteCounts(s)
+	case hardfork.HF10:
+		// HF10 calls retally_liquidity_weight() — recomputes every
+		// liquidity_reward_balance row's weight using the
+		// post-HF10 MIN(hive,hbd) formula (database_vesting.cpp:102,
+		// database_hardfork.cpp:232). Pre-HF9 rows had been holding
+		// stale PRODUCT weights that dwarfed post-HF9 MIN weights, so
+		// pay_liquidity_reward kept paying out to accounts that hadn't
+		// traded recently.
+		retallyLiquidityWeight(s)
 	case hardfork.HF12:
 		// HF12__178 retires the liquidity-reward subsystem. Wipe every
 		// row so the by_volume_weight scan in pay_liquidity_reward
@@ -162,16 +172,12 @@ func applyHardfork(s *state.Session, id hardfork.ID) {
 		// HIVE_CREATE_ACCOUNT_WITH_HIVE_MODIFIER (= 30) since accounts
 		// were previously created at 1× fee but the new RC subsystem
 		// makes that 30× too cheap. Mirrors database_hardfork.cpp:354.
-		_ = s.Range(objects.WitnessTable, state.PrimaryIndex, nil,
-			func(_, value []byte) (bool, error) {
-				w, err := objects.ReadWitness(value)
-				if err != nil {
-					return true, nil
-				}
-				w.AccountCreationFee *= 30
-				objects.PutWitness(s, &w)
-				return true, nil
-			})
+		_ = objects.EnsureWitnessStore(s).RangePrimary(func(w *objects.Witness) (bool, error) {
+			cp := *w
+			cp.AccountCreationFee *= 30
+			objects.PutWitness(s, &cp)
+			return true, nil
+		})
 		// Initialize voting manabar to full for every existing account
 		// since pre-HF20 the field was a percentage; HF20 reinterprets
 		// it as raw mana with a vesting-derived cap. We mirror by
@@ -685,6 +691,45 @@ func applyHardfork17CommentCashoutFix(s *state.Session) {
 	}
 }
 
+// retallyLiquidityWeight recomputes every liquidity_reward_balance
+// row's weight under the HF10+ MIN(hive,hbd) formula. Mirrors C++
+// database::retally_liquidity_weight (database_vesting.cpp:102) which
+// is invoked from the HF10 hardfork handler (database_hardfork.cpp:232).
+func retallyLiquidityWeight(s *state.Session) {
+	type row struct {
+		owner       string
+		hive, hbd   int64
+		lastUpdate  uint32
+		prevWeight  [16]byte
+	}
+	var rows []row
+	_ = s.Range(objects.LiquidityRewardBalanceTable, state.PrimaryIndex, nil,
+		func(_, value []byte) (bool, error) {
+			b, err := objects.ReadLiquidityRewardBalance(value)
+			if err != nil {
+				return true, nil
+			}
+			rows = append(rows, row{
+				owner:      b.Owner,
+				hive:       b.HiveVolume,
+				hbd:        b.HBDVolume,
+				lastUpdate: b.LastUpdate,
+				prevWeight: b.Weight,
+			})
+			return true, nil
+		})
+	for _, r := range rows {
+		b := objects.LiquidityRewardBalance{
+			Owner:      r.owner,
+			HiveVolume: r.hive,
+			HBDVolume:  r.hbd,
+			LastUpdate: r.lastUpdate,
+			Weight:     objects.ComputeLiquidityWeight(r.hive, r.hbd, true /* HF10+ → MIN */),
+		}
+		objects.PutLiquidityRewardBalanceUpdating(s, &b, r.prevWeight)
+	}
+}
+
 // clearLiquidityRewardBalances drops every row in the
 // liquidity_reward_balance table. Called from HF12.
 func clearLiquidityRewardBalances(s *state.Session) {
@@ -725,15 +770,10 @@ func retallyWitnessVotes(s *state.Session) {
 	// Step 1: zero every witness's TotalVotesVests.
 	type wRec struct{ owner string }
 	var witnesses []wRec
-	_ = s.Range(objects.WitnessTable, state.PrimaryIndex, nil,
-		func(_, value []byte) (bool, error) {
-			w, err := objects.ReadWitness(value)
-			if err != nil {
-				return true, nil
-			}
-			witnesses = append(witnesses, wRec{owner: w.Owner})
-			return true, nil
-		})
+	_ = objects.EnsureWitnessStore(s).RangePrimary(func(w *objects.Witness) (bool, error) {
+		witnesses = append(witnesses, wRec{owner: w.Owner})
+		return true, nil
+	})
 	// C++ retally_witness_votes (database_witness.cpp:113) zeros
 	// w.votes AND w.virtual_position; it does NOT touch
 	// virtual_last_update or virtual_scheduled_time. The subsequent
@@ -779,29 +819,17 @@ func retallyWitnessVotes(s *state.Session) {
 		if power == 0 {
 			continue
 		}
-		prefix := state.AppendAccountName(nil, ar.name)
-		_ = s.Range(objects.WitnessVoteTable, state.PrimaryIndex, prefix,
-			func(body, _ []byte) (bool, error) {
-				if len(body) < 2*state.AccountNameKeyLen {
-					return true, nil
-				}
-				witnessBytes := body[state.AccountNameKeyLen : 2*state.AccountNameKeyLen]
-				wn := state.AccountNameKeyLen
-				for wn > 0 && witnessBytes[wn-1] == 0 {
-					wn--
-				}
-				witnessName := string(witnessBytes[:wn])
-				w, gerr := objects.GetWitness(s, witnessName)
-				if gerr != nil {
-					return true, nil
-				}
-				// C++ retally calls adjust_witness_vote per voter,
-				// which advances virtual_position / virtual_last_update
-				// / virtual_scheduled_time alongside the vote bump.
-				objects.AdjustWitnessVote(s, &w, power, hf)
-				objects.PutWitness(s, &w)
-				return true, nil
-			})
+		for _, witnessName := range objects.EnsureWitnessVoteStore(s).VotesFor(ar.name) {
+			w, gerr := objects.GetWitness(s, witnessName)
+			if gerr != nil {
+				continue
+			}
+			// C++ retally calls adjust_witness_vote per voter,
+			// which advances virtual_position / virtual_last_update
+			// / virtual_scheduled_time alongside the vote bump.
+			objects.AdjustWitnessVote(s, &w, power, hf)
+			objects.PutWitness(s, &w)
+		}
 	}
 }
 
@@ -849,13 +877,7 @@ func retallyWitnessVoteCountsForProxiedOnly(s *state.Session) {
 		}
 		var newCount uint16
 		if ar.hasProxy {
-			// Count votes for this account
-			prefix := state.AppendAccountName(nil, ar.name)
-			_ = s.Range(objects.WitnessVoteTable, state.PrimaryIndex, prefix,
-				func(_, _ []byte) (bool, error) {
-					newCount++
-					return true, nil
-				})
+			newCount = uint16(objects.EnsureWitnessVoteStore(s).CountFor(ar.name))
 		}
 		// Mirror C++ bug: even non-proxy accounts get rewritten to
 		// the local newCount (= 0), which differs from a stored
@@ -893,29 +915,15 @@ func retallyWitnessVoteCounts(s *state.Session) {
 		objects.PutAccount(s, &a)
 	}
 
-	type voteRec struct{ voter string }
-	var votes []voteRec
-	_ = s.Range(objects.WitnessVoteTable, state.PrimaryIndex, nil,
-		func(body, _ []byte) (bool, error) {
-			if len(body) < state.AccountNameKeyLen {
-				return true, nil
-			}
-			voterBytes := body[:state.AccountNameKeyLen]
-			vn := state.AccountNameKeyLen
-			for vn > 0 && voterBytes[vn-1] == 0 {
-				vn--
-			}
-			votes = append(votes, voteRec{voter: string(voterBytes[:vn])})
-			return true, nil
-		})
-	for _, v := range votes {
-		a, err := objects.GetAccount(s, v.voter)
+	_ = objects.EnsureWitnessVoteStore(s).RangeAllVoters(func(voter auth.AccountName, witnesses []auth.AccountName) (bool, error) {
+		a, err := objects.GetAccount(s, voter)
 		if err != nil {
-			continue
+			return true, nil
 		}
-		a.WitnessesVotedFor++
+		a.WitnessesVotedFor += uint16(len(witnesses))
 		objects.PutAccount(s, &a)
-	}
+		return true, nil
+	})
 }
 
 // truncateFeedHistoryWindow shrinks fho.price_history to at most n

@@ -175,27 +175,19 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 	//    Two-pass: collect candidates from the by-vote index, then mutate
 	//    Schedule + persist outside the iteration so we don't mutate the
 	//    index we're scanning.
+	wstore := objects.EnsureWitnessStore(s)
 	selectedVoted := make(map[string]bool)
 	type candidate struct {
 		owner auth.AccountName
 	}
 	var voteCands []candidate
-	_ = s.Range(objects.WitnessTable, objects.WitnessByVoteIndex, nil,
-		func(key, _ []byte) (bool, error) {
-			if len(voteCands) >= int(objects.MaxWitnesses) {
-				return false, nil
-			}
-			if len(key) < 8+state.AccountNameKeyLen {
-				return true, nil
-			}
-			ownerBytes := key[8 : 8+state.AccountNameKeyLen]
-			n := state.AccountNameKeyLen
-			for n > 0 && ownerBytes[n-1] == 0 {
-				n--
-			}
-			voteCands = append(voteCands, candidate{owner: auth.AccountName(string(ownerBytes[:n]))})
-			return true, nil
-		})
+	_ = wstore.RangeByVote(func(w *objects.Witness) (bool, error) {
+		if len(voteCands) >= int(objects.MaxWitnesses) {
+			return false, nil
+		}
+		voteCands = append(voteCands, candidate{owner: w.Owner})
+		return true, nil
+	})
 	for _, c := range voteCands {
 		if uint8(len(selectedVoted)) >= ws.MaxVotedWitnesses {
 			break
@@ -219,7 +211,7 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 		dumpFullWitnessTSV(s, blockNum, ws, dumpPath)
 	}
 	// Legacy block-list-gated dumps kept for compatibility.
-	if os.Getenv("GHIVEDIFF_VSTS") != "" {
+	if envGhivediffVsts != "" {
 		if (blockNum >= 1041495 && blockNum <= 1050000) ||
 			(blockNum >= 2880000 && blockNum <= 2910000) ||
 			(blockNum%21000 == 0 && blockNum >= 1050000 && blockNum <= 2888500) {
@@ -237,42 +229,28 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 		pow   uint64
 	}
 	var powCandidates []powEntry
-	_ = s.Range(objects.WitnessTable, objects.WitnessByPowIndex, nil,
-		func(key, _ []byte) (bool, error) {
-			// Stop once we've harvested enough candidates to fill all
-			// max_miner slots — matches C++'s mitr advance loop, which
-			// only drops witnesses as far as max_miner_witnesses.
-			if uint8(len(selectedMiners)) >= ws.MaxMinerWitnesses && len(powCandidates) >= int(ws.MaxMinerWitnesses) {
-				return false, nil
-			}
-			if len(key) < 8+state.AccountNameKeyLen {
-				return true, nil
-			}
-			pow := decodeBE64(key[:8])
-			if pow == 0 {
-				return true, nil
-			}
-			ownerBytes := key[8 : 8+state.AccountNameKeyLen]
-			n := state.AccountNameKeyLen
-			for n > 0 && ownerBytes[n-1] == 0 {
-				n--
-			}
-			owner := auth.AccountName(string(ownerBytes[:n]))
-			powCandidates = append(powCandidates, powEntry{owner: owner, pow: pow})
-			if !selectedVoted[string(owner)] {
-				w, err := objects.GetWitness(s, owner)
-				if err != nil {
-					return true, nil
-				}
-				if !(hf.Has(hardfork.HF14) && w.BlockSigningKey == zero33) {
-					selectedMiners[string(owner)] = true
-				}
-			}
-			if uint8(len(selectedMiners)) >= ws.MaxMinerWitnesses {
-				return false, nil
-			}
+	_ = wstore.RangeByPow(func(w *objects.Witness) (bool, error) {
+		// Stop once we've harvested enough candidates to fill all
+		// max_miner slots — matches C++'s mitr advance loop, which
+		// only drops witnesses as far as max_miner_witnesses.
+		if uint8(len(selectedMiners)) >= ws.MaxMinerWitnesses && len(powCandidates) >= int(ws.MaxMinerWitnesses) {
+			return false, nil
+		}
+		if w.PowWorker == 0 {
 			return true, nil
-		})
+		}
+		owner := w.Owner
+		powCandidates = append(powCandidates, powEntry{owner: owner, pow: w.PowWorker})
+		if !selectedVoted[string(owner)] {
+			if !(hf.Has(hardfork.HF14) && w.BlockSigningKey == zero33) {
+				selectedMiners[string(owner)] = true
+			}
+		}
+		if uint8(len(selectedMiners)) >= ws.MaxMinerWitnesses {
+			return false, nil
+		}
+		return true, nil
+	})
 	// Now mutate: each visited witness has pow_worker zeroed and
 	// num_pow_witnesses decremented — matches C++ witness_schedule.cpp:194-204
 	// (drops head of the by_pow index whether or not picked as miner).
@@ -291,7 +269,7 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 			w.PowWorker = 0
 			if dgpo.NumPowWitnesses > 0 {
 				dgpo.NumPowWitnesses--
-				if os.Getenv("GHIVEDIFF_POWBUMP") != "" {
+				if envGhivediffPowbump != "" {
 					fmt.Fprintf(os.Stderr, "POWDRAIN block=%d num=%d\n", blockNum, dgpo.NumPowWitnesses)
 				}
 			}
@@ -323,23 +301,12 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 	// then iterate the slice to update Schedule + VirtualScheduledTime.
 	// Stops once `active` reaches wantedTotal (counting added timeshares).
 	tsPicked := 0
-	_ = s.Range(objects.WitnessTable, objects.WitnessByScheduleTimeIndex, nil,
-		func(key, _ []byte) (bool, error) {
-			if len(active)+tsPicked >= wantedTotal {
-				return false, nil
-			}
-			if len(key) < 16+state.AccountNameKeyLen {
-				return true, nil
-			}
-			var vst [16]byte
-			copy(vst[:], key[:16])
-			ownerBytes := key[16 : 16+state.AccountNameKeyLen]
-			n := state.AccountNameKeyLen
-			for n > 0 && ownerBytes[n-1] == 0 {
-				n--
-			}
-			owner := auth.AccountName(string(ownerBytes[:n]))
-			visited = append(visited, processed{owner: owner, vst: vst})
+	_ = wstore.RangeByScheduleTime(func(w *objects.Witness) (bool, error) {
+		if len(active)+tsPicked >= wantedTotal {
+			return false, nil
+		}
+		owner := w.Owner
+		visited = append(visited, processed{owner: owner, vst: w.VirtualScheduledTime})
 			// Speculatively count this as a picked timeshare for the
 			// stop condition — we'll discard the count if the witness
 			// turns out to be already-elected or disabled in the
@@ -400,7 +367,7 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 		objects.PutWitness(s, &w)
 	}
 	if resetVT {
-		if os.Getenv("GHIVEDIFF_RESET") != "" {
+		if envGhivediffReset != "" {
 			fmt.Fprintf(os.Stderr, "GHIVEDIFF RESET-VST block=%d\n", blockNum)
 		}
 		newVT.SetInt64(0)
@@ -550,8 +517,6 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 
 	updateMedianWitnessProps(s, ws)
 
-	// Mirror hived's update_global_witness_properties: copy median_props
-	// into DGPO so other evaluators see the new chain properties immediately.
 	if ws.MedianHBDInterestRate > 0 {
 		dgpo.HBDInterestRate = ws.MedianHBDInterestRate
 	}
@@ -577,26 +542,18 @@ func updateWitnessSchedulePreHF4(s *state.Session, ws *objects.WitnessSchedule, 
 	const hiveStartMinerVotingBlock uint32 = 864_000
 	useVoteBased := dgpo.NumPowWitnesses == 0 || blockNum > hiveStartMinerVotingBlock
 
+	wstore := objects.EnsureWitnessStore(s)
 	if useVoteBased {
 		// Two-pass: collect by-vote candidates first, then mutate.
 		// Lock out the top (HIVE_MAX_WITNESSES - 2) by setting VST = MAX.
 		var byVoteCands []auth.AccountName
-		_ = s.Range(objects.WitnessTable, objects.WitnessByVoteIndex, nil,
-			func(key, _ []byte) (bool, error) {
-				if len(byVoteCands) >= int(objects.MaxWitnesses)-2 {
-					return false, nil
-				}
-				if len(key) < 8+state.AccountNameKeyLen {
-					return true, nil
-				}
-				ownerBytes := key[8 : 8+state.AccountNameKeyLen]
-				n := state.AccountNameKeyLen
-				for n > 0 && ownerBytes[n-1] == 0 {
-					n--
-				}
-				byVoteCands = append(byVoteCands, auth.AccountName(string(ownerBytes[:n])))
-				return true, nil
-			})
+		_ = wstore.RangeByVote(func(w *objects.Witness) (bool, error) {
+			if len(byVoteCands) >= int(objects.MaxWitnesses)-2 {
+				return false, nil
+			}
+			byVoteCands = append(byVoteCands, w.Owner)
+			return true, nil
+		})
 		picked := 0
 		for _, owner := range byVoteCands {
 			if picked >= int(objects.MaxWitnesses)-2 {
@@ -619,28 +576,14 @@ func updateWitnessSchedulePreHF4(s *state.Session, ws *objects.WitnessSchedule, 
 		// (skip pow workers). Two-pass: first non-pow candidate.
 		var tsCand auth.AccountName
 		var tsCandFound bool
-		_ = s.Range(objects.WitnessTable, objects.WitnessByScheduleTimeIndex, nil,
-			func(key, _ []byte) (bool, error) {
-				if len(key) < 16+state.AccountNameKeyLen {
-					return true, nil
-				}
-				ownerBytes := key[16 : 16+state.AccountNameKeyLen]
-				n := state.AccountNameKeyLen
-				for n > 0 && ownerBytes[n-1] == 0 {
-					n--
-				}
-				owner := auth.AccountName(string(ownerBytes[:n]))
-				w, err := objects.GetWitness(s, owner)
-				if err != nil {
-					return true, nil
-				}
-				if w.PowWorker != 0 {
-					return true, nil
-				}
-				tsCand = owner
-				tsCandFound = true
-				return false, nil
-			})
+		_ = wstore.RangeByScheduleTime(func(w *objects.Witness) (bool, error) {
+			if w.PowWorker != 0 {
+				return true, nil
+			}
+			tsCand = w.Owner
+			tsCandFound = true
+			return false, nil
+		})
 		if tsCandFound {
 			w, err := objects.GetWitness(s, tsCand)
 			if err == nil {
@@ -682,24 +625,14 @@ func updateWitnessSchedulePreHF4(s *state.Session, ws *objects.WitnessSchedule, 
 	if dgpo.NumPowWitnesses > uint32(objects.MaxWitnesses) {
 		var firstPow auth.AccountName
 		var firstPowFound bool
-		_ = s.Range(objects.WitnessTable, objects.WitnessByPowIndex, nil,
-			func(key, _ []byte) (bool, error) {
-				if len(key) < 8+state.AccountNameKeyLen {
-					return true, nil
-				}
-				pow := decodeBE64(key[:8])
-				if pow == 0 {
-					return true, nil
-				}
-				ownerBytes := key[8 : 8+state.AccountNameKeyLen]
-				n := state.AccountNameKeyLen
-				for n > 0 && ownerBytes[n-1] == 0 {
-					n--
-				}
-				firstPow = auth.AccountName(string(ownerBytes[:n]))
-				firstPowFound = true
-				return false, nil
-			})
+		_ = wstore.RangeByPow(func(w *objects.Witness) (bool, error) {
+			if w.PowWorker == 0 {
+				return true, nil
+			}
+			firstPow = w.Owner
+			firstPowFound = true
+			return false, nil
+		})
 		if firstPowFound {
 			w, err := objects.GetWitness(s, firstPow)
 			if err == nil && w.PowWorker != 0 {
@@ -707,7 +640,7 @@ func updateWitnessSchedulePreHF4(s *state.Session, ws *objects.WitnessSchedule, 
 				objects.PutWitness(s, &w)
 				if dgpo.NumPowWitnesses > 0 {
 					dgpo.NumPowWitnesses--
-				if os.Getenv("GHIVEDIFF_POWBUMP") != "" {
+				if envGhivediffPowbump != "" {
 					fmt.Fprintf(os.Stderr, "POWDRAIN block=%d num=%d\n", blockNum, dgpo.NumPowWitnesses)
 				}
 				}
@@ -718,26 +651,16 @@ func updateWitnessSchedulePreHF4(s *state.Session, ws *objects.WitnessSchedule, 
 	// Add PoW miners until we hit HIVE_MAX_WITNESSES OR (post-START_MINER_VOTING)
 	// just one PoW miner per round. Two-pass: collect, then check stop.
 	var powOwners []auth.AccountName
-	_ = s.Range(objects.WitnessTable, objects.WitnessByPowIndex, nil,
-		func(key, _ []byte) (bool, error) {
-			if len(key) < 8+state.AccountNameKeyLen {
-				return true, nil
-			}
-			pow := decodeBE64(key[:8])
-			if pow == 0 {
-				return true, nil
-			}
-			ownerBytes := key[8 : 8+state.AccountNameKeyLen]
-			n := state.AccountNameKeyLen
-			for n > 0 && ownerBytes[n-1] == 0 {
-				n--
-			}
-			powOwners = append(powOwners, auth.AccountName(string(ownerBytes[:n])))
-			if len(powOwners) >= int(objects.MaxWitnesses) {
-				return false, nil
-			}
+	_ = wstore.RangeByPow(func(w *objects.Witness) (bool, error) {
+		if w.PowWorker == 0 {
 			return true, nil
-		})
+		}
+		powOwners = append(powOwners, w.Owner)
+		if len(powOwners) >= int(objects.MaxWitnesses) {
+			return false, nil
+		}
+		return true, nil
+	})
 	for _, owner := range powOwners {
 		active = append(active, owner)
 		if blockNum > hiveStartMinerVotingBlock || len(active) >= int(objects.MaxWitnesses) {

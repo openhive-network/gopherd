@@ -148,6 +148,9 @@ func applyLimitOrderCreate(ctx *Context, owner string, orderID uint32, amountToS
 		}
 		a.Balance -= amountToSell.Amount
 	case asset.HbdSymbol:
+		// C++ adjust_balance asserts pre-modify balance ≥ |delta| BEFORE
+		// the interest-accrual modify lambda runs (database.cpp:3311),
+		// so this check uses the pre-accrual HBDBalance — same as C++.
 		if a.HBDBalance < amountToSell.Amount {
 			return fmt.Errorf("%w: %q has %d HBD, sell %d", ErrInsufficientBalance, owner, a.HBDBalance, amountToSell.Amount)
 		}

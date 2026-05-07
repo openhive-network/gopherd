@@ -3,6 +3,7 @@ package testfixture
 import (
 	"testing"
 
+	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/op"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
@@ -20,6 +21,7 @@ func TestDeclineVotingRightsApply(t *testing.T) {
 	f.FundVesting("alice", 10_000)
 	f.FundVesting("bob", 10_000)
 	f.GenerateBlock()
+	f.HardforksUpTo(hardfork.HF14)
 
 	t.Log("--- Success creating decline request")
 	if err := f.ApplyOp(op.DeclineVotingRights{

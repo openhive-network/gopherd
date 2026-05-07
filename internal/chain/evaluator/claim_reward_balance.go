@@ -68,6 +68,11 @@ func (claimRewardBalanceEvaluator) Apply(ctx *Context, o op.Operation) error {
 		objects.RegenerateRCMana(&a, ctx.HeadBlockTime)
 	}
 	objects.PutAccount(ctx.DB, &a)
+	// hive_evaluator_transfer.cpp:717 — propagate the new VESTS into the
+	// witness-vote totals up the proxy chain.
+	if cr.RewardVests.Amount != 0 {
+		objects.AdjustProxiedWitnessVotes(ctx.DB, &a, cr.RewardVests.Amount)
+	}
 	return nil
 }
 

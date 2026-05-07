@@ -86,6 +86,12 @@ func (withdrawVestingEvaluator) Apply(ctx *Context, o op.Operation) error {
 	if a.VestingWithdrawRate == 0 {
 		a.VestingWithdrawRate = 1
 	}
+	// hive_evaluator_transfer.cpp:374-377 — HF21+ rounds the rate UP so
+	// rate × intervals ≥ requested. Pre-HF21, the integer truncation
+	// could leave a few satoshi unwithdrawn at the end.
+	if ctx.Hardforks.Has(hardfork.HF21) && a.VestingWithdrawRate*intervals < w.VestingShares.Amount {
+		a.VestingWithdrawRate++
+	}
 	a.NextVestingWithdrawal = ctx.HeadBlockTime + intervalSec
 	a.ToWithdraw = w.VestingShares.Amount
 	a.Withdrawn = 0
@@ -112,16 +118,36 @@ func (setWithdrawVestingRouteEvaluator) Apply(ctx *Context, o op.Operation) erro
 	} else if !has {
 		return fmt.Errorf("%w: to=%q", ErrAccountNotFound, r.ToAccount)
 	}
-	if r.Percent == 0 {
-		objects.DeleteWithdrawRoute(ctx.DB, r.FromAccount, r.ToAccount)
-		return nil
+	// HF21__3343 — withdraw target cannot be treasury.
+	if ctx.Hardforks.Has(hardfork.HF21) && isTreasuryAccount(r.ToAccount, ctx.Hardforks) {
+		return fmt.Errorf("set_withdraw_vesting_route: target cannot be treasury %q", r.ToAccount)
 	}
-	objects.PutWithdrawRoute(ctx.DB, &objects.WithdrawRoute{
-		From:     r.FromAccount,
-		To:       r.ToAccount,
-		Percent:  r.Percent,
-		AutoVest: r.AutoVest,
-	})
+	// hive_evaluator_transfer.cpp:408 — disallow creating a 0% route
+	// when none exists. percent==0 with an existing row removes it.
+	had, _ := objects.GetWithdrawRoute(ctx.DB, r.FromAccount, r.ToAccount)
+	exists := had.From == r.FromAccount && had.To == r.ToAccount
+	if r.Percent == 0 {
+		if !exists {
+			return fmt.Errorf("set_withdraw_vesting_route: cannot create a 0%% destination")
+		}
+		objects.DeleteWithdrawRoute(ctx.DB, r.FromAccount, r.ToAccount)
+	} else {
+		objects.PutWithdrawRoute(ctx.DB, &objects.WithdrawRoute{
+			From:     r.FromAccount,
+			To:       r.ToAccount,
+			Percent:  r.Percent,
+			AutoVest: r.AutoVest,
+		})
+	}
+	// hive_evaluator_transfer.cpp:447-453 — total percent across all
+	// routes for from_account must be ≤ 100%.
+	total, err := objects.SumWithdrawRoutePercentFrom(ctx.DB, r.FromAccount)
+	if err != nil {
+		return err
+	}
+	if total > 10000 {
+		return fmt.Errorf("set_withdraw_vesting_route: total percent %d > 100%% across all routes", total)
+	}
 	return nil
 }
 

@@ -71,11 +71,18 @@ func updateMedianFeed(s *state.Session, blockNum, blockTime uint32) {
 	var feeds []asset.Price
 	if ws, err := objects.GetWitnessSchedule(s); err == nil {
 		// C++ database.cpp:2476-2494 iterates wso.current_shuffled_witnesses
-		// position-by-position. The full-parity update_witness_schedule_4
-		// fills CurrentShuffledWitnesses with 21 entries (max_voted +
-		// max_miner + max_runner timeshare via virtual_scheduled_time)
-		// matching C++'s active set.
-		for _, n := range ws.CurrentShuffledWitnesses {
+		// position-by-position from 0 to wso.num_scheduled_witnesses
+		// (NOT the full slice length — older slice entries from a
+		// previous round may linger past the new num_scheduled count
+		// after `ws.CurrentShuffledWitnesses = shuffled` if the
+		// underlying slice's capacity is reused). Match C++ by capping
+		// the iteration at NumScheduledWitnesses.
+		count := int(ws.NumScheduledWitnesses)
+		if count > len(ws.CurrentShuffledWitnesses) {
+			count = len(ws.CurrentShuffledWitnesses)
+		}
+		for i := 0; i < count; i++ {
+			n := ws.CurrentShuffledWitnesses[i]
 			name := string(n)
 			if name == "" {
 				continue
@@ -97,7 +104,7 @@ func updateMedianFeed(s *state.Session, blockNum, blockTime uint32) {
 		}
 	}
 
-	if os.Getenv("GHIVEDIFF_FEED") != "" {
+	if envGhivediffFeed != "" {
 		var sched []string
 		if ws, err := objects.GetWitnessSchedule(s); err == nil {
 			for _, n := range ws.CurrentShuffledWitnesses {
@@ -176,7 +183,7 @@ func updateMedianFeed(s *state.Session, blockNum, blockTime uint32) {
 
 	sort.Slice(feeds, func(i, j int) bool { return priceLess(feeds[i], feeds[j]) })
 	medianFeed := feeds[len(feeds)/2]
-	if os.Getenv("GHIVEDIFF_FEED") != "" {
+	if envGhivediffFeed != "" {
 		fmt.Fprintf(os.Stderr, "GHIVEDIFF FEED-MEDIAN block=%d median_base=%d median_quote=%d\n",
 			blockNum, medianFeed.Base.Amount, medianFeed.Quote.Amount)
 	}
@@ -198,7 +205,7 @@ func updateMedianFeed(s *state.Session, blockNum, blockTime uint32) {
 		copyHist := make([]asset.Price, len(fh.PriceHistory))
 		copy(copyHist, fh.PriceHistory)
 		sort.Slice(copyHist, func(i, j int) bool { return priceLess(copyHist[i], copyHist[j]) })
-		if os.Getenv("GHIVEDIFF_FEED") != "" {
+		if envGhivediffFeed != "" {
 			fmt.Fprintf(os.Stderr, "GHIVEDIFF FEED-HIST block=%d hist_len=%d cmh_base=%d cmh_quote=%d\n",
 				blockNum, len(fh.PriceHistory),
 				copyHist[len(copyHist)/2].Base.Amount,

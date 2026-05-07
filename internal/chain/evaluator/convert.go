@@ -76,6 +76,10 @@ func (collateralizedConvertEvaluator) Apply(ctx *Context, o op.Operation) error 
 	if !ok {
 		return fmt.Errorf("collateralizedConvertEvaluator: unexpected op type %T", o)
 	}
+	// HF1_25 — collateralized_convert is HF25+ only.
+	if !ctx.Hardforks.Has(hardfork.HF25) {
+		return fmt.Errorf("collateralized_convert: requires HF25")
+	}
 	if c.Amount.Symbol.Num != asset.HiveSymbol {
 		return fmt.Errorf("%w: collateralized_convert requires HIVE collateral", ErrUnsupportedSymbol)
 	}

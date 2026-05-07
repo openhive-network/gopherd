@@ -300,45 +300,20 @@ func WitnessKey(owner auth.AccountName) []byte {
 	return state.AppendAccountName(nil, owner)
 }
 
+// PutWitnessIndexed is the fast-path variant of PutWitness used when the
+// caller already has the pre-modify Witness values in hand. With the
+// chainbase-style WitnessStore the prior values aren't strictly needed
+// (the store knows the prior pointer internally), so this is a thin
+// wrapper for backward compatibility.
+func PutWitnessIndexed(s *state.Session, w *Witness, _ int64, _ [16]byte, _ uint64) {
+	EnsureWitnessStore(s).Put(w)
+}
+
 // PutWitness stores w under its owner key and maintains the by-vote,
-// by-schedule-time, and by-pow secondary indexes. If a prior record
-// exists with different values for the indexed fields, the stale
-// entries are removed first.
+// by-schedule-time, and by-pow secondary indexes via the typed
+// WitnessStore.
 func PutWitness(s *state.Session, w *Witness) {
-	// Read prior row (if any) to know what stale index entries to drop.
-	prev, hadPrev := readWitnessIndexFields(s, w.Owner)
-	if hadPrev {
-		if prev.votes != w.TotalVotesVests {
-			s.Delete(WitnessTable, WitnessByVoteIndex, witnessByVoteKey(prev.votes, w.Owner))
-			s.Put(WitnessTable, WitnessByVoteIndex, witnessByVoteKey(w.TotalVotesVests, w.Owner), nil)
-		}
-		if prev.vst != w.VirtualScheduledTime {
-			if !virtualTimeIsZero(prev.vst) {
-				s.Delete(WitnessTable, WitnessByScheduleTimeIndex, witnessByScheduleTimeKey(prev.vst, w.Owner))
-			}
-			if !virtualTimeIsZero(w.VirtualScheduledTime) {
-				s.Put(WitnessTable, WitnessByScheduleTimeIndex, witnessByScheduleTimeKey(w.VirtualScheduledTime, w.Owner), nil)
-			}
-		}
-		if prev.pow != w.PowWorker {
-			if prev.pow != 0 {
-				s.Delete(WitnessTable, WitnessByPowIndex, witnessByPowKey(prev.pow, w.Owner))
-			}
-			if w.PowWorker != 0 {
-				s.Put(WitnessTable, WitnessByPowIndex, witnessByPowKey(w.PowWorker, w.Owner), nil)
-			}
-		}
-	} else {
-		s.Put(WitnessTable, WitnessByVoteIndex, witnessByVoteKey(w.TotalVotesVests, w.Owner), nil)
-		if !virtualTimeIsZero(w.VirtualScheduledTime) {
-			s.Put(WitnessTable, WitnessByScheduleTimeIndex, witnessByScheduleTimeKey(w.VirtualScheduledTime, w.Owner), nil)
-		}
-		if w.PowWorker != 0 {
-			s.Put(WitnessTable, WitnessByPowIndex, witnessByPowKey(w.PowWorker, w.Owner), nil)
-		}
-	}
-	s.SerScratch = AppendWitness(s.SerScratch[:0], w)
-	s.Put(WitnessTable, state.PrimaryIndex, WitnessKey(w.Owner), s.SerScratch)
+	EnsureWitnessStore(s).Put(w)
 }
 
 // virtualTimeIsZero reports whether all 16 bytes are 0 — meaning the
@@ -354,80 +329,39 @@ func virtualTimeIsZero(v [16]byte) bool {
 	return true
 }
 
-type witnessIndexFields struct {
-	votes int64
-	vst   [16]byte
-	pow   uint64
-}
-
-// readWitnessIndexFields fetches the prior index fields for a witness
-// without keeping the whole struct around — used by PutWitness to
-// detect stale index entries that need deletion.
-func readWitnessIndexFields(s *state.Session, owner auth.AccountName) (witnessIndexFields, bool) {
-	v, err := s.Get(WitnessTable, state.PrimaryIndex, WitnessKey(owner))
-	if err != nil {
-		return witnessIndexFields{}, false
-	}
-	w, err := ReadWitness(v)
-	if err != nil {
-		return witnessIndexFields{}, false
-	}
-	return witnessIndexFields{votes: w.TotalVotesVests, vst: w.VirtualScheduledTime, pow: w.PowWorker}, true
-}
-
-// readWitnessVotes returns the stored TotalVotesVests for the named
-// witness without decoding the rest of the row. Returns (0, false) if
-// the witness does not exist or the row is malformed.
-func readWitnessVotes(s *state.Session, owner auth.AccountName) (int64, bool) {
-	v, err := s.Get(WitnessTable, state.PrimaryIndex, WitnessKey(owner))
-	if err != nil {
-		return 0, false
-	}
-	w, err := ReadWitness(v)
-	if err != nil {
-		return 0, false
-	}
-	return w.TotalVotesVests, true
-}
-
-// _ keeps readWitnessVotes referenced even if no callsite remains
-// after the index-aware PutWitness rewrite — the helper is still
-// useful to other code paths.
-var _ = readWitnessVotes
-
-// GetWitness fetches the witness named owner.
+// GetWitness fetches the witness named owner from the typed store.
 func GetWitness(s *state.Session, owner auth.AccountName) (Witness, error) {
-	v, err := s.Get(WitnessTable, state.PrimaryIndex, WitnessKey(owner))
-	if err != nil {
-		return Witness{}, err
+	w, ok := EnsureWitnessStore(s).Get(owner)
+	if !ok {
+		return Witness{}, state.ErrNotFound
 	}
-	return ReadWitness(v)
+	return w, nil
 }
 
 // HasWitness reports whether a witness owner exists.
 func HasWitness(s *state.Session, owner auth.AccountName) (bool, error) {
-	return s.Has(WitnessTable, state.PrimaryIndex, WitnessKey(owner))
+	return EnsureWitnessStore(s).Has(owner), nil
 }
 
-// witnessVoteKey encodes (account, witness) as a 32-byte composite.
-func witnessVoteKey(account, witness auth.AccountName) []byte {
-	out := state.AppendAccountName(nil, account)
-	return state.AppendAccountName(out, witness)
-}
+// FlushWitnessIndexes is a no-op in the typed-store world — the
+// WitnessStore keeps secondary indexes synchronously consistent with
+// the primary map. Kept for API stability with callers that still
+// invoke it before a Range.
+func FlushWitnessIndexes(_ *state.Session) {}
 
 // PutWitnessVote records that account votes for witness.
 func PutWitnessVote(s *state.Session, account, witness auth.AccountName) {
-	s.Put(WitnessVoteTable, state.PrimaryIndex, witnessVoteKey(account, witness), nil)
+	EnsureWitnessVoteStore(s).Put(account, witness)
 }
 
 // HasWitnessVote reports whether account currently votes for witness.
 func HasWitnessVote(s *state.Session, account, witness auth.AccountName) (bool, error) {
-	return s.Has(WitnessVoteTable, state.PrimaryIndex, witnessVoteKey(account, witness))
+	return EnsureWitnessVoteStore(s).Has(account, witness), nil
 }
 
 // DeleteWitnessVote removes account's vote for witness.
 func DeleteWitnessVote(s *state.Session, account, witness auth.AccountName) {
-	s.Delete(WitnessVoteTable, state.PrimaryIndex, witnessVoteKey(account, witness))
+	EnsureWitnessVoteStore(s).Delete(account, witness)
 }
 
 // AdjustWitnessVotesForVoter walks every witness_vote row cast by
@@ -447,31 +381,34 @@ func AdjustWitnessVotesForVoter(s *state.Session, account auth.AccountName, delt
 	if delta == 0 {
 		return
 	}
-	prefix := state.AppendAccountName(nil, account)
-	type pair struct{ witness auth.AccountName }
-	var votes []pair
-	_ = s.Range(WitnessVoteTable, state.PrimaryIndex, prefix,
-		func(body, _ []byte) (bool, error) {
-			if len(body) < 2*state.AccountNameKeyLen {
-				return true, nil
-			}
-			witnessBytes := body[state.AccountNameKeyLen : 2*state.AccountNameKeyLen]
-			n := state.AccountNameKeyLen
-			for n > 0 && witnessBytes[n-1] == 0 {
-				n--
-			}
-			votes = append(votes, pair{witness: string(witnessBytes[:n])})
-			return true, nil
-		})
+	votes := EnsureWitnessVoteStore(s).VotesFor(account)
+	if len(votes) == 0 {
+		return
+	}
 	dgpo, _ := GetDGPO(s)
 	hf := hardfork.SetForBlock(dgpo.HeadBlockNumber)
-	for _, v := range votes {
-		w, err := GetWitness(s, v.witness)
-		if err != nil {
+	// Hoist the witness schedule read out of the per-witness loop —
+	// AdjustWitnessVote needs CurrentVirtualTime which doesn't change
+	// across iterations of this loop (only updated by the per-block
+	// schedule rebuild). Saves a btree Get + ReadWitnessSchedule per
+	// witness vote (30+ saves per producer-reward block).
+	ws, wsErr := GetWitnessSchedule(s)
+	wstore := EnsureWitnessStore(s)
+	for _, witnessName := range votes {
+		w, ok := wstore.Get(witnessName)
+		if !ok {
 			continue
 		}
-		AdjustWitnessVote(s, &w, delta, hf)
-		PutWitness(s, &w)
+		if wsErr == nil {
+			adjustWitnessVoteWith(&w, delta, hf, ws.CurrentVirtualTime)
+		} else {
+			// Fall back to the public path (no schedule yet).
+			w.TotalVotesVests += delta
+			if w.TotalVotesVests < 0 {
+				w.TotalVotesVests = 0
+			}
+		}
+		wstore.Put(&w)
 	}
 }
 
@@ -499,87 +436,110 @@ func AdjustWitnessVote(s *state.Session, w *Witness, delta int64, hf hardfork.Se
 		}
 		return
 	}
-	mod128 := uint128Modulus()
-	currentVT := new(big.Int).SetBytes(ws.CurrentVirtualTime[:])
-	virtualLastUpdate := new(big.Int).SetBytes(w.VirtualLastUpdate[:])
-	virtualPosition := new(big.Int).SetBytes(w.VirtualPosition[:])
+	adjustWitnessVoteWith(w, delta, hf, ws.CurrentVirtualTime)
+}
+
+// adjustWitnessVoteWith is the inner loop callable when the witness schedule's
+// CurrentVirtualTime is already in hand — used by AdjustWitnessVotesForVoter
+// to hoist the GetWitnessSchedule out of the per-witness loop (called 30+
+// times per producer-reward block; each GetWitnessSchedule does a btree Get
+// + ReadWitnessSchedule).
+func adjustWitnessVoteWith(w *Witness, delta int64, hf hardfork.Set, currentVT16 [16]byte) {
+	// Native uint128 path — replaces the previous big.Int implementation
+	// which allocated 7+ heap big.Ints per call. Each AdjustWitnessVote
+	// fires once per witness in the producer's vote list (≤30) every
+	// block via processProducerReward → CreateVesting → AdjustProxiedWitnessVotes.
+	currentVT := UnpackUint128BE(currentVT16)
+	virtualLastUpdate := UnpackUint128BE(w.VirtualLastUpdate)
+	virtualPosition := UnpackUint128BE(w.VirtualPosition)
 
 	// delta_pos = OLD votes * (current_vt - virtual_last_update).
-	// virtual_position += delta_pos — wraps mod 2^128 in C++. Mirror
-	// that wrap explicitly with big.Int + Mod.
+	// virtual_position += delta_pos — wraps mod 2^128 (C++ uint128_t
+	// native overflow; Uint128.Add wraps the same way).
 	if currentVT.Cmp(virtualLastUpdate) > 0 {
-		dt := new(big.Int).Sub(currentVT, virtualLastUpdate)
-		dp := new(big.Int).Mul(big.NewInt(w.TotalVotesVests), dt)
-		virtualPosition.Add(virtualPosition, dp)
-		virtualPosition.Mod(virtualPosition, mod128)
+		dt := currentVT.Sub(virtualLastUpdate)
+		// w.TotalVotesVests is non-negative (clamped at 0 after every
+		// update), so safe to convert to uint64.
+		dp := dt.Mul64(uint64(w.TotalVotesVests))
+		virtualPosition = virtualPosition.Add(dp) // wraps mod 2^128
 	}
-	// virtual_last_update = current_virtual_time
-	w.VirtualLastUpdate = packBig128(currentVT)
+	w.VirtualLastUpdate = currentVT.PackBE16()
 
 	w.TotalVotesVests += delta
 	if w.TotalVotesVests < 0 {
 		w.TotalVotesVests = 0
 	}
-	w.VirtualPosition = packBig128(virtualPosition)
+	w.VirtualPosition = virtualPosition.PackBE16()
 
 	// Lap length: HF2+ uses LAP_LENGTH2 (2^128-1); pre-HF2 uses
 	// LAP_LENGTH (2^64-1).
-	lap := lapLength2()
-	if !hf.Has(hardfork.HF2) {
-		lap = lapLength()
+	var lap Uint128
+	if hf.Has(hardfork.HF2) {
+		lap = Uint128Max // 2^128 - 1
+	} else {
+		lap = Uint128{Hi: 0, Lo: ^uint64(0)} // 2^64 - 1
 	}
 	// virtual_scheduled_time = virtual_last_update + (lap - virtual_position) / (votes + 1).
 	// In C++ this is uint128 subtraction — when virtual_position > lap
 	// it wraps to a huge value, the divide gives a huge advance, then
 	// VST overflows past current_vt and the HF4+ clamp catches it.
-	advance := new(big.Int).Sub(lap, virtualPosition)
-	advance.Mod(advance, mod128)
-	advance.Quo(advance, big.NewInt(w.TotalVotesVests+1))
-	newVST := new(big.Int).Add(currentVT, advance)
-	newVST.Mod(newVST, mod128)
+	advance := lap.Sub(virtualPosition) // wraps if vp > lap
+	// votes+1 is at most int64.max+1 which fits in uint64.
+	advance = advance.Quo64(uint64(w.TotalVotesVests + 1))
+	newVST := currentVT.Add(advance) // wraps mod 2^128
 	// HF4+: if VST < current_vt (mod-128 overflow), clamp to uint128 max.
 	if hf.Has(hardfork.HF4) {
 		if newVST.Cmp(currentVT) < 0 {
-			newVST = lap128Max()
+			newVST = Uint128Max
 		}
 	}
-	w.VirtualScheduledTime = packBig128(newVST)
+	w.VirtualScheduledTime = newVST.PackBE16()
 }
 
 // packBig128 returns the 16-byte big-endian uint128 representation of v.
 // Caller is responsible for keeping v in the [0, 2^128) range — values
-// outside the range are silently truncated to the low 128 bits.
+// outside the range are silently truncated to the low 128 bits. Uses
+// FillBytes (Go 1.15+) to avoid the per-call alloc that v.Bytes() does.
 func packBig128(v *big.Int) [16]byte {
 	var out [16]byte
 	if v == nil || v.Sign() <= 0 {
 		return out
 	}
-	src := v.Bytes()
-	if len(src) > 16 {
+	if v.BitLen() > 128 {
+		// Mask to low 128 bits via temporary; fall back to slow path.
+		src := v.Bytes()
 		src = src[len(src)-16:]
+		copy(out[:], src)
+		return out
 	}
-	copy(out[16-len(src):], src)
+	v.FillBytes(out[:])
 	return out
 }
+
+// uint128 helper constants — package-level immutable big.Ints to avoid
+// allocating fresh big.Ints on every AdjustWitnessVote call (alloc
+// profile showed math/big.nat.make at 18% of allocations driven by
+// these helpers). Treat the returned pointer as read-only — never pass
+// to a mutating method (Add, Sub, etc.) as the LEFT operand.
+var (
+	uint128ModulusVal = new(big.Int).Lsh(big.NewInt(1), 128)
+	lapLength2Val     = new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 128), big.NewInt(1))
+	lapLengthVal      = new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 64), big.NewInt(1))
+)
 
 // uint128Modulus returns 2^128 — the modulus for wrapping uint128 math.
 // Used to keep virtual_position and virtual_scheduled_time in
 // [0, 2^128) like C++'s native uint128 wraparound.
-func uint128Modulus() *big.Int {
-	return new(big.Int).Lsh(big.NewInt(1), 128)
-}
+func uint128Modulus() *big.Int { return uint128ModulusVal }
 
-func lapLength2() *big.Int {
-	// 2^128 - 1
-	return new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 128), big.NewInt(1))
-}
+// lapLength2 returns 2^128 - 1 (HF2+ lap length).
+func lapLength2() *big.Int { return lapLength2Val }
 
-func lapLength() *big.Int {
-	// 2^64 - 1
-	return new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 64), big.NewInt(1))
-}
+// lapLength returns 2^64 - 1 (pre-HF2 lap length).
+func lapLength() *big.Int { return lapLengthVal }
 
-func lap128Max() *big.Int { return lapLength2() }
+// lap128Max returns 2^128 - 1 — sentinel for HF4+ overflow clamp.
+func lap128Max() *big.Int { return lapLength2Val }
 
 // ClearWitnessVotesForAccount walks every witness_vote row keyed under
 // account and removes it, decrementing each affected witness's
@@ -590,28 +550,10 @@ func lap128Max() *big.Int { return lapLength2() }
 //
 // Returns the number of votes cleared.
 func ClearWitnessVotesForAccount(s *state.Session, account auth.AccountName, voterVesting int64) int {
-	prefix := state.AppendAccountName(nil, account)
-	type pair struct{ witness auth.AccountName }
-	var votes []pair
-	_ = s.Range(WitnessVoteTable, state.PrimaryIndex, prefix,
-		func(body, _ []byte) (bool, error) {
-			// body is the row's primary key minus the [table:index] prefix:
-			// account_padded(16) || witness_padded(16). Recover the
-			// witness name from the trailing 16 bytes.
-			if len(body) < 2*state.AccountNameKeyLen {
-				return true, nil
-			}
-			witnessBytes := body[state.AccountNameKeyLen : 2*state.AccountNameKeyLen]
-			n := state.AccountNameKeyLen
-			for n > 0 && witnessBytes[n-1] == 0 {
-				n--
-			}
-			votes = append(votes, pair{witness: string(witnessBytes[:n])})
-			return true, nil
-		})
-	for _, v := range votes {
-		DeleteWitnessVote(s, account, v.witness)
-		w, err := GetWitness(s, v.witness)
+	votes := EnsureWitnessVoteStore(s).VotesFor(account)
+	for _, witness := range votes {
+		DeleteWitnessVote(s, account, witness)
+		w, err := GetWitness(s, witness)
 		if err == nil {
 			w.TotalVotesVests -= voterVesting
 			if w.TotalVotesVests < 0 {

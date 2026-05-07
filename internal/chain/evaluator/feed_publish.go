@@ -3,6 +3,7 @@ package evaluator
 import (
 	"fmt"
 
+	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/op"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
@@ -55,6 +56,10 @@ func (declineVotingRightsEvaluator) Apply(ctx *Context, o op.Operation) error {
 	dv, ok := o.(op.DeclineVotingRights)
 	if !ok {
 		return fmt.Errorf("declineVotingRightsEvaluator: unexpected op type %T", o)
+	}
+	// HF14__324 — decline_voting_rights is HF14+ only.
+	if !ctx.Hardforks.Has(hardfork.HF14) {
+		return fmt.Errorf("decline_voting_rights: requires HF14")
 	}
 	if has, err := objects.HasAccount(ctx.DB, dv.Account); err != nil {
 		return err

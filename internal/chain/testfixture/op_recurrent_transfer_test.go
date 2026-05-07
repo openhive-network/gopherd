@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"hived-go/internal/protocol/asset"
+	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/op"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
@@ -25,6 +26,7 @@ func TestRecurrentTransferPairIDBasic(t *testing.T) {
 	f.Actors("alice", "bob")
 	f.FundLiquidHBD("alice", 200_000)
 	f.GenerateBlock()
+	f.HardforksUpTo(hardfork.HF25)
 
 	// First schedule: pair_id 0, 10 HBD every 72h, 5 executions.
 	if err := f.ApplyOp(op.RecurrentTransfer{
@@ -81,6 +83,7 @@ func TestRecurrentTransferPairIDCRUDUpdate(t *testing.T) {
 	f.Actors("alice", "bob")
 	f.FundLiquidHBD("alice", 200_000)
 	f.GenerateBlock()
+	f.HardforksUpTo(hardfork.HF25)
 
 	// Initial create with pair_id=100, recurrence=48, execs=3, 20 HBD.
 	f.MustApplyOp(op.RecurrentTransfer{
@@ -127,6 +130,7 @@ func TestRecurrentTransferPairIDCRUDDelete(t *testing.T) {
 	f.Actors("alice", "bob")
 	f.FundLiquidHBD("alice", 200_000)
 	f.GenerateBlock()
+	f.HardforksUpTo(hardfork.HF25)
 
 	f.MustApplyOp(op.RecurrentTransfer{
 		From:       "alice",
@@ -166,6 +170,7 @@ func TestRecurrentTransferHBD(t *testing.T) {
 	f.Actors("alice", "bob")
 	f.FundLiquidHBD("alice", 100_000)
 	f.GenerateBlock()
+	f.HardforksUpTo(hardfork.HF25)
 
 	if err := f.ApplyOp(op.RecurrentTransfer{
 		From:       "alice",

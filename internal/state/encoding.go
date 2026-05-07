@@ -41,16 +41,14 @@ func AppendInt64BE(dst []byte, v int64) []byte {
 const AccountNameKeyLen = 16
 
 // AppendAccountName appends name as exactly AccountNameKeyLen bytes,
-// truncating or NUL-padding as needed.
+// truncating or NUL-padding as needed. Hot path: this is on every state
+// lookup that takes an account_name_type, so the byte-by-byte loop is
+// hand-rolled to avoid per-iteration append overhead — `var buf` lives
+// on the stack, copy fills the prefix from name, the rest stays zero.
 func AppendAccountName(dst []byte, name string) []byte {
-	for i := 0; i < AccountNameKeyLen; i++ {
-		if i < len(name) {
-			dst = append(dst, name[i])
-		} else {
-			dst = append(dst, 0)
-		}
-	}
-	return dst
+	var buf [AccountNameKeyLen]byte
+	copy(buf[:], name)
+	return append(dst, buf[:]...)
 }
 
 // AppendTimePointSec appends a time_point_sec as 4 big-endian bytes.

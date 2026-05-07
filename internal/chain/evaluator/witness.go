@@ -219,6 +219,10 @@ func (witnessSetPropertiesEvaluator) Apply(ctx *Context, o op.Operation) error {
 	if !ok {
 		return fmt.Errorf("witnessSetPropertiesEvaluator: unexpected op type %T", o)
 	}
+	// HF20__1620 — witness_set_properties is HF20+ only.
+	if !ctx.Hardforks.Has(hardfork.HF20) {
+		return fmt.Errorf("witness_set_properties: requires HF20")
+	}
 	w, err := objects.GetWitness(ctx.DB, wsp.Owner)
 	if err != nil {
 		if err == state.ErrNotFound {
@@ -351,12 +355,17 @@ func (accountWitnessVoteEvaluator) Apply(ctx *Context, o op.Operation) error {
 		}
 		return err
 	}
-	if !voter.CanVote() {
-		return fmt.Errorf("account_witness_vote: %q has declined voting rights", wv.Account)
-	}
+	// hive_evaluator.cpp:267-268 — proxy check FIRST, then can_vote.
 	if voter.Proxy != "" {
 		return ErrCantVoteWithProxy
 	}
+	if !voter.CanVote() {
+		return fmt.Errorf("account_witness_vote: %q has declined voting rights", wv.Account)
+	}
+	// hive_evaluator.cpp:269 — UNCONDITIONAL refresh of governance vote
+	// expiration BEFORE the vote delta. Pre-HF22 the field is set but
+	// unread (idempotent on consensus); HF22+ it gates expiry sweeps.
+	updateGovernanceVoteExpirationTs(&voter, ctx.HeadBlockTime)
 
 	w, err := objects.GetWitness(ctx.DB, wv.Witness)
 	if err != nil {
@@ -394,10 +403,6 @@ func (accountWitnessVoteEvaluator) Apply(ctx *Context, o op.Operation) error {
 		objects.PutWitnessVote(ctx.DB, wv.Account, wv.Witness)
 		voter.WitnessesVotedFor++
 		applyWitnessVoteDelta(ctx, &voter, &w, effectiveVests)
-		// hive_evaluator.cpp:269 — UNCONDITIONAL refresh of the
-		// governance vote expiration. Pre-HF22 the field exists but
-		// is unread (so the write is a harmless idempotent set).
-		updateGovernanceVoteExpirationTs(&voter, ctx.HeadBlockTime)
 	} else {
 		if !had {
 			return fmt.Errorf("%w: %q -> %q", ErrNotVotedForWitness, wv.Account, wv.Witness)
@@ -490,8 +495,11 @@ func (accountWitnessProxyEvaluator) Apply(ctx *Context, o op.Operation) error {
 		return fmt.Errorf("account_witness_proxy: %q has declined voting rights", pr.Account)
 	}
 	// hive_evaluator.cpp:214 — refresh governance vote expiration
-	// unconditionally before propagating proxy changes.
+	// unconditionally before propagating proxy changes. Mutate locally
+	// AND persist before NullifyProxiedWitnessVotes runs, so a later
+	// re-read of the account doesn't drop this update.
 	updateGovernanceVoteExpirationTs(&a, ctx.HeadBlockTime)
+	objects.PutAccount(ctx.DB, &a)
 
 	// Mirror C++ hive_evaluator.cpp:210 — account_witness_proxy unconditionally
 	// nullifies the propagation chain first (so any prior proxy stops
@@ -506,16 +514,15 @@ func (accountWitnessProxyEvaluator) Apply(ctx *Context, o op.Operation) error {
 		// preceding Nullify already subtracted the full propagation
 		// (direct + proxied_vsf_votes[*]) from each witness.
 		objects.ClearWitnessVotesForAccount(ctx.DB, pr.Account, 0)
-		a.WitnessesVotedFor = 0
-		a.Proxy = pr.Proxy
 		// Re-read after Nullify possibly mutated `a` (proxy chain
-		// updates can write back through GetAccount).
+		// updates can write back through GetAccount). The fresh row
+		// already has the persisted GovernanceVoteExpiration update.
 		fresh, ferr := objects.GetAccount(ctx.DB, pr.Account)
 		if ferr == nil {
-			fresh.Proxy = pr.Proxy
-			fresh.WitnessesVotedFor = 0
 			a = fresh
 		}
+		a.Proxy = pr.Proxy
+		a.WitnessesVotedFor = 0
 		objects.ApplyProxyAtDepth(ctx.DB, &a, directPower)
 	} else {
 		a.Proxy = ""

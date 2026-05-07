@@ -143,8 +143,11 @@ func TestProposalDailyBudgetCap(t *testing.T) {
 	f.SkipSeconds(skip)
 
 	bob := f.HBDBalance("bob")
-	// Hourly budget = treasury(1_000_000) / 100 × 3600 / 86400 = 416.
-	wantMax := int64(1_000_000 / 100 * 3600 / 86400)
+	// Hourly budget = treasury / 100 × 3600 / 86400. Treasury is the
+	// seeded 1_000_000 + 10 HBD (10_000 sat) fee paid by alice on
+	// create_proposal (dhf_evaluator.cpp:96).
+	const treasuryAtMaintenance = int64(1_000_000 + 10_000)
+	wantMax := treasuryAtMaintenance / 100 * 3600 / 86400
 	if bob > wantMax {
 		t.Fatalf("bob exceeded hourly budget: got %d, max %d", bob, wantMax)
 	}

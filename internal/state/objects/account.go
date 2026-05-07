@@ -501,6 +501,11 @@ func PutAccount(s *state.Session, a *Account) {
 }
 
 // GetAccount fetches the account named name. Returns ErrNotFound if absent.
+//
+// A parsed-Account cache was tried (mirroring the witness path) but the
+// per-Put cost of mirroring 100+ accounts/block into a session map
+// outweighed the read savings — accounts are written more than they're
+// re-read within a block, unlike the active 21 witnesses.
 func GetAccount(s *state.Session, name auth.AccountName) (Account, error) {
 	v, err := s.Get(AccountTable, state.PrimaryIndex, AccountKey(name))
 	if err != nil {

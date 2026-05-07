@@ -6,6 +6,7 @@ import (
 
 	"hived-go/internal/crypto"
 	"hived-go/internal/protocol/auth"
+	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/op"
 )
 
@@ -169,6 +170,7 @@ func TestClaimAccountApply(t *testing.T) {
 	f.Actor("alice")
 	f.FundLiquid("alice", 100_000)
 	f.GenerateBlock()
+	f.HardforksUpTo(hardfork.HF20)
 
 	t.Log("--- Test claim account paying the fee in HIVE")
 	if err := f.ApplyOp(op.ClaimAccount{
@@ -199,6 +201,7 @@ func TestCreateClaimedAccountApply(t *testing.T) {
 	f.Actor("alice")
 	f.FundLiquid("alice", 100_000)
 	f.GenerateBlock()
+	f.HardforksUpTo(hardfork.HF20)
 
 	// First, claim a slot.
 	if err := f.ApplyOp(op.ClaimAccount{
@@ -245,6 +248,7 @@ func TestAccountUpdate2Apply(t *testing.T) {
 	f := New(t)
 	f.Actor("alice")
 	f.GenerateBlock()
+	f.HardforksUpTo(hardfork.HF21)
 
 	newMemo := crypto.PublicKey{0x02, 'M', 'E', 'M', 'O'}
 	if err := f.ApplyOp(op.AccountUpdate2{

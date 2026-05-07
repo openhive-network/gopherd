@@ -3,12 +3,51 @@ package evaluator
 import (
 	"errors"
 	"fmt"
+	"math/big"
 
 	"hived-go/internal/protocol/asset"
+	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/op"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
 )
+
+// convertHiveToHBDByMedian mirrors C++ asset_symbol::operator*(price)
+// for HIVE×median → HBD. base = HBD, quote = HIVE (post-HF20 normalized).
+// Pre-HF20 the orientation can be reversed; we handle both. Uses big.Int
+// to avoid int64 overflow on the multiply.
+func convertHiveToHBDByMedian(hiveAmount int64, p asset.Price) int64 {
+	if p.Base.Amount <= 0 || p.Quote.Amount <= 0 {
+		return 0
+	}
+	var num, den int64
+	switch {
+	case p.Base.Symbol.Num == asset.HbdSymbol && p.Quote.Symbol.Num == asset.HiveSymbol:
+		num, den = p.Base.Amount, p.Quote.Amount
+	case p.Base.Symbol.Num == asset.HiveSymbol && p.Quote.Symbol.Num == asset.HbdSymbol:
+		num, den = p.Quote.Amount, p.Base.Amount
+	default:
+		return 0
+	}
+	out := new(big.Int).Mul(big.NewInt(hiveAmount), big.NewInt(num))
+	out.Quo(out, big.NewInt(den))
+	return out.Int64()
+}
+
+// isTreasuryAccount reports whether name is the canonical DHF treasury
+// account at the given hardfork set. Mirrors hived's
+// database::is_treasury (database.cpp).
+//   - pre-HF24: "steem.dao"
+//   - HF24+:    "hive.fund" (the rename was atomic at HF24)
+//
+// Hived also clears the OLD treasury post-HF24 — we keep both names
+// matching as treasury throughout for safety on the boundary block.
+func isTreasuryAccount(name string, hf hardfork.Set) bool {
+	if hf.Has(hardfork.HF24) {
+		return name == "hive.fund"
+	}
+	return name == "steem.dao"
+}
 
 // Errors evaluators commonly return. Caller code can use errors.Is to
 // detect the consensus reason for rejection.
@@ -46,6 +85,50 @@ func (transferEvaluator) Apply(ctx *Context, o op.Operation) error {
 			return fmt.Errorf("%w: from=%q", ErrAccountNotFound, tx.From)
 		}
 		return err
+	}
+
+	// HF1_24 treasury HIVE→HBD conversion (hive_evaluator_transfer.cpp:263).
+	// Sending HIVE to treasury post-HF24 implicitly converts to HBD at the
+	// current median price, supply moves accordingly.
+	if ctx.Hardforks.Has(hardfork.HF24) && tx.Amount.Symbol.Num == asset.HiveSymbol && isTreasuryAccount(tx.To, ctx.Hardforks) {
+		if from.Balance < tx.Amount.Amount {
+			return fmt.Errorf("%w: %q has %d HIVE, needs %d", ErrInsufficientBalance, tx.From, from.Balance, tx.Amount.Amount)
+		}
+		fh, ferr := objects.GetFeedHistory(ctx.DB)
+		if ferr != nil || fh.CurrentMedianHistory.Base.Amount == 0 {
+			return fmt.Errorf("transfer: send HIVE to treasury requires a price feed")
+		}
+		convertedAmt := convertHiveToHBDByMedian(tx.Amount.Amount, fh.CurrentMedianHistory)
+		from.Balance -= tx.Amount.Amount
+		objects.PutAccount(ctx.DB, &from)
+
+		to, terr := objects.GetAccount(ctx.DB, tx.To)
+		if terr != nil {
+			return fmt.Errorf("%w: to=%q (treasury)", ErrAccountNotFound, tx.To)
+		}
+		objects.AdjustHBDBalance(ctx.DB, &to, ctx.HeadBlockTime, convertedAmt)
+		objects.PutAccount(ctx.DB, &to)
+
+		// adjust_supply(-HIVE) and adjust_supply(+HBD) — supply totals
+		// in DGPO.
+		dgpo, derr := objects.GetDGPO(ctx.DB)
+		if derr == nil {
+			dgpo.CurrentSupply -= tx.Amount.Amount
+			if convertedAmt > 0 {
+				dgpo.CurrentHBDSupply += convertedAmt
+			}
+			objects.PutDGPO(ctx.DB, &dgpo)
+		}
+		return nil
+	}
+
+	// HF0_21__3343: post-HF21, treasury accounts can only receive HBD
+	// (the HF24 HIVE→HBD path above handles HF24+). Hive sending HIVE
+	// to treasury pre-HF24 is rejected.
+	if ctx.Hardforks.Has(hardfork.HF21) && isTreasuryAccount(tx.To, ctx.Hardforks) {
+		if tx.Amount.Symbol.Num != asset.HbdSymbol {
+			return fmt.Errorf("transfer: can only send HBD or HIVE-via-HF24 to treasury %q", tx.To)
+		}
 	}
 
 	// Determine which balance field the transfer touches based on the

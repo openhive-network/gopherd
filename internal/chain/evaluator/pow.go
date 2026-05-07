@@ -5,6 +5,7 @@ import (
 	"math/big"
 	"os"
 
+	"hived-go/internal/crypto"
 	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/op"
 	"hived-go/internal/state"
@@ -66,8 +67,9 @@ func (powEvaluator) Apply(ctx *Context, o op.Operation) error {
 	}
 	// pow1 always pays the reward (it's deprecated at HF13 and chains
 	// past that point reject the op entirely; the block_log won't
-	// contain pow1 ops post-HF13).
-	return ensureMinerAccountForPow(ctx, pw.WorkerAccount, true)
+	// contain pow1 ops post-HF13). Pass the work.worker as signing_key
+	// for new witnesses (mirrors hive_evaluator.cpp:476).
+	return ensureMinerAccountForPow(ctx, pw.WorkerAccount, true, pw.Props, pw.Work.Worker)
 }
 
 // pow2Evaluator implements the partial-mining-era apply for `pow2`. Same
@@ -88,10 +90,17 @@ func (pow2Evaluator) Apply(ctx *Context, o op.Operation) error {
 	default:
 		return fmt.Errorf("pow2: unknown work variant %d", pw.WorkVariantTag)
 	}
+	// pow2's signing_key for a NEW account = *o.new_owner_key
+	// (hive_evaluator.cpp:574). For existing accounts the signing_key
+	// is not modified.
+	var signingKey crypto.PublicKey
+	if pw.NewOwnerKey != nil {
+		signingKey = *pw.NewOwnerKey
+	}
 	// hived's pow2_evaluator (libraries/chain/hive_evaluator.cpp:593) only
 	// pays the reward when HF16 is NOT yet active. Account/witness setup
 	// always runs.
-	return ensureMinerAccountForPow(ctx, worker, !ctx.Hardforks.Has(hardfork.HF16))
+	return ensureMinerAccountForPow(ctx, worker, !ctx.Hardforks.Has(hardfork.HF16), pw.Props, signingKey)
 }
 
 // HIVE_MIN_POW_REWARD = HIVE_MINING_REWARD = 1.000 HIVE in satoshi
@@ -185,8 +194,12 @@ func payPowReward(ctx *Context) error {
 
 // ensureMinerAccountForPow creates an account named worker if missing
 // and (when payReward is true) credits the block producer with the
-// pow reward.
-func ensureMinerAccountForPow(ctx *Context, worker string, payReward bool) error {
+// pow reward. props is the published chain_properties from the op;
+// they're copied onto the witness via copy_legacy_chain_properties
+// (hive_evaluator.cpp:464, 472, 588). signingKey is set as the witness's
+// block_signing_key on FIRST PoW only (hive_evaluator.cpp:476, 574);
+// subsequent PoW ops on an existing witness leave signing_key alone.
+func ensureMinerAccountForPow(ctx *Context, worker string, payReward bool, props op.LegacyChainProperties, signingKey crypto.PublicKey) error {
 	if worker == "" {
 		return fmt.Errorf("pow/pow2: empty worker_account")
 	}
@@ -232,6 +245,8 @@ func ensureMinerAccountForPow(ctx *Context, worker string, payReward bool) error
 		}
 		w = got
 	}
+	_ = props
+	_ = signingKey
 	// Match C++ pow_apply (hive_evaluator.cpp:451-455, 465, 477):
 	//   ++dgp.total_pow; ++dgp.num_pow_witnesses; w.pow_worker = dgp.total_pow.
 	// Both counters bump UNCONDITIONALLY — C++ does it in a single

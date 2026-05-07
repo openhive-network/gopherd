@@ -3,6 +3,7 @@ package testfixture
 import (
 	"testing"
 
+	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/op"
 )
 
@@ -150,6 +151,7 @@ func TestRemoveProposalNonOwnerRejected(t *testing.T) {
 	f.Actors("alice", "bob")
 	f.FundLiquidHBD("alice", 80_000)
 	f.GenerateBlock()
+	f.HardforksUpTo(hardfork.HF21)
 
 	now := f.HeadBlockTime()
 	if err := f.ApplyOp(op.CreateProposal{

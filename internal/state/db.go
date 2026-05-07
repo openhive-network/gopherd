@@ -19,6 +19,91 @@ type Database struct {
 	// (FeedHistory, WitnessSchedule) that change rarely. Invalidated
 	// by domain Put helpers when the underlying row mutates.
 	Aux map[string]any
+	// subsystems is the registry of typed in-memory containers that
+	// chainbase-style domain code (objects.WitnessStore, …) registers
+	// at construction. Each one implements SnapshotSubsystem so the
+	// Session lifecycle (Snapshot/Restore/Commit/Undo) can roll their
+	// undo-log positions in lock-step with the K/V overlay.
+	subsystems []SnapshotSubsystem
+	// subsystemReg holds the same subsystems indexed by a string name
+	// so domain code can fetch them from a Session without an import
+	// cycle. Lookup is cold (once per Session, then cached on the
+	// caller side), so map overhead doesn't matter.
+	subsystemReg map[string]any
+}
+
+// SnapshotSubsystem is implemented by typed in-memory state containers
+// (objects.WitnessStore, future Account/Comment stores). Each container
+// owns its own undo log keyed by an integer "point"; the Session
+// captures one point per subsystem in its Savepoint and rolls them
+// back together on Restore. Commit drops accumulated undo entries.
+//
+// Snapshot semantics mirror chainbase's undo_session: every mutation
+// writes a before-image into the log; Restore replays in reverse.
+type SnapshotSubsystem interface {
+	SnapshotPoint() int
+	RestoreToPoint(int)
+	CommitPoint()
+}
+
+// RegisterSubsystem records a typed container plus its snapshot hooks.
+// Returns the container slot so callers can fetch it back via
+// GetSubsystem(name). Calling twice with the same name overwrites the
+// registry entry but appends to the snapshot list — registrations
+// happen once at Database construction so that's fine in practice.
+func (d *Database) RegisterSubsystem(name string, sys any, snap SnapshotSubsystem) {
+	if d.subsystemReg == nil {
+		d.subsystemReg = make(map[string]any, 4)
+	}
+	d.subsystemReg[name] = sys
+	if snap != nil {
+		d.subsystems = append(d.subsystems, snap)
+	}
+}
+
+// GetSubsystem returns the typed container registered under name, or
+// nil if none was registered. Caller must type-assert.
+func (d *Database) GetSubsystem(name string) any {
+	if d.subsystemReg == nil {
+		return nil
+	}
+	return d.subsystemReg[name]
+}
+
+// snapshotAll captures the current undo-log point of every registered
+// subsystem.
+func (d *Database) snapshotAll(out []int) []int {
+	for _, s := range d.subsystems {
+		out = append(out, s.SnapshotPoint())
+	}
+	return out
+}
+
+// restoreAll rolls every subsystem back to the captured points.
+func (d *Database) restoreAll(points []int) {
+	for i, s := range d.subsystems {
+		if i >= len(points) {
+			s.RestoreToPoint(0)
+			continue
+		}
+		s.RestoreToPoint(points[i])
+	}
+}
+
+// commitAll fires each subsystem's CommitPoint hook to release
+// accumulated undo entries.
+func (d *Database) commitAll() {
+	for _, s := range d.subsystems {
+		s.CommitPoint()
+	}
+}
+
+// undoAll rolls every subsystem all the way back to its zero point —
+// used by Session.Undo (full session discard).
+func (d *Database) undoAll() {
+	for _, s := range d.subsystems {
+		s.RestoreToPoint(0)
+	}
 }
 
 // AuxInvalidate drops a cached parsed object at the Database level.

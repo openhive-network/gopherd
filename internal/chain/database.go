@@ -28,10 +28,24 @@ type Database struct {
 	// the underlying buckets stay warm and we avoid 14M+ map allocations
 	// per replay.
 	session *state.Session
+	// lcbCache mirrors each witness's LastConfirmedBlockNum so the per-
+	// block updateLastIrreversibleBlock can avoid 21 GetWitness reads
+	// (each a btree lookup + full Witness deserialize). Updated whenever
+	// updateProducerLastConfirmed bumps a witness; cache misses are
+	// resolved by reading state and populating the entry. Single-writer
+	// (only updateProducerLastConfirmed mutates LCB), so consistency
+	// holds as long as we update cache and state together.
+	lcbCache map[string]uint32
 }
 
 // New wraps an opened state.Database for block application.
-func New(s *state.Database) *Database { return &Database{state: s, session: state.NewSession(s)} }
+func New(s *state.Database) *Database {
+	return &Database{
+		state:    s,
+		session:  state.NewSession(s),
+		lcbCache: make(map[string]uint32, 32),
+	}
+}
 
 // State returns the underlying state.Database.
 func (d *Database) State() *state.Database { return d.state }
@@ -385,7 +399,7 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	// Producer's last_confirmed_block_num is bumped immediately on
 	// successful block apply (mirrors C++ update_signing_witness which
 	// updates the producer's record before the LIB recompute below).
-	updateProducerLastConfirmed(session, hdr.Witness, blockNum)
+	d.updateProducerLastConfirmed(session, hdr.Witness, blockNum)
 
 	clearExpiredOrders(session, hdr.Timestamp)
 	clearExpiredDelegations(session, hdr.Timestamp)
@@ -394,7 +408,7 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	updateVirtualSupply(session, blockNum)
 	clearNullAccountBalance(session, blockNum)
 	processProducerReward(session, hdr.Witness, blockNum)
-	if os.Getenv("GHIVEDIFF") != "" {
+	if envGhivediff != "" {
 		// Per-block dump in the HF7-cascade-divergence window. Trace
 		// fires AFTER processProducerReward but BEFORE processFunds —
 		// matches C++'s trace location inside process_funds (which is
@@ -403,7 +417,7 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	// GHIVEDIFF_ALL dump matches C++'s placement inside process_funds:
 	// AFTER get_producer_reward (= our processProducerReward) but
 	// BEFORE the content/curate/vesting inflation slice modify.
-	if os.Getenv("GHIVEDIFF_ALL") != "" {
+	if envGhivediffAll != "" {
 		d, _ := objects.GetDGPO(session)
 		fh, _ := objects.GetFeedHistory(session)
 		fmt.Fprintf(os.Stderr, "GHIVEDIFF GLOBAL block=%d fund=%d vfund=%d vshares=%d supply=%d vsupply=%d hbd_supply=%d median=%d/%d\n",
@@ -416,7 +430,7 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	// GHIVEDIFF_ACCOUNTS=acc1,acc2 — per-block balance dump for each
 	// listed account. Mirrors hived's diagnostic block at
 	// database.cpp:1832-1853.
-	if accEnv := os.Getenv("GHIVEDIFF_ACCOUNTS"); accEnv != "" {
+	if accEnv := envGhivediffAccounts; accEnv != "" {
 		for _, name := range strings.Split(accEnv, ",") {
 			if name == "" {
 				continue
@@ -430,7 +444,7 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 		}
 	}
 	processFunds(session, blockNum, hdr.Witness)
-	if os.Getenv("GHIVEDIFF") != "" {
+	if envGhivediff != "" {
 		switch blockNum {
 		case 100000, 500000, 1000000, 1500000, 2000000, 2500000, 2700000, 2800000, 2850000, 2880000, 2885000, 2889000, 2889020, 2890000, 2891000, 2892000, 2893000, 2894000, 2895000, 2896000, 2896500, 2896680, 2896682, 2897000, 2897356, 2897358, 2897500, 2897700, 2897750, 2897769, 2897770:
 			if a, e := objects.GetAccount(session, "pfunk"); e == nil {
@@ -503,7 +517,7 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 
 	// LIB recompute runs after the new schedule + producer-confirm are
 	// in place. Mirrors database.cpp:2870 update_last_irreversible_block.
-	updateLastIrreversibleBlock(session)
+	d.updateLastIrreversibleBlock(session)
 
 	// Re-read dgpo so the returned value reflects per-block hook
 	// updates (supply, vesting fund, etc.).

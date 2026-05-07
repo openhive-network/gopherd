@@ -21,7 +21,7 @@ const hundredPercentBP uint32 = 10000
 // fast-confirm transactions, not modeled here yet.
 //
 // LIB is monotonically non-decreasing — never moves backwards.
-func updateLastIrreversibleBlock(s *state.Session) {
+func (d *Database) updateLastIrreversibleBlock(s *state.Session) {
 	dgpo, err := objects.GetDGPO(s)
 	if err != nil {
 		return
@@ -39,10 +39,19 @@ func updateLastIrreversibleBlock(s *state.Session) {
 		if int(i) >= len(ws.CurrentShuffledWitnesses) {
 			break
 		}
-		w, err := objects.GetWitness(s, ws.CurrentShuffledWitnesses[i])
+		name := ws.CurrentShuffledWitnesses[i]
+		// Cache hit avoids a btree Get + full Witness deserialize.
+		// updateProducerLastConfirmed is the only writer of LCB, so the
+		// cache stays consistent without invalidation hooks elsewhere.
+		if lcb, ok := d.lcbCache[string(name)]; ok {
+			confirmed = append(confirmed, lcb)
+			continue
+		}
+		w, err := objects.GetWitness(s, name)
 		if err != nil {
 			continue
 		}
+		d.lcbCache[string(name)] = w.LastConfirmedBlockNum
 		confirmed = append(confirmed, w.LastConfirmedBlockNum)
 	}
 	if len(confirmed) == 0 {
@@ -68,7 +77,7 @@ func updateLastIrreversibleBlock(s *state.Session) {
 // last_confirmed_block_num to the just-applied block. Mirrors C++
 // update_signing_witness which sets last_confirmed_block_num to the new
 // head block number for the producer.
-func updateProducerLastConfirmed(s *state.Session, witness string, blockNum uint32) {
+func (d *Database) updateProducerLastConfirmed(s *state.Session, witness string, blockNum uint32) {
 	if witness == "" {
 		return
 	}
@@ -79,6 +88,13 @@ func updateProducerLastConfirmed(s *state.Session, witness string, blockNum uint
 	if w.LastConfirmedBlockNum >= blockNum {
 		return
 	}
+	// Per-block hot path. Snapshot pre-modify index fields so PutWitnessIndexed
+	// can skip the read-prev step PutWitness would otherwise do — saves a
+	// full Get + ReadWitness round-trip every single block.
+	oldVotes := w.TotalVotesVests
+	oldVST := w.VirtualScheduledTime
+	oldPow := w.PowWorker
 	w.LastConfirmedBlockNum = blockNum
-	objects.PutWitness(s, &w)
+	objects.PutWitnessIndexed(s, &w, oldVotes, oldVST, oldPow)
+	d.lcbCache[witness] = blockNum
 }

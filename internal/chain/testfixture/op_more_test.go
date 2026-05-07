@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"hived-go/internal/protocol/asset"
+	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/op"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
@@ -396,6 +397,7 @@ func TestRecurrentTransferApply(t *testing.T) {
 	f.Actors("alice", "bob")
 	f.FundLiquid("alice", 100_000)
 	f.GenerateBlock()
+	f.HardforksUpTo(hardfork.HF25)
 
 	t.Log("--- Create a recurrent transfer schedule")
 	if err := f.ApplyOp(op.RecurrentTransfer{

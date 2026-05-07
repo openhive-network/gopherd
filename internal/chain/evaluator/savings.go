@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"hived-go/internal/protocol/asset"
+	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/op"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
@@ -30,6 +31,11 @@ func (transferToSavingsEvaluator) Apply(ctx *Context, o op.Operation) error {
 	}
 	if t.Amount.Amount <= 0 {
 		return ErrTransferAmountNotPos
+	}
+	// HF21__3343 — cannot send to savings of a treasury account
+	// (hive_evaluator_transfer.cpp:626).
+	if ctx.Hardforks.Has(hardfork.HF21) && isTreasuryAccount(t.To, ctx.Hardforks) {
+		return fmt.Errorf("transfer_to_savings: cannot transfer to treasury %q", t.To)
 	}
 	from, err := objects.GetAccount(ctx.DB, t.From)
 	if err != nil {
@@ -82,6 +88,11 @@ func (transferFromSavingsEvaluator) Apply(ctx *Context, o op.Operation) error {
 	}
 	if t.Amount.Amount <= 0 {
 		return ErrTransferAmountNotPos
+	}
+	// HF21__3343 — withdraw target cannot be treasury unless the asset
+	// is HBD (hive_evaluator_transfer.cpp:639).
+	if ctx.Hardforks.Has(hardfork.HF21) && isTreasuryAccount(t.To, ctx.Hardforks) && t.Amount.Symbol.Num != asset.HbdSymbol {
+		return fmt.Errorf("transfer_from_savings: only HBD may be withdrawn to treasury %q", t.To)
 	}
 	from, err := objects.GetAccount(ctx.DB, t.From)
 	if err != nil {

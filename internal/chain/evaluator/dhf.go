@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"hived-go/internal/protocol/asset"
+	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/op"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
@@ -44,10 +45,24 @@ func nextProposalID(ctx *Context) int64 {
 
 type createProposalEvaluator struct{}
 
+// HIVE_TREASURY_FEE = 10 HBD (10000 sat). HIVE_PROPOSAL_FEE_INCREASE_*
+// constants kick in for HF24+ when proposal duration > 60 days.
+const (
+	treasuryFeeHBD              int64 = 10000
+	proposalFeeIncreaseDays           = 60
+	proposalFeeIncreaseDaysSec        = proposalFeeIncreaseDays * 86400
+	proposalFeeIncreaseAmount   int64 = 1000 // +1 HBD per extra day
+	oneDaySeconds                     = 86400
+)
+
 func (createProposalEvaluator) Apply(ctx *Context, o op.Operation) error {
 	cp, ok := o.(op.CreateProposal)
 	if !ok {
 		return fmt.Errorf("createProposalEvaluator: unexpected op type %T", o)
+	}
+	// HF21__3215 — DHF activates at HF21.
+	if !ctx.Hardforks.Has(hardfork.HF21) {
+		return fmt.Errorf("create_proposal: requires HF21")
 	}
 	if err := cp.Validate(); err != nil {
 		return err
@@ -59,29 +74,43 @@ func (createProposalEvaluator) Apply(ctx *Context, o op.Operation) error {
 		return ErrTransferAmountNotPos
 	}
 	// end_date must be in the future of head_block_time
-	// (dhf_evaluator.cpp:73). start_date can predate head_time slightly
-	// to absorb tx submission latency.
+	// (dhf_evaluator.cpp:43). start_date can predate head_time slightly.
 	if cp.EndDate <= ctx.HeadBlockTime {
 		return fmt.Errorf("create_proposal: end_date must be > head_block_time")
 	}
 	if cp.StartDate >= cp.EndDate {
 		return fmt.Errorf("create_proposal: start_date must precede end_date")
 	}
-	// Treasury fee: HIVE_TREASURY_FEE = 10 HBD = 10000 satoshi.
-	const treasuryFeeHBD int64 = 10000
+
+	// HF24+ fee scaling: proposals with duration > 60 days pay +1 HBD per
+	// extra day (dhf_evaluator.cpp:47-56).
+	feeHBD := treasuryFeeHBD
+	if ctx.Hardforks.Has(hardfork.HF24) {
+		runTime := uint32(0)
+		if cp.EndDate > cp.StartDate {
+			runTime = cp.EndDate - cp.StartDate
+		}
+		if runTime > proposalFeeIncreaseDaysSec {
+			extraDays := int64(runTime/oneDaySeconds) - proposalFeeIncreaseDays
+			if extraDays > 0 {
+				feeHBD += proposalFeeIncreaseAmount * extraDays
+			}
+		}
+	}
+
+	// Treasury account must exist (dhf_evaluator.cpp:59). Resolve name
+	// at the current hardfork — pre-HF24 = "steem.dao", HF24+ = "hive.fund".
+	treasuryName := "steem.dao"
+	if ctx.Hardforks.Has(hardfork.HF24) {
+		treasuryName = "hive.fund"
+	}
+	treasury, terr := objects.GetAccount(ctx.DB, treasuryName)
+	if terr != nil {
+		return fmt.Errorf("create_proposal: treasury account %q missing", treasuryName)
+	}
+
 	creator, cerr := objects.GetAccount(ctx.DB, cp.Creator)
 	if cerr != nil {
-		return fmt.Errorf("%w: creator=%q", ErrAccountNotFound, cp.Creator)
-	}
-	if creator.HBDBalance < treasuryFeeHBD {
-		return fmt.Errorf("create_proposal: creator %q has insufficient HBD for treasury fee (%d < %d)",
-			cp.Creator, creator.HBDBalance, treasuryFeeHBD)
-	}
-	creator.HBDBalance -= treasuryFeeHBD
-	objects.PutAccount(ctx.DB, &creator)
-	if has, err := objects.HasAccount(ctx.DB, cp.Creator); err != nil {
-		return err
-	} else if !has {
 		return fmt.Errorf("%w: creator=%q", ErrAccountNotFound, cp.Creator)
 	}
 	if has, err := objects.HasAccount(ctx.DB, cp.Receiver); err != nil {
@@ -89,6 +118,11 @@ func (createProposalEvaluator) Apply(ctx *Context, o op.Operation) error {
 	} else if !has {
 		return fmt.Errorf("%w: receiver=%q", ErrAccountNotFound, cp.Receiver)
 	}
+	if creator.HBDBalance < feeHBD {
+		return fmt.Errorf("create_proposal: creator %q has insufficient HBD for treasury fee (%d < %d)",
+			cp.Creator, creator.HBDBalance, feeHBD)
+	}
+
 	id := nextProposalID(ctx)
 	objects.PutProposal(ctx.DB, &objects.Proposal{
 		ID:        id,
@@ -100,6 +134,13 @@ func (createProposalEvaluator) Apply(ctx *Context, o op.Operation) error {
 		Subject:   cp.Subject,
 		Permlink:  cp.Permlink,
 	})
+
+	// Pay the fee: debit creator, credit treasury (dhf_evaluator.cpp:94-96).
+	objects.AdjustHBDBalance(ctx.DB, &creator, ctx.HeadBlockTime, -feeHBD)
+	objects.AdjustHBDBalance(ctx.DB, &treasury, ctx.HeadBlockTime, feeHBD)
+	objects.PutAccount(ctx.DB, &creator)
+	objects.PutAccount(ctx.DB, &treasury)
+
 	return nil
 }
 
@@ -109,6 +150,9 @@ func (updateProposalVotesEvaluator) Apply(ctx *Context, o op.Operation) error {
 	uv, ok := o.(op.UpdateProposalVotes)
 	if !ok {
 		return fmt.Errorf("updateProposalVotesEvaluator: unexpected op type %T", o)
+	}
+	if !ctx.Hardforks.Has(hardfork.HF21) {
+		return fmt.Errorf("update_proposal_votes: requires HF21")
 	}
 	if err := uv.Validate(); err != nil {
 		return err
@@ -158,6 +202,9 @@ func (removeProposalEvaluator) Apply(ctx *Context, o op.Operation) error {
 	if !ok {
 		return fmt.Errorf("removeProposalEvaluator: unexpected op type %T", o)
 	}
+	if !ctx.Hardforks.Has(hardfork.HF21) {
+		return fmt.Errorf("remove_proposal: requires HF21")
+	}
 	if err := rp.Validate(); err != nil {
 		return err
 	}
@@ -183,6 +230,10 @@ func (updateProposalEvaluator) Apply(ctx *Context, o op.Operation) error {
 	up, ok := o.(op.UpdateProposal)
 	if !ok {
 		return fmt.Errorf("updateProposalEvaluator: unexpected op type %T", o)
+	}
+	// HF24__71 — update_proposal is HF24+ only.
+	if !ctx.Hardforks.Has(hardfork.HF24) {
+		return fmt.Errorf("update_proposal: requires HF24")
 	}
 	p, err := objects.GetProposal(ctx.DB, up.ProposalID)
 	if err != nil {

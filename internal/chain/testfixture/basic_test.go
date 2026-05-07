@@ -50,12 +50,9 @@ func TestRecurrentTransferExpiration(t *testing.T) {
 	f := New(t)
 	f.Actors("alice", "bob")
 	f.FundLiquid("alice", 100_000)
-	// Activate HF25+ so process_recurrent_transfers fires.
-	// (We can't HardforksUpTo before fund or actors get re-scaled
-	// by HF1; the order is fund/actor → HF.)
-	for _, name := range []string{"alice", "bob"} {
-		_ = name
-	}
+	// Activate HF25+ so the evaluator accepts the op and
+	// process_recurrent_transfers fires.
+	f.HardforksUpTo(hardfork.HF25)
 
 	if err := f.ApplyOp(op.RecurrentTransfer{
 		From:       "alice",

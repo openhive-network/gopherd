@@ -67,6 +67,13 @@ type Session struct {
 	// mutated in place, and serialized once at commit time instead of
 	// on every Put.
 	preCommit []func()
+	// mistrustDBAux is set by Restore. While true, parsed-object
+	// accessors (GetWitness, etc.) skip the cross-Session DatabaseAux
+	// cache and fall through to overlay/backend — overlay holds the
+	// post-Restore truth, but DatabaseAux still mirrors what was
+	// committed before this Session started, which is now stale
+	// relative to the surviving overlay state.
+	mistrustDBAux bool
 }
 
 // RegisterPreCommit schedules fn to run just before this Session's
@@ -122,6 +129,19 @@ func (s *Session) HasOverlayWrite(table TableID, index IndexID) bool {
 	})
 	return hit
 }
+
+// MistrustDatabaseAux reports whether parsed-object accessors should
+// skip the cross-Session DatabaseAux cache for this Session. Set by
+// Restore — after a tx rollback the Session's overlay holds values
+// that are NEWER than DatabaseAux (which mirrors committed state),
+// so the accessors must consult overlay/backend directly until next
+// Commit clears the flag.
+func (s *Session) MistrustDatabaseAux() bool { return s.mistrustDBAux }
+
+// Database returns the underlying *Database. Domain code uses this to
+// fetch typed in-memory subsystems (objects.WitnessStore, …) that bypass
+// the K/V overlay path entirely.
+func (s *Session) Database() *Database { return s.db }
 
 // GetExpHint forwards to the underlying Database.
 func (s *Session) GetExpHint(table TableID, index IndexID) (uint32, bool) {
@@ -208,14 +228,27 @@ func (s *Session) Has(table TableID, index IndexID, body []byte) (bool, error) {
 // copied; callers may reuse their buffers.
 func (s *Session) Put(table TableID, index IndexID, body, value []byte) {
 	s.scratch = EncodeKeyInto(s.scratch, table, index, body)
-	cv := make([]byte, len(value))
-	copy(cv, value)
+	// Secondary-index writes ship a zero-length value (the sort key
+	// lives in the body); skip the per-call make+copy in that case so
+	// each index update only allocates the overlay key string.
+	var cv []byte
+	if len(value) > 0 {
+		cv = make([]byte, len(value))
+		copy(cv, value)
+	}
 	fullKey := string(s.scratch)
 	if _, exists := s.overlay[fullKey]; !exists {
 		s.overlayKeys.Set(fullKey)
 	}
 	s.overlay[fullKey] = overlayEntry{value: cv}
-	s.dirtyKeys = append(s.dirtyKeys, fullKey)
+	// Append to dirtyKeys, deduping consecutive writes to the same key.
+	// Catches the common DGPO read-modify-write pattern where the same
+	// key gets Put 2-5× in a row from adjacent per-block hooks. Without
+	// this, commitDirty did 30%+ of CPU at chain head re-Setting the
+	// same btree key on each duplicate.
+	if n := len(s.dirtyKeys); n == 0 || s.dirtyKeys[n-1] != fullKey {
+		s.dirtyKeys = append(s.dirtyKeys, fullKey)
+	}
 	if s.readCache != nil {
 		delete(s.readCache, fullKey)
 	}
@@ -230,7 +263,11 @@ func (s *Session) Delete(table TableID, index IndexID, body []byte) {
 		s.overlayKeys.Set(fullKey)
 	}
 	s.overlay[fullKey] = overlayEntry{tombstone: true}
-	s.dirtyKeys = append(s.dirtyKeys, fullKey)
+	// Same consecutive-key dedup as Put — Delete-then-Delete to the same
+	// key is rare but handle uniformly.
+	if n := len(s.dirtyKeys); n == 0 || s.dirtyKeys[n-1] != fullKey {
+		s.dirtyKeys = append(s.dirtyKeys, fullKey)
+	}
 	if s.readCache != nil {
 		delete(s.readCache, fullKey)
 	}
@@ -256,6 +293,8 @@ func (s *Session) Commit(sync bool) error {
 		clear(s.Aux)
 		s.overlayKeys.Clear()
 		s.dirtyKeys = s.dirtyKeys[:0]
+		s.mistrustDBAux = false
+		s.db.commitAll()
 		return nil
 	}
 	if err := s.db.backend.commitDirty(s.overlay, s.dirtyKeys, sync); err != nil {
@@ -266,6 +305,8 @@ func (s *Session) Commit(sync bool) error {
 	clear(s.Aux)
 	s.overlayKeys.Clear()
 	s.dirtyKeys = s.dirtyKeys[:0]
+	s.mistrustDBAux = false
+	s.db.commitAll()
 	return nil
 }
 
@@ -281,6 +322,8 @@ func (s *Session) Undo() {
 	s.overlayKeys.Clear()
 	s.preCommit = s.preCommit[:0]
 	s.dirtyKeys = s.dirtyKeys[:0]
+	s.mistrustDBAux = false
+	s.db.undoAll()
 }
 
 // Empty reports whether the session has any pending modifications.
@@ -297,9 +340,16 @@ func (s *Session) Empty() bool { return len(s.overlay) == 0 }
 // is a shallow map snapshot — far cheaper than a per-modification
 // reverse log for the common case where tx failure is rare.
 type Savepoint struct {
-	overlay   map[string]overlayEntry
-	keys      []string
-	dirtyKeys []string
+	overlay      map[string]overlayEntry
+	keys         []string
+	dirtyKeys    []string
+	preCommitLen int
+	// subsystemPoints captures the SnapshotPoint() of each registered
+	// state.Database subsystem (typed in-memory containers like
+	// objects.WitnessStore). Restore replays each subsystem's undo
+	// log down to its captured point so chainbase-style stores roll
+	// back in lock-step with the K/V overlay.
+	subsystemPoints []int
 }
 
 // Snapshot captures the current overlay state. Subsequent Put/Delete
@@ -307,6 +357,11 @@ type Savepoint struct {
 //
 // Cost: O(len(overlay)) — a shallow copy of the map. The values slice
 // is shared, since Put always allocates a fresh slice.
+//
+// preCommitLen records the count of registered pre-commit hooks at
+// snapshot time; Restore truncates the slice back so any hooks added
+// by the rolled-back tx don't fire at commit (their captured lazy
+// state is now invalid).
 func (s *Session) Snapshot() Savepoint {
 	cp := make(map[string]overlayEntry, len(s.overlay))
 	for k, v := range s.overlay {
@@ -315,11 +370,23 @@ func (s *Session) Snapshot() Savepoint {
 	keys := make([]string, 0, s.overlayKeys.Len())
 	s.overlayKeys.Scan(func(k string) bool { keys = append(keys, k); return true })
 	dk := append([]string(nil), s.dirtyKeys...)
-	return Savepoint{overlay: cp, keys: keys, dirtyKeys: dk}
+	subPts := s.db.snapshotAll(make([]int, 0, len(s.db.subsystems)))
+	return Savepoint{
+		overlay:         cp,
+		keys:            keys,
+		dirtyKeys:       dk,
+		preCommitLen:    len(s.preCommit),
+		subsystemPoints: subPts,
+	}
 }
 
 // Restore reverts the overlay to the state captured by sp. Any
-// Put/Delete since the snapshot is discarded.
+// Put/Delete since the snapshot is discarded. Per-Session caches
+// (readCache, Aux) are also dropped — they may have absorbed values
+// from the now-reverted overlay, and the cost of rebuilding them is
+// dwarfed by the rarity of this path (tx failure). Pre-commit hooks
+// added since the snapshot are dropped too — their captured lazy
+// state was undone with the overlay.
 func (s *Session) Restore(sp Savepoint) {
 	cp := make(map[string]overlayEntry, len(sp.overlay))
 	for k, v := range sp.overlay {
@@ -331,6 +398,13 @@ func (s *Session) Restore(sp Savepoint) {
 		s.overlayKeys.Set(k)
 	}
 	s.dirtyKeys = append(s.dirtyKeys[:0], sp.dirtyKeys...)
+	clear(s.readCache)
+	clear(s.Aux)
+	if sp.preCommitLen < len(s.preCommit) {
+		s.preCommit = s.preCommit[:sp.preCommitLen]
+	}
+	s.mistrustDBAux = true
+	s.db.restoreAll(sp.subsystemPoints)
 }
 
 // Range iterates entries in [table, index] whose body bytes start with

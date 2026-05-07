@@ -190,15 +190,34 @@ func adjustLiquidityRewardOnFill(ctx *Context, old, new *objects.LimitOrder, old
 	// HIVE-equivalent regardless of leg orientation.
 	makerIsHive := asset.AssetNum(old.MinReceiveSym) == asset.HiveSymbol
 	hf9 := ctx.Hardforks.Has(hardfork.HF9)
-	adjustLiquidityVolume(ctx, old.Owner, hiveAmount, !makerIsHive, hf9)  // maker += hive_amount on its hive_volume side
-	adjustLiquidityVolume(ctx, new.Owner, -hiveAmount, !makerIsHive, hf9) // taker -= same
+	hf10 := ctx.Hardforks.Has(hardfork.HF10)
+	adjustLiquidityVolume(ctx, old.Owner, hiveAmount, hf9, hf10, !makerIsHive)  // maker += hive_amount on its hive_volume side
+	adjustLiquidityVolume(ctx, new.Owner, -hiveAmount, hf9, hf10, !makerIsHive) // taker -= same
 }
 
 // adjustLiquidityVolume mirrors database::adjust_liquidity_reward
 // (database_vesting.cpp:62). Looks up or creates the row; resets
 // volumes if the row hasn't been touched in HIVE_LIQUIDITY_TIMEOUT_SEC
 // (7d); applies the volume delta; recomputes weight; updates last_update.
-func adjustLiquidityVolume(ctx *Context, owner string, delta int64, isHbd bool, hf9 bool) {
+//
+// hived gates the weight formula on TWO different hardforks depending
+// on which path runs:
+//   - existing row modify: `update_weight(has_hardfork(HF10))` — only
+//     HF10+ flips that branch to MIN; between HF9 and HF10 it keeps
+//     PRODUCT.
+//   - new row create:      `update_weight(has_hardfork(HF9))` — HF9+
+//     uses MIN.
+// HF10 then runs `retally_liquidity_weight()` to recompute every
+// pre-existing row with the MIN formula. Without this distinction
+// our Go fed adm's post-HF9 modifies through MIN immediately, while
+// C++ kept feeding them through PRODUCT until HF10. Result: in the
+// HF9→HF10 window every account's modify-path weight collapsed to
+// MIN here while C++'s stayed at the (much larger) PRODUCT. Stale
+// pre-HF9 PRODUCT rows then dominated `pay_liquidity_reward`, so adm
+// stopped winning and missed ~9 of its ~172 hourly 1200-HIVE payouts
+// (≈10K HIVE), leaving its HIVE balance ~1.7M sat short for the
+// limit_order_create that fails at block 3,223,222.
+func adjustLiquidityVolume(ctx *Context, owner string, delta int64, hf9, hf10 bool, isHbd bool) {
 	const liquidityTimeoutSec uint32 = 60 * 60 * 24 * 7
 	now := ctx.HeadBlockTime
 	b, err := objects.GetLiquidityRewardBalance(ctx.DB, owner)
@@ -216,7 +235,13 @@ func adjustLiquidityVolume(ctx *Context, owner string, delta int64, isHbd bool, 
 	} else {
 		b.HiveVolume += delta
 	}
-	b.Weight = objects.ComputeLiquidityWeight(b.HiveVolume, b.HBDVolume, hf9)
+	// existing row: HF10 gate; new row: HF9 gate (matches C++
+	// database_vesting.cpp:82 vs 96).
+	useMinFormula := hf10
+	if !exists {
+		useMinFormula = hf9
+	}
+	b.Weight = objects.ComputeLiquidityWeight(b.HiveVolume, b.HBDVolume, useMinFormula)
 	b.LastUpdate = now
 	if exists {
 		objects.PutLiquidityRewardBalanceUpdating(ctx.DB, &b, prevWeight)

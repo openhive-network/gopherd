@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"hived-go/internal/protocol/asset"
+	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/op"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
@@ -86,6 +87,7 @@ func TestCreateProposalSucceedsWithValidArgs(t *testing.T) {
 	f.Actors("alice", "bob")
 	f.FundLiquidHBD("alice", 80_000)
 	f.GenerateBlock()
+	f.HardforksUpTo(hardfork.HF21)
 
 	now := f.HeadBlockTime()
 	if err := f.ApplyOp(op.CreateProposal{
@@ -124,6 +126,7 @@ func TestUpdateProposalVotesAddRemove(t *testing.T) {
 	f.FundLiquidHBD("alice", 80_000)
 	f.FundVesting("carol", 1_000_000)
 	f.GenerateBlock()
+	f.HardforksUpTo(hardfork.HF21)
 
 	now := f.HeadBlockTime()
 	f.MustApplyOp(op.CreateProposal{
@@ -203,6 +206,7 @@ func TestRemoveProposalDeletesRow(t *testing.T) {
 	f.Actors("alice", "bob")
 	f.FundLiquidHBD("alice", 80_000)
 	f.GenerateBlock()
+	f.HardforksUpTo(hardfork.HF21)
 
 	now := f.HeadBlockTime()
 	f.MustApplyOp(op.CreateProposal{

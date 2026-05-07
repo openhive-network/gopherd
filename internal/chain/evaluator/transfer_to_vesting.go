@@ -40,6 +40,11 @@ func (transferToVestingEvaluator) Apply(ctx *Context, o op.Operation) error {
 	if tv.Amount.Amount <= 0 {
 		return ErrTransferAmountNotPos
 	}
+	// HF21__3343 — cannot vest on behalf of treasury
+	// (hive_evaluator_transfer.cpp:299).
+	if ctx.Hardforks.Has(hardfork.HF21) && isTreasuryAccount(tv.To, ctx.Hardforks) {
+		return fmt.Errorf("transfer_to_vesting: cannot vest on behalf of treasury %q", tv.To)
+	}
 
 	from, err := objects.GetAccount(ctx.DB, tv.From)
 	if err != nil {

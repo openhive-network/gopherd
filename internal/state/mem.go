@@ -1,7 +1,7 @@
 package state
 
 import (
-	"bytes"
+	"sort"
 
 	"github.com/tidwall/btree"
 )
@@ -21,18 +21,35 @@ import (
 // reads but not for concurrent writes; if we ever multithread replay
 // we'll need a RWMutex.
 type memBackend struct {
+	// tree keeps keys sorted for range scans (rawIter) AND point
+	// lookups (rawGet/rawHas). A parallel hash map was tried but the
+	// per-write mapassign cost in commitDirty (~9% of CPU at chain
+	// head) exceeded the bsearch savings on reads, since most hot
+	// reads (witnesses, accounts) are already absorbed by the
+	// per-Database parsed-object caches.
 	tree *btree.BTreeG[memItem]
+	// commitHint is reused across commitDirty's SetHint/DeleteHint calls.
+	// After sorting dirtyKeys ascending, adjacent operations land in the
+	// same btree node ~all the time, so the hint short-circuits bsearch.
+	commitHint btree.PathHint
+	// commitBuf reuses the sort buffer across commits.
+	commitBuf []string
 }
 
 type memItem struct {
-	key, value []byte
+	// key is stored as string so the btree's per-Set/Delete can avoid
+	// the []byte allocation that string→[]byte conversion would force
+	// on every commit. Strings are immutable, hashable, and Go's
+	// runtime compares them via cmpstring (same SIMD path as cmpbody).
+	key   string
+	value []byte
 }
 
 func openMem() *memBackend {
 	return &memBackend{
 		tree: btree.NewBTreeGOptions[memItem](
-			func(a, b memItem) bool { return bytes.Compare(a.key, b.key) < 0 },
-			btree.Options{Degree: 32, NoLocks: true},
+			func(a, b memItem) bool { return a.key < b.key },
+			btree.Options{Degree: 64, NoLocks: true},
 		),
 	}
 }
@@ -40,7 +57,7 @@ func openMem() *memBackend {
 func (b *memBackend) Close() error { return nil }
 
 func (b *memBackend) rawGet(key []byte) ([]byte, error) {
-	item, ok := b.tree.Get(memItem{key: key})
+	item, ok := b.tree.Get(memItem{key: string(key)})
 	if !ok {
 		return nil, ErrNotFound
 	}
@@ -48,7 +65,7 @@ func (b *memBackend) rawGet(key []byte) ([]byte, error) {
 }
 
 func (b *memBackend) rawHas(key []byte) (bool, error) {
-	_, ok := b.tree.Get(memItem{key: key})
+	_, ok := b.tree.Get(memItem{key: string(key)})
 	return ok, nil
 }
 
@@ -60,29 +77,40 @@ func (b *memBackend) rawIter(lower, upper []byte) (Iter, error) {
 
 func (b *memBackend) commit(overlay map[string]overlayEntry, _ bool) error {
 	for k, e := range overlay {
-		key := []byte(k)
 		if e.tombstone {
-			b.tree.Delete(memItem{key: key})
+			b.tree.Delete(memItem{key: k})
 			continue
 		}
-		b.tree.Set(memItem{key: key, value: e.value})
+		b.tree.Set(memItem{key: k, value: e.value})
 	}
 	return nil
 }
 
 func (b *memBackend) commitDirty(overlay map[string]overlayEntry, dirtyKeys []string, _ bool) error {
-	// Walk the dirty-keys slice (cache-friendly, no Go map iter
-	// overhead). Duplicate keys process the same final state from the
-	// overlay map, so the second/third Set is a redundant no-op rather
-	// than incorrect — small extra cost vs. a dedup-set allocation.
-	for _, k := range dirtyKeys {
-		e := overlay[k]
-		key := []byte(k)
-		if e.tombstone {
-			b.tree.Delete(memItem{key: key})
+	// Sort dirtyKeys ascending so adjacent operations target neighboring
+	// btree nodes — the reusable PathHint then short-circuits bsearch on
+	// ~every call. Sorting also surfaces duplicates as adjacent so we
+	// can skip the redundant Set/Delete (Session dedups consecutive
+	// writes but not interleaved ones).
+	keys := append(b.commitBuf[:0], dirtyKeys...)
+	sort.Strings(keys)
+	b.commitBuf = keys
+
+	hint := &b.commitHint
+	prev := ""
+	first := true
+	for _, k := range keys {
+		if !first && k == prev {
 			continue
 		}
-		b.tree.Set(memItem{key: key, value: e.value})
+		first = false
+		prev = k
+		e := overlay[k]
+		if e.tombstone {
+			b.tree.DeleteHint(memItem{key: k}, hint)
+			continue
+		}
+		b.tree.SetHint(memItem{key: k, value: e.value}, hint)
 	}
 	return nil
 }
@@ -92,7 +120,7 @@ func (b *memBackend) commitDirty(overlay map[string]overlayEntry, dirtyKeys []st
 type memIter struct {
 	tree         *btree.BTreeG[memItem]
 	it           btree.IterG[memItem]
-	lower, upper []byte
+	lower, upper string
 	valid        bool
 	hasIter      bool
 }
@@ -102,9 +130,10 @@ func (m *memIter) SetBounds(lower, upper []byte) {
 		m.it.Release()
 		m.hasIter = false
 	}
-	// Copy bounds — the caller's lower/upper buffers may be reused.
-	m.lower = append(m.lower[:0], lower...)
-	m.upper = append(m.upper[:0], upper...)
+	// Stash bounds as strings — the btree's Less compares string keys
+	// directly, so we avoid a per-Next bytes.Compare/cmpbody round-trip.
+	m.lower = string(lower)
+	m.upper = string(upper)
 	m.valid = false
 }
 
@@ -118,7 +147,7 @@ func (m *memIter) First() bool {
 		m.valid = false
 		return false
 	}
-	m.valid = bytes.Compare(m.it.Item().key, m.upper) < 0
+	m.valid = m.it.Item().key < m.upper
 	return m.valid
 }
 
@@ -132,11 +161,11 @@ func (m *memIter) Next() bool {
 		m.valid = false
 		return false
 	}
-	m.valid = bytes.Compare(m.it.Item().key, m.upper) < 0
+	m.valid = m.it.Item().key < m.upper
 	return m.valid
 }
 
-func (m *memIter) Key() []byte                  { return m.it.Item().key }
+func (m *memIter) Key() []byte                  { return []byte(m.it.Item().key) }
 func (m *memIter) ValueAndErr() ([]byte, error) { return m.it.Item().value, nil }
 func (m *memIter) Error() error                 { return nil }
 func (m *memIter) Close() error {

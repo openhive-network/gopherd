@@ -84,13 +84,9 @@ func main() {
 		fmt.Printf("median=%d/%d\n",
 			fh.CurrentMedianHistory.Base.Amount,
 			fh.CurrentMedianHistory.Quote.Amount)
-		fmt.Printf("history len=%d (last 10):\n", len(fh.PriceHistory))
-		start := len(fh.PriceHistory) - 10
-		if start < 0 {
-			start = 0
-		}
-		for _, p := range fh.PriceHistory[start:] {
-			fmt.Printf("  %d/%d\n", p.Base.Amount, p.Quote.Amount)
+		fmt.Printf("history len=%d (full):\n", len(fh.PriceHistory))
+		for i, p := range fh.PriceHistory {
+			fmt.Printf("  pos[%3d]: %d/%d\n", i, p.Base.Amount, p.Quote.Amount)
 		}
 	case "comment-votes":
 		// usage: getws <snap> comment-votes <author> <permlink>

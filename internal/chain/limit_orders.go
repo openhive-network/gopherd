@@ -42,7 +42,7 @@ func clearExpiredOrders(s *state.Session, blockTime uint32) {
 			if len(body) < 4+state.AccountNameKeyLen+4 {
 				return true, nil
 			}
-			if os.Getenv("GHIVEDIFF") != "" && len(body) >= 24 {
+			if envGhivediff != "" && len(body) >= 24 {
 				owner := string(body[4 : 4+state.AccountNameKeyLen])
 				if owner[:3] == "jsc" {
 					fmt.Fprintf(os.Stderr, "GHIVEDIFF SCAN bodylen=%d hex=%x\n", len(body), body)
@@ -99,7 +99,7 @@ func cancelExpiredOrder(s *state.Session, owner string, orderID uint32, blockTim
 	if err != nil {
 		return
 	}
-	if owner == "jsc" && os.Getenv("GHIVEDIFF") != "" {
+	if owner == "jsc" && envGhivediff != "" {
 		fmt.Fprintf(os.Stderr, "GHIVEDIFF EXPIRE block-t=%d owner=%s orderid=%d for_sale=%d exp=%d\n",
 			blockTime, owner, orderID, order.ForSaleAmount, order.Expiration)
 	}

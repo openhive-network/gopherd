@@ -3,6 +3,7 @@ package evaluator
 import (
 	"fmt"
 
+	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/op"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
@@ -97,6 +98,10 @@ func (accountUpdate2Evaluator) Apply(ctx *Context, o op.Operation) error {
 	au, ok := o.(op.AccountUpdate2)
 	if !ok {
 		return fmt.Errorf("accountUpdate2Evaluator: unexpected op type %T", o)
+	}
+	// HF21__3274 — account_update2 is HF21+ only.
+	if !ctx.Hardforks.Has(hardfork.HF21) {
+		return fmt.Errorf("account_update2: requires HF21")
 	}
 
 	a, err := objects.GetAccount(ctx.DB, au.Account)
