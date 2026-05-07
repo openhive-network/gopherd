@@ -1,6 +1,9 @@
 package chain
 
 import (
+	"fmt"
+	"os"
+
 	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
@@ -78,6 +81,9 @@ func payLiquidityReward(s *state.Session, blockNum, blockTime uint32) {
 			return true, nil
 		})
 	if best.owner == "" {
+		if envGhivediff != "" {
+			fmt.Fprintf(os.Stderr, "GHIVEDIFF LP-PAY block=%d t=%d reward=%d winner=NONE\n", blockNum, blockTime, reward)
+		}
 		return
 	}
 
@@ -90,7 +96,13 @@ func payLiquidityReward(s *state.Session, blockNum, blockTime uint32) {
 		}
 	}
 	if allZero {
+		if envGhivediff != "" {
+			fmt.Fprintf(os.Stderr, "GHIVEDIFF LP-PAY block=%d t=%d reward=%d winner=ZERO\n", blockNum, blockTime, reward)
+		}
 		return
+	}
+	if envGhivediff != "" {
+		fmt.Fprintf(os.Stderr, "GHIVEDIFF LP-PAY block=%d t=%d reward=%d winner=%s weight=%x\n", blockNum, blockTime, reward, best.owner, best.weight)
 	}
 
 	row, err := objects.GetLiquidityRewardBalance(s, best.owner)

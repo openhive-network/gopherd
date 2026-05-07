@@ -268,19 +268,30 @@ func fillLimitOrder(ctx *Context, order *objects.LimitOrder, pays, receives int6
 			pays, order.ForSaleSymbol, receives, order.MinReceiveSym, order.ForSaleAmount,
 			preHive, preHbd)
 	}
-	if pays <= 0 || receives <= 0 {
+	if pays <= 0 {
 		return false
 	}
-	// Credit the seller `receives` in their MinReceiveSym.
-	a, err := objects.GetAccount(ctx.DB, order.Owner)
-	if err == nil {
-		switch asset.AssetNum(order.MinReceiveSym) {
-		case asset.HiveSymbol:
-			a.Balance += receives
-		case asset.HbdSymbol:
-			objects.AdjustHBDBalance(ctx.DB, &a, ctx.HeadBlockTime, receives)
+	// Credit the seller `receives` in their MinReceiveSym. Skip the
+	// account round-trip when receives is zero — it would be a no-op
+	// adjust_balance — but still let the caller drive the for_sale
+	// decrement + dust-cancel refund below. That's what C++
+	// fill_order does (database_market.cpp:363 always runs
+	// adjust_balance, then proceeds to the for_sale arithmetic and
+	// the amount_to_receive==0 cancel branch); skipping the whole
+	// function on receives==0 silently lost ~1.2 HIVE refunds for
+	// alittle by block 3,261,601 because those orders' partial fills
+	// rounded out to 0 receive and never hit the refund path.
+	if receives > 0 {
+		a, err := objects.GetAccount(ctx.DB, order.Owner)
+		if err == nil {
+			switch asset.AssetNum(order.MinReceiveSym) {
+			case asset.HiveSymbol:
+				a.Balance += receives
+			case asset.HbdSymbol:
+				objects.AdjustHBDBalance(ctx.DB, &a, ctx.HeadBlockTime, receives)
+			}
+			objects.PutAccount(ctx.DB, &a)
 		}
-		objects.PutAccount(ctx.DB, &a)
 	}
 
 	if pays >= order.ForSaleAmount {

@@ -90,8 +90,38 @@ func main() {
 					}
 				case op.LimitOrderCreate:
 					if string(o.Owner) == acct {
-						fmt.Printf("block %d LIMIT_ORDER_CREATE owner=%s sell=%d sym=%d min_to_receive=%d\n",
-							n, o.Owner, o.AmountToSell.Amount, o.AmountToSell.Symbol.Num, o.MinToReceive.Amount)
+						fmt.Printf("block %d LIMIT_ORDER_CREATE owner=%s id=%d sell=%d sym=%d min_to_receive=%d exp=%d\n",
+							n, o.Owner, o.OrderID, o.AmountToSell.Amount, o.AmountToSell.Symbol.Num, o.MinToReceive.Amount, o.Expiration)
+					}
+				case op.LimitOrderCreate2:
+					if string(o.Owner) == acct {
+						fmt.Printf("block %d LIMIT_ORDER_CREATE2 owner=%s id=%d sell=%d sym=%d exchange_rate=%d/%d exp=%d\n",
+							n, o.Owner, o.OrderID, o.AmountToSell.Amount, o.AmountToSell.Symbol.Num, o.ExchangeRate.Base.Amount, o.ExchangeRate.Quote.Amount, o.Expiration)
+					}
+				case op.LimitOrderCancel:
+					if string(o.Owner) == acct {
+						fmt.Printf("block %d LIMIT_ORDER_CANCEL owner=%s id=%d\n",
+							n, o.Owner, o.OrderID)
+					}
+				case op.TransferFromSavings:
+					if string(o.From) == acct || string(o.To) == acct {
+						fmt.Printf("block %d TRANSFER_FROM_SAVINGS from=%s to=%s amount=%d sym=%d req=%d\n",
+							n, o.From, o.To, o.Amount.Amount, o.Amount.Symbol.Num, o.RequestID)
+					}
+				case op.TransferToSavings:
+					if string(o.From) == acct || string(o.To) == acct {
+						fmt.Printf("block %d TRANSFER_TO_SAVINGS from=%s to=%s amount=%d sym=%d\n",
+							n, o.From, o.To, o.Amount.Amount, o.Amount.Symbol.Num)
+					}
+				case op.CancelTransferFromSavings:
+					if string(o.From) == acct {
+						fmt.Printf("block %d CANCEL_TRANSFER_FROM_SAVINGS from=%s req=%d\n",
+							n, o.From, o.RequestID)
+					}
+				case op.SetWithdrawVestingRoute:
+					if string(o.FromAccount) == acct || string(o.ToAccount) == acct {
+						fmt.Printf("block %d SET_WITHDRAW_VESTING_ROUTE from=%s to=%s pct=%d auto_vest=%t\n",
+							n, o.FromAccount, o.ToAccount, o.Percent, o.AutoVest)
 					}
 				}
 			}
