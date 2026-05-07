@@ -449,16 +449,35 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 		return fmt.Errorf("%w: votes disabled for comment", ErrCommentClosed)
 	}
 	// hive_evaluator_social.cpp:328: skip the vote when comment_cashout
-	// is gone OR (HF12+ AND payout_time == max). PRE-HF12 the entire
-	// gate is false (HF12 inactive), so votes on already-paid roots
-	// fall through to the weighted-avg branch and re-pull cashout_time
-	// — this is what re-schedules the comment for a fresh 24h cycle.
-	// Skipping pre-HF12 here over-zeros children_abs_rshares cascades
-	// at HF7 (block 2,889,020 et seq.) and pre-empts thousands of
-	// follow-up votes whose mana drains C++ would otherwise have
-	// captured.
-	if ctx.Hardforks.Has(hardfork.HF12) && c.WasPaid && c.CashoutTime == 0 {
-		return nil
+	// is gone OR (HF12+ AND payout_time == max). C++'s
+	// calculate_discussion_payout_time returns the ROOT's cashout_time
+	// for pre-HF17 replies (database_comment.cpp:60-66), so pre-HF17
+	// the gate uses ROOT's CashoutTime, not the reply's own.
+	// Without this, Go silently skips votes on paid REPLIES whose ROOT
+	// is still active (yuliana case at block 3,538,189) — which over-
+	// preserves mana for the voter and drifts abs_rshares ~2% by the
+	// next root vote, cascading into wrong cashout-time pulls.
+	if ctx.Hardforks.Has(hardfork.HF12) {
+		gateCashoutTime := c.CashoutTime
+		gateWasPaid := c.WasPaid
+		if !ctx.Hardforks.Has(hardfork.HF17) && c.ParentAuthor != "" {
+			// pre-HF17 reply: payout-time gate uses the ROOT's state.
+			rootAuthor := c.RootAuthor
+			rootPermlink := c.RootPermlink
+			if rootAuthor == "" {
+				rootAuthor = c.Author
+				rootPermlink = c.Permlink
+			}
+			if rootAuthor != c.Author || rootPermlink != c.Permlink {
+				if root, rerr := objects.GetComment(ctx.DB, rootAuthor, rootPermlink); rerr == nil {
+					gateCashoutTime = root.CashoutTime
+					gateWasPaid = root.WasPaid
+				}
+			}
+		}
+		if gateWasPaid && gateCashoutTime == 0 {
+			return nil
+		}
 	}
 
 	prev, err := objects.GetCommentVote(ctx.DB, v.Voter, v.Author, v.Permlink)
