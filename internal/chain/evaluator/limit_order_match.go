@@ -1,7 +1,9 @@
 package evaluator
 
 import (
+	"fmt"
 	"math/big"
+	"os"
 
 	"hived-go/internal/protocol/asset"
 	"hived-go/internal/protocol/hardfork"
@@ -146,7 +148,13 @@ func matchOrders(ctx *Context, newOrder, old *objects.LimitOrder) int {
 		if ctx.Hardforks.Has(hardfork.HF10) {
 			minAge = liquidityRewardMinAgePostHF10
 		}
-		if old.Created != 0 && ctx.HeadBlockTime >= old.Created+minAge {
+		ageOK := old.Created != 0 && ctx.HeadBlockTime >= old.Created+minAge
+		if envGhivediffLP != "" && (envGhivediffLP == "*" || old.Owner == envGhivediffLP || newOrder.Owner == envGhivediffLP) {
+			fmt.Fprintf(os.Stderr, "GHIVEDIFF LP-MATCH block=%d t=%d old_owner=%s old_id=%d old_created=%d age_ok=%t old_recv_sym=%d old_recv=%d new_recv_sym=%d new_recv=%d new_owner=%s\n",
+				ctx.BlockNum, ctx.HeadBlockTime, old.Owner, old.OrderID, old.Created, ageOK,
+				old.MinReceiveSym, oldOrderReceives, newOrder.MinReceiveSym, newOrderReceives, newOrder.Owner)
+		}
+		if ageOK {
 			adjustLiquidityRewardOnFill(ctx, old, newOrder, oldOrderReceives, newOrderReceives)
 		}
 	}
@@ -223,9 +231,11 @@ func adjustLiquidityVolume(ctx *Context, owner string, delta int64, hf9, hf10 bo
 	b, err := objects.GetLiquidityRewardBalance(ctx.DB, owner)
 	prevWeight := b.Weight
 	exists := err == nil
+	timedOut := false
 	if exists && now-b.LastUpdate >= liquidityTimeoutSec {
 		b.HiveVolume = 0
 		b.HBDVolume = 0
+		timedOut = true
 	}
 	if !exists {
 		b = objects.LiquidityRewardBalance{Owner: owner}
@@ -243,12 +253,18 @@ func adjustLiquidityVolume(ctx *Context, owner string, delta int64, hf9, hf10 bo
 	}
 	b.Weight = objects.ComputeLiquidityWeight(b.HiveVolume, b.HBDVolume, useMinFormula)
 	b.LastUpdate = now
+	if envGhivediffLP != "" && (owner == envGhivediffLP || envGhivediffLP == "*") {
+		fmt.Fprintf(os.Stderr, "GHIVEDIFF LP-VOL block=%d t=%d owner=%s delta=%d isHbd=%t timedOut=%t hive_v=%d hbd_v=%d weight=%x\n",
+			ctx.BlockNum, now, owner, delta, isHbd, timedOut, b.HiveVolume, b.HBDVolume, b.Weight)
+	}
 	if exists {
 		objects.PutLiquidityRewardBalanceUpdating(ctx.DB, &b, prevWeight)
 	} else {
 		objects.PutLiquidityRewardBalance(ctx.DB, &b)
 	}
 }
+
+var envGhivediffLP = os.Getenv("GHIVEDIFF_LP")
 
 // fillLimitOrder mirrors database::fill_order in database_market.cpp:323.
 // Credits the seller their `receives`, decrements `for_sale` by `pays`,

@@ -56,12 +56,22 @@ func payLiquidityReward(s *state.Session, blockNum, blockTime uint32) {
 	}
 
 	// Find the highest-weight row by walking the by-weight secondary
-	// index in REVERSE (it's sorted ascending; the last entry has the
-	// largest weight). We collect the last visited candidate during
-	// forward iteration.
+	// index. The on-disk index is keyed [weight:16][owner_padded:16] in
+	// ascending byte order, so the LARGEST weight comes last; we collect
+	// candidates and break weight-ties in C++ order. C++'s by_volume_weight
+	// uses composite_key_compare<std::greater<weight>, std::less<account_id_type>>,
+	// so on a weight-tie the OLDER account (smaller account_id) wins.
+	// Go has no account_id but Account.Created (block-time) is allocated
+	// in the same chronological order across accounts created in
+	// different blocks, so we tie-break on Created first then Name lex.
+	// Without this, Go's "last entry wins" tie-break picks the lex-largest
+	// owner — at block 3,259,200 that flipped LP-PAY winner from `afew`
+	// (C++) to `alot` (Go) when both held weight 0x16e360, cascading into
+	// alittle's 900-HIVE shortfall at block 3,342,630.
 	type candidate struct {
-		weight [16]byte
-		owner  string
+		weight  [16]byte
+		owner   string
+		created uint32
 	}
 	var best candidate
 	_ = s.Range(objects.LiquidityRewardBalanceTable, objects.LiquidityRewardByWeightIndex, nil,
@@ -76,8 +86,19 @@ func payLiquidityReward(s *state.Session, blockNum, blockTime uint32) {
 			for n > 0 && ownerBytes[n-1] == 0 {
 				n--
 			}
-			best.weight = w
-			best.owner = string(ownerBytes[:n])
+			owner := string(ownerBytes[:n])
+			cmp := bytesCompare16(w, best.weight)
+			if best.owner == "" || cmp > 0 {
+				a, _ := objects.GetAccount(s, owner)
+				best = candidate{weight: w, owner: owner, created: a.Created}
+				return true, nil
+			}
+			if cmp == 0 {
+				a, _ := objects.GetAccount(s, owner)
+				if a.Created < best.created || (a.Created == best.created && owner < best.owner) {
+					best = candidate{weight: w, owner: owner, created: a.Created}
+				}
+			}
 			return true, nil
 		})
 	if best.owner == "" {
@@ -134,6 +155,19 @@ func payLiquidityReward(s *state.Session, blockNum, blockTime uint32) {
 	row.Weight = [16]byte{}
 	row.LastUpdate = blockTime
 	objects.PutLiquidityRewardBalanceUpdating(s, &row, prevWeight)
+}
+
+// bytesCompare16 returns -1/0/+1 for big-endian byte-wise compare.
+func bytesCompare16(a, b [16]byte) int {
+	for i := 0; i < 16; i++ {
+		if a[i] != b[i] {
+			if a[i] < b[i] {
+				return -1
+			}
+			return 1
+		}
+	}
+	return 0
 }
 
 // liquidityRewardForVirtualSupply returns the per-hour LP reward in
