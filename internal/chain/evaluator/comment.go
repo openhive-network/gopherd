@@ -853,16 +853,24 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 			root.MaxCashoutTime = ctx.HeadBlockTime + hiveMaxCashoutWindowSeconds
 		}
 
-		// Skip dust votes post-HF14 — they contribute zero rshares but
-		// also don't pull cashout time (matches hive_evaluator_social.cpp:426).
-		// TODO: also missing C++'s `was_paid` branch at hive_evaluator_social.cpp:418
-		// (post-cashout votes pin to LastPayout+30d). Tested 2026-05-07: adding
-		// it didn't fix craig-grant 3-HBD-sat shortfall at block 3,540,652
-		// (heaven is on FIRST cashout, branch doesn't apply) and caused 2x
-		// perf regression. Real bug must be in vote-time-update of UNPAID
-		// posts — likely mana-drain accumulation drift or missing rejection
-		// of recasts on already-rewarded curation. Investigation continues.
-		if !(ctx.Hardforks.Has(hardfork.HF14) && absRshares == 0) {
+		// HF12 + WasPaid root: post-cashout votes pin the next cashout to
+		// last_payout + HIVE_SECOND_CASHOUT_WINDOW (30d), bypassing the
+		// weighted-average pull. Mirrors hive_evaluator_social.cpp:418-421.
+		// Without this branch, post-payout votes pull the second-cashout
+		// time via weighted-avg which drifts vs C++. Together with the
+		// vote-gate fix (root-payout-time check) this handles the
+		// post-cashout vote semantics correctly.
+		if ctx.Hardforks.Has(hardfork.HF12) && root.WasPaid && root.LastPayout > 0 {
+			const hiveSecondCashoutWindow uint32 = 60 * 60 * 24 * 30
+			newCashout := root.LastPayout + hiveSecondCashoutWindow
+			if oldRootCashout != 0 && oldRootCashout != newCashout {
+				objects.DeleteCommentCashoutSchedule(ctx.DB, oldRootCashout, root.ID)
+			}
+			root.CashoutTime = newCashout
+			if newCashout != oldRootCashout {
+				objects.PutCommentCashoutSchedule(ctx.DB, newCashout, root.ID, root.Author, root.Permlink)
+			}
+		} else if !(ctx.Hardforks.Has(hardfork.HF14) && absRshares == 0) {
 			var newCashoutTimeSec uint32
 			if ctx.Hardforks.Has(hardfork.HF12) && !ctx.Hardforks.Has(hardfork.HF13) {
 				newCashoutTimeSec = ctx.HeadBlockTime + cashoutWindowSecondsPreHF17 // 12h
