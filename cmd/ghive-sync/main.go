@@ -48,6 +48,7 @@ import (
 	"hived-go/internal/protocol/network"
 	"hived-go/internal/state"
 	"hived-go/internal/state/genesis"
+	"hived-go/internal/state/objects"
 )
 
 func main() {
@@ -142,7 +143,7 @@ func parseFlags() flags {
 	flag.StringVar(&f.backend, "backend", "", "state backend: pebble (persistent) or mem (volatile, ~3-5x faster); default = pebble unless --verify-against is set, in which case mem (since the run is throwaway anyway)")
 	flag.StringVar(&f.cpuProfile, "cpuprofile", "", "write runtime/pprof CPU profile to this path")
 	flag.BoolVar(&f.noVerifyMerkle, "no-verify-merkle", false, "skip the per-block merkle-root recomputation (faster; only safe with --verify-against)")
-	flag.IntVar(&f.commitBatch, "commit-batch", 100, "coalesce N session.Commit calls into one backend write (1 = legacy per-block flush; 0 = also disabled)")
+	flag.IntVar(&f.commitBatch, "commit-batch", 0, "coalesce N session.Commit calls into one backend write (0 = backend-default: 1 for mem, 100 for pebble; 1 = legacy per-block flush)")
 	flag.Parse()
 	f.targetBlock = uint32(target)
 	f.maxBlocks = uint32(max)
@@ -208,12 +209,30 @@ func newApp(cfg flags) (*app, error) {
 	default:
 		return nil, fmt.Errorf("unknown --backend %q (want pebble or mem)", cfg.backend)
 	}
-	if err := genesis.Apply(stateDB); err != nil {
-		// Apply tolerates an already-bootstrapped dir.
-		_ = err
+	// Genesis only re-fires on a truly empty state dir. Re-applying on
+	// a bootstrapped dir resets DGPO.HeadBlockNumber to 0, which makes
+	// the crash-recovery comparison below see "state head=0" and
+	// re-replay every block — fast on small windows, fatal on a real
+	// chain.
+	probe := state.NewSession(stateDB)
+	if _, err := objects.GetDGPO(probe); err == state.ErrNotFound {
+		if err := genesis.Apply(stateDB); err != nil {
+			return nil, fmt.Errorf("genesis apply: %w", err)
+		}
 	}
-	if cfg.commitBatch > 1 {
-		stateDB.SetBatchSize(cfg.commitBatch)
+	// Default batch size depends on backend (see ghive-tools replay for
+	// the rationale): pebble amortizes per-block fsync at 100; mem's
+	// per-Get map probe outweighs the saved commitDirty work, so 1.
+	effectiveBatch := cfg.commitBatch
+	if effectiveBatch == 0 {
+		if cfg.backend == "mem" {
+			effectiveBatch = 1
+		} else {
+			effectiveBatch = 100
+		}
+	}
+	if effectiveBatch > 1 {
+		stateDB.SetBatchSize(effectiveBatch)
 	}
 	cdb := chain.New(stateDB)
 	// Enable the recent-block cache so afterApply can pull each freshly-

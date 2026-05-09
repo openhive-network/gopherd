@@ -82,18 +82,28 @@ func main() {
 	defer stateDB.Close()
 
 	// Bootstrap: if the state dir is empty, apply genesis. Selects
-	// mainnet vs testnet variant via config-ini `genesis-type`.
-	switch cfg.GenesisType {
-	case "testnet":
-		if err := genesis.ApplyTestnet(stateDB, 21); err != nil {
-			_ = err
-		}
-		fmt.Println("ghive: testnet genesis applied (21 init witnesses + 21 operator accounts)")
-	default:
-		if err := genesis.Apply(stateDB); err != nil {
-			// genesis.Apply tolerates an already-bootstrapped dir
-			// (writes are idempotent).
-			_ = err
+	// mainnet vs testnet variant via config-ini `genesis-type`. We
+	// gate on DGPO presence because re-applying genesis on a populated
+	// dir resets HeadBlockNumber to 0 and tricks crash-recovery into
+	// re-replaying every block.
+	probe := state.NewSession(stateDB)
+	bootstrapped := false
+	if _, err := objects.GetDGPO(probe); err == nil {
+		bootstrapped = true
+	}
+	if !bootstrapped {
+		switch cfg.GenesisType {
+		case "testnet":
+			if err := genesis.ApplyTestnet(stateDB, 21); err != nil {
+				fmt.Fprintf(os.Stderr, "ghive: testnet genesis: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Println("ghive: testnet genesis applied (21 init witnesses + 21 operator accounts)")
+		default:
+			if err := genesis.Apply(stateDB); err != nil {
+				fmt.Fprintf(os.Stderr, "ghive: genesis: %v\n", err)
+				os.Exit(1)
+			}
 		}
 	}
 

@@ -47,7 +47,7 @@ func cmdReplay(args []string) int {
 	saveDirSnapshotTo := fs.String("save-dir-snapshot-to", "", "directory snapshot root (block-N/ subdir is created; used with --save-dir-snapshot-at)")
 	snapshotEvery := fs.Uint("snapshot-every", 0, "save a directory snapshot every N applied blocks (0 = off)")
 	snapshotDir := fs.String("snapshot-dir", "", "directory under which periodic snapshots are saved (block-<N>/ subdir per snapshot, used with --snapshot-every)")
-	batchSize := fs.Int("commit-batch", 100, "coalesce N session.Commit calls into one backend write (1 = legacy per-block flush)")
+	batchSize := fs.Int("commit-batch", 0, "coalesce N session.Commit calls into one backend write (0 = backend-default: 1 for mem, 100 for pebble; 1 = legacy per-block flush)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -112,9 +112,22 @@ func cmdReplay(args []string) int {
 	}
 	defer stateDB.Close()
 
-	if *batchSize > 1 {
-		stateDB.SetBatchSize(*batchSize)
-		fmt.Printf("replay: commit-batch=%d (per-block flush coalesced)\n", *batchSize)
+	// Default batch size:
+	//   pebble: 100 (amortizes per-block fsync, big win for live nodes)
+	//   mem:    1   (in-memory btree.Set is already cheap; the batch
+	//               overlay's per-Get map probe outweighs the saved
+	//               commitDirty work for replay).
+	effectiveBatch := *batchSize
+	if effectiveBatch == 0 {
+		if *backend == "mem" {
+			effectiveBatch = 1
+		} else {
+			effectiveBatch = 100
+		}
+	}
+	if effectiveBatch > 1 {
+		stateDB.SetBatchSize(effectiveBatch)
+		fmt.Printf("replay: commit-batch=%d (per-block flush coalesced)\n", effectiveBatch)
 	}
 
 	// Pre-register every typed subsystem on the freshly-opened
