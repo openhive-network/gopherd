@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# scripts/testnet-heads — print the current head_block_num of every
+# running testnet node, sourced from each node's run.log.
+#
+# We don't (yet) have a JSON-RPC plugin to query in real time, so this
+# script greps the latest "APPLIED block N" or "gossip: applied block N"
+# line from each ./testnet/node-*/run.log. That's authoritative for our
+# purposes — those lines are emitted on every successful chain advance,
+# whether the block was locally produced or received from a peer.
+#
+# Output format:
+#
+#   node-1   head=17  (witness)        # last advance was a local APPLY
+#   node-2   head=17  (gossip)         # last advance came from a peer
+#   node-3   head=17  (gossip)
+#
+# Use case: smoke-test that all nodes are converged on the same head
+# after `scripts/testnet-up N`.
+
+set -euo pipefail
+
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+OUT=${ROOT}/testnet
+
+if [[ ! -d "${OUT}" ]]; then
+  echo "no testnet/ directory — run scripts/testnet-up first"
+  exit 1
+fi
+
+shopt -s nullglob
+NODES=("${OUT}"/node-*/)
+if [[ "${#NODES[@]}" -eq 0 ]]; then
+  echo "no node-* directories under ${OUT}"
+  exit 1
+fi
+
+for ND in "${NODES[@]}"; do
+  NODE=$(basename "${ND}")
+  LOG="${ND}run.log"
+  if [[ ! -s "${LOG}" ]]; then
+    printf '%-12s head=?      (no log)\n' "${NODE}"
+    continue
+  fi
+  # Latest line that advances the head, either local or gossip.
+  LINE=$(grep -E '(APPLIED block |gossip: applied block )' "${LOG}" | tail -1 || true)
+  if [[ -z "${LINE}" ]]; then
+    printf '%-12s head=?      (no APPLIED yet)\n' "${NODE}"
+    continue
+  fi
+  HEAD=$(echo "${LINE}" | grep -oE 'block [0-9]+' | head -1 | awk '{print $2}')
+  if grep -q 'witness: APPLIED' <<<"${LINE}"; then
+    SRC="witness"
+  else
+    SRC="gossip"
+  fi
+  printf '%-12s head=%-6s (%s)\n' "${NODE}" "${HEAD}" "${SRC}"
+done
