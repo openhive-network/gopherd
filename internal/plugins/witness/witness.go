@@ -19,6 +19,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -50,8 +51,26 @@ type Plugin struct {
 	mu      sync.Mutex
 	pending []op.Operation // mempool — ops to include in our next block
 
+	logMu       sync.Mutex
+	lastLogTime time.Time
+	lastLogMsg  string
+
 	stopCh chan struct{}
 	doneCh chan struct{}
+}
+
+// logEvery rate-limits a stderr line to once per `interval` per distinct msg.
+// Used for the heartbeat trace ("scheduled=X not owned") so a 500ms tick
+// loop doesn't flood the log.
+func (p *Plugin) logEvery(interval time.Duration, format string, args ...interface{}) {
+	msg := fmt.Sprintf(format, args...)
+	p.logMu.Lock()
+	if msg != p.lastLogMsg || time.Since(p.lastLogTime) > interval {
+		fmt.Fprintf(os.Stderr, "witness: %s\n", msg)
+		p.lastLogMsg = msg
+		p.lastLogTime = time.Now()
+	}
+	p.logMu.Unlock()
 }
 
 // New returns a witness plugin attached to a chain.Database.
@@ -97,9 +116,7 @@ func (p *Plugin) run() {
 			return
 		case <-tick.C:
 			if err := p.maybeProduceBlock(); err != nil {
-				// Real implementation logs to slog; we suppress to
-				// keep this scaffold dependency-free.
-				_ = err
+				fmt.Fprintf(os.Stderr, "witness: %v\n", err)
 			}
 		}
 	}
@@ -113,21 +130,42 @@ func (p *Plugin) maybeProduceBlock() error {
 		return nil // observer mode
 	}
 	scheduled, err := p.Chain.ScheduledWitness(1)
-	if err != nil || scheduled == "" {
+	if err != nil {
+		return fmt.Errorf("scheduled-witness lookup: %w", err)
+	}
+	if scheduled == "" {
+		// One-shot trace; the silent path was the #1 bug source on
+		// fresh testnet (no schedule populated, scheduling formula off).
+		p.logEvery(5*time.Second, "scheduled witness for slot 1 is empty")
 		return nil
 	}
 	prod := p.findProducer(scheduled)
 	if prod == nil {
+		p.logEvery(5*time.Second, "scheduled=%q (not owned by this node)", scheduled)
 		return nil // not our turn
 	}
+	headBN, _ := func() (uint32, error) {
+		d, e := objects.GetDGPO(state.NewSession(p.State))
+		return d.HeadBlockNumber, e
+	}()
+	fmt.Fprintf(os.Stderr, "witness: producing for %s (head=%d)\n", scheduled, headBN)
 
 	// Time-of-block: align to the next 3-second boundary AFTER head.
+	// On a fresh chain (block 1) dgpo.Time is genesis (years ago);
+	// fall back to wall-clock aligned to the next 3-second boundary so
+	// produced blocks carry sane timestamps.
 	dgpo, err := objects.GetDGPO(state.NewSession(p.State))
 	if err != nil {
 		return err
 	}
-	nextSlotTime := dgpo.Time + 3
 	now := uint32(time.Now().Unix())
+	nextSlotTime := dgpo.Time + 3
+	if nextSlotTime+3600 < now {
+		// More than an hour stale (fresh testnet, restart after pause):
+		// jump to the CURRENT wall-clock 3-second boundary so the
+		// witness immediately produces instead of waiting for the future.
+		nextSlotTime = (now / 3) * 3
+	}
 	if nextSlotTime > now {
 		return nil // not yet — wait for clock to catch up
 	}
@@ -137,7 +175,7 @@ func (p *Plugin) maybeProduceBlock() error {
 		return fmt.Errorf("witness build_block: %w", err)
 	}
 	stats := chain.Stats{}
-	_, err = p.Chain.ApplyBlock(rawBlock, dgpo.HeadBlockNumber+1, chain.ApplyOptions{
+	postDgpo, err := p.Chain.ApplyBlock(rawBlock, dgpo.HeadBlockNumber+1, chain.ApplyOptions{
 		Sync:                      true,
 		SkipTransactionSignatures: true, // we just produced; no need to verify
 		SkipBlockSignature:        true,
@@ -145,6 +183,8 @@ func (p *Plugin) maybeProduceBlock() error {
 	if err != nil {
 		return fmt.Errorf("witness apply_block: %w", err)
 	}
+	fmt.Fprintf(os.Stderr, "witness: APPLIED block %d (head=%d, time=%d)\n",
+		dgpo.HeadBlockNumber+1, postDgpo.HeadBlockNumber, postDgpo.Time)
 	// Drain the mempool.
 	p.mu.Lock()
 	p.pending = p.pending[:0]

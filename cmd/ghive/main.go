@@ -70,11 +70,20 @@ func main() {
 	}
 	defer stateDB.Close()
 
-	// Bootstrap: if the state dir is empty, apply genesis.
-	if err := genesis.Apply(stateDB); err != nil {
-		// genesis.Apply tolerates an already-bootstrapped dir
-		// (writes are idempotent).
-		_ = err
+	// Bootstrap: if the state dir is empty, apply genesis. Selects
+	// mainnet vs testnet variant via config-ini `genesis-type`.
+	switch cfg.GenesisType {
+	case "testnet":
+		if err := genesis.ApplyTestnet(stateDB, 21); err != nil {
+			_ = err
+		}
+		fmt.Println("ghive: testnet genesis applied (21 init witnesses + 21 operator accounts)")
+	default:
+		if err := genesis.Apply(stateDB); err != nil {
+			// genesis.Apply tolerates an already-bootstrapped dir
+			// (writes are idempotent).
+			_ = err
+		}
 	}
 
 	cdb := chain.New(stateDB)

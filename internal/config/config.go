@@ -39,6 +39,11 @@ type Config struct {
 	// SharedFileSize is the soft memory bound (Boost INI string like
 	// "20G", "8G"). We parse it into bytes for our Pebble cache.
 	SharedFileSize string
+	// GenesisType selects the genesis bootstrap variant: "" or "mainnet"
+	// uses genesis.Apply (mainnet); "testnet" uses genesis.ApplyTestnet
+	// (21 init-N witnesses + N operator accounts pre-funded). The
+	// testnet-config tool emits "genesis-type = testnet" by default.
+	GenesisType string
 	// Raw holds every (key, value) pair encountered so callers can
 	// access keys we don't promote to typed fields.
 	Raw map[string][]string
@@ -102,6 +107,8 @@ func Parse(r io.Reader) (*Config, error) {
 			c.DataDir = val
 		case "shared-file-size":
 			c.SharedFileSize = val
+		case "genesis-type":
+			c.GenesisType = val
 		}
 	}
 	if err := scanner.Err(); err != nil {
