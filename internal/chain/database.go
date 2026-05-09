@@ -82,6 +82,19 @@ func New(s *state.Database) *Database {
 // State returns the underlying state.Database.
 func (d *Database) State() *state.Database { return d.state }
 
+// FlushBatch forces any pending batched writes (Database.BatchSize>1)
+// to the backend. Takes the apply-write lock so ApplyBlock cannot race
+// the flush. Safe to call when no batch is pending. sync controls
+// whether the underlying write is fsync'd (Pebble only).
+//
+// Daemon shutdown / snapshot save callers should fire this in defer
+// to make sure the persisted backend reflects the in-memory head.
+func (d *Database) FlushBatch(sync bool) error {
+	d.applyMu.Lock()
+	defer d.applyMu.Unlock()
+	return d.state.FlushBatch(sync)
+}
+
 // EnableRecentBlockCache turns on the in-memory ring of last-N-applied
 // raw block bytes. Required for serving p2p sync responses; callers that
 // only replay block_log can leave it disabled. Safe to call once at

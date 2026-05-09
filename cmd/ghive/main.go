@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"hived-go/internal/blocklog"
 	"hived-go/internal/chain"
 	"hived-go/internal/config"
 	"hived-go/internal/crypto"
@@ -73,6 +74,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "ghive: open state: %v\n", err)
 		os.Exit(1)
 	}
+	// Coalesce per-block backend writes into batches of N. Crash recovery
+	// re-replays from the block_log writer's head so durability is
+	// preserved across kill -9. Default 100 picked to keep per-block read
+	// cost low while still amortizing fsync over a meaningful window.
+	stateDB.SetBatchSize(100)
 	defer stateDB.Close()
 
 	// Bootstrap: if the state dir is empty, apply genesis. Selects
@@ -95,6 +101,16 @@ func main() {
 	// Enable in-memory recent-block cache so the p2p sync layer can
 	// re-serve fetch_items requests without going to disk.
 	cdb.EnableRecentBlockCache(chain.RecentBlockCacheSize)
+
+	// Crash recovery: a hard kill mid-batch can leave the persisted
+	// state up to BatchSize-1 blocks behind the local block_log (which
+	// fsyncs on every Append). Re-replay any gap before we accept peer
+	// or witness traffic.
+	blockLogPath := filepath.Join(cfg.DataDir, "blockchain", "block_log")
+	if err := recoverFromBlockLog(cdb, blockLogPath); err != nil {
+		fmt.Fprintf(os.Stderr, "ghive: crash recovery: %v\n", err)
+		os.Exit(1)
+	}
 
 	// Load witness producers from config. Each (witness, private-key)
 	// pair becomes a Producer entry. Without producers the daemon is
@@ -205,6 +221,64 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
 	fmt.Println("ghive: shutting down...")
+	// Flush the commit batch so the on-disk state catches up to the
+	// in-memory head before Close. Without this a graceful shutdown
+	// loses up to BatchSize-1 blocks of state — the chain re-derives
+	// them from the block_log on next start, but we'd rather not pay
+	// that cost when we have a clean exit window.
+	if err := cdb.FlushBatch(true); err != nil {
+		fmt.Fprintf(os.Stderr, "ghive: flush batch: %v\n", err)
+	}
+}
+
+// recoverFromBlockLog replays any blocks present in the local block_log
+// but missing from the chain.Database state. With Database.BatchSize>1
+// a hard kill can leave the persisted backend behind the durably-written
+// block_log; this pass closes the gap before normal startup proceeds.
+//
+// No-op when the block_log is missing (fresh data dir) or the state
+// head already matches.
+func recoverFromBlockLog(cdb *chain.Database, blockLogPath string) error {
+	if _, err := os.Stat(blockLogPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	stateHead, err := cdb.HeadBlock()
+	if err != nil {
+		return fmt.Errorf("read state head: %w", err)
+	}
+	r, err := blocklog.Open(blockLogPath)
+	if err != nil {
+		return fmt.Errorf("open block_log: %w", err)
+	}
+	defer r.Close()
+	logHead := r.Head()
+	if logHead == 0 || logHead <= stateHead {
+		return nil
+	}
+	fmt.Printf("ghive: crash recovery: state head=%d, block_log head=%d; replaying %d blocks\n",
+		stateHead, logHead, logHead-stateHead)
+	opts := chain.ApplyOptions{
+		Sync:                      false,
+		SkipBlockSignature:        true,
+		SkipTransactionSignatures: true,
+	}
+	for n := stateHead + 1; n <= logHead; n++ {
+		raw, err := r.Block(n)
+		if err != nil {
+			return fmt.Errorf("read block %d: %w", n, err)
+		}
+		if _, err := cdb.ApplyBlock(raw, n, opts, nil); err != nil {
+			return fmt.Errorf("apply block %d: %w", n, err)
+		}
+	}
+	if err := cdb.FlushBatch(true); err != nil {
+		return fmt.Errorf("flush after recovery: %w", err)
+	}
+	fmt.Printf("ghive: crash recovery: state caught up to block %d\n", logHead)
+	return nil
 }
 
 // parsePrivateKey decodes a config.ini `private-key` string in WIF format

@@ -118,6 +118,12 @@ type flags struct {
 	// if you trust the canonical block_log reference (which already
 	// validated the merkle root upstream).
 	noVerifyMerkle bool
+	// commitBatch coalesces this many session.Commit calls into one
+	// backend write. Larger values reduce per-block fsync (pebble) and
+	// btree-merge (mem) overhead at the cost of more in-memory state
+	// pending between flushes. Crash-recovery re-replays from the
+	// block_log writer's head so durability is preserved.
+	commitBatch int
 }
 
 func parseFlags() flags {
@@ -136,6 +142,7 @@ func parseFlags() flags {
 	flag.StringVar(&f.backend, "backend", "", "state backend: pebble (persistent) or mem (volatile, ~3-5x faster); default = pebble unless --verify-against is set, in which case mem (since the run is throwaway anyway)")
 	flag.StringVar(&f.cpuProfile, "cpuprofile", "", "write runtime/pprof CPU profile to this path")
 	flag.BoolVar(&f.noVerifyMerkle, "no-verify-merkle", false, "skip the per-block merkle-root recomputation (faster; only safe with --verify-against)")
+	flag.IntVar(&f.commitBatch, "commit-batch", 100, "coalesce N session.Commit calls into one backend write (1 = legacy per-block flush; 0 = also disabled)")
 	flag.Parse()
 	f.targetBlock = uint32(target)
 	f.maxBlocks = uint32(max)
@@ -205,6 +212,9 @@ func newApp(cfg flags) (*app, error) {
 		// Apply tolerates an already-bootstrapped dir.
 		_ = err
 	}
+	if cfg.commitBatch > 1 {
+		stateDB.SetBatchSize(cfg.commitBatch)
+	}
 	cdb := chain.New(stateDB)
 	// Enable the recent-block cache so afterApply can pull each freshly-
 	// applied block's raw bytes back out and stream them into the writer.
@@ -259,7 +269,61 @@ func newApp(cfg flags) (*app, error) {
 		}
 		a.verify = ref
 	}
+	// Crash recovery: with commit-batch>1 a hard kill can leave the
+	// persisted backend up to BatchSize-1 blocks behind the block_log
+	// (which fsyncs on every Append). Detect that gap and re-replay the
+	// missing blocks from the writer's local block_log before accepting
+	// any peer traffic. This ensures the in-memory state head matches
+	// the durably-persisted block_log head, which is the contract every
+	// downstream reader relies on.
+	if err := a.recoverFromBlockLog(blockLogPath); err != nil {
+		a.close()
+		return nil, fmt.Errorf("crash recovery: %w", err)
+	}
 	return a, nil
+}
+
+// recoverFromBlockLog replays any blocks present in the local block_log
+// but missing from the chain.Database state. Mirrors hived's startup
+// pass that re-applies entries above the on-disk dgpo head_block_number.
+//
+// Called once at app construction. No-op when the block_log is empty or
+// the state head already matches.
+func (a *app) recoverFromBlockLog(blockLogPath string) error {
+	stateHead, err := a.chain.HeadBlock()
+	if err != nil {
+		return fmt.Errorf("read state head: %w", err)
+	}
+	writerHead := a.writer.HeadBlock()
+	if writerHead == 0 || writerHead <= stateHead {
+		return nil
+	}
+	r, err := blocklog.Open(blockLogPath)
+	if err != nil {
+		return fmt.Errorf("open block_log %s: %w", blockLogPath, err)
+	}
+	defer r.Close()
+	a.logger.printf("crash recovery: state head=%d, block_log head=%d; re-replaying %d blocks",
+		stateHead, writerHead, writerHead-stateHead)
+	opts := chain.ApplyOptions{
+		Sync:                      false,
+		SkipBlockSignature:        true,
+		SkipTransactionSignatures: true,
+	}
+	for n := stateHead + 1; n <= writerHead; n++ {
+		raw, err := r.Block(n)
+		if err != nil {
+			return fmt.Errorf("read recovery block %d: %w", n, err)
+		}
+		if _, err := a.chain.ApplyBlock(raw, n, opts, nil); err != nil {
+			return fmt.Errorf("apply recovery block %d: %w", n, err)
+		}
+	}
+	if err := a.chain.FlushBatch(true); err != nil {
+		return fmt.Errorf("flush after recovery: %w", err)
+	}
+	a.logger.printf("crash recovery: replayed up to block %d, state durably persisted", writerHead)
+	return nil
 }
 
 func (a *app) close() {
@@ -274,6 +338,13 @@ func (a *app) close() {
 	if a.verify != nil {
 		_ = a.verify.Close()
 		a.verify = nil
+	}
+	if a.chain != nil {
+		// Flush any batched writes to the backend so the next process
+		// boot doesn't have to re-replay through them. Use sync=true so
+		// the on-disk state matches the in-memory head when we close.
+		_ = a.chain.FlushBatch(true)
+		a.chain = nil
 	}
 	if a.state != nil {
 		_ = a.state.Close()

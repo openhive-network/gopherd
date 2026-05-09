@@ -421,3 +421,151 @@ func TestApplyBlockHookIntegration(t *testing.T) {
 		t.Fatalf("byte mismatch: got %d bytes, want %d bytes", len(gotBytes), len(wantBytes))
 	}
 }
+
+// TestCrashRecoveryReplaysFromBlockLog simulates a hard kill mid-batch:
+// blocks 1..200 are applied with BatchSize=100 (so 200 land cleanly in
+// the backend), then blocks 201..250 are applied with BatchSize=100 but
+// the process exits WITHOUT FlushBatch — leaving the persisted state at
+// block 200 and the block_log writer at block 250. On restart, the
+// crash-recovery path must replay blocks 201..250 from the block_log so
+// the chain head matches the writer head.
+func TestCrashRecoveryReplaysFromBlockLog(t *testing.T) {
+	src := projectBlockLog(t)
+	const total = 250
+	const flushAt = 200
+
+	srcReader, err := blocklog.Open(src)
+	if err != nil {
+		t.Fatalf("open source: %v", err)
+	}
+	if srcReader.Head() < total {
+		srcReader.Close()
+		t.Skipf("source block_log only has %d blocks", srcReader.Head())
+	}
+	rawBlocks := make([][]byte, total)
+	for i := uint32(1); i <= total; i++ {
+		b, err := srcReader.Block(i)
+		if err != nil {
+			srcReader.Close()
+			t.Fatalf("read source %d: %v", i, err)
+		}
+		rawBlocks[i-1] = b
+	}
+	srcReader.Close()
+
+	dataDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dataDir, "blockchain"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	blockLogPath := filepath.Join(dataDir, "blockchain", "block_log")
+
+	// --- pretend we are the daemon: apply 250 blocks, fsync block_log
+	// every block (default), but only flush the state batch at block 200. ---
+	{
+		stateDB, err := state.Open(dataDir, 64<<20)
+		if err != nil {
+			t.Fatalf("open state: %v", err)
+		}
+		if err := genesis.Apply(stateDB); err != nil {
+			_ = err
+		}
+		stateDB.SetBatchSize(100)
+		cdb := chain.New(stateDB)
+		w, err := blocklog.OpenForWrite(blockLogPath, false)
+		if err != nil {
+			t.Fatalf("open writer: %v", err)
+		}
+		opts := chain.ApplyOptions{
+			SkipBlockSignature:        true,
+			SkipTransactionSignatures: true,
+		}
+		for i, raw := range rawBlocks {
+			n := uint32(i + 1)
+			if _, err := cdb.ApplyBlock(raw, n, opts, nil); err != nil {
+				t.Fatalf("ApplyBlock %d: %v", n, err)
+			}
+			if err := w.Append(raw); err != nil {
+				t.Fatalf("Append %d: %v", n, err)
+			}
+			if n == flushAt {
+				if err := cdb.FlushBatch(true); err != nil {
+					t.Fatalf("FlushBatch at %d: %v", n, err)
+				}
+			}
+		}
+		// Close the writer (so its index sidecar is durable). DO NOT call
+		// FlushBatch on the chain — this is the simulated crash.
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+		// Drop the in-memory batch overlay BEFORE closing pebble so the
+		// pebble Close() doesn't end up persisting it. This mirrors what
+		// `kill -9` would do — process death drops the in-memory map.
+		stateDB.DiscardBatch()
+		if err := stateDB.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// --- restart: state head should be flushAt (200), block_log head 250.
+	// Recovery must close the gap. ---
+	stateDB, err := state.Open(dataDir, 64<<20)
+	if err != nil {
+		t.Fatalf("re-open state: %v", err)
+	}
+	defer stateDB.Close()
+	stateDB.SetBatchSize(100)
+	cdb := chain.New(stateDB)
+	headBefore, err := cdb.HeadBlock()
+	if err != nil {
+		t.Fatalf("head before recovery: %v", err)
+	}
+	if headBefore != flushAt {
+		t.Fatalf("head before recovery: got %d, want %d (state should reflect last flush)", headBefore, flushAt)
+	}
+
+	if err := recoverFromBlockLogTest(cdb, blockLogPath); err != nil {
+		t.Fatalf("recoverFromBlockLog: %v", err)
+	}
+	headAfter, err := cdb.HeadBlock()
+	if err != nil {
+		t.Fatalf("head after recovery: %v", err)
+	}
+	if headAfter != total {
+		t.Fatalf("head after recovery: got %d, want %d", headAfter, total)
+	}
+}
+
+// recoverFromBlockLogTest mirrors the production recoverFromBlockLog in
+// ghive-sync's app, but reduced to the inputs the unit test needs (no
+// app struct, no logger). Production flow is exercised by the
+// newApp constructor's recovery call once a real --data-dir is set up.
+func recoverFromBlockLogTest(cdb *chain.Database, blockLogPath string) error {
+	r, err := blocklog.Open(blockLogPath)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	stateHead, err := cdb.HeadBlock()
+	if err != nil {
+		return err
+	}
+	logHead := r.Head()
+	if logHead == 0 || logHead <= stateHead {
+		return nil
+	}
+	opts := chain.ApplyOptions{
+		SkipBlockSignature:        true,
+		SkipTransactionSignatures: true,
+	}
+	for n := stateHead + 1; n <= logHead; n++ {
+		raw, err := r.Block(n)
+		if err != nil {
+			return err
+		}
+		if _, err := cdb.ApplyBlock(raw, n, opts, nil); err != nil {
+			return err
+		}
+	}
+	return cdb.FlushBatch(true)
+}
