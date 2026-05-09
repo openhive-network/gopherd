@@ -7,11 +7,15 @@ import (
 )
 
 // removeExpiredGovernanceVotes mirrors database::remove_expired_governance_votes
-// (libraries/chain/database.cpp:3505). HF22+: when an account hasn't
-// updated its governance_vote_expiration_ts within the renewal period
-// (1 year), its proposal votes and witness votes are cleared.
+// (libraries/chain/database.cpp:3630). HF25+ (NOT HF22 — the gate moved
+// up at HF25 to coincide with the renewal-period activation): when an
+// account hasn't updated its governance_vote_expiration_ts within the
+// renewal period (1 year), its proposal votes, witness proxy, and
+// witness votes are cleared. C++ first calls nullify_proxied_witness_votes
+// to drain proxied weight up the chain BEFORE clear_witness_votes.
 //
-// Pre-HF22 the field is unused and this hook is a no-op.
+// Pre-HF25 the field is unused for sweeps; pre-HF22 the field is
+// uninitialized and this hook is a no-op.
 //
 // We approximate by scanning the accounts table once per maintenance
 // interval (every block has acceptable cost given Pebble's iteration);
@@ -20,7 +24,7 @@ import (
 // same final state once all due accounts are processed.
 func removeExpiredGovernanceVotes(s *state.Session, blockTime, blockNum uint32) {
 	hf := hardfork.SetForBlock(blockNum)
-	if !hf.Has(hardfork.HF22) {
+	if !hf.Has(hardfork.HF25) {
 		return
 	}
 	// Only run once per HIVE_PROPOSAL_MAINTENANCE_PERIOD (1h) to bound
@@ -30,39 +34,50 @@ func removeExpiredGovernanceVotes(s *state.Session, blockTime, blockNum uint32) 
 	}
 
 	type expired struct {
-		name    string
-		vesting int64
+		name string
 	}
 	var due []expired
-	_ = s.Range(objects.AccountTable, state.PrimaryIndex, nil,
-		func(_, value []byte) (bool, error) {
-			a, err := objects.ReadAccount(value)
-			if err != nil {
-				return true, nil
-			}
-			if a.GovernanceVoteExpiration == 0 {
-				return true, nil
-			}
-			if a.GovernanceVoteExpiration > blockTime {
-				return true, nil
-			}
-			due = append(due, expired{name: a.Name, vesting: a.VestingShares})
+	_ = objects.RangeAccounts(s, func(a *objects.Account) (bool, error) {
+		if a.GovernanceVoteExpiration == 0 {
 			return true, nil
-		})
+		}
+		if a.GovernanceVoteExpiration > blockTime {
+			return true, nil
+		}
+		due = append(due, expired{name: a.Name})
+		return true, nil
+	})
 
 	for _, e := range due {
+		a, err := objects.GetAccount(s, e.name)
+		if err != nil {
+			continue
+		}
+		// C++ database.cpp:3633-3634 — nullify proxied votes BEFORE
+		// clearing direct votes, so accumulated proxied_vsf_votes drain
+		// up the chain rather than leaking on the cleared account.
+		directPower := a.VestingShares
+		if hf.Has(hardfork.HF24) {
+			directPower -= int64(a.SumDelayedVotes)
+			if directPower < 0 {
+				directPower = 0
+			}
+		}
+		objects.NullifyProxiedWitnessVotes(s, &a, directPower)
 		// Drop all proposal votes by this account.
 		clearProposalVotesForVoter(s, e.name)
-		// Drop all direct witness votes (and decrement totals).
-		objects.ClearWitnessVotesForAccount(s, e.name, e.vesting)
-		// Clear proxy + flag expired.
-		if a, err := objects.GetAccount(s, e.name); err == nil {
-			a.Proxy = ""
-			a.WitnessesVotedFor = 0
-			// Sentinel: setting to 0 means "expired/never expired again".
-			a.GovernanceVoteExpiration = 0
-			objects.PutAccount(s, &a)
+		// Drop direct witness votes. Pass 0 because Nullify above
+		// already removed the propagation-array contribution for the
+		// chain-walk's witnesses.
+		objects.ClearWitnessVotesForAccount(s, e.name, 0)
+		// Re-read after possible mutations from NullifyProxiedWitnessVotes.
+		if fresh, ferr := objects.GetAccount(s, e.name); ferr == nil {
+			a = fresh
 		}
+		a.Proxy = ""
+		a.WitnessesVotedFor = 0
+		a.GovernanceVoteExpiration = 0
+		objects.PutAccount(s, &a)
 	}
 }
 

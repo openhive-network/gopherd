@@ -28,15 +28,39 @@ func clearNullAccountBalance(s *state.Session, blockNum uint32) {
 		return // null account doesn't exist yet
 	}
 
-	// Track totals to subtract from supply at the end (in HIVE/HBD).
+	// Snapshot totals pre-interest (mirrors C++ collect_account_total_balance
+	// at database.cpp:1167-1172). The supply decrement at the end uses
+	// these snapshotted values; any interest accrued by AdjustHBDBalance /
+	// AdjustSavingsHBDBalance below mints to current_hbd_supply BEFORE
+	// the snapshot subtracts, so net supply change is `-(X - I)`.
 	totalHIVE := a.Balance + a.SavingsBalance + a.RewardHive
 	totalHBD := a.HBDBalance + a.SavingsHBDBalance + a.RewardHBD
 
-	// Liquid + savings + rewards: zero in place.
+	// Mirror C++ database.cpp:1186-1204 — call adjust_balance /
+	// adjust_savings_balance with the negated current balance so the
+	// interest accrual hook fires before the delta lands. The
+	// post-adjust account retains the just-minted interest as a residual,
+	// which gets cleared on the next round.
+	dgpo, dgpoErr := objects.GetDGPO(s)
+	blockTime := uint32(0)
+	if dgpoErr == nil {
+		blockTime = dgpo.Time
+	}
+	if a.HBDBalance > 0 && blockTime != 0 {
+		objects.AdjustHBDBalance(s, &a, blockTime, -a.HBDBalance)
+	} else {
+		a.HBDBalance = 0
+	}
+	if a.SavingsHBDBalance > 0 && blockTime != 0 {
+		objects.AdjustSavingsHBDBalance(s, &a, blockTime, -a.SavingsHBDBalance)
+	} else {
+		a.SavingsHBDBalance = 0
+	}
+
+	// Liquid HIVE + savings HIVE + reward balances have no interest
+	// hook in C++ adjust_balance — they zero directly.
 	a.Balance = 0
-	a.HBDBalance = 0
 	a.SavingsBalance = 0
-	a.SavingsHBDBalance = 0
 	a.RewardHive = 0
 	a.RewardHBD = 0
 
@@ -51,8 +75,13 @@ func clearNullAccountBalance(s *state.Session, blockNum uint32) {
 				dgpo.TotalVestingShares)
 			dgpo.TotalVestingShares -= a.VestingShares
 			dgpo.TotalVestingFundHive -= vestsToHive
+			// C++ folds vesting_hive_value into the final total_hive
+			// `adjust_supply(-total_hive)`; we keep the vesting deduction
+			// here, but apply it via adjustSupplyHive so virtual_supply
+			// shrinks in step with current_supply (matches what C++
+			// achieves through one combined adjust_supply call).
 			if vestsToHive > 0 {
-				dgpo.CurrentSupply -= vestsToHive
+				adjustSupplyHive(s, &dgpo, -vestsToHive)
 			}
 			objects.PutDGPO(s, &dgpo)
 		}
@@ -70,11 +99,16 @@ func clearNullAccountBalance(s *state.Session, blockNum uint32) {
 	objects.PutAccount(s, &a)
 
 	if dgpo, err := objects.GetDGPO(s); err == nil {
+		// Mirror C++ clear_null_account_balance (database.cpp:1258-1262):
+		// adjust_supply(-total_hive) then adjust_supply(-total_hbd). The
+		// HBD branch does a full virtual_supply recompute — without it,
+		// Go's intra-block VS lags C++'s by `total_hbd × median` until
+		// the next end-of-block updateVirtualSupply.
 		if totalHIVE > 0 {
-			dgpo.CurrentSupply -= totalHIVE
+			adjustSupplyHive(s, &dgpo, -totalHIVE)
 		}
 		if totalHBD > 0 {
-			dgpo.CurrentHBDSupply -= totalHBD
+			adjustSupplyHbd(s, &dgpo, -totalHBD)
 		}
 		objects.PutDGPO(s, &dgpo)
 	}

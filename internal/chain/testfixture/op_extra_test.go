@@ -34,7 +34,7 @@ func TestCommentBeneficiariesApply(t *testing.T) {
 	}
 	if err := f.ApplyOp(op.CommentOptions{
 		Author: "alice", Permlink: "test",
-		MaxAcceptedPayout:    HBD(1_000_000_000_000),
+		MaxAcceptedPayout:    HBD(1_000_000_000),
 		PercentHbd:           10000,
 		AllowVotes:           true,
 		AllowCurationRewards: true,
@@ -46,7 +46,7 @@ func TestCommentBeneficiariesApply(t *testing.T) {
 	t.Log("--- Failure on non-existent beneficiary")
 	if err := f.ApplyOp(op.CommentOptions{
 		Author: "alice", Permlink: "test",
-		MaxAcceptedPayout:    HBD(1_000_000_000_000),
+		MaxAcceptedPayout:    HBD(1_000_000_000),
 		PercentHbd:           10000,
 		AllowVotes:           true,
 		AllowCurationRewards: true,
@@ -58,7 +58,7 @@ func TestCommentBeneficiariesApply(t *testing.T) {
 	t.Log("--- Success: bob gets 25%, sam gets 50%, dave gets 10%")
 	if err := f.ApplyOp(op.CommentOptions{
 		Author: "alice", Permlink: "test",
-		MaxAcceptedPayout:    HBD(1_000_000_000_000),
+		MaxAcceptedPayout:    HBD(1_000_000_000),
 		PercentHbd:           10000,
 		AllowVotes:           true,
 		AllowCurationRewards: true,
@@ -78,7 +78,7 @@ func TestCommentBeneficiariesApply(t *testing.T) {
 	t.Log("--- Cannot set beneficiaries twice")
 	if err := f.ApplyOp(op.CommentOptions{
 		Author: "alice", Permlink: "test",
-		MaxAcceptedPayout:    HBD(1_000_000_000_000),
+		MaxAcceptedPayout:    HBD(1_000_000_000),
 		PercentHbd:           10000,
 		AllowVotes:           true,
 		AllowCurationRewards: true,

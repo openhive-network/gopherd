@@ -118,6 +118,18 @@ func processOneWithdrawal(s *state.Session, accountName string, scheduledTime ui
 	if toWithdraw > remaining {
 		toWithdraw = remaining
 	}
+	// Pre-HF28 final-chunk modulo quirk (database_vesting.cpp:176-177).
+	// When remaining < rate, C++ replaces `remaining` with
+	// `to_withdraw_total % rate`. For most accounts this collapses to
+	// the same value, but for HF1-affected accounts whose rate changed
+	// mid-power-down ("gil" is the canonical example) the residual
+	// differs by 0.769230 VESTS vs 0.000040 VESTS — leaks/locks VESTS
+	// on dgpo.TotalVestingShares which then propagates into witness
+	// vote totals → schedule → median feed.
+	hfWithdraw := hardfork.SetForBlock(scheduledTime / 3)
+	if !hfWithdraw.Has(hardfork.HF28) && toWithdraw < a.VestingWithdrawRate && a.VestingWithdrawRate > 0 {
+		toWithdraw = a.ToWithdraw % a.VestingWithdrawRate
+	}
 	if toWithdraw > a.VestingShares {
 		toWithdraw = a.VestingShares
 	}

@@ -270,10 +270,16 @@ func processFunds(s *state.Session, blockNum uint32, witnessName string) {
 
 	dgpo.TotalVestingFundHive += vestingReward
 	dgpo.TotalRewardFundHive += contentReward + curateReward
-	// Mirror C++ database.cpp:1909:
+	// Mirror C++ database.cpp:1909-1913:
 	//   p.current_supply += content_reward + witness_pay + vesting_reward
-	// (where content_reward is the curate-folded value).
-	dgpo.CurrentSupply += contentReward + curateReward + witnessPay + vestingReward
+	//   p.virtual_supply += content_reward + witness_pay + vesting_reward
+	// (where content_reward is the curate-folded value). Bump virtual_supply
+	// atomically alongside current_supply so any in-block reader (e.g.
+	// pay_liquidity_reward at FEED_INTERVAL boundaries) sees the post-funds
+	// value rather than the pre-funds one.
+	delta := contentReward + curateReward + witnessPay + vestingReward
+	dgpo.CurrentSupply += delta
+	dgpo.VirtualSupply += delta
 	objects.PutDGPO(s, &dgpo)
 }
 
@@ -387,18 +393,45 @@ func processFundsHF16(s *state.Session, dgpo *objects.DynamicGlobalProperty, blo
 	}
 
 	dgpo.TotalVestingFundHive += vestingReward
-	dgpo.CurrentSupply += contentReward + vestingReward + witnessReward + dhfNew
+	// Mirror C++ database.cpp:1767-1784. The HIVE side is straightforward:
+	//   current_supply += new_hive   (= contentReward + vestingReward + witnessReward)
+	//   virtual_supply += new_hive + dhf_new_funds
+	// The DHF (HF21+) side: dhf_new_funds is HIVE that gets CONVERTED to HBD
+	// via the median price and credited to the treasury as HBD. Pre-HF24
+	// treasury is "steem.dao"; HF24+ "hive.fund".
+	newHiveDelta := contentReward + vestingReward + witnessReward
+	dgpo.CurrentSupply += newHiveDelta
+	dgpo.VirtualSupply += newHiveDelta + dhfNew
 	if dhfNew > 0 {
-		// Treasury gets the DHF allocation as HBD-equivalent. Without
-		// a feed we credit it as HIVE; once the feed is wired hived
-		// converts via median_price. Pre-HF24 treasury is "steem.dao";
-		// HF24+ "hive.fund". We try the post-HF24 name first.
-		if treasury, err := objects.GetAccount(s, "hive.fund"); err == nil {
-			treasury.Balance += dhfNew
-			objects.PutAccount(s, &treasury)
-		} else if treasury, err := objects.GetAccount(s, "steem.dao"); err == nil {
-			treasury.Balance += dhfNew
-			objects.PutAccount(s, &treasury)
+		// Convert dhfNew HIVE → HBD via median feed for the treasury.
+		var dhfHBD int64
+		if fh, ferr := objects.GetFeedHistory(s); ferr == nil && !priceIsZero(fh.CurrentMedianHistory) {
+			dhfHBD = convertHiveToHBD(dhfNew, fh.CurrentMedianHistory)
+		}
+		if dhfHBD <= 0 {
+			// Fall back to crediting HIVE if the feed isn't available.
+			if treasury, err := objects.GetAccount(s, "hive.fund"); err == nil {
+				treasury.Balance += dhfNew
+				objects.PutAccount(s, &treasury)
+				dgpo.CurrentSupply += dhfNew
+			} else if treasury, err := objects.GetAccount(s, "steem.dao"); err == nil {
+				treasury.Balance += dhfNew
+				objects.PutAccount(s, &treasury)
+				dgpo.CurrentSupply += dhfNew
+			}
+		} else {
+			treasuryName := "hive.fund"
+			treasury, err := objects.GetAccount(s, treasuryName)
+			if err != nil {
+				treasuryName = "steem.dao"
+				treasury, err = objects.GetAccount(s, treasuryName)
+			}
+			if err == nil {
+				treasury.HBDBalance += dhfHBD
+				objects.PutAccount(s, &treasury)
+			}
+			dgpo.CurrentHBDSupply += dhfHBD
+			dgpo.DHFIntervalLedger += dhfHBD
 		}
 	}
 	objects.PutDGPO(s, dgpo)

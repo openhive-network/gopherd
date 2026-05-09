@@ -295,3 +295,25 @@ func (w *WitnessSchedule) ScheduledWitnessForSlot(headBlockNum, slotNum uint32) 
 	}
 	return w.CurrentShuffledWitnesses[idx]
 }
+
+// ScheduledWitnessForSlotAslot is the corrected variant that mirrors
+// hived's `get_scheduled_witness( slot_num )` =
+// `current_shuffled_witnesses[(current_aslot + slot_num) % num_scheduled]`.
+// `current_aslot` advances per slot — INCLUDING missed slots — whereas
+// head_block_num advances only on produced blocks. Use this in
+// per-block code that resolves the producer for a given slot
+// (update_witness_missed_blocks) so missed-slot attribution mirrors
+// C++. Without this fix, gxt-1080-sc-0028 saw 1 missed slot in Go but
+// 2 in hived at block 5,140,000 — the second one would have triggered
+// the HF14+ disable check, which is why hived's signing_key was zero
+// (DISABLED) and Go's wasn't.
+func (w *WitnessSchedule) ScheduledWitnessForSlotAslot(currentAslot uint64, slotNum uint32) auth.AccountName {
+	if w.NumScheduledWitnesses == 0 || len(w.CurrentShuffledWitnesses) == 0 {
+		return ""
+	}
+	idx := (currentAslot + uint64(slotNum)) % uint64(w.NumScheduledWitnesses)
+	if int(idx) >= len(w.CurrentShuffledWitnesses) {
+		return ""
+	}
+	return w.CurrentShuffledWitnesses[idx]
+}

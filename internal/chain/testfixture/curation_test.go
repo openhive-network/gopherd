@@ -243,13 +243,23 @@ func TestCurationTwoEqualVotersEqualPayout(t *testing.T) {
 	})
 	f.GenerateBlock()
 
-	bobBefore := f.Vests("bob")
-	carolBefore := f.Vests("carol")
+	// HF17_659+ routes curation rewards into RewardVests (not the
+	// liquid VestingShares); both are vests, so we sum the two for the
+	// curator-payout check.
+	curatorVests := func(name string) int64 {
+		a, err := objects.GetAccount(state.NewSession(f.State), name)
+		if err != nil {
+			t.Fatalf("get account %q: %v", name, err)
+		}
+		return a.VestingShares + a.RewardVests
+	}
+	bobBefore := curatorVests("bob")
+	carolBefore := curatorVests("carol")
 
 	f.SkipSeconds(60 * 60 * 24 * 7)
 
-	bobDelta := f.Vests("bob") - bobBefore
-	carolDelta := f.Vests("carol") - carolBefore
+	bobDelta := curatorVests("bob") - bobBefore
+	carolDelta := curatorVests("carol") - carolBefore
 	if bobDelta == 0 || carolDelta == 0 {
 		t.Fatalf("expected both voters to receive curation: bob_d=%d carol_d=%d",
 			bobDelta, carolDelta)
@@ -312,12 +322,21 @@ func TestCurationSingleVoterCashout(t *testing.T) {
 		t.Fatalf("bob: %v", err)
 	}
 
-	bobBefore := f.Vests("bob")
+	// HF17_659+ curation rewards land in RewardVests; sum both so the
+	// post-fix behaviour passes.
+	bobVests := func() int64 {
+		a, err := objects.GetAccount(state.NewSession(f.State), "bob")
+		if err != nil {
+			t.Fatalf("get bob: %v", err)
+		}
+		return a.VestingShares + a.RewardVests
+	}
+	bobBefore := bobVests()
 
 	// Skip to cashout (HF17 = 7 days).
 	f.SkipSeconds(60 * 60 * 24 * 7)
 
-	bobAfter := f.Vests("bob")
+	bobAfter := bobVests()
 	if bobAfter <= bobBefore {
 		t.Fatalf("bob should receive curation VESTS at cashout: before=%d after=%d",
 			bobBefore, bobAfter)

@@ -28,6 +28,39 @@ func verifyAuthorityAccountsExist(ctx *Context, a auth.Authority) error {
 	return nil
 }
 
+// checkAuthorityAccountsExistAndCorrect mirrors hived's
+// check_authority_accounts_exist (hive_evaluator_account.cpp:89). Pre-HF15
+// posting authorities silently dropped any account_auth referencing a
+// non-existent account instead of throwing. Returns the cleaned-up
+// authority (may be the same as input when nothing was dropped).
+func checkAuthorityAccountsExistAndCorrect(ctx *Context, a auth.Authority) (auth.Authority, error) {
+	cleaned := a
+	hadInvalid := false
+	keep := cleaned.AccountAuths[:0]
+	for _, aa := range cleaned.AccountAuths {
+		has, err := objects.HasAccount(ctx.DB, aa.Account)
+		if err != nil {
+			return cleaned, err
+		}
+		if has {
+			keep = append(keep, aa)
+		} else {
+			hadInvalid = true
+		}
+	}
+	if hadInvalid {
+		// Don't mutate the input slice header; return a copy with the
+		// filtered list so callers can swap in the corrected authority.
+		corrected := auth.Authority{
+			WeightThreshold: cleaned.WeightThreshold,
+			AccountAuths:    append([]auth.AccountAuth(nil), keep...),
+			KeyAuths:        cleaned.KeyAuths,
+		}
+		return corrected, nil
+	}
+	return cleaned, nil
+}
+
 // ErrAccountAlreadyExists is returned by account_create when the chosen
 // new_account_name is already taken.
 var ErrAccountAlreadyExists = errors.New("account already exists")

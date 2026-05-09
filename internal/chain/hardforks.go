@@ -52,11 +52,14 @@ func RunHardforkActivation(s *state.Session, id hardfork.ID, blockNum uint32) {
 // the ones we model here are the ones whose state mutations are
 // observable post-activation.
 func applyHardfork(s *state.Session, id hardfork.ID) {
-	// Mirror C++ apply_hardfork's bookkeeping: push processed_hardforks,
-	// bump last_hardfork, and update current_hardfork_version. Done
-	// before per-HF effects so any code reading the property object
-	// during a hook sees the new state.
-	bumpHardforkPropertyObject(s, id)
+	// Mirror C++ apply_hardfork (database_hardfork.cpp:519-527): per-HF
+	// effects run FIRST, then the hardfork_property_object is bumped.
+	// This ordering matters when an effect handler reads
+	// `hpo.current_hardfork_version`/`next_hardfork` — at that moment it
+	// must reflect the PRE-bump state. (For HF1-HF12 the dispatch is
+	// neutral because none of the effect handlers read hpo, but
+	// HF22→HF23 forces a bump regardless of vote tally and a future
+	// effect handler that reads hpo could trip on the wrong order.)
 	switch id {
 	case hardfork.HF1:
 		performVestingShareSplit(s, 1_000_000)
@@ -268,6 +271,10 @@ func applyHardfork(s *state.Session, id hardfork.ID) {
 		// by walking all accounts and checking VoteRevoked.
 		removeProposalVotesForRevokedAccounts(s)
 	}
+	// Per-HF effects done — now bump processed_hardforks /
+	// last_hardfork / current_hardfork_version. Mirrors C++ ordering
+	// at database_hardfork.cpp:519-527.
+	bumpHardforkPropertyObject(s, id)
 }
 
 // bumpHardforkPropertyObject mirrors the per-apply_hardfork housekeeping
@@ -409,15 +416,10 @@ func performVestingShareSplit(s *state.Session, magnitude int64) {
 		owner string
 	}
 	var acctNames []acctMod
-	_ = s.Range(objects.AccountTable, state.PrimaryIndex, nil,
-		func(_, value []byte) (bool, error) {
-			a, err := objects.ReadAccount(value)
-			if err != nil {
-				return true, nil
-			}
-			acctNames = append(acctNames, acctMod{owner: a.Name})
-			return true, nil
-		})
+	_ = objects.RangeAccounts(s, func(a *objects.Account) (bool, error) {
+		acctNames = append(acctNames, acctMod{owner: a.Name})
+		return true, nil
+	})
 	for _, m := range acctNames {
 		a, err := objects.GetAccount(s, m.owner)
 		if err != nil {
@@ -484,15 +486,10 @@ func rebuildCommentRshares(s *state.Session, magnitude int64) {
 		author, permlink string
 	}
 	var queue []pending
-	_ = s.Range(objects.CommentTable, state.PrimaryIndex, nil,
-		func(_, value []byte) (bool, error) {
-			c, err := objects.ReadComment(value)
-			if err != nil {
-				return true, nil
-			}
-			queue = append(queue, pending{author: c.Author, permlink: c.Permlink})
-			return true, nil
-		})
+	_ = objects.RangeAllComments(s, func(c *objects.Comment) (bool, error) {
+		queue = append(queue, pending{author: string(c.Author), permlink: c.Permlink})
+		return true, nil
+	})
 	dgpo, dgpoErr := objects.GetDGPO(s)
 	total := reward.Uint128FromBytes(dgpo.TotalRewardShares2)
 	for _, p := range queue {
@@ -575,25 +572,20 @@ func applyHardfork12CommentCashoutFix(s *state.Session) {
 		isPaidOut        bool
 	}
 	var queue []pending
-	_ = s.Range(objects.CommentTable, state.PrimaryIndex, nil,
-		func(_, value []byte) (bool, error) {
-			c, err := objects.ReadComment(value)
-			if err != nil {
-				return true, nil
-			}
-			if c.ParentAuthor != "" {
-				return true, nil // replies stay frozen
-			}
-			queue = append(queue, pending{
-				author:     c.Author,
-				permlink:   c.Permlink,
-				oldCashout: c.CashoutTime,
-				created:    c.Created,
-				netRshares: c.NetRshares,
-				isPaidOut:  c.CashoutTime == 0,
-			})
-			return true, nil
+	_ = objects.RangeAllComments(s, func(c *objects.Comment) (bool, error) {
+		if c.ParentAuthor != "" {
+			return true, nil // replies stay frozen
+		}
+		queue = append(queue, pending{
+			author:     string(c.Author),
+			permlink:   c.Permlink,
+			oldCashout: c.CashoutTime,
+			created:    c.Created,
+			netRshares: c.NetRshares,
+			isPaidOut:  c.CashoutTime == 0,
 		})
+		return true, nil
+	})
 
 	// Mirror C++ database_comment.cpp:579:
 	//   - root + unpaid + frozen (cashout==max): cashout = head + 12h (HIVE_CASHOUT_WINDOW_SECONDS_PRE_HF17)
@@ -647,20 +639,15 @@ func applyHardfork17CommentCashoutFix(s *state.Session) {
 		created          uint32
 	}
 	var queue []pending
-	_ = s.Range(objects.CommentTable, state.PrimaryIndex, nil,
-		func(_, value []byte) (bool, error) {
-			c, err := objects.ReadComment(value)
-			if err != nil {
-				return true, nil
-			}
-			queue = append(queue, pending{
-				author:     c.Author,
-				permlink:   c.Permlink,
-				oldCashout: c.CashoutTime,
-				created:    c.Created,
-			})
-			return true, nil
+	_ = objects.RangeAllComments(s, func(c *objects.Comment) (bool, error) {
+		queue = append(queue, pending{
+			author:     string(c.Author),
+			permlink:   c.Permlink,
+			oldCashout: c.CashoutTime,
+			created:    c.Created,
 		})
+		return true, nil
+	})
 	for _, p := range queue {
 		c, err := objects.GetComment(s, p.author, p.permlink)
 		if err != nil {
@@ -794,15 +781,10 @@ func retallyWitnessVotes(s *state.Session) {
 	// (= direct vest + sum(proxied_vsf_votes)) to each.
 	type acctRec struct{ name string }
 	var accounts []acctRec
-	_ = s.Range(objects.AccountTable, state.PrimaryIndex, nil,
-		func(_, value []byte) (bool, error) {
-			a, err := objects.ReadAccount(value)
-			if err != nil {
-				return true, nil
-			}
-			accounts = append(accounts, acctRec{name: a.Name})
-			return true, nil
-		})
+	_ = objects.RangeAccounts(s, func(a *objects.Account) (bool, error) {
+		accounts = append(accounts, acctRec{name: a.Name})
+		return true, nil
+	})
 	dgpo, _ := objects.GetDGPO(s)
 	hf := hardfork.SetForBlock(dgpo.HeadBlockNumber)
 	for _, ar := range accounts {
@@ -857,19 +839,14 @@ func retallyWitnessVoteCountsForProxiedOnly(s *state.Session) {
 		curCount uint16
 	}
 	var accounts []acctRec
-	_ = s.Range(objects.AccountTable, state.PrimaryIndex, nil,
-		func(_, value []byte) (bool, error) {
-			a, err := objects.ReadAccount(value)
-			if err != nil {
-				return true, nil
-			}
-			accounts = append(accounts, acctRec{
-				name:     a.Name,
-				hasProxy: a.Proxy != "",
-				curCount: a.WitnessesVotedFor,
-			})
-			return true, nil
+	_ = objects.RangeAccounts(s, func(a *objects.Account) (bool, error) {
+		accounts = append(accounts, acctRec{
+			name:     a.Name,
+			hasProxy: a.Proxy != "",
+			curCount: a.WitnessesVotedFor,
 		})
+		return true, nil
+	})
 	for _, ar := range accounts {
 		a, err := objects.GetAccount(s, ar.name)
 		if err != nil {
@@ -897,15 +874,10 @@ func retallyWitnessVoteCountsForProxiedOnly(s *state.Session) {
 func retallyWitnessVoteCounts(s *state.Session) {
 	type acctRec struct{ name string }
 	var accounts []acctRec
-	_ = s.Range(objects.AccountTable, state.PrimaryIndex, nil,
-		func(_, value []byte) (bool, error) {
-			a, err := objects.ReadAccount(value)
-			if err != nil {
-				return true, nil
-			}
-			accounts = append(accounts, acctRec{name: a.Name})
-			return true, nil
-		})
+	_ = objects.RangeAccounts(s, func(a *objects.Account) (bool, error) {
+		accounts = append(accounts, acctRec{name: a.Name})
+		return true, nil
+	})
 	for _, ar := range accounts {
 		a, err := objects.GetAccount(s, ar.name)
 		if err != nil {

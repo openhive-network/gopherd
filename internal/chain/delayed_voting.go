@@ -35,35 +35,34 @@ func processDelayedVoting(s *state.Session, blockTime, blockNum uint32) {
 	}
 	var due []matured
 
-	_ = s.Range(objects.AccountTable, state.PrimaryIndex, nil,
-		func(_, value []byte) (bool, error) {
-			a, err := objects.ReadAccount(value)
-			if err != nil {
-				return true, nil
-			}
-			if len(a.DelayedVotes) == 0 {
-				return true, nil
-			}
-			// Mature every bucket whose time + 30 days <= blockTime.
-			// Buckets are ordered by time so the front is always the
-			// oldest.
-			changed := false
-			for len(a.DelayedVotes) > 0 {
-				front := a.DelayedVotes[0]
-				if front.Time+objects.DelayedVotingTotalIntervalSec > blockTime {
-					break
-				}
-				due = append(due, matured{name: a.Name, val: front.Val})
-				if err := objects.DelayedVotingEraseFront(&a.DelayedVotes, &a.SumDelayedVotes); err != nil {
-					break
-				}
-				changed = true
-			}
-			if changed {
-				objects.PutAccount(s, &a)
-			}
+	_ = objects.RangeAccounts(s, func(a *objects.Account) (bool, error) {
+		if len(a.DelayedVotes) == 0 {
 			return true, nil
-		})
+		}
+		// Take a working copy — we mutate via Put so the typed-store's
+		// undo log captures a clean before-image rather than holding
+		// our scratch slice.
+		acc := *a
+		// Mature every bucket whose time + 30 days <= blockTime.
+		// Buckets are ordered by time so the front is always the
+		// oldest.
+		changed := false
+		for len(acc.DelayedVotes) > 0 {
+			front := acc.DelayedVotes[0]
+			if front.Time+objects.DelayedVotingTotalIntervalSec > blockTime {
+				break
+			}
+			due = append(due, matured{name: acc.Name, val: front.Val})
+			if err := objects.DelayedVotingEraseFront(&acc.DelayedVotes, &acc.SumDelayedVotes); err != nil {
+				break
+			}
+			changed = true
+		}
+		if changed {
+			objects.PutAccount(s, &acc)
+		}
+		return true, nil
+	})
 
 	for _, m := range due {
 		// Now that the bucket is mature, propagate the val to the

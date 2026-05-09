@@ -142,15 +142,21 @@ func TestValidateBlockSizeLimit(t *testing.T) {
 // TestSlotNumForBlockTime covers the helper used by the witness
 // scheduling assert (HIVE_BLOCK_INTERVAL = 3 seconds per slot).
 func TestSlotNumForBlockTime(t *testing.T) {
+	// Mirrors hived's get_slot_at_time: head_time is rounded DOWN to the
+	// previous interval boundary before computing the next slot. With
+	// HIVE_BLOCK_INTERVAL=3, head=100 rounds to head_slot_time=99, so
+	// the first valid slot starts at 102 — not 103.
 	cases := []struct {
 		head, block uint32
 		wantSlot    uint32
 	}{
-		{100, 103, 1}, // contiguous
-		{100, 106, 2}, // one missed
-		{100, 109, 3},
-		{100, 100, 0}, // same time → invalid
-		{100, 102, 0}, // less than one slot apart
+		{99, 102, 1},  // aligned head, contiguous
+		{99, 105, 2},  // aligned head, one missed
+		{99, 108, 3},
+		{100, 102, 1}, // unaligned head rounds down to 99 → 102 is slot 1
+		{100, 105, 2},
+		{100, 100, 0}, // block_time < first_slot_time (102) → invalid
+		{100, 101, 0},
 		{100, 99, 0},  // backwards
 	}
 	for _, c := range cases {

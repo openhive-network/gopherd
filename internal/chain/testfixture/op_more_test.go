@@ -125,14 +125,24 @@ func TestLimitOrderCreate2Apply(t *testing.T) {
 	if got := f.Balance("alice"); got != 5_000 {
 		t.Fatalf("alice HIVE after order: got %d, want 5000", got)
 	}
-	// Implied min-to-receive = 5000 × 1500 / 1000 = 7500 HBD-sat.
+	// Stored sell_price preserves exchange_rate.base/quote verbatim
+	// (mirrors C++ `_db.create<limit_order_object>(seller, amount_to_sell,
+	// o.exchange_rate, ...)`). The implied receive at full fill is
+	// for_sale × quote / base = 5000 × 1500 / 1000 = 7500 sat-HBD, but
+	// that's a derived quantity, not a stored field.
 	s := state.NewSession(f.State)
 	o, err := objects.GetLimitOrder(s, "alice", 1)
 	if err != nil {
 		t.Fatalf("order lookup: %v", err)
 	}
-	if o.MinReceiveAmt != 7_500 {
-		t.Fatalf("MinReceiveAmt: got %d, want 7500", o.MinReceiveAmt)
+	if o.SellPriceBaseAmount != 1_000 {
+		t.Fatalf("SellPriceBaseAmount: got %d, want 1000", o.SellPriceBaseAmount)
+	}
+	if o.MinReceiveAmt != 1_500 {
+		t.Fatalf("MinReceiveAmt (sell_price.quote): got %d, want 1500", o.MinReceiveAmt)
+	}
+	if o.ForSaleAmount != 5_000 {
+		t.Fatalf("ForSaleAmount: got %d, want 5000", o.ForSaleAmount)
 	}
 }
 

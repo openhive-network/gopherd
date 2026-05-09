@@ -401,6 +401,24 @@ func (s *Session) Restore(sp Savepoint) {
 		s.overlayKeys.Set(k)
 	}
 	s.dirtyKeys = append(s.dirtyKeys[:0], sp.dirtyKeys...)
+	// Truncate preCommit hooks back to snapshot length. Hooks added by
+	// the rolled-back tx would otherwise still fire at commit and
+	// serialize stale state.
+	if sp.preCommitLen >= 0 && sp.preCommitLen <= len(s.preCommit) {
+		s.preCommit = s.preCommit[:sp.preCommitLen]
+	}
+	// Invalidate the dgpo Aux cache: PutDGPO writes the overlay
+	// directly so Restore reverted the actual state, but the parsed
+	// dgpo cached in s.Aux still holds the failed-tx's value. Clearing
+	// it forces the next GetDGPO to re-parse from the (now-reverted)
+	// overlay, returning the correct PRE-tx state. Only the dgpo entry
+	// is cleared — readCache and other Aux entries are preserved per
+	// the historical tuning (cv-cleanup / vote-rshares accounting at
+	// acidsun's HBD block 2,904,813 was tuned against full Aux survival
+	// across Restore, so we narrow the invalidation to dgpo only).
+	if s.Aux != nil {
+		delete(s.Aux, "dgpo")
+	}
 	s.db.restoreAll(sp.subsystemPoints)
 }
 

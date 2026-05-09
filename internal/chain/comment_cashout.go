@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"hived-go/internal/protocol/asset"
+	"hived-go/internal/protocol/auth"
 	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/reward"
 	"hived-go/internal/state"
@@ -173,32 +174,11 @@ func processCommentCashouts(s *state.Session, blockTime, blockNum uint32) {
 			id          uint64
 		}
 		var siblings []sibling
-		prefix := objects.CommentByRootPrefix(rootAuthor, rootPermlink)
-		_ = s.Range(objects.CommentTable, objects.CommentByRootIndex, prefix,
-			func(body, _ []byte) (bool, error) {
-				// body = [root_author 16][root_permlink][0x00][author 16][permlink]
-				// Strip the root prefix to leave [author 16][permlink].
-				if len(body) <= len(prefix) {
-					return true, nil
-				}
-				rest := body[len(prefix):]
-				if len(rest) < state.AccountNameKeyLen {
-					return true, nil
-				}
-				authorBytes := rest[:state.AccountNameKeyLen]
-				permlink := string(rest[state.AccountNameKeyLen:])
-				n := state.AccountNameKeyLen
-				for n > 0 && authorBytes[n-1] == 0 {
-					n--
-				}
-				author := string(authorBytes[:n])
-				sib, gerr := objects.GetComment(s, author, permlink)
-				if gerr != nil {
-					return true, nil
-				}
+		_ = objects.RangeCommentsByRoot(s, auth.AccountName(rootAuthor), rootPermlink,
+			func(sib *objects.Comment) (bool, error) {
 				siblings = append(siblings, sibling{
-					author:      author,
-					permlink:    permlink,
+					author:      string(sib.Author),
+					permlink:    sib.Permlink,
 					cashoutTime: sib.CashoutTime,
 					id:          sib.ID,
 				})
@@ -352,8 +332,21 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 		return
 	}
 
-	// payout = fundBalance × curve / shares2.
-	payoutBig := new(big.Int).Mul(big.NewInt(fundBalance), commentCurve)
+	// reward_weight haircut (HF12-HF17 ROOT posts only). Mirrors
+	// libraries/chain/util/reward.cpp:18: `claim = (claim × reward_weight)
+	// / HIVE_100_PERCENT`. The weighted claim drives `payout`, but the
+	// unweighted curve still drives the `shares2` subtraction below
+	// (C++ database_comment.cpp:380 calls adjust_rshares2 with the raw
+	// curve). RewardWeight==0 means the field hasn't been set
+	// (legacy/replies/post-HF17) — treat as HIVE_100_PERCENT (no haircut).
+	weightedCurve := commentCurve
+	if c.RewardWeight != 0 && c.RewardWeight < 10000 {
+		weightedCurve = new(big.Int).Mul(commentCurve, big.NewInt(int64(c.RewardWeight)))
+		weightedCurve.Quo(weightedCurve, big.NewInt(10000))
+	}
+
+	// payout = fundBalance × weightedCurve / shares2.
+	payoutBig := new(big.Int).Mul(big.NewInt(fundBalance), weightedCurve)
 	payoutBig.Quo(payoutBig, shares2)
 	if !payoutBig.IsInt64() {
 		payoutBig.SetInt64(int64(^uint64(0) >> 1))
@@ -379,8 +372,19 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 		ghiveDiff("GHIVEDIFF CASHOUT-CALC block=%d author=%s permlink=%s id=%d cashoutTime=%d rshares=%d fundBalance=%d shares2_hi=%d shares2_lo=%d claimed_pre_clip=%d\n",
 			blockNum, author, permlink, c.ID, scheduledTime, c.NetRshares, fundBalance, hi, lo, claimed)
 	}
-	if claimed > c.MaxAcceptedPayout {
-		claimed = c.MaxAcceptedPayout
+	// MaxAcceptedPayout is denominated in HBD (HBD_asset in C++); to clip
+	// against `claimed` (HIVE-sat), convert via the median feed.
+	// Mirrors libraries/chain/util/reward.cpp:27-29 + database_comment.cpp:219:
+	// `max_hive = to_hive(current_hive_price, max_hbd); payout = min(payout, max_hive)`.
+	maxClaim := c.MaxAcceptedPayout
+	if fh, ferr := objects.GetFeedHistory(s); ferr == nil && !priceIsZero(fh.CurrentMedianHistory) {
+		maxClaim = convertHBDToHive(c.MaxAcceptedPayout, fh.CurrentMedianHistory)
+		if maxClaim <= 0 {
+			maxClaim = c.MaxAcceptedPayout // fallback if conversion yields 0
+		}
+	}
+	if claimed > maxClaim {
+		claimed = maxClaim
 	}
 	if claimed > fundBalance {
 		claimed = fundBalance
@@ -402,10 +406,9 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 	// `adjust_rshares2(curve(net_rshares), 0)` at
 	// database_comment.cpp:350-351; HF17+ the per-fund recent_claims
 	// snapshot is decremented analogously.
+	// Mirror C++ database.cpp:1673-1674 — uint128 wraps mod 2^128 on
+	// transient underflow. Uint128ToBytes performs the mod, no clamp.
 	shares2.Sub(shares2, commentCurve)
-	if shares2.Sign() < 0 {
-		shares2.SetInt64(0)
-	}
 	if usingFund {
 		fund.RecentClaims = reward.Uint128ToBytes(shares2)
 	} else {
@@ -457,6 +460,23 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 	curatorPool := claimed * curationPct / 10000
 	authorPool := claimed - curatorPool
 
+	// Mirror C++ cashout_comment_helper order (database_comment.cpp:259-310):
+	// CURATORS FIRST (so authors / beneficiaries see the post-curator
+	// vesting share price), then beneficiaries, then author. Each
+	// create_vesting2 call mutates total_vesting_fund_hive and
+	// total_vesting_shares, so the per-recipient payout depends on the
+	// order. Earlier Go paid beneficiaries before curators, which drifted
+	// share prices for any post with both — dormant pre-HF17 (no
+	// beneficiaries) but visible later.
+	curatorRemainder := int64(0)
+	if curatorPool > 0 {
+		curatorRemainder = distributeCuratorPool(s, c.Author, c.Permlink, curatorPool)
+	}
+	hf := hardfork.SetForBlock(blockNum)
+	if !hf.Has(hardfork.HF20) && curatorRemainder > 0 {
+		authorPool += curatorRemainder
+	}
+
 	// Beneficiaries (HF17+): take their share OFF THE TOP of authorPool.
 	// Each beneficiary's slice is paid as if the beneficiary were the
 	// author — half via create_hbd, half via create_vesting. HF21+ has a
@@ -486,10 +506,12 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 			hbdPayout := convertHiveToHBD(share, fh.CurrentMedianHistory)
 			objects.AdjustHBDBalance(s, &bAcct, blockTime, hbdPayout)
 			objects.PutAccount(s, &bAcct)
+			// adjust_supply pair: HIVE -share burned, HBD +hbdPayout minted
+			// (with VS recompute on the HBD branch). Mirrors C++
+			// database_comment.cpp:283-285.
 			if dgpo, derr := objects.GetDGPO(s); derr == nil {
-				dgpo.CurrentSupply -= share
-				dgpo.CurrentHBDSupply += hbdPayout
-				dgpo.VirtualSupply -= share
+				adjustSupplyHive(s, &dgpo, -share)
+				adjustSupplyHbd(s, &dgpo, hbdPayout)
 				objects.PutDGPO(s, &dgpo)
 			}
 			totalBeneficiary += share
@@ -509,22 +531,6 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 	authorPool -= totalBeneficiary
 	if authorPool < 0 {
 		authorPool = 0
-	}
-
-	// Distribute curators using the configured curve weights when
-	// using the reward_fund_object — otherwise the simple rshares²
-	// fallback. Pre-HF20, the unclaimed remainder (pool minus actual
-	// curator payouts — non-zero because TotalVoteWeight accumulates
-	// undiscounted weights while individual votes carry the
-	// reverse-auction-discounted weight) is forwarded back to the
-	// author. HF20 (block ~25M) flips this off — unclaimed evaporates.
-	curatorRemainder := int64(0)
-	if curatorPool > 0 {
-		curatorRemainder = distributeCuratorPool(s, c.Author, c.Permlink, curatorPool)
-	}
-	hf := hardfork.SetForBlock(blockNum)
-	if !hf.Has(hardfork.HF20) && curatorRemainder > 0 {
-		authorPool += curatorRemainder
 	}
 
 	// Author payout split: half HBD-style (subject to print rate) +
@@ -560,28 +566,11 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 	zero()
 }
 
-// deleteCommentVotes walks the by-comment secondary index for the
-// (author, permlink) comment and removes each vote row.
+// deleteCommentVotes drops every vote row on (author, permlink). Uses
+// the typed CommentVoteStore's bulk-delete which avoids the per-vote
+// btree probe of the old secondary-index walk.
 func deleteCommentVotes(s *state.Session, author, permlink string) {
-	type voterKey struct{ voter string }
-	var votes []voterKey
-	prefix := objects.CommentVoteByCommentPrefix(author, permlink)
-	_ = s.Range(objects.CommentVoteTable, objects.CommentVoteByCommentIndex, prefix,
-		func(body, _ []byte) (bool, error) {
-			if len(body) < state.AccountNameKeyLen {
-				return true, nil
-			}
-			vb := body[len(body)-state.AccountNameKeyLen:]
-			n := state.AccountNameKeyLen
-			for n > 0 && vb[n-1] == 0 {
-				n--
-			}
-			votes = append(votes, voterKey{voter: string(vb[:n])})
-			return true, nil
-		})
-	for _, v := range votes {
-		objects.DeleteCommentVote(s, v.voter, author, permlink)
-	}
+	objects.DeleteAllCommentVotesForComment(s, auth.AccountName(author), permlink)
 }
 
 // evaluateRewardCurveBoundedCuration mirrors C++ reward.cpp:50-52
@@ -687,10 +676,18 @@ func payCreateHbd(s *state.Session, a *objects.Account, blockTime uint32, hiveAm
 	objects.AdjustHBDBalance(s, a, blockTime, hbdAmount)
 	a.Balance += toHive
 
-	// adjust_supply: -toHbdHive HIVE, +hbdAmount HBD.
+	// Mirror C++'s pair of adjust_supply calls in create_hbd
+	// (database.cpp:979-980): adjust_supply(-to_hbd HIVE) bumps
+	// current_supply and virtual_supply incrementally, then
+	// adjust_supply(+hbd HBD) does a FULL recompute of virtual_supply
+	// from current_supply + current_hbd_supply × median. Without the
+	// HBD-side recompute, Go's intra-block virtual_supply lags C++'s by
+	// `hbd × median` per cashout — visible to the next intra-block
+	// reader (process_funds, pay_liquidity_reward) and (transitively)
+	// to subsequent HBD-supply ratio calcs at next-block updateVirtualSupply.
 	if dgpo, derr := objects.GetDGPO(s); derr == nil {
-		dgpo.CurrentSupply -= toHbdHive
-		dgpo.CurrentHBDSupply += hbdAmount
+		adjustSupplyHive(s, &dgpo, -toHbdHive)
+		adjustSupplyHbd(s, &dgpo, hbdAmount)
 		objects.PutDGPO(s, &dgpo)
 	}
 }
@@ -744,20 +741,9 @@ func distributeCuratorPool(s *state.Session, author, permlink string, pool int64
 	}
 	var pays []pay
 
-	prefix := objects.CommentVoteByCommentPrefix(author, permlink)
-	_ = s.Range(objects.CommentVoteTable, objects.CommentVoteByCommentIndex, prefix,
-		func(body, _ []byte) (bool, error) {
-			if len(body) < state.AccountNameKeyLen {
-				return true, nil
-			}
-			voterBytes := body[len(body)-state.AccountNameKeyLen:]
-			n := state.AccountNameKeyLen
-			for n > 0 && voterBytes[n-1] == 0 {
-				n--
-			}
-			voter := string(voterBytes[:n])
-			cv, gerr := objects.GetCommentVote(s, voter, author, permlink)
-			if gerr != nil || cv.CurationWeight == 0 {
+	_ = objects.RangeCommentVotesByComment(s, auth.AccountName(author), permlink,
+		func(cv *objects.CommentVote) (bool, error) {
+			if cv.CurationWeight == 0 {
 				return true, nil
 			}
 			w := new(big.Int).SetUint64(cv.CurationWeight)
@@ -770,7 +756,7 @@ func distributeCuratorPool(s *state.Session, author, permlink string, pool int64
 			if s64 <= 0 {
 				return true, nil
 			}
-			pays = append(pays, pay{voter: voter, weight: cv.CurationWeight, share: s64})
+			pays = append(pays, pay{voter: string(cv.Voter), weight: cv.CurationWeight, share: s64})
 			return true, nil
 		})
 
@@ -788,12 +774,18 @@ func distributeCuratorPool(s *state.Session, author, permlink string, pool int64
 
 	paid := int64(0)
 	dgpoNow, _ := objects.GetDGPO(s)
+	// HF17_659 (block 10,629,455 mainnet) flips curator vests to the
+	// reward_balance — claimable later via claim_reward_balance —
+	// instead of crediting vesting_shares directly. Mirrors C++ at
+	// database_comment.cpp:188 `create_vesting2(... has_hardfork(HF17_659) ...)`.
+	hf := hardfork.SetForBlock(dgpoNow.HeadBlockNumber)
+	toReward := hf.Has(hardfork.HF17)
 	for _, p := range pays {
 		if traceAccount(p.voter) || traceAccount(author) {
 			ghiveDiff("GHIVEDIFF CASHOUT-CURATOR block=%d author=%s permlink=%s voter=%s weight=%d total_weight=%d pool=%d claim=%d\n",
 				dgpoNow.HeadBlockNumber, author, permlink, p.voter, p.weight, c.TotalVoteWeight, pool, p.share)
 		}
-		_, _ = CreateVesting_via_chain(s, p.voter, p.share, false)
+		_, _ = CreateVesting_via_chain(s, p.voter, p.share, toReward)
 		paid += p.share
 	}
 	if paid > pool {

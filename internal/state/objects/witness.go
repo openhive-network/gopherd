@@ -79,6 +79,15 @@ type Witness struct {
 	// last_confirmed values. Mirrors witness_object::last_confirmed_block_num
 	// (libraries/chain/include/hive/chain/witness_objects.hpp).
 	LastConfirmedBlockNum uint32
+	// LastWork — pow1 work hash (32-byte sha256) submitted by this
+	// witness. Hived's pow_apply (hive_evaluator.cpp:407-413) rejects
+	// any pow1 op whose work hash matches an existing witness's
+	// last_work. Without a global by_work index, Go enforces the
+	// same-witness case only (witness X resubmitting their own proof
+	// after a drain) — cross-witness collision requires a SHA256
+	// collision and is astronomically rare. pow2 does NOT touch this
+	// field (C++ pow2_evaluator never writes last_work).
+	LastWork [32]byte
 }
 
 // WitnessScheduleType mirrors witness_object::schedule_type:
@@ -179,6 +188,7 @@ func AppendWitness(dst []byte, w *Witness) []byte {
 	dst = appendU32LE(dst, uint32(w.AccountSubsidyBudget))
 	dst = appendU32LE(dst, w.AccountSubsidyDecay)
 	dst = appendU32LE(dst, w.LastConfirmedBlockNum)
+	dst = append(dst, w.LastWork[:]...)
 	return dst
 }
 
@@ -288,6 +298,13 @@ func ReadWitness(src []byte) (Witness, error) {
 	}
 	if w.LastConfirmedBlockNum, err = r.ReadUint32(); err != nil {
 		return w, fmt.Errorf("witness.last_confirmed_block_num: %w", err)
+	}
+	// LastWork is a later schema addition; tolerate EOF.
+	if r.AtEnd() {
+		return w, nil
+	}
+	if err := r.ReadInto(w.LastWork[:]); err != nil {
+		return w, fmt.Errorf("witness.last_work: %w", err)
 	}
 	if !r.AtEnd() {
 		return w, errors.New("witness: trailing bytes")
@@ -403,10 +420,9 @@ func AdjustWitnessVotesForVoter(s *state.Session, account auth.AccountName, delt
 			adjustWitnessVoteWith(&w, delta, hf, ws.CurrentVirtualTime)
 		} else {
 			// Fall back to the public path (no schedule yet).
+			// No negative clamp — C++ allows w.votes to go negative
+			// (`safe<int64_t>` only guards overflow). See applyWitnessVoteDelta.
 			w.TotalVotesVests += delta
-			if w.TotalVotesVests < 0 {
-				w.TotalVotesVests = 0
-			}
 		}
 		wstore.Put(&w)
 	}
@@ -430,10 +446,9 @@ func AdjustWitnessVote(s *state.Session, w *Witness, delta int64, hf hardfork.Se
 	ws, err := GetWitnessSchedule(s)
 	if err != nil {
 		// No schedule yet (genesis) — fall back to plain vote bump.
+		// No negative clamp; C++'s adjust_witness_vote also allows
+		// w.votes to go negative.
 		w.TotalVotesVests += delta
-		if w.TotalVotesVests < 0 {
-			w.TotalVotesVests = 0
-		}
 		return
 	}
 	adjustWitnessVoteWith(w, delta, hf, ws.CurrentVirtualTime)
@@ -458,17 +473,20 @@ func adjustWitnessVoteWith(w *Witness, delta int64, hf hardfork.Set, currentVT16
 	// native overflow; Uint128.Add wraps the same way).
 	if currentVT.Cmp(virtualLastUpdate) > 0 {
 		dt := currentVT.Sub(virtualLastUpdate)
-		// w.TotalVotesVests is non-negative (clamped at 0 after every
-		// update), so safe to convert to uint64.
+		// w.TotalVotesVests can be negative (matching C++ safe<int64>);
+		// uint64(int64) is a reinterpret cast (2's complement), so the
+		// subsequent Mul64 wraps mod 2^64 the same way C++'s int64*uint128
+		// promotion does mod 2^128.
 		dp := dt.Mul64(uint64(w.TotalVotesVests))
 		virtualPosition = virtualPosition.Add(dp) // wraps mod 2^128
 	}
 	w.VirtualLastUpdate = currentVT.PackBE16()
 
+	// No negative clamp — C++'s adjust_witness_vote (database_witness.cpp:79)
+	// only asserts `w.votes <= total_vesting_shares` (upper bound). Allowing
+	// negatives is required so unvote+revote at pre-HF2 nets correctly
+	// instead of inflating the witness's vote total by the voter's full vest.
 	w.TotalVotesVests += delta
-	if w.TotalVotesVests < 0 {
-		w.TotalVotesVests = 0
-	}
 	w.VirtualPosition = virtualPosition.PackBE16()
 
 	// Lap length: HF2+ uses LAP_LENGTH2 (2^128-1); pre-HF2 uses
@@ -548,21 +566,39 @@ func lap128Max() *big.Int { return lapLength2Val }
 // account_witness_proxy when a proxy is set and by
 // process_decline_voting_rights.
 //
+// When voterVesting > 0, mutations go through AdjustWitnessVote so the
+// virtual_position / virtual_scheduled_time are updated alongside
+// total_votes_vests — matching C++'s adjust_witness_vote() path used by
+// HF22+ governance-vote-expiration sweeps and process_decline_voting_rights.
+//
 // Returns the number of votes cleared.
 func ClearWitnessVotesForAccount(s *state.Session, account auth.AccountName, voterVesting int64) int {
 	votes := EnsureWitnessVoteStore(s).VotesFor(account)
 	for _, witness := range votes {
 		DeleteWitnessVote(s, account, witness)
+		if voterVesting == 0 {
+			continue
+		}
 		w, err := GetWitness(s, witness)
 		if err == nil {
-			w.TotalVotesVests -= voterVesting
-			if w.TotalVotesVests < 0 {
-				w.TotalVotesVests = 0
-			}
-			PutWitness(s, &w)
+			// Use AdjustWitnessVote so the virtual_position + VST
+			// re-roll matches every other vote-decrement path.
+			AdjustWitnessVote(s, &w, -voterVesting, hardforkSetForBlockNum(s))
 		}
 	}
 	return len(votes)
+}
+
+// hardforkSetForBlockNum returns the active hardfork set at the
+// session's current head block. Stored as a function indirection so
+// state/objects doesn't have to import the hardfork package at build
+// time — caller injects via the session's DGPO snapshot.
+func hardforkSetForBlockNum(s *state.Session) hardfork.Set {
+	dgpo, err := GetDGPO(s)
+	if err != nil {
+		return 0
+	}
+	return hardfork.SetForBlock(dgpo.HeadBlockNumber)
 }
 
 // --- private helpers (added here to avoid cycling imports) --------------

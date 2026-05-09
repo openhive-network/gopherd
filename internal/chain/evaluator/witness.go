@@ -452,10 +452,15 @@ func applyWitnessVoteDelta(ctx *Context, voter *objects.Account, w *objects.Witn
 		return
 	}
 	// pre-HF2: just bump votes; do NOT advance virtual_position or VST.
+	// C++'s pre-HF2 path (hive_evaluator.cpp:295-298) does plain
+	// `w.votes -= voter.get_governance_vote_power()` and accepts negative
+	// values (`safe<int64_t>` only asserts on overflow, not on going
+	// below zero). Clamping to 0 here drops the un-vote subtraction so a
+	// later re-vote NET-ADDS the voter's full vest a second time —
+	// directly drove block 905,964/905,966 steemit unvote+revote of
+	// nextgencrypto inflating Go's votes by ~2.598e17 sat-VESTS and
+	// poisoning every witness schedule pick from block 933,600 onwards.
 	w.TotalVotesVests += delta
-	if w.TotalVotesVests < 0 {
-		w.TotalVotesVests = 0
-	}
 }
 
 // accountWitnessProxyEvaluator implements account_witness_proxy.
@@ -469,11 +474,10 @@ func applyWitnessVoteDelta(ctx *Context, voter *objects.Account, w *objects.Witn
 //       - re-add the account's voting weight up the new proxy chain
 //   - if CLEARING the proxy (proxy == ""): just clear the proxy field
 //
-// We currently elide proxied_vsf_votes (the recursion-up-the-chain
-// re-adjustment) since we don't model the per-account
-// proxied_vsf_votes[5] array. The clear_witness_votes side-effect IS
-// modeled, since not modeling it caused stale witness_vote rows that
-// rejected later re-votes ("already votes for this witness").
+// proxied_vsf_votes propagation is fully modeled via
+// NullifyProxiedWitnessVotes + ApplyProxyAtDepth (proxy_votes.go),
+// which recurse up the proxy chain to MaxProxyRecursionDepth and
+// adjust each proxy's per-depth slot.
 type accountWitnessProxyEvaluator struct{}
 
 func (accountWitnessProxyEvaluator) Apply(ctx *Context, o op.Operation) error {

@@ -175,28 +175,34 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 	//    Two-pass: collect candidates from the by-vote index, then mutate
 	//    Schedule + persist outside the iteration so we don't mutate the
 	//    index we're scanning.
+	//
+	//    C++ witness_schedule.cpp:162 iterates by_vote_name, SKIPPING
+	//    (not stopping at) HF14+ disabled witnesses, until it has
+	//    accumulated max_voted_witnesses non-disabled. The candidate
+	//    pool size must therefore be unbounded — capping at
+	//    HIVE_MAX_WITNESSES (21) before filtering would silently drop
+	//    lower-ranked enabled witnesses if any of the top-21 are
+	//    disabled, leaking votes out of the active set.
 	wstore := objects.EnsureWitnessStore(s)
 	selectedVoted := make(map[string]bool)
-	type candidate struct {
-		owner auth.AccountName
+	var voteCands []auth.AccountName
+	{
+		selected := 0
+		_ = wstore.RangeByVote(func(w *objects.Witness) (bool, error) {
+			if selected >= int(ws.MaxVotedWitnesses) {
+				return false, nil
+			}
+			if hf.Has(hardfork.HF14) && w.BlockSigningKey == zero33 {
+				return true, nil
+			}
+			voteCands = append(voteCands, w.Owner)
+			selected++
+			return true, nil
+		})
 	}
-	var voteCands []candidate
-	_ = wstore.RangeByVote(func(w *objects.Witness) (bool, error) {
-		if len(voteCands) >= int(objects.MaxWitnesses) {
-			return false, nil
-		}
-		voteCands = append(voteCands, candidate{owner: w.Owner})
-		return true, nil
-	})
-	for _, c := range voteCands {
-		if uint8(len(selectedVoted)) >= ws.MaxVotedWitnesses {
-			break
-		}
-		w, err := objects.GetWitness(s, c.owner)
+	for _, owner := range voteCands {
+		w, err := objects.GetWitness(s, owner)
 		if err != nil {
-			continue
-		}
-		if hf.Has(hardfork.HF14) && w.BlockSigningKey == zero33 {
 			continue
 		}
 		selectedVoted[string(w.Owner)] = true
@@ -270,7 +276,7 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 			if dgpo.NumPowWitnesses > 0 {
 				dgpo.NumPowWitnesses--
 				if envGhivediffPowbump != "" {
-					fmt.Fprintf(os.Stderr, "POWDRAIN block=%d num=%d\n", blockNum, dgpo.NumPowWitnesses)
+					fmt.Fprintf(os.Stderr, "POWDRAIN block=%d num=%d witness=%s\n", blockNum, dgpo.NumPowWitnesses, w.Owner)
 				}
 			}
 		}
@@ -300,6 +306,13 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 	// Two-pass: collect ALL by-schedule-time visits into `visited` first,
 	// then iterate the slice to update Schedule + VirtualScheduledTime.
 	// Stops once `active` reaches wantedTotal (counting added timeshares).
+	//
+	// C++ witness_schedule.cpp:323 only ++witness_count for visits that
+	// (a) are not HF14+ disabled, AND (b) are not already in
+	// selected_voted/selected_miners. Disabled witnesses are still
+	// pushed to processed_witnesses (so their VST is re-rolled), but
+	// don't count toward the stop threshold. Match exactly: incrementing
+	// tsPicked for a disabled witness would leak an active slot.
 	tsPicked := 0
 	_ = wstore.RangeByScheduleTime(func(w *objects.Witness) (bool, error) {
 		if len(active)+tsPicked >= wantedTotal {
@@ -307,15 +320,12 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 		}
 		owner := w.Owner
 		visited = append(visited, processed{owner: owner, vst: w.VirtualScheduledTime})
-			// Speculatively count this as a picked timeshare for the
-			// stop condition — we'll discard the count if the witness
-			// turns out to be already-elected or disabled in the
-			// mutation pass.
-			if !selectedVoted[string(owner)] && !selectedMiners[string(owner)] {
-				tsPicked++
-			}
-			return true, nil
-		})
+		if !selectedVoted[string(owner)] && !selectedMiners[string(owner)] &&
+			!(hf.Has(hardfork.HF14) && w.BlockSigningKey == zero33) {
+			tsPicked++
+		}
+		return true, nil
+	})
 
 	// First pass: walk visited in ASC order, advancing new_virtual_time
 	// to each visited witness's OLD VST. After the loop, new_virtual_time
@@ -545,31 +555,35 @@ func updateWitnessSchedulePreHF4(s *state.Session, ws *objects.WitnessSchedule, 
 	wstore := objects.EnsureWitnessStore(s)
 	if useVoteBased {
 		// Two-pass: collect by-vote candidates first, then mutate.
-		// Lock out the top (HIVE_MAX_WITNESSES - 2) by setting VST = MAX.
+		// C++ witness_schedule.cpp:560 iterates by_vote_name, SKIPPING
+		// (not stopping at) pow_workers, until it has accumulated
+		// HIVE_MAX_WITNESSES-2 = 19 non-pow witnesses. The Go bug
+		// fixed here was capping the candidate pool at 19 BEFORE
+		// filtering pow_workers, so any pow-worker in the top-19
+		// vote slots silently shrank the schedule and leaked actual
+		// vote-leaders out of the active set (e.g., boatymcboatface,
+		// joseph at block 933,600).
 		var byVoteCands []auth.AccountName
+		selected := 0
 		_ = wstore.RangeByVote(func(w *objects.Witness) (bool, error) {
-			if len(byVoteCands) >= int(objects.MaxWitnesses)-2 {
+			if selected >= int(objects.MaxWitnesses)-2 {
 				return false, nil
 			}
+			if w.PowWorker != 0 {
+				return true, nil
+			}
 			byVoteCands = append(byVoteCands, w.Owner)
+			selected++
 			return true, nil
 		})
-		picked := 0
 		for _, owner := range byVoteCands {
-			if picked >= int(objects.MaxWitnesses)-2 {
-				break
-			}
 			w, err := objects.GetWitness(s, owner)
 			if err != nil {
-				continue
-			}
-			if w.PowWorker != 0 {
 				continue
 			}
 			active = append(active, w.Owner)
 			w.VirtualScheduledTime = uint128MaxBytes
 			objects.PutWitness(s, &w)
-			picked++
 		}
 
 		// Pick exactly one timeshare witness from by_schedule_time
@@ -641,7 +655,7 @@ func updateWitnessSchedulePreHF4(s *state.Session, ws *objects.WitnessSchedule, 
 				if dgpo.NumPowWitnesses > 0 {
 					dgpo.NumPowWitnesses--
 				if envGhivediffPowbump != "" {
-					fmt.Fprintf(os.Stderr, "POWDRAIN block=%d num=%d\n", blockNum, dgpo.NumPowWitnesses)
+					fmt.Fprintf(os.Stderr, "POWDRAIN block=%d num=%d witness=%s\n", blockNum, dgpo.NumPowWitnesses, w.Owner)
 				}
 				}
 			}

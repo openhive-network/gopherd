@@ -6,58 +6,84 @@ import (
 	"github.com/tidwall/btree"
 )
 
-// memBackend stores all key/value pairs in a single sorted in-memory
-// btree. Mirrors chainbase's design: every read/write/iter is a
-// pointer-deref-cost operation, no LSM merging, no compactions, no
-// disk I/O. Trades persistence for ~3-5x replay throughput.
+// memBackend stores all key/value pairs in a per-table btree map.
+// Per-table trees keep each table's working set contiguous in memory
+// for better CPU cache utilization, and shrink the effective btree
+// depth — at 3.5M blocks the chain holds ~50M CommentVote rows, ~5M
+// Comments, ~400K Accounts. Stuffing them all in ONE btree pushed
+// the depth into the cache-thrashing zone (log₂(50M)≈26 levels).
 //
-// Crash recovery: there is none. For the replay use case (the only
-// caller today) we re-derive state from block_log on next start. To
-// add persistence later, snapshot the tree to a flat file every N
-// blocks and restore on startup.
-//
-// Thread safety: the backend is single-writer / single-reader, matching
-// the rest of the replay pipeline. tidwall/btree is safe for concurrent
-// reads but not for concurrent writes; if we ever multithread replay
-// we'll need a RWMutex.
+// Crash recovery: there is none. For the replay use case we re-derive
+// state from block_log on next start.
 type memBackend struct {
-	// tree keeps keys sorted for range scans (rawIter) AND point
-	// lookups (rawGet/rawHas). A parallel hash map was tried but the
-	// per-write mapassign cost in commitDirty (~9% of CPU at chain
-	// head) exceeded the bsearch savings on reads, since most hot
-	// reads (witnesses, accounts) are already absorbed by the
-	// per-Database parsed-object caches.
-	tree *btree.BTreeG[memItem]
-	// commitHint is reused across commitDirty's SetHint/DeleteHint calls.
-	// After sorting dirtyKeys ascending, adjacent operations land in the
-	// same btree node ~all the time, so the hint short-circuits bsearch.
-	commitHint btree.PathHint
+	// trees keys each table's data by the 3-byte [TableID:2 BE][IndexID:1]
+	// header decoded from the physical key. Lazily-initialized.
+	trees map[uint32]*btree.BTreeG[memItem]
+	// commitHints reuses one PathHint per (table, index) across
+	// commitDirty's SetHint/DeleteHint calls.
+	commitHints map[uint32]*btree.PathHint
 	// commitBuf reuses the sort buffer across commits.
 	commitBuf []string
 }
 
 type memItem struct {
-	// key is stored as string so the btree's per-Set/Delete can avoid
-	// the []byte allocation that string→[]byte conversion would force
-	// on every commit. Strings are immutable, hashable, and Go's
-	// runtime compares them via cmpstring (same SIMD path as cmpbody).
 	key   string
 	value []byte
 }
 
+// memTreeKey extracts the (TableID, IndexID) header from the first 3
+// bytes of a physical key.
+func memTreeKey(key []byte) uint32 {
+	if len(key) < 3 {
+		return 0
+	}
+	return uint32(key[0])<<16 | uint32(key[1])<<8 | uint32(key[2])
+}
+
+func memTreeKeyFromString(key string) uint32 {
+	if len(key) < 3 {
+		return 0
+	}
+	return uint32(key[0])<<16 | uint32(key[1])<<8 | uint32(key[2])
+}
+
 func openMem() *memBackend {
 	return &memBackend{
-		tree: btree.NewBTreeGOptions[memItem](
-			func(a, b memItem) bool { return a.key < b.key },
-			btree.Options{Degree: 64, NoLocks: true},
-		),
+		trees:       make(map[uint32]*btree.BTreeG[memItem], 32),
+		commitHints: make(map[uint32]*btree.PathHint, 32),
 	}
+}
+
+func (b *memBackend) getTree(bucket uint32) *btree.BTreeG[memItem] {
+	if t, ok := b.trees[bucket]; ok {
+		return t
+	}
+	t := btree.NewBTreeGOptions[memItem](
+		func(a, b memItem) bool { return a.key < b.key },
+		btree.Options{Degree: 64, NoLocks: true},
+	)
+	b.trees[bucket] = t
+	return t
+}
+
+func (b *memBackend) getHint(bucket uint32) *btree.PathHint {
+	if h, ok := b.commitHints[bucket]; ok {
+		return h
+	}
+	h := &btree.PathHint{}
+	b.commitHints[bucket] = h
+	return h
 }
 
 func (b *memBackend) Close() error { return nil }
 
 func (b *memBackend) rawGet(key []byte) ([]byte, error) {
-	item, ok := b.tree.Get(memItem{key: string(key)})
+	bucket := memTreeKey(key)
+	t, ok := b.trees[bucket]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	item, ok := t.Get(memItem{key: string(key)})
 	if !ok {
 		return nil, ErrNotFound
 	}
@@ -65,38 +91,39 @@ func (b *memBackend) rawGet(key []byte) ([]byte, error) {
 }
 
 func (b *memBackend) rawHas(key []byte) (bool, error) {
-	_, ok := b.tree.Get(memItem{key: string(key)})
+	bucket := memTreeKey(key)
+	t, ok := b.trees[bucket]
+	if !ok {
+		return false, nil
+	}
+	_, ok = t.Get(memItem{key: string(key)})
 	return ok, nil
 }
 
 func (b *memBackend) rawIter(lower, upper []byte) (Iter, error) {
-	mi := &memIter{tree: b.tree}
+	mi := &memIter{backend: b}
 	mi.SetBounds(lower, upper)
 	return mi, nil
 }
 
 func (b *memBackend) commit(overlay map[string]overlayEntry, _ bool) error {
 	for k, e := range overlay {
+		bucket := memTreeKeyFromString(k)
+		t := b.getTree(bucket)
 		if e.tombstone {
-			b.tree.Delete(memItem{key: k})
+			t.Delete(memItem{key: k})
 			continue
 		}
-		b.tree.Set(memItem{key: k, value: e.value})
+		t.Set(memItem{key: k, value: e.value})
 	}
 	return nil
 }
 
 func (b *memBackend) commitDirty(overlay map[string]overlayEntry, dirtyKeys []string, _ bool) error {
-	// Sort dirtyKeys ascending so adjacent operations target neighboring
-	// btree nodes — the reusable PathHint then short-circuits bsearch on
-	// ~every call. Sorting also surfaces duplicates as adjacent so we
-	// can skip the redundant Set/Delete (Session dedups consecutive
-	// writes but not interleaved ones).
 	keys := append(b.commitBuf[:0], dirtyKeys...)
 	sort.Strings(keys)
 	b.commitBuf = keys
 
-	hint := &b.commitHint
 	prev := ""
 	first := true
 	for _, k := range keys {
@@ -106,18 +133,26 @@ func (b *memBackend) commitDirty(overlay map[string]overlayEntry, dirtyKeys []st
 		first = false
 		prev = k
 		e := overlay[k]
+		bucket := memTreeKeyFromString(k)
+		t := b.getTree(bucket)
+		hint := b.getHint(bucket)
 		if e.tombstone {
-			b.tree.DeleteHint(memItem{key: k}, hint)
+			t.DeleteHint(memItem{key: k}, hint)
 			continue
 		}
-		b.tree.SetHint(memItem{key: k, value: e.value}, hint)
+		t.SetHint(memItem{key: k, value: e.value}, hint)
 	}
 	return nil
 }
 
-// memIter wraps tidwall/btree.IterG into our Iter interface. Reusable
-// across SetBounds/First cycles within a Session.
 type memIter struct {
+	// backend lets SetBounds rebind the iter to whichever per-table
+	// tree matches the new lower-bound bucket. Without this, a Session
+	// that calls Range(table=A) followed by Range(table=B) would see
+	// the second range scan the wrong tree because Session pools the
+	// iterator across calls (iter.SetBounds rebinds bounds but not
+	// the underlying tree).
+	backend      *memBackend
 	tree         *btree.BTreeG[memItem]
 	it           btree.IterG[memItem]
 	lower, upper string
@@ -130,14 +165,19 @@ func (m *memIter) SetBounds(lower, upper []byte) {
 		m.it.Release()
 		m.hasIter = false
 	}
-	// Stash bounds as strings — the btree's Less compares string keys
-	// directly, so we avoid a per-Next bytes.Compare/cmpbody round-trip.
 	m.lower = string(lower)
 	m.upper = string(upper)
 	m.valid = false
+	if m.backend != nil {
+		m.tree = m.backend.trees[memTreeKey(lower)] // may be nil for empty table
+	}
 }
 
 func (m *memIter) First() bool {
+	if m.tree == nil {
+		m.valid = false
+		return false
+	}
 	if m.hasIter {
 		m.it.Release()
 	}

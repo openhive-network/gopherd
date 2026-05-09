@@ -21,14 +21,18 @@ import (
 // the proceeds direction doesn't apply.)
 func clearAccounts(s *state.Session, names []string) {
 	dgpo, _ := objects.GetDGPO(s)
+	blockTime := dgpo.Time
 	dgpoChanged := false
 	for _, name := range names {
 		a, err := objects.GetAccount(s, name)
 		if err != nil {
 			continue
 		}
-		// Liquid balances → 0. Track supply deltas so the chain-wide
-		// totals stay correct. The cleared assets effectively burn.
+		// Snapshot supply deltas BEFORE adjusting (matches the snapshot
+		// pattern in clear_null_account_balance).
+		hbdSnap := a.HBDBalance
+		hbdSavingsSnap := a.SavingsHBDBalance
+		// Liquid HIVE / savings_HIVE: no interest hook, zero directly.
 		if a.Balance > 0 {
 			dgpo.CurrentSupply -= a.Balance
 			a.Balance = 0
@@ -39,14 +43,26 @@ func clearAccounts(s *state.Session, names []string) {
 			a.SavingsBalance = 0
 			dgpoChanged = true
 		}
-		if a.HBDBalance > 0 {
-			dgpo.CurrentHBDSupply -= a.HBDBalance
-			a.HBDBalance = 0
+		// HBD / savings_HBD: route through the interest-accrual hooks
+		// so any pending 30-day window mints to current_hbd_supply
+		// before the negative delta lands. Mirrors the C++ pattern of
+		// adjust_balance(account, -hbd_balance) at clear_accounts.
+		if hbdSnap > 0 {
+			if blockTime != 0 {
+				objects.AdjustHBDBalance(s, &a, blockTime, -hbdSnap)
+			} else {
+				a.HBDBalance = 0
+			}
+			dgpo.CurrentHBDSupply -= hbdSnap
 			dgpoChanged = true
 		}
-		if a.SavingsHBDBalance > 0 {
-			dgpo.CurrentHBDSupply -= a.SavingsHBDBalance
-			a.SavingsHBDBalance = 0
+		if hbdSavingsSnap > 0 {
+			if blockTime != 0 {
+				objects.AdjustSavingsHBDBalance(s, &a, blockTime, -hbdSavingsSnap)
+			} else {
+				a.SavingsHBDBalance = 0
+			}
+			dgpo.CurrentHBDSupply -= hbdSavingsSnap
 			dgpoChanged = true
 		}
 		if a.VestingShares > 0 {

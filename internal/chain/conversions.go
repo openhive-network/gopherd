@@ -72,10 +72,16 @@ func processConversions(s *state.Session, blockTime uint32) {
 				objects.PutAccount(s, &a)
 			}
 		}
-		// Adjust supply: HBD-supply down, HIVE-supply up.
+		// Mirror C++ database_conversion.cpp adjust_supply pair:
+		// adjust_supply(-req.Amount HBD) → recompute virtual_supply, then
+		// adjust_supply(+hiveAmount HIVE) → incremental virtual_supply +=.
+		// Net VS change is ~0 (HBD removed equals HIVE added at median),
+		// but doing each side correctly keeps intra-block readers
+		// (process_funds, etc.) and the next-block percent_hbd ratio in
+		// sync with C++.
 		if dgpo, derr := objects.GetDGPO(s); derr == nil {
-			dgpo.CurrentHBDSupply -= req.Amount
-			dgpo.CurrentSupply += hiveAmount
+			adjustSupplyHbd(s, &dgpo, -req.Amount)
+			adjustSupplyHive(s, &dgpo, hiveAmount)
 			objects.PutDGPO(s, &dgpo)
 		}
 		objects.DeleteConvertRequestFull(s, &req)

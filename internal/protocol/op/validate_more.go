@@ -106,8 +106,24 @@ func (o LimitOrderCreate2) Validate() error {
 	if o.AmountToSell.Symbol.Num != o.ExchangeRate.Base.Symbol.Num {
 		return errors.New("limit_order_create2.amount_to_sell: must match exchange_rate.base symbol")
 	}
+	if o.AmountToSell.Amount <= 0 {
+		return fmt.Errorf("limit_order_create2.amount_to_sell: must be positive, got %d", o.AmountToSell.Amount)
+	}
 	if o.ExchangeRate.Base.Amount <= 0 || o.ExchangeRate.Quote.Amount <= 0 {
 		return errors.New("limit_order_create2.exchange_rate: base/quote must be positive")
+	}
+	if o.AmountToSell.Symbol.Num == o.ExchangeRate.Quote.Symbol.Num {
+		return errors.New("limit_order_create2: cannot sell and receive the same asset")
+	}
+	// Mirror hive_operations.cpp:620 — limit orders are restricted to the
+	// HIVE/HBD market on mainnet.
+	if err := requireSymbol("limit_order_create2.amount_to_sell", o.AmountToSell, asset.HiveSymbol, asset.HbdSymbol); err != nil {
+		return err
+	}
+	if err := requireSymbol("limit_order_create2.exchange_rate.quote",
+		asset.Asset{Amount: o.ExchangeRate.Quote.Amount, Symbol: o.ExchangeRate.Quote.Symbol},
+		asset.HiveSymbol, asset.HbdSymbol); err != nil {
+		return err
 	}
 	return nil
 }

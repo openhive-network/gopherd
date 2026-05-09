@@ -1,7 +1,9 @@
 package chain
 
 import (
+	"fmt"
 	"math/big"
+	"os"
 
 	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/state"
@@ -42,13 +44,36 @@ func updateVirtualSupply(s *state.Session, blockNum uint32) {
 		// percent_hbd = current_hbd_supply × HIVE_100_PERCENT / virtual_supply
 		// (basis points). dgpo.virtual_supply is HIVE-satoshi; current_hbd_supply
 		// is HBD-satoshi but expressed as a "value share" via the feed price.
+		//
+		// HF24+ excludes treasury HBD from the debt-ratio calculation
+		// (database.cpp:2975-2982): hbd_supply -= treasury.hbd_balance,
+		// then virtual_supply = hbd_supply × median + current_supply.
+		// HF21+ adds round-half-up: numerator += virtual_supply / 2.
+		hbdSupply := dgpo.CurrentHBDSupply
+		virtualSupplyForRatio := dgpo.VirtualSupply
+		if hf.Has(hardfork.HF24) {
+			treasuryName := "hive.fund"
+			if treasury, terr := objects.GetAccount(s, treasuryName); terr == nil {
+				hbdSupply -= treasury.HBDBalance
+				if hbdSupply < 0 {
+					hbdSupply = 0
+				}
+			}
+			if hbdSupply != dgpo.CurrentHBDSupply {
+				hbdAsHiveAdj := convertHBDToHive(hbdSupply, fh.CurrentMedianHistory)
+				virtualSupplyForRatio = hbdAsHiveAdj + dgpo.CurrentSupply
+			}
+		}
 		var percentHBD int64
-		if dgpo.VirtualSupply > 0 {
-			hbdAsHive := convertHBDToHive(dgpo.CurrentHBDSupply, fh.CurrentMedianHistory)
-			pct := new(big.Int).Mul(big.NewInt(hbdAsHive), big.NewInt(10000))
-			pct.Quo(pct, big.NewInt(dgpo.VirtualSupply))
-			if pct.IsInt64() {
-				percentHBD = pct.Int64()
+		if virtualSupplyForRatio > 0 {
+			hbdAsHive := convertHBDToHive(hbdSupply, fh.CurrentMedianHistory)
+			num := new(big.Int).Mul(big.NewInt(hbdAsHive), big.NewInt(10000))
+			if hf.Has(hardfork.HF21) {
+				num.Add(num, big.NewInt(virtualSupplyForRatio/2))
+			}
+			num.Quo(num, big.NewInt(virtualSupplyForRatio))
+			if num.IsInt64() {
+				percentHBD = num.Int64()
 			}
 		}
 		start := int64(dgpo.HBDStartPercent)
@@ -76,6 +101,11 @@ func updateVirtualSupply(s *state.Session, blockNum uint32) {
 				rate = 10000
 			}
 			dgpo.HBDPrintRate = uint16(rate)
+		}
+		if blockNum == 5216528 {
+			fmt.Fprintf(os.Stderr, "GHIVEDIFF VS-DUMP block=%d hbd_supply=%d virtual_supply=%d hbd_as_hive=%d percent_hbd=%d print_rate=%d median_base=%d median_quote=%d\n",
+				blockNum, hbdSupply, virtualSupplyForRatio, convertHBDToHive(hbdSupply, fh.CurrentMedianHistory), percentHBD, dgpo.HBDPrintRate,
+				fh.CurrentMedianHistory.Base.Amount, fh.CurrentMedianHistory.Quote.Amount)
 		}
 	}
 	objects.PutDGPO(s, &dgpo)

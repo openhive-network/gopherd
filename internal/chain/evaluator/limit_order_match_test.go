@@ -56,9 +56,10 @@ func TestLimitOrderMatching(t *testing.T) {
 		BlockTime: 1_000_000,
 	}
 	// Alice creates order: sell 100 HIVE for 50 HBD.
+	aliceSell := asset.Asset{Amount: 100_000, Symbol: asset.Symbol{Num: asset.HiveSymbol}}
 	if err := applyLimitOrderCreate(ctx, "alice", 1,
-		asset.Asset{Amount: 100_000, Symbol: asset.Symbol{Num: asset.HiveSymbol}},
-		asset.Asset{Amount: 50_000, Symbol: asset.Symbol{Num: asset.HbdSymbol}},
+		aliceSell,
+		asset.Price{Base: aliceSell, Quote: asset.Asset{Amount: 50_000, Symbol: asset.Symbol{Num: asset.HbdSymbol}}},
 		2_000_000+86400, false); err != nil {
 		t.Fatalf("alice order: %v", err)
 	}
@@ -74,9 +75,10 @@ func TestLimitOrderMatching(t *testing.T) {
 	t.Logf("alice symbols: HIVE=%#x HBD=%#x", uint32(asset.HiveSymbol), uint32(asset.HbdSymbol))
 
 	// Bob creates order: sell 50 HBD for 100 HIVE — this should match Alice.
+	bobSell := asset.Asset{Amount: 50_000, Symbol: asset.Symbol{Num: asset.HbdSymbol}}
 	if err := applyLimitOrderCreate(ctx, "bob", 1,
-		asset.Asset{Amount: 50_000, Symbol: asset.Symbol{Num: asset.HbdSymbol}},
-		asset.Asset{Amount: 100_000, Symbol: asset.Symbol{Num: asset.HiveSymbol}},
+		bobSell,
+		asset.Price{Base: bobSell, Quote: asset.Asset{Amount: 100_000, Symbol: asset.Symbol{Num: asset.HiveSymbol}}},
 		2_000_000+86400, false); err != nil {
 		t.Fatalf("bob order: %v", err)
 	}

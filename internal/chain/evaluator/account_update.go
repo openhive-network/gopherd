@@ -42,8 +42,24 @@ func (accountUpdateEvaluator) Apply(ctx *Context, o op.Operation) error {
 		}
 	}
 	if au.Posting != nil {
-		if err := verifyAuthorityAccountsExist(ctx, *au.Posting); err != nil {
-			return err
+		// hived posting auth handling (hive_evaluator_account.cpp:325-339):
+		// post-HF15 → verify_authority_accounts_exist (fatal on missing);
+		// pre-HF15 → check_authority_accounts_exist which SILENTLY DROPS
+		// account_auths referencing non-existent accounts and returns
+		// the corrected authority. Match that — pre-HF15 mainnet has
+		// account_update ops where the posting authority's account_auths
+		// list contained a public-key string (e.g., "STM6GVCS7JeftT27"),
+		// which hived dropped quietly and Go was rejecting outright.
+		if ctx.Hardforks.Has(hardfork.HF15) {
+			if err := verifyAuthorityAccountsExist(ctx, *au.Posting); err != nil {
+				return err
+			}
+		} else {
+			corrected, err := checkAuthorityAccountsExistAndCorrect(ctx, *au.Posting)
+			if err != nil {
+				return err
+			}
+			*au.Posting = corrected
 		}
 	}
 	// hived only overwrites memo_key when the op carries a non-zero

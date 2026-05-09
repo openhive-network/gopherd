@@ -3,8 +3,42 @@ package objects
 import (
 	"math/big"
 
+	"hived-go/internal/protocol/asset"
 	"hived-go/internal/state"
 )
+
+// feedPriceIsZero is a local copy of chain.priceIsZero (we can't import
+// chain from objects). A zero/null median means no feed has settled yet
+// — treat as no HBD-side virtual supply contribution, matching C++'s
+// `median_price.is_null()` short-circuit.
+func feedPriceIsZero(p asset.Price) bool {
+	return p.Base.Amount == 0 || p.Quote.Amount == 0
+}
+
+// hbdInterestVirtualHive converts a sat-HBD interest amount into the
+// HIVE-equivalent virtual_supply contribution at the given median feed.
+// Local mirror of chain.convertHBDToHive (objects can't import chain).
+func hbdInterestVirtualHive(hbdInterest int64, median asset.Price) int64 {
+	if median.Base.Amount <= 0 || median.Quote.Amount <= 0 {
+		return 0
+	}
+	num := new(big.Int)
+	if median.Base.Symbol.Num == asset.HbdSymbol && median.Quote.Symbol.Num == asset.HiveSymbol {
+		// HBD-base / HIVE-quote: hive = hbd × quote / base.
+		num.Mul(big.NewInt(hbdInterest), big.NewInt(median.Quote.Amount))
+		num.Quo(num, big.NewInt(median.Base.Amount))
+	} else if median.Base.Symbol.Num == asset.HiveSymbol && median.Quote.Symbol.Num == asset.HbdSymbol {
+		// HIVE-base / HBD-quote: hive = hbd × base / quote.
+		num.Mul(big.NewInt(hbdInterest), big.NewInt(median.Base.Amount))
+		num.Quo(num, big.NewInt(median.Quote.Amount))
+	} else {
+		return 0
+	}
+	if num.IsInt64() {
+		return num.Int64()
+	}
+	return 0
+}
 
 // HIVE_HBD_INTEREST_COMPOUND_INTERVAL_SEC = 30 days. Interest accrues
 // continuously into hbd_seconds; once a 30-day window passes, the next
@@ -111,7 +145,17 @@ func AdjustHBDBalance(s *state.Session, a *Account, blockTime uint32, delta int6
 				interest := hbdInterestPayout(a.HBDSeconds, rateForDGPO(&dgpo))
 				if interest > 0 {
 					a.HBDBalance += interest
+					// Mirror C++ adjust_balance HBD branch (database.cpp:3350-3354):
+					// virtual_supply += interest_paid × current_median_history.
+					// Without this, Go's intra-block VS lags C++'s by
+					// `interest × median` per HBD-interest payout. End-of-block
+					// updateVirtualSupply reconciles, but intra-block readers
+					// (process_funds, payCreateHbd's print_rate via hbd ratio)
+					// see different VS values.
 					dgpo.CurrentHBDSupply += interest
+					if fh, ferr := GetFeedHistory(s); ferr == nil && !feedPriceIsZero(fh.CurrentMedianHistory) {
+						dgpo.VirtualSupply += hbdInterestVirtualHive(interest, fh.CurrentMedianHistory)
+					}
 					PutDGPO(s, &dgpo)
 				}
 				a.HBDSeconds = [16]byte{}
@@ -139,6 +183,9 @@ func AdjustSavingsHBDBalance(s *state.Session, a *Account, blockTime uint32, del
 				if interest > 0 {
 					a.SavingsHBDBalance += interest
 					dgpo.CurrentHBDSupply += interest
+					if fh, ferr := GetFeedHistory(s); ferr == nil && !feedPriceIsZero(fh.CurrentMedianHistory) {
+						dgpo.VirtualSupply += hbdInterestVirtualHive(interest, fh.CurrentMedianHistory)
+					}
 					PutDGPO(s, &dgpo)
 				}
 				a.SavingsHBDSeconds = [16]byte{}

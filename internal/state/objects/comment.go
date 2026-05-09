@@ -98,6 +98,14 @@ type Comment struct {
 	// = 14d). The weighted-average cashout_time clamps to this value
 	// (hive_evaluator_social.cpp:439). 0 == not yet set (treat as max).
 	MaxCashoutTime uint32
+	// RewardWeight is the per-comment haircut applied to the cashout
+	// pool claim — `claim = claim × RewardWeight / HIVE_100_PERCENT`.
+	// Set on creation for HF12+ pre-HF17 ROOT posts based on the
+	// author's PostBandwidth decay (hive_evaluator_social.cpp:216-225;
+	// reward.cpp:18). 10000 (HIVE_100_PERCENT) = no haircut. Stored on
+	// comment_cashout_ex_object in C++. 0 means "not initialized";
+	// treat as 10000 for legacy rows and replies.
+	RewardWeight uint16
 }
 
 // Beneficiary is one row in a comment's beneficiaries list.
@@ -277,6 +285,7 @@ func AppendComment(dst []byte, c *Comment) []byte {
 	dst = appendU64LE(dst, c.ID)
 	dst = appendU64LE(dst, c.ChildrenAbsRshares)
 	dst = appendU32LE(dst, c.MaxCashoutTime)
+	dst = append(dst, byte(c.RewardWeight), byte(c.RewardWeight>>8))
 	return dst
 }
 
@@ -408,54 +417,52 @@ func ReadComment(src []byte) (Comment, error) {
 	if c.MaxCashoutTime, err = r.ReadUint32(); err != nil {
 		return c, fmt.Errorf("comment.max_cashout_time: %w", err)
 	}
+	// RewardWeight is a later schema addition; tolerate EOF.
+	if r.AtEnd() {
+		return c, nil
+	}
+	if c.RewardWeight, err = r.ReadUint16(); err != nil {
+		return c, fmt.Errorf("comment.reward_weight: %w", err)
+	}
 	if !r.AtEnd() {
 		return c, errors.New("comment: trailing bytes")
 	}
 	return c, nil
 }
 
-// PutComment stores c. RootAuthor/RootPermlink default to (Author,
-// Permlink) — root posts are their own root — so legacy callers that
-// haven't been updated still get a self-rooted entry, which is the
-// correct behavior for top-level posts and lets the by_root scan find
-// the post itself.
+// PutComment stores c via the typed CommentStore.
 func PutComment(s *state.Session, c *Comment) {
-	if c.RootAuthor == "" {
-		c.RootAuthor = c.Author
-		c.RootPermlink = c.Permlink
-	}
-	s.Put(CommentTable, state.PrimaryIndex, commentKey(c.Author, c.Permlink), AppendComment(nil, c))
-	s.Put(CommentTable, CommentByRootIndex,
-		commentByRootKey(c.RootAuthor, c.RootPermlink, c.Author, c.Permlink), nil)
+	EnsureCommentStore(s).Put(c)
 }
 
 // GetComment fetches a comment by (author, permlink).
 func GetComment(s *state.Session, author auth.AccountName, permlink string) (Comment, error) {
-	v, err := s.Get(CommentTable, state.PrimaryIndex, commentKey(author, permlink))
-	if err != nil {
-		return Comment{}, err
+	c, ok := EnsureCommentStore(s).Get(author, permlink)
+	if !ok {
+		return Comment{}, state.ErrNotFound
 	}
-	return ReadComment(v)
+	return c, nil
 }
 
 // HasComment reports comment existence.
 func HasComment(s *state.Session, author auth.AccountName, permlink string) (bool, error) {
-	return s.Has(CommentTable, state.PrimaryIndex, commentKey(author, permlink))
+	return EnsureCommentStore(s).Has(author, permlink), nil
 }
 
-// DeleteComment removes a comment plus its by-root index entry. The
-// caller must hand us the row's current Root* fields — we use them to
-// compute the secondary key. Callers that already have a Comment value
-// in hand should prefer DeleteCommentFull below.
+// DeleteComment removes a comment from the typed store.
 func DeleteComment(s *state.Session, author auth.AccountName, permlink string) {
-	// Best-effort by-root index delete: read the row first to learn its
-	// Root* fields. If the row is missing (e.g., already deleted) we
-	// just drop the primary entry.
-	if c, err := GetComment(s, author, permlink); err == nil {
-		s.Delete(CommentTable, CommentByRootIndex,
-			commentByRootKey(c.RootAuthor, c.RootPermlink, author, permlink))
-	}
-	s.Delete(CommentTable, state.PrimaryIndex, commentKey(author, permlink))
+	EnsureCommentStore(s).Delete(author, permlink)
+}
+
+// RangeCommentsByRoot iterates every comment in the discussion rooted at
+// (rootAuthor, rootPermlink).
+func RangeCommentsByRoot(s *state.Session, rootAuthor auth.AccountName, rootPermlink string, fn func(c *Comment) (bool, error)) error {
+	return EnsureCommentStore(s).RangeByRoot(rootAuthor, rootPermlink, fn)
+}
+
+// RangeAllComments iterates every comment in name-ascending order.
+func RangeAllComments(s *state.Session, fn func(c *Comment) (bool, error)) error {
+	return EnsureCommentStore(s).RangePrimary(fn)
 }
 
 // commentVoteKey encodes (voter, author, permlink). Voter is fixed 16
@@ -551,29 +558,36 @@ func CommentVoteByCommentPrefix(author auth.AccountName, permlink string) []byte
 	return out
 }
 
-// PutCommentVote stores cv and updates the secondary by-comment index.
+// PutCommentVote stores cv via the typed CommentVoteStore.
 func PutCommentVote(s *state.Session, cv *CommentVote) {
-	s.Put(CommentVoteTable, state.PrimaryIndex, commentVoteKey(cv.Voter, cv.Author, cv.Permlink), AppendCommentVote(nil, cv))
-	s.Put(CommentVoteTable, CommentVoteByCommentIndex, commentVoteByCommentKey(cv.Author, cv.Permlink, cv.Voter), nil)
+	EnsureCommentVoteStore(s).Put(cv)
 }
 
 // GetCommentVote fetches the vote (voter, author, permlink).
 func GetCommentVote(s *state.Session, voter, author auth.AccountName, permlink string) (CommentVote, error) {
-	v, err := s.Get(CommentVoteTable, state.PrimaryIndex, commentVoteKey(voter, author, permlink))
-	if err != nil {
-		return CommentVote{}, err
+	cv, ok := EnsureCommentVoteStore(s).Get(voter, author, permlink)
+	if !ok {
+		return CommentVote{}, state.ErrNotFound
 	}
-	return ReadCommentVote(v)
+	return cv, nil
 }
 
 // HasCommentVote reports vote existence.
 func HasCommentVote(s *state.Session, voter, author auth.AccountName, permlink string) (bool, error) {
-	return s.Has(CommentVoteTable, state.PrimaryIndex, commentVoteKey(voter, author, permlink))
+	return EnsureCommentVoteStore(s).Has(voter, author, permlink), nil
 }
 
-// DeleteCommentVote removes (voter, author, permlink) from both the
-// primary index and the by-comment secondary.
+// DeleteCommentVote removes (voter, author, permlink).
 func DeleteCommentVote(s *state.Session, voter, author auth.AccountName, permlink string) {
-	s.Delete(CommentVoteTable, state.PrimaryIndex, commentVoteKey(voter, author, permlink))
-	s.Delete(CommentVoteTable, CommentVoteByCommentIndex, commentVoteByCommentKey(author, permlink, voter))
+	EnsureCommentVoteStore(s).Delete(voter, author, permlink)
+}
+
+// RangeCommentVotesByComment iterates every vote on (author, permlink).
+func RangeCommentVotesByComment(s *state.Session, author auth.AccountName, permlink string, fn func(cv *CommentVote) (bool, error)) error {
+	return EnsureCommentVoteStore(s).RangeByComment(author, permlink, fn)
+}
+
+// DeleteAllCommentVotesForComment removes every vote on (author, permlink).
+func DeleteAllCommentVotesForComment(s *state.Session, author auth.AccountName, permlink string) {
+	EnsureCommentVoteStore(s).DeleteAllForComment(author, permlink)
 }

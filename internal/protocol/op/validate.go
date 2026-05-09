@@ -226,5 +226,16 @@ func (o LimitOrderCreate) Validate() error {
 	if o.AmountToSell.Symbol.Num == o.MinToReceive.Symbol.Num {
 		return errors.New("limit_order_create: cannot sell and receive the same asset")
 	}
+	// Mirror hive_operations.cpp:601 — both legs must be in the HIVE/HBD
+	// market. (Smart-asset NAI tolerance is omitted: SMTs never shipped on
+	// mainnet and our op decoder doesn't surface NAI symbols.) Guards
+	// against a malformed op silently dropping the credit in the receiver
+	// switch in fillLimitOrder.
+	if err := requireSymbol("limit_order_create.amount_to_sell", o.AmountToSell, asset.HiveSymbol, asset.HbdSymbol); err != nil {
+		return err
+	}
+	if err := requireSymbol("limit_order_create.min_to_receive", o.MinToReceive, asset.HiveSymbol, asset.HbdSymbol); err != nil {
+		return err
+	}
 	return nil
 }

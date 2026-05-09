@@ -97,11 +97,10 @@ func TestUndoBasicMultiObject(t *testing.T) {
 
 	pre := state.NewSession(f.State)
 	preCount := 0
-	_ = pre.Range(objects.AccountTable, state.PrimaryIndex, nil,
-		func(_, _ []byte) (bool, error) {
-			preCount++
-			return true, nil
-		})
+	_ = objects.RangeAccounts(pre, func(_ *objects.Account) (bool, error) {
+		preCount++
+		return true, nil
+	})
 
 	s := state.NewSession(f.State)
 	objects.PutAccount(s, &objects.Account{Name: "name00", Balance: 1})
@@ -110,17 +109,16 @@ func TestUndoBasicMultiObject(t *testing.T) {
 	a.Balance = 22
 	objects.PutAccount(s, &a)
 	objects.PutAccount(s, &objects.Account{Name: "name03", Balance: 3})
-	s.Delete(objects.AccountTable, state.PrimaryIndex, objects.AccountKey("name03"))
+	objects.DeleteAccount(s, "name03")
 	s.Undo()
 
 	// Verify final state matches pre-state.
 	post := state.NewSession(f.State)
 	postCount := 0
-	_ = post.Range(objects.AccountTable, state.PrimaryIndex, nil,
-		func(_, _ []byte) (bool, error) {
-			postCount++
-			return true, nil
-		})
+	_ = objects.RangeAccounts(post, func(_ *objects.Account) (bool, error) {
+		postCount++
+		return true, nil
+	})
 	if postCount != preCount {
 		t.Fatalf("account count after undo: got %d, want %d", postCount, preCount)
 	}

@@ -22,6 +22,12 @@ coverage.txt
 # Local data
 data/
 *.log
+/logs/
+/blockchain/
+/p2p/
+/config.ini
+/snapshots/
+/.worktrees/
 
 # block_log fixtures sit in the repo root for now; do NOT commit them
 /block_log

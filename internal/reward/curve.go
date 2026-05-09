@@ -46,17 +46,35 @@ func Uint128FromBytes(b [16]byte) *big.Int {
 	return out
 }
 
-// Uint128ToBytes serializes a non-negative big.Int as 16-byte big-endian.
-// Caller is responsible for ensuring v fits in 128 bits.
+// Uint128ToBytes serializes v as a 16-byte big-endian uint128, taking
+// the value modulo 2^128. Negative inputs wrap (mirrors C++'s
+// fc::uint128_t arithmetic which is unsigned and wraps mod 2^128 —
+// notably how `total_reward_shares2 -= old; total_reward_shares2 += new`
+// at database.cpp:1673-1674 silently absorbs transient underflows).
 func Uint128ToBytes(v *big.Int) [16]byte {
 	var out [16]byte
-	if v.Sign() <= 0 {
+	if v.Sign() == 0 {
 		return out
 	}
-	src := v.Bytes()
+	w := new(big.Int).And(v, uint128Mask)
+	if v.Sign() < 0 {
+		// Big.Int's And on negatives uses two's-complement; convert
+		// by adding 2^128 until non-negative within 128 bits.
+		w = new(big.Int).Mod(v, modulus128)
+	}
+	src := w.Bytes()
 	if len(src) > 16 {
 		src = src[len(src)-16:]
 	}
 	copy(out[16-len(src):], src)
 	return out
 }
+
+// uint128Mask = 2^128 - 1; modulus128 = 2^128. Pre-computed once.
+var (
+	uint128Mask = func() *big.Int {
+		m := new(big.Int).Lsh(big.NewInt(1), 128)
+		return m.Sub(m, big.NewInt(1))
+	}()
+	modulus128 = new(big.Int).Lsh(big.NewInt(1), 128)
+)

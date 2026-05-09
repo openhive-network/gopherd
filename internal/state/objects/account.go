@@ -490,31 +490,31 @@ func AccountKey(name auth.AccountName) []byte {
 	return state.AppendAccountName(nil, name)
 }
 
-// PutAccount stores a in the session under the primary key derived from
-// a.Name. Reuses Session.SerScratch as the serialization output buffer
-// to avoid per-call growslice allocations — Session.Put copies the
-// value into the overlay so the buffer is safe to reuse on the next
-// PutAccount call.
+// PutAccount stores a in the session's typed AccountStore.
 func PutAccount(s *state.Session, a *Account) {
-	s.SerScratch = AppendAccount(s.SerScratch[:0], a)
-	s.Put(AccountTable, state.PrimaryIndex, AccountKey(a.Name), s.SerScratch)
+	EnsureAccountStore(s).Put(a)
 }
 
 // GetAccount fetches the account named name. Returns ErrNotFound if absent.
-//
-// A parsed-Account cache was tried (mirroring the witness path) but the
-// per-Put cost of mirroring 100+ accounts/block into a session map
-// outweighed the read savings — accounts are written more than they're
-// re-read within a block, unlike the active 21 witnesses.
 func GetAccount(s *state.Session, name auth.AccountName) (Account, error) {
-	v, err := s.Get(AccountTable, state.PrimaryIndex, AccountKey(name))
-	if err != nil {
-		return Account{}, err
+	a, ok := EnsureAccountStore(s).Get(name)
+	if !ok {
+		return Account{}, state.ErrNotFound
 	}
-	return ReadAccount(v)
+	return a, nil
 }
 
 // HasAccount reports whether an account named name exists.
 func HasAccount(s *state.Session, name auth.AccountName) (bool, error) {
-	return s.Has(AccountTable, state.PrimaryIndex, AccountKey(name))
+	return EnsureAccountStore(s).Has(name), nil
+}
+
+// DeleteAccount removes an account row.
+func DeleteAccount(s *state.Session, name auth.AccountName) {
+	EnsureAccountStore(s).Delete(name)
+}
+
+// RangeAccounts iterates every account in name-ascending order.
+func RangeAccounts(s *state.Session, fn func(a *Account) (bool, error)) error {
+	return EnsureAccountStore(s).RangePrimary(fn)
 }

@@ -29,7 +29,13 @@ func clearExpiredDelegations(s *state.Session, blockTime uint32) {
 				return true, nil
 			}
 			t := uint32(body[0])<<24 | uint32(body[1])<<16 | uint32(body[2])<<8 | uint32(body[3])
-			if t > blockTime {
+			// C++ database.cpp:3240 uses `expiration_time() < now` — strictly
+			// less. Stop at `t >= blockTime` so equal-to-now rows wait one
+			// more block, matching C++. (Before this change Go processed
+			// `t <= blockTime`, expiring rows one block early — visible as
+			// an off-by-one in delegator delegated_vesting_shares between
+			// Go and C++ at the equality block.)
+			if t >= blockTime {
 				nextExp = t
 				return false, nil
 			}

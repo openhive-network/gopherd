@@ -272,7 +272,7 @@ var envGhivediffLP = os.Getenv("GHIVEDIFF_LP")
 // remaining amount_to_receive becomes zero — a dust safety valve from
 // hived). Returns true when the order was fully consumed.
 func fillLimitOrder(ctx *Context, order *objects.LimitOrder, pays, receives int64) bool {
-	if ctx.BlockNum >= 2889020 && ctx.BlockNum <= 2891791 {
+	if (ctx.BlockNum >= 2889020 && ctx.BlockNum <= 2891791) || vestTraceAccount(order.Owner) {
 		preHive := int64(0)
 		preHbd := int64(0)
 		if a, gerr := objects.GetAccount(ctx.DB, order.Owner); gerr == nil {

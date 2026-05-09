@@ -317,15 +317,10 @@ func dumpFullWitnessTSV(s *state.Session, blockNum uint32, ws *objects.WitnessSc
 		fmt.Fprintln(fullDumpFp, "block\tname\tvotes\tposition\tlast_update\tscheduled_time\tschedule\tpow_worker")
 	}
 	var names []string
-	_ = s.Range(objects.WitnessTable, state.PrimaryIndex, nil,
-		func(_, value []byte) (bool, error) {
-			w, err := objects.ReadWitness(value)
-			if err != nil {
-				return true, nil
-			}
-			names = append(names, string(w.Owner))
-			return true, nil
-		})
+	_ = objects.EnsureWitnessStore(s).RangePrimary(func(w *objects.Witness) (bool, error) {
+		names = append(names, string(w.Owner))
+		return true, nil
+	})
 	sort.Strings(names) // deterministic order, matches hived by_name iter
 	for _, name := range names {
 		w, err := objects.GetWitness(s, auth.AccountName(name))

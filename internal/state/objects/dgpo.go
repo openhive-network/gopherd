@@ -138,6 +138,27 @@ type DynamicGlobalProperty struct {
 	// Mirrors dynamic_global_property_object::downvote_pool_percent
 	// (libraries/chain/include/hive/chain/global_property_object.hpp:160).
 	DownvotePoolPercent uint16
+	// DHFIntervalLedger (HF21+) — running tally of HBD minted to the
+	// treasury per process_funds tick (mirror of
+	// dynamic_global_property_object::dhf_interval_ledger). Reset by
+	// process_proposals at each interval boundary; emitted as the
+	// dhf_funding_operation virtual op.
+	DHFIntervalLedger int64
+	// CurrentAslot is the absolute slot index since genesis, incremented
+	// per slot — INCLUDING missed slots — not just per produced block.
+	// Mirrors dynamic_global_property_object::current_aslot
+	// (libraries/chain/include/hive/chain/global_property_object.hpp:78).
+	// Used by `get_scheduled_witness( slot_num )` =
+	// `current_shuffled_witnesses[(current_aslot + slot_num) % num_scheduled]`.
+	// Without this, Go's `ScheduledWitnessForSlot` falls back on
+	// HeadBlockNumber, which DOESN'T advance on missed slots — causing
+	// `update_witness_missed_blocks` to lookup the WRONG witness for
+	// each missed slot, dramatically undercounting per-witness
+	// total_missed (gxt-1080-sc-0028 Go missed=1 vs hived=2 at block
+	// 5,140,000 caused HF14+ disable to fire in hived but not Go,
+	// which propagated into divergent schedules and the +1 NumPow
+	// cascade past block 5,148,675).
+	CurrentAslot uint64
 }
 
 // AppendDGPO serializes p to dst.
@@ -170,6 +191,8 @@ func AppendDGPO(dst []byte, p *DynamicGlobalProperty) []byte {
 	dst = appendU32LE(dst, p.LastIrreversibleBlockNum)
 	dst = append(dst, byte(p.DownvotePoolPercent), byte(p.DownvotePoolPercent>>8))
 	dst = appendU64LE(dst, p.TotalPow)
+	dst = appendI64LE(dst, p.DHFIntervalLedger)
+	dst = appendU64LE(dst, p.CurrentAslot)
 	return dst
 }
 
@@ -302,6 +325,20 @@ func ReadDGPO(src []byte) (DynamicGlobalProperty, error) {
 	if p.TotalPow, err = r.ReadUint64(); err != nil {
 		return p, fmt.Errorf("dgpo.total_pow: %w", err)
 	}
+	// DHFIntervalLedger is a later schema addition; tolerate EOF.
+	if r.AtEnd() {
+		return p, nil
+	}
+	if p.DHFIntervalLedger, err = r.ReadInt64(); err != nil {
+		return p, fmt.Errorf("dgpo.dhf_interval_ledger: %w", err)
+	}
+	// CurrentAslot is a later schema addition; tolerate EOF for legacy rows.
+	if r.AtEnd() {
+		return p, nil
+	}
+	if p.CurrentAslot, err = r.ReadUint64(); err != nil {
+		return p, fmt.Errorf("dgpo.current_aslot: %w", err)
+	}
 	if !r.AtEnd() {
 		return p, errors.New("dgpo: trailing bytes after decode (schema mismatch?)")
 	}
@@ -325,6 +362,18 @@ type dgpoLazy struct {
 // write is deferred to commit time via a pre-commit hook registered
 // on the first PutDGPO of the block.
 func PutDGPO(s *state.Session, p *DynamicGlobalProperty) {
+	// Direct write: serialize and put now. The previous lazy mechanism
+	// cached the parsed struct in s.Aux and registered a single
+	// pre-commit callback; on tx rollback the overlay reverted but the
+	// Aux cache + pre-commit hook persisted, so the hook re-fired at
+	// commit and serialized the FAILED tx's mutations into the overlay
+	// — leaking dgpo state across rolled-back txs (caught at block
+	// 5,148,657: gxt-1080-sc-0027 pow2 op rejected by hived's
+	// pow_worker assert; Go's dgpo.NumPowWitnesses ended up +1 vs the
+	// actual count of pow_worker > 0 witnesses). Direct write keeps
+	// the overlay authoritative so session.Restore reverts cleanly.
+	s.SerScratch = AppendDGPO(s.SerScratch[:0], p)
+	s.Put(DynamicGlobalPropertyTable, state.PrimaryIndex, dgpoSingletonKey, s.SerScratch)
 	if s.Aux == nil {
 		s.Aux = make(map[string]any, 4)
 	}
@@ -334,13 +383,6 @@ func PutDGPO(s *state.Session, p *DynamicGlobalProperty) {
 		s.Aux[dgpoAuxKey] = cached
 	} else {
 		cached.val = *p
-	}
-	if !cached.dirty {
-		cached.dirty = true
-		s.RegisterPreCommit(func() {
-			s.SerScratch = AppendDGPO(s.SerScratch[:0], &cached.val)
-			s.Put(DynamicGlobalPropertyTable, state.PrimaryIndex, dgpoSingletonKey, s.SerScratch)
-		})
 	}
 }
 

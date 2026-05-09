@@ -53,13 +53,22 @@ type WitnessStore struct {
 	dirty   map[string]struct{}
 }
 
-// witnessSecondaryKey snapshots the (votes, vst, pow) values that the
-// secondary btrees are currently keyed on for one owner. It's identical
-// in shape to the now-private witnessIndexFields the K/V era used.
+// witnessSecondaryKey snapshots the (votes, vst, pow, created) values
+// that the secondary btrees are currently keyed on for one owner.
+//
+// `created` mirrors hived's by_schedule_time tie-break by witness_id
+// (row insertion order). Two witnesses with equal VST in hived's
+// composite index resolve by creation order; with Go's tie-break being
+// owner-name ascending, witnesses created LATER (e.g., sminer1 in PoW
+// phase) but lex-smaller than genesis ones (e.g., steemit16) reordered
+// in front of them, advancing different witnesses' VSTs at every
+// schedule rebuild. Block 3,207,456 is the first block where the
+// resulting per-witness VST drift triggers a chain-state divergence.
 type witnessSecondaryKey struct {
-	votes int64
-	vst   [16]byte
-	pow   uint64
+	votes   int64
+	vst     [16]byte
+	pow     uint64
+	created uint32
 }
 
 // witnessSecKey is the secondary-index sort key. `sort` holds the
@@ -200,19 +209,20 @@ func (s *WitnessStore) flushSecondaries() {
 			if hadOld {
 				s.byVote.Delete(witnessByVoteSecKey(old.votes, owner))
 				if !virtualTimeIsZeroFlat(old.vst) {
-					s.byVST.Delete(witnessByVSTSecKey(old.vst, owner))
+					s.byVST.Delete(witnessByVSTSecKey(old.vst, old.created, owner))
 				}
 				if old.pow != 0 {
-					s.byPow.Delete(witnessByPowSecKey(old.pow, owner))
+					s.byPow.Delete(witnessByPowSecKey(old.pow, old.created, owner))
 				}
 				delete(s.flushed, owner)
 			}
 			continue
 		}
 		newK := witnessSecondaryKey{
-			votes: cur.TotalVotesVests,
-			vst:   cur.VirtualScheduledTime,
-			pow:   cur.PowWorker,
+			votes:   cur.TotalVotesVests,
+			vst:     cur.VirtualScheduledTime,
+			pow:     cur.PowWorker,
+			created: cur.Created,
 		}
 		if hadOld {
 			if old.votes != newK.votes {
@@ -221,27 +231,27 @@ func (s *WitnessStore) flushSecondaries() {
 			}
 			if old.vst != newK.vst {
 				if !virtualTimeIsZeroFlat(old.vst) {
-					s.byVST.Delete(witnessByVSTSecKey(old.vst, owner))
+					s.byVST.Delete(witnessByVSTSecKey(old.vst, old.created, owner))
 				}
 				if !virtualTimeIsZeroFlat(newK.vst) {
-					s.byVST.Set(witnessByVSTSecKey(newK.vst, owner))
+					s.byVST.Set(witnessByVSTSecKey(newK.vst, newK.created, owner))
 				}
 			}
 			if old.pow != newK.pow {
 				if old.pow != 0 {
-					s.byPow.Delete(witnessByPowSecKey(old.pow, owner))
+					s.byPow.Delete(witnessByPowSecKey(old.pow, old.created, owner))
 				}
 				if newK.pow != 0 {
-					s.byPow.Set(witnessByPowSecKey(newK.pow, owner))
+					s.byPow.Set(witnessByPowSecKey(newK.pow, newK.created, owner))
 				}
 			}
 		} else {
 			s.byVote.Set(witnessByVoteSecKey(newK.votes, owner))
 			if !virtualTimeIsZeroFlat(newK.vst) {
-				s.byVST.Set(witnessByVSTSecKey(newK.vst, owner))
+				s.byVST.Set(witnessByVSTSecKey(newK.vst, newK.created, owner))
 			}
 			if newK.pow != 0 {
-				s.byPow.Set(witnessByPowSecKey(newK.pow, owner))
+				s.byPow.Set(witnessByPowSecKey(newK.pow, newK.created, owner))
 			}
 		}
 		s.flushed[owner] = newK
@@ -270,15 +280,25 @@ func witnessByVoteSecKey(votes int64, owner string) witnessSecKey {
 	return witnessSecKey{sort: string(buf[:]), owner: owner}
 }
 
-// witnessByVSTSecKey encodes (vst_be16, owner) — VST is already big-endian.
-func witnessByVSTSecKey(vst [16]byte, owner string) witnessSecKey {
-	return witnessSecKey{sort: string(vst[:]), owner: owner}
+// witnessByVSTSecKey encodes (vst_be16, created_be4) — VST is already
+// big-endian, and creation block_time follows so witnesses with equal
+// VST sort by creation order (mirrors hived's composite_key<vst, witness_id>
+// tie-break). Owner falls through as the secondary tiebreak only for
+// the (rare) two-witnesses-created-in-the-same-block case.
+func witnessByVSTSecKey(vst [16]byte, created uint32, owner string) witnessSecKey {
+	var buf [20]byte
+	copy(buf[:16], vst[:])
+	binary.BigEndian.PutUint32(buf[16:], created)
+	return witnessSecKey{sort: string(buf[:]), owner: owner}
 }
 
-// witnessByPowSecKey encodes (pow_be8, owner).
-func witnessByPowSecKey(pow uint64, owner string) witnessSecKey {
-	var buf [8]byte
-	binary.BigEndian.PutUint64(buf[:], pow)
+// witnessByPowSecKey encodes (pow_be8, created_be4) — pow_worker first
+// then creation block_time so ties break by witness_id (creation order),
+// mirroring hived's by_pow composite_key<pow_worker, witness_id>.
+func witnessByPowSecKey(pow uint64, created uint32, owner string) witnessSecKey {
+	var buf [12]byte
+	binary.BigEndian.PutUint64(buf[:8], pow)
+	binary.BigEndian.PutUint32(buf[8:], created)
 	return witnessSecKey{sort: string(buf[:]), owner: owner}
 }
 

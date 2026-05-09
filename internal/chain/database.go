@@ -11,6 +11,7 @@ import (
 
 	"hived-go/internal/chain/evaluator"
 	"hived-go/internal/fcraw"
+	"hived-go/internal/protocol/auth"
 	"hived-go/internal/protocol/block"
 	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/network"
@@ -210,6 +211,28 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 		Witness:       hdr.Witness,
 	}
 
+	// Mirror C++ database.cpp:2374-2376 — set dgp.current_witness BEFORE
+	// the tx loop runs, so PoW evaluators (and any other op that reads
+	// dgpo.CurrentWitness) see the current block's producer rather than
+	// the previous block's. Go's evaluator.Context.Witness is also set
+	// to hdr.Witness (line 210), so the in-Context reads are independent;
+	// this only matters for code paths that read dgpo directly.
+	{
+		dgpoPre, derr := objects.GetDGPO(session)
+		if derr == nil {
+			dgpoPre.CurrentWitness = hdr.Witness
+			objects.PutDGPO(session, &dgpoPre)
+		}
+	}
+
+	// Mirror C++ database.cpp:2379 — process_header_extensions runs
+	// BEFORE the tx loop so witness running_version + hardfork_version_vote
+	// reflect the current block when downstream evaluators or the HF5+
+	// witness-version assertion read them.
+	if err := processHeaderExtensions(session, &hdr); err != nil {
+		return objects.DynamicGlobalProperty{}, fmt.Errorf("apply_block %d header_extensions: %w", blockNum, err)
+	}
+
 	r := fcraw.NewReader(rawBlock[hdrLen:])
 	txCount, err := r.ReadVarUint()
 	if err != nil {
@@ -346,28 +369,51 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 		}
 	}
 
-	// Block-level updates that mirror C++ apply_block: process header
-	// extensions BEFORE per-block hooks run so the witness's running
-	// version + hardfork vote are current when update_witness_schedule
-	// rolls medians and process_hardforks tallies. Mirrors
-	// database.cpp:2402.
-	if err := processHeaderExtensions(session, &hdr); err != nil {
-		return objects.DynamicGlobalProperty{}, fmt.Errorf("apply_block %d header_extensions: %w", blockNum, err)
+	// Mirror C++ database.cpp:2412 — update_global_dynamic_data after
+	// tx application and before per-block hooks. CurrentWitness was
+	// already set pre-tx-loop (mirrors C++ line 2374); here we advance
+	// HeadBlockNumber, Time, HeadBlockID. Per-block hooks see the new
+	// head block.
+	//
+	// update_global_dynamic_data also calls update_witness_missed_blocks
+	// for each missed slot (database.cpp:2926-2933), incrementing their
+	// total_missed and HF14-HF20 zeroing the signing_key for witnesses
+	// out of touch beyond HIVE_WITNESS_SHUTDOWN_THRESHOLD blocks. We
+	// run that BEFORE the DGPO advance so missed-witness lookups still
+	// see the previous head block number.
+	// Compute slot number BEFORE the missed-block walk so we can advance
+	// CurrentAslot and pass the per-block slot to update_witness_missed_blocks.
+	//
+	// At block 1 hived's get_slot_at_time runs the head_block_num()==0
+	// branch of get_slot_time, which uses dpo.time directly (= genesis
+	// time, no rounding). Because Go's genesis seeds dgpo.Time with
+	// network.GenesisTimeUnix and that value is on a 3-second boundary,
+	// slotNumForBlockTime returns the same value as hived's get_slot_at_time
+	// without any block-1 special case. For mainnet block 1 (timestamp
+	// 1458835500, genesis 1458835200) this is 100 — the off-by-99 source
+	// of the iter15 CurrentAslot drift, which Go was clamping to 1.
+	//
+	// update_witness_missed_blocks is gated by hived's
+	// `head_block_num() != 0` guard; mirror that with `blockNum > 1`.
+	slotForBlock := slotNumForBlockTime(headBlockTime, hdr.Timestamp)
+	if blockNum > 1 && slotForBlock > 1 {
+		updateWitnessMissedBlocks(session, hdr.Witness, slotForBlock-1, hf, blockNum, prevHeadBlockNum)
 	}
-
-	// Roll forward the DGPO BEFORE per-block hooks — hived calls
-	// update_global_dynamic_data right after tx application and before
-	// any of the per-block processing functions, so they see the
-	// current block's head_block_number / time / current_witness.
-	// Mirrors libraries/chain/database.cpp:2825.
 	dgpo, err := objects.GetDGPO(session)
 	if err != nil && err != state.ErrNotFound {
 		return objects.DynamicGlobalProperty{}, fmt.Errorf("apply_block %d dgpo read: %w", blockNum, err)
 	}
 	dgpo.HeadBlockNumber = blockNum
 	dgpo.Time = hdr.Timestamp
-	dgpo.CurrentWitness = hdr.Witness
 	dgpo.HeadBlockID = block.ConstructID(rawBlock[:hdrLen], blockNum)
+	// Advance CurrentAslot by slotForBlock — mirrors hived's
+	// update_global_dynamic_data (database.cpp:2912-2920) which adds
+	// the block's slot index (1 + missed slots since previous block) to
+	// dgpo.current_aslot. ScheduledWitnessForSlot reads CurrentAslot to
+	// resolve which witness should produce slot N from the schedule
+	// shuffle. Without advancing on missed slots, miss-counter
+	// attribution looks at the WRONG witness for each missed slot.
+	dgpo.CurrentAslot += uint64(slotForBlock)
 	objects.PutDGPO(session, &dgpo)
 
 	// Per-block hooks — order mirrors libraries/chain/database.cpp's
@@ -570,14 +616,66 @@ const blockIntervalSec uint32 = 3
 // next contiguous block; slot 2 = one missed; etc. Returns 0 if the block
 // is at or before head_time (which would be a clock-rewind error upstream).
 func slotNumForBlockTime(headTime, blockTime uint32) uint32 {
-	if blockTime <= headTime {
+	// Mirror hived's get_slot_at_time (database.cpp:1015-1020) which
+	// uses get_slot_time(1) = head_slot_time + 1*interval, where
+	// head_slot_time = (head_block_time / interval) * interval —
+	// ROUNDED DOWN to the previous interval boundary. Without the
+	// alignment, blocks where head_block_time isn't a multiple of
+	// interval would be miscounted (Go returned 0, hived returned 1).
+	// Source of the 99-slot CurrentAslot gap observed at block
+	// 5,148,656 vs hived.
+	headSlotTime := (headTime / blockIntervalSec) * blockIntervalSec
+	firstSlotTime := headSlotTime + blockIntervalSec
+	if blockTime < firstSlotTime {
 		return 0
 	}
-	delta := blockTime - headTime
-	if delta < blockIntervalSec {
-		return 0
+	return (blockTime-firstSlotTime)/blockIntervalSec + 1
+}
+
+// hiveWitnessShutdownThresholdBlocks = HIVE_BLOCKS_PER_DAY = 28800.
+// Pre-HF14 / post-HF20 the shutdown branch is a no-op (HF14 introduced it,
+// HF20 disabled it via SP190). Within HF14-HF20, a witness whose
+// last_confirmed_block_num is more than this many blocks behind head_block
+// has its signing_key zeroed (effectively dropping them from the schedule).
+const hiveWitnessShutdownThresholdBlocks uint32 = 28800
+
+// updateWitnessMissedBlocks mirrors database::update_witness_missed_blocks
+// (database_witness.cpp:284-306). For each missed slot 1..missedBlocks, it
+// finds the witness who SHOULD have produced that slot, increments their
+// total_missed counter, and HF14-HF20 zeroes their BlockSigningKey if
+// their last_confirmed is too far behind head — which causes the next
+// witness-schedule rebuild to drop them from the active set entirely.
+func updateWitnessMissedBlocks(s *state.Session, blockWitness auth.AccountName, missedBlocks uint32, hf hardfork.Set, blockNum, prevHeadBlockNum uint32) {
+	if missedBlocks == 0 {
+		return
 	}
-	return delta / blockIntervalSec
+	ws, err := objects.GetWitnessSchedule(s)
+	if err != nil {
+		return
+	}
+	// hived: per-slot witness lookup uses dgpo.current_aslot, NOT
+	// head_block_num. iter16 closed the upstream CurrentAslot drift
+	// (slotNumForBlockTime now rounds head_time DOWN to interval
+	// boundary, matching hived's get_slot_at_time).
+	dgpoForAslot, _ := objects.GetDGPO(s)
+	currentAslot := dgpoForAslot.CurrentAslot
+	for i := uint32(0); i < missedBlocks; i++ {
+		missedName := ws.ScheduledWitnessForSlotAslot(currentAslot, i+1)
+		if missedName == "" || missedName == blockWitness {
+			continue
+		}
+		w, err := objects.GetWitness(s, missedName)
+		if err != nil {
+			continue
+		}
+		w.TotalMissedBlocks++
+		if hf.Has(hardfork.HF14) && !hf.Has(hardfork.HF20) {
+			if blockNum-w.LastConfirmedBlockNum > hiveWitnessShutdownThresholdBlocks {
+				w.BlockSigningKey = [33]byte{}
+			}
+		}
+		objects.PutWitness(s, &w)
+	}
 }
 
 // isNotImplemented reports whether err wraps evaluator.ErrNotImplemented.

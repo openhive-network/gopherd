@@ -133,11 +133,40 @@ func (commentEvaluator) Apply(ctx *Context, o op.Operation) error {
 		// HF12-HF17 only root posts cash out. HF17+ all comments do.
 		// commentCashoutTime returns 0 when the comment never cashes out.
 		cashoutTime := commentCashoutTime(ctx.Hardforks, ctx.HeadBlockTime, hasParent)
+
+		// reward_weight haircut for frequent posters (HF12-HF17 ROOT
+		// posts only). Mirrors hive_evaluator_social.cpp:216-225.
+		// Decays the previous post_bandwidth by the time-since-last-root
+		// over a 1-day window, adds 10000 (HIVE_100_PERCENT), then
+		// reward_weight = min(WEIGHT_CONSTANT × 100% / bw², 100%) where
+		// WEIGHT_CONSTANT = (4 × 10000)² = 1,600,000,000. Applied at
+		// cashout as `claim × reward_weight / 10000`. Stored on
+		// comment_cashout_ex_object in C++; on Comment.RewardWeight here.
+		const hivePostAverageWindow = uint64(60 * 60 * 24)
+		const hive100Percent = uint64(10000)
+		const hivePostWeightConstant = (4 * hive100Percent) * (4 * hive100Percent)
+		var rewardWeight uint16 = uint16(hive100Percent)
+		postBandwidth := uint64(authorAcct.PostBandwidth)
+		if ctx.Hardforks.Has(hardfork.HF12) && !ctx.Hardforks.Has(hardfork.HF17) && !hasParent {
+			postDeltaTime := uint64(ctx.HeadBlockTime - authorAcct.LastRootPost)
+			if postDeltaTime > hivePostAverageWindow {
+				postDeltaTime = hivePostAverageWindow
+			}
+			oldWeight := (postBandwidth * (hivePostAverageWindow - postDeltaTime)) / hivePostAverageWindow
+			postBandwidth = oldWeight + hive100Percent
+			rw := (hivePostWeightConstant * hive100Percent) / (postBandwidth * postBandwidth)
+			if rw > hive100Percent {
+				rw = hive100Percent
+			}
+			rewardWeight = uint16(rw)
+		}
+
 		// Update author's last-post timestamps so subsequent comments
 		// from this account hit the interval gate above.
 		authorAcct.LastPost = ctx.HeadBlockTime
 		if !hasParent {
 			authorAcct.LastRootPost = ctx.HeadBlockTime
+			authorAcct.PostBandwidth = uint32(postBandwidth)
 		}
 		authorAcct.PostCount++
 		objects.PutAccount(ctx.DB, &authorAcct)
@@ -184,13 +213,21 @@ func (commentEvaluator) Apply(ctx *Context, o op.Operation) error {
 			Created:              ctx.HeadBlockTime,
 			LastUpdate:           ctx.HeadBlockTime,
 			CashoutTime:          cashoutTime,
-			MaxAcceptedPayout:    1_000_000_000_000, // HIVE_MAX_SHARE_SUPPLY default
-			PercentHbd:           10000,             // HIVE_100_PERCENT
+			// C++ comment_cashout_object initialiser: HBD_asset(1'000'000'000)
+			// = 1,000,000.000 HBD (3 decimals). Mirrors comment_options_operation's
+			// own default of `asset(1'000'000'000, HBD_SYMBOL)`. Using the
+			// 1T sat-HBD HIVE_MAX_SHARE_SUPPLY value here makes every
+			// subsequent comment_options op count as `lowering`, falsely
+			// tripping the no-votes-yet tightening assert (block 4,972,630
+			// freebornangel reproducer).
+			MaxAcceptedPayout:    1_000_000_000,
+			PercentHbd:           10000, // HIVE_100_PERCENT
 			AllowVotes:           true,
 			AllowCurationRewards: true,
 			RootAuthor:           rootAuthor,
 			RootPermlink:         rootPermlink,
 			ID:                   commentID,
+			RewardWeight:         rewardWeight,
 		})
 		if cashoutTime != 0 {
 			objects.PutCommentCashoutSchedule(ctx.DB, cashoutTime, commentID, c.Author, c.Permlink)
@@ -280,29 +317,10 @@ func (deleteCommentEvaluator) Apply(ctx *Context, o op.Operation) error {
 	return nil
 }
 
-// deleteAllCommentVotes mirrors the comment_vote_index iteration in
-// C++ delete_comment_evaluator. Walks every cv row for this comment
-// (by-comment secondary index) and removes it.
+// deleteAllCommentVotes drops every CommentVote on (author, permlink)
+// in one shot. Used by delete_comment_evaluator's cleanup path.
 func deleteAllCommentVotes(s *state.Session, author, permlink string) {
-	type voterKey struct{ voter string }
-	var votes []voterKey
-	prefix := objects.CommentVoteByCommentPrefix(author, permlink)
-	_ = s.Range(objects.CommentVoteTable, objects.CommentVoteByCommentIndex, prefix,
-		func(body, _ []byte) (bool, error) {
-			if len(body) < state.AccountNameKeyLen {
-				return true, nil
-			}
-			vb := body[len(body)-state.AccountNameKeyLen:]
-			n := state.AccountNameKeyLen
-			for n > 0 && vb[n-1] == 0 {
-				n--
-			}
-			votes = append(votes, voterKey{voter: string(vb[:n])})
-			return true, nil
-		})
-	for _, v := range votes {
-		objects.DeleteCommentVote(s, v.voter, author, permlink)
-	}
+	objects.DeleteAllCommentVotesForComment(s, auth.AccountName(author), permlink)
 }
 
 // commentOptionsEvaluator implements comment_options.
@@ -517,8 +535,14 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 		votingManaRegenerationSec int64 = 5 * 24 * 60 * 60 // 5 days
 		secondsPerDay            int64 = 24 * 60 * 60
 	)
+	// HIVE_INITIAL_VOTE_POWER_RATE = 40 pre-HF19; C++ database_hardfork.cpp
+	// HF19 case sets `gpo.vote_power_reserve_rate = HIVE_REDUCED_VOTE_POWER_RATE`
+	// (= 10) at HF19, NOT HF20. Earlier code gated on HF20 — wrong for the
+	// HF19–HF20 window (block ~13M–~25M) where C++ already drops to 10
+	// while Go was still at 40. Dormant for blocks pre-HF19 (we're at 5.2M
+	// in this iteration), but a real divergence past HF19.
 	voteReserveRate := int64(40) // HIVE_INITIAL_VOTE_POWER_RATE
-	if ctx.Hardforks.Has(hardfork.HF20) {
+	if ctx.Hardforks.Has(hardfork.HF19) {
 		voteReserveRate = 10 // HIVE_REDUCED_VOTE_POWER_RATE
 	}
 	elapsed := int64(ctx.HeadBlockTime) - int64(voter.VotingManaLastUpdate)
@@ -595,19 +619,39 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 	}
 	// Upvote lockout (HF7+): can't INCREASE rshares within the lockout
 	// window before payout. HF17+ uses 12h, HF7-HF17 uses 1 minute.
+	// C++ hive_evaluator_social.cpp:396-397 uses calculate_discussion_payout_time
+	// which for pre-HF17 replies returns the ROOT's cashout_time
+	// (database_comment.cpp:60-66 follows the parent chain). Match that so
+	// reply votes near root's cashout boundary are rejected as in C++.
 	prevRshares := int64(0)
 	if !isNew {
 		prevRshares = prev.Rshares
 	}
-	if rshares > prevRshares && c.CashoutTime != 0 {
-		var lockout uint32
-		if ctx.Hardforks.Has(hardfork.HF17) {
-			lockout = 60 * 60 * 12 // 12 hours
-		} else if ctx.Hardforks.Has(hardfork.HF7) {
-			lockout = 60 // 1 minute
+	if rshares > prevRshares {
+		lockoutCashoutTime := c.CashoutTime
+		if !ctx.Hardforks.Has(hardfork.HF17) && c.ParentAuthor != "" {
+			rootAuthor := c.RootAuthor
+			rootPermlink := c.RootPermlink
+			if rootAuthor == "" {
+				rootAuthor = c.Author
+				rootPermlink = c.Permlink
+			}
+			if rootAuthor != c.Author || rootPermlink != c.Permlink {
+				if root, rerr := objects.GetComment(ctx.DB, rootAuthor, rootPermlink); rerr == nil {
+					lockoutCashoutTime = root.CashoutTime
+				}
+			}
 		}
-		if lockout > 0 && c.CashoutTime > ctx.HeadBlockTime && c.CashoutTime-ctx.HeadBlockTime <= lockout {
-			return fmt.Errorf("vote: cannot increase payout in last %ds before cashout", lockout)
+		if lockoutCashoutTime != 0 {
+			var lockout uint32
+			if ctx.Hardforks.Has(hardfork.HF17) {
+				lockout = 60 * 60 * 12 // 12 hours
+			} else if ctx.Hardforks.Has(hardfork.HF7) {
+				lockout = 60 // 1 minute
+			}
+			if lockout > 0 && lockoutCashoutTime > ctx.HeadBlockTime && lockoutCashoutTime-ctx.HeadBlockTime <= lockout {
+				return fmt.Errorf("vote: cannot increase payout in last %ds before cashout", lockout)
+			}
 		}
 	}
 	// HF20+ downvote routing: a downvote first draws from the
@@ -870,7 +914,21 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 			if newCashout != oldRootCashout {
 				objects.PutCommentCashoutSchedule(ctx.DB, newCashout, root.ID, root.Author, root.Permlink)
 			}
-		} else if !(ctx.Hardforks.Has(hardfork.HF14) && absRshares == 0) {
+		} else if ctx.Hardforks.Has(hardfork.HF14) && absRshares == 0 {
+			// HF14 weight==0 cleanup: still clamp root cashout to max.
+			// Mirrors hive_evaluator_social.cpp:435-437,449,461 which
+			// always sets cashout_time = min(cur, max_cashout_time)
+			// regardless of the abs_rshares==0 short-circuit. Effect
+			// kicks in only when oldRootCashout > MaxCashoutTime, rare.
+			if root.MaxCashoutTime != 0 && oldRootCashout > root.MaxCashoutTime {
+				newCashout := root.MaxCashoutTime
+				if oldRootCashout != newCashout {
+					objects.DeleteCommentCashoutSchedule(ctx.DB, oldRootCashout, root.ID)
+					root.CashoutTime = newCashout
+					objects.PutCommentCashoutSchedule(ctx.DB, newCashout, root.ID, root.Author, root.Permlink)
+				}
+			}
+		} else {
 			var newCashoutTimeSec uint32
 			if ctx.Hardforks.Has(hardfork.HF12) && !ctx.Hardforks.Has(hardfork.HF13) {
 				newCashoutTimeSec = ctx.HeadBlockTime + cashoutWindowSecondsPreHF17 // 12h
@@ -995,15 +1053,16 @@ func curationWeightCurve(ctx *Context, c *objects.Comment, voteRshares uint64) *
 // content_constant).
 func adjustRewardShares2(s *state.Session, oldNetRshares, newNetRshares int64) {
 	// Post-HF17: write to reward_fund.recent_claims.
+	// Mirror C++ database.cpp:1673-1674 — uint128 modular subtraction +
+	// addition, NO clamp. A transient negative is part of normal
+	// operation when an old curve outran the running total temporarily;
+	// Uint128ToBytes wraps mod 2^128 to match C++ fc::uint128_t.
 	if fund, err := objects.GetRewardFund(s, objects.PostRewardFundName); err == nil {
 		total := reward.Uint128FromBytes(fund.RecentClaims)
 		oldCurve := evaluateCurveForFund(oldNetRshares, &fund)
 		newCurve := evaluateCurveForFund(newNetRshares, &fund)
 		total.Sub(total, oldCurve)
 		total.Add(total, newCurve)
-		if total.Sign() < 0 {
-			total.SetInt64(0)
-		}
 		fund.RecentClaims = reward.Uint128ToBytes(total)
 		objects.PutRewardFund(s, &fund)
 		return
@@ -1017,9 +1076,6 @@ func adjustRewardShares2(s *state.Session, oldNetRshares, newNetRshares int64) {
 	newCurve := reward.EvaluateRewardCurveQuadratic(newNetRshares)
 	total.Sub(total, oldCurve)
 	total.Add(total, newCurve)
-	if total.Sign() < 0 {
-		total.SetInt64(0)
-	}
 	dgpo.TotalRewardShares2 = reward.Uint128ToBytes(total)
 	objects.PutDGPO(s, &dgpo)
 }
