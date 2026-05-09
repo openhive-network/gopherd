@@ -216,6 +216,56 @@ type devNullWriter struct{}
 
 func (devNullWriter) Write(p []byte) (int, error) { return len(p), nil }
 
+// TestParseLegacyAddressMessage exercises the legacy_address_message
+// parser used by peer.go to consume mainnet hived's address-gossip.
+// We hand-build a body with two well-formed entries (one IPv4 unicast,
+// one loopback that should be filtered) + check we extract just one.
+//
+// fc::ip::address packs as a LE uint32 of the IP — e.g. wire bytes
+// {01, 02, 03, 04} decode to address 4.3.2.1 (we reverse the bytes).
+// The test pins this round-trip explicitly because interop with the
+// existing proto.ReadLegacyAddress (which reads bytes-as-network-order)
+// is wrong: it works in isolation but not against real hived.
+func TestParseLegacyAddressMessage(t *testing.T) {
+	// Two entries:
+	//   - Wire {1, 2, 3, 4} → 4.3.2.1:2001 (unicast, kept)
+	//   - Wire {1, 0, 0, 127} → 127.0.0.1:2001 (loopback, filtered)
+	const entrySize = 53
+	body := []byte{0x02} // varint 2
+	mk := func(wireIP [4]byte, port uint16) []byte {
+		b := make([]byte, entrySize)
+		copy(b[0:4], wireIP[:])
+		b[4] = byte(port)
+		b[5] = byte(port >> 8)
+		// last_seen, latency, node_id, direction, firewalled — all zero,
+		// the parser doesn't care.
+		return b
+	}
+	body = append(body, mk([4]byte{1, 2, 3, 4}, 2001)...)
+	body = append(body, mk([4]byte{1, 0, 0, 127}, 2001)...)
+
+	got, err := parseLegacyAddressMessage(body)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d entries; want 1 (loopback should be filtered)", len(got))
+	}
+	if got[0].RemoteEndpoint.Addr.String() != "4.3.2.1:2001" {
+		t.Errorf("entry 0 endpoint = %q, want 4.3.2.1:2001", got[0].RemoteEndpoint.Addr.String())
+	}
+}
+
+// TestParseLegacyAddressMessageRejectsTruncated verifies the parser
+// returns an error on a body that claims more entries than fit.
+func TestParseLegacyAddressMessageRejectsTruncated(t *testing.T) {
+	// Claim 5 entries, supply 0 bodies.
+	body := []byte{0x05}
+	if _, err := parseLegacyAddressMessage(body); err == nil {
+		t.Fatal("expected error on truncated body")
+	}
+}
+
 // Sanity: the atomic.Int32 in Peer doesn't drift if no goroutine writes.
 func TestPeerInitialState(t *testing.T) {
 	dummy := &Peer{}

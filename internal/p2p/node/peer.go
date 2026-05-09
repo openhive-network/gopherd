@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -22,6 +23,11 @@ import (
 	"hived-go/internal/p2p/proto"
 	"hived-go/internal/p2p/transport"
 )
+
+// netipAddrFrom4 wraps netip.AddrFrom4 so the helper near
+// parseLegacyAddressMessage stays self-contained — keeping the function
+// + its tiny local helpers together in one block.
+func netipAddrFrom4(b [4]byte) netip.Addr { return netip.AddrFrom4(b) }
 
 // TraceEnabled toggles a per-peer wire-trace dump on stderr. Driven by the
 // GHIVE_P2P_TRACE env var ("1" / "true") at process start; useful when
@@ -385,12 +391,29 @@ func (p *Peer) run(ctx context.Context, delegate Delegate) {
 			}
 		case proto.LegacyAddressMessageType:
 			// Legacy address_message (5010) — vector of legacy_address_info
-			// (IPv4-only endpoint). We don't currently maintain a separate
-			// peerdb for legacy peers; treat this as an inbound discovery
-			// signal but skip parsing for now (the new 5020 path covers
-			// modern peers). A future cleanup can teach the peerdb to
-			// accept legacy addresses too.
-			_ = body
+			// (IPv4-only endpoint). Mainnet hived peers send this form as
+			// part of their standard address-gossip (the 5020 form is
+			// alongside it). Parse + feed into the discovery path so the
+			// dialer can ramp up beyond the seed list.
+			//
+			// Layout per legacy_address_info (53 bytes per entry):
+			//   legacy_endpoint    6 bytes (4 IP + 2 port LE)
+			//   last_seen_time     4 bytes (uint32 LE)
+			//   latency            8 bytes (uint64 LE, microseconds)
+			//   node_id           33 bytes (raw secp256k1 pubkey)
+			//   direction          1 byte
+			//   firewalled         1 byte
+			// Preceded by an FC varint count.
+			if delegate == nil {
+				continue
+			}
+			addrs, err := parseLegacyAddressMessage(body)
+			if err != nil {
+				// Parse failures are non-fatal — we just don't learn from
+				// this peer's reply this round.
+				continue
+			}
+			delegate.OnAddressesReceived(p, addrs)
 		case proto.AddressMessageType:
 			if delegate == nil {
 				continue
@@ -528,4 +551,84 @@ func (p *Peer) heartbeatLoop(ctx context.Context, stop <-chan struct{}) {
 			}
 		}
 	}
+}
+
+// parseLegacyAddressMessage extracts the (host:port) endpoints carried by
+// a graphene::net::legacy_address_message body. Mainnet hived sends this
+// alongside the modern address_message; we use it to ramp the peerdb past
+// the initial 8-seed list. We synthesise proto.AddressInfo records (with
+// the modern Endpoint type) so the existing OnAddressesReceived plumbing
+// can consume them unchanged.
+//
+// Layout: varint count, then count × legacy_address_info (53 bytes each).
+// Per-entry: 4 IP + 2 port LE + 4 last_seen + 8 latency + 33 node_id + 1
+// direction + 1 firewalled.
+//
+// Errors: returns nil on a malformed body — the caller treats that as
+// "no addresses learned this round".
+func parseLegacyAddressMessage(body []byte) ([]proto.AddressInfo, error) {
+	const entrySize = 4 + 2 + 4 + 8 + 33 + 1 + 1 // 53
+	if len(body) == 0 {
+		return nil, nil
+	}
+	// Decode an FC varint (LEB128-style) for the count.
+	count, n, err := readVarUint(body)
+	if err != nil {
+		return nil, err
+	}
+	body = body[n:]
+	if int(count) > len(body)/entrySize+1 {
+		// Implausible — bail rather than allocate huge slice.
+		return nil, fmt.Errorf("legacy_address_message: count %d exceeds body capacity", count)
+	}
+	out := make([]proto.AddressInfo, 0, count)
+	for i := uint64(0); i < count; i++ {
+		if len(body) < entrySize {
+			return nil, fmt.Errorf("legacy_address_message: truncated at entry %d", i)
+		}
+		// fc::ip::address packs as a LE uint32 of the IP. The IP is
+		// conceptually stored in NETWORK byte order, so the LE encoding
+		// reverses the bytes on the wire — we have to swap back to get
+		// the dotted-quad. (E.g. "172.18.0.2" → wire bytes `02 00 12 ac`.)
+		ip4 := [4]byte{body[3], body[2], body[1], body[0]}
+		port := uint16(body[4]) | uint16(body[5])<<8
+		// Skip everything past the (ip,port) — for peerdb we only need
+		// the dialable endpoint string. We DO advance over the rest so
+		// the next iteration starts on the right entry.
+		body = body[entrySize:]
+		// Filter the obvious non-dialables here. The peerdb path also
+		// filters on node side, but cheap to short-circuit here.
+		if port == 0 {
+			continue
+		}
+		addr := netipAddrFrom4(ip4)
+		if !addr.IsValid() || addr.IsUnspecified() || addr.IsLoopback() || addr.IsMulticast() {
+			continue
+		}
+		out = append(out, proto.AddressInfo{
+			RemoteEndpoint: proto.MakeEndpoint(addr, port),
+			Direction:      proto.DirectionInbound,
+		})
+	}
+	return out, nil
+}
+
+// readVarUint decodes an FC varint (same wire format as fc::raw::varint —
+// little-endian LEB128). Returns the value, the byte count consumed, and
+// any error.
+func readVarUint(b []byte) (uint64, int, error) {
+	var v uint64
+	var shift uint
+	for i := 0; i < len(b); i++ {
+		c := b[i]
+		v |= uint64(c&0x7f) << shift
+		if c&0x80 == 0 {
+			return v, i + 1, nil
+		}
+		shift += 7
+		if shift >= 64 {
+			return 0, 0, fmt.Errorf("varint overflow")
+		}
+	}
+	return 0, 0, fmt.Errorf("varint truncated")
 }
