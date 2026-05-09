@@ -303,12 +303,20 @@ func (d *Delegate) handleBlockchainItemIDsInventory(p *node.Peer, body []byte) {
 	}
 
 	// If the peer signalled there's more remaining AND we didn't throttle
-	// THIS round, walk forward. We DO NOT gate on len(missing)>0 anymore:
-	// when 8 peers all hand back the same first 200 IDs in a sync, the
+	// THIS round, walk forward. We DO NOT gate on len(missing)>0:
+	// when N peers all hand back the same first chunk in a sync, the
 	// later peers see all-deduped (we already have / already requested)
 	// and len(missing)==0 — but if we don't walk them forward they go
 	// silent until the 5s INV tick, killing throughput. Walking them
 	// forward immediately gets each peer onto fresh ground.
+	//
+	// Furthermore, FAN OUT the walk-forward to every other connected
+	// peer too. When peer A is slow to respond on a 1000-block chunk,
+	// peers B..H deliver the same 1000-block chunk in parallel — the
+	// first to arrive wins (subsequent dups are filtered by
+	// RecentBlockBytesByID and HeadBlock checks). We trade some
+	// upstream-bandwidth at the seeds for stall-free catch-up; the
+	// per-peer outstanding cap keeps any single peer bounded.
 	if msg.TotalRemainingItemCount > 0 && !throttled && !d.inhibitFetching.Load() {
 		// Use the highest-num hash we received as the new synopsis
 		// anchor — it will become our head once those blocks apply.
@@ -319,6 +327,7 @@ func (d *Delegate) handleBlockchainItemIDsInventory(p *node.Peer, body []byte) {
 		d.poke()
 	}
 }
+
 
 // handleFetchItems is the SERVER side: peer is asking for raw items by
 // hash. Reply with one block_message per known block, or
@@ -427,11 +436,21 @@ func (d *Delegate) handleBlock(p *node.Peer, body []byte) {
 		}
 	}
 
+	// Pre-recover the witness signing key on THIS goroutine. handleBlock
+	// runs on the per-peer receive goroutine — with N peers we get N-way
+	// parallel sig recovery for free, and applyLoop never blocks on the
+	// expensive secp256k1 RecoverPublicKey. RecoverBlockSigner returns
+	// the zero PublicKey on any parse / recovery error; in that case
+	// chain.ApplyBlock falls back to its own (failing) recovery path
+	// which generates the canonical error message.
+	signer := RecoverBlockSigner(msg.SignedBlockBytes)
+
 	job := applyJob{
-		blockNum: bid.Num(),
-		rawBlock: msg.SignedBlockBytes,
-		id:       bid,
-		srcPeer:  p,
+		blockNum:          bid.Num(),
+		rawBlock:          msg.SignedBlockBytes,
+		id:                bid,
+		srcPeer:           p,
+		preVerifiedSigner: signer,
 	}
 	select {
 	case d.applyQ <- job:

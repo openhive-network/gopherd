@@ -185,6 +185,7 @@ func (d *Delegate) applyLoop() {
 				Sync:                      false,
 				SkipTransactionSignatures: false,
 				SkipBlockSignature:        false,
+				PreVerifiedBlockSigner:    job.preVerifiedSigner,
 			}, nil); err != nil {
 				d.logf("apply_block %d failed: %v", job.blockNum, err)
 				// Drop and continue — gossip / next INV will re-deliver

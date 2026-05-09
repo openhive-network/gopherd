@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"hived-go/internal/chain"
+	"hived-go/internal/crypto"
 	"hived-go/internal/p2p/node"
 	"hived-go/internal/protocol/block"
 )
@@ -79,17 +80,12 @@ const (
 	// DefaultMaxOutstandingTotal caps the total number of blocks we have
 	// in flight (fetched but not yet applied) across all peers. Together
 	// with ApplyQueueSize this is the upper bound on memory consumed by
-	// inbound block traffic. Bumped from 2048 to 8192 because a fast
-	// catch-up against 8 peers needs deep pipelining: at ~30 KiB/block
-	// average, 8192 ≈ 240 MiB worst-case, well within budget.
+	// inbound block traffic.
 	DefaultMaxOutstandingTotal = 8192
 
 	// DefaultMaxOutstandingPerPeer caps how many blocks any single peer
 	// can have in flight to us. Keeps a single misbehaving (or simply
-	// faster) peer from monopolising the budget. Bumped from 512 to 2048
-	// — the 200-block-per-fetch_blockchain_item_ids reply means 2 RTTs
-	// of pipeline depth at the previous cap; 2048 is closer to what the
-	// hived-side response queue can absorb without wasting our budget.
+	// faster) peer from monopolising the budget.
 	DefaultMaxOutstandingPerPeer = 2048
 )
 
@@ -314,6 +310,13 @@ type applyJob struct {
 	rawBlock []byte
 	id       block.ID
 	srcPeer  *node.Peer
+	// preVerifiedSigner, when non-zero, is the witness signing key
+	// recovered from the block's WitnessSignature on the per-peer
+	// receive goroutine (which is parallel across peers, unlike the
+	// single applyLoop). chain.ApplyBlock skips its own RecoverPublicKey
+	// when this is set, eliminating the dominant CPU cost from the
+	// hot apply path.
+	preVerifiedSigner crypto.PublicKey
 }
 
 // New builds a Delegate against a real *chain.Database.

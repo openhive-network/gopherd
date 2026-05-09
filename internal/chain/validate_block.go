@@ -82,20 +82,36 @@ func validateBlock(s *state.Session, hdr *block.SignedHeader, rawBlock []byte, h
 // rawBlock[:hdrLen-block.SignatureSize] is the unsigned header bytes
 // hived feeds into SHA256 to derive the digest.
 func verifyBlockSignature(s *state.Session, hdr *block.SignedHeader, rawBlock []byte, hdrLen int, blockNum uint32) error {
+	return verifyBlockSignatureWithCache(s, hdr, rawBlock, hdrLen, blockNum, crypto.PublicKey{})
+}
+
+// verifyBlockSignatureWithCache mirrors verifyBlockSignature but accepts
+// a pre-recovered signer key. When non-zero, the expensive secp256k1
+// RecoverPublicKey call is skipped and we just check the cached key
+// against the witness's BlockSigningKey. The caller is responsible for
+// having recovered the key against the EXACT same digest
+// (block.BlockSigningDigest(unsignedHeader)). See
+// internal/p2p/sync/sigverify.go for the look-ahead worker pool that
+// fills the cache.
+func verifyBlockSignatureWithCache(s *state.Session, hdr *block.SignedHeader, rawBlock []byte, hdrLen int, blockNum uint32, preVerified crypto.PublicKey) error {
 	if hdrLen < block.SignatureSize {
 		return fmt.Errorf("verify_block_signature %d: header too short (%d bytes, signature alone is %d)",
 			blockNum, hdrLen, block.SignatureSize)
 	}
-	unsignedHeader := rawBlock[:hdrLen-block.SignatureSize]
-	digest := block.BlockSigningDigest(unsignedHeader)
 
-	var sig crypto.CompactSignature
-	copy(sig[:], hdr.WitnessSignature[:])
-
-	got, err := crypto.RecoverPublicKey(digest, sig)
-	if err != nil {
-		return fmt.Errorf("verify_block_signature %d: recover: %w", blockNum, err)
+	got := preVerified
+	if got.IsZero() {
+		unsignedHeader := rawBlock[:hdrLen-block.SignatureSize]
+		digest := block.BlockSigningDigest(unsignedHeader)
+		var sig crypto.CompactSignature
+		copy(sig[:], hdr.WitnessSignature[:])
+		var err error
+		got, err = crypto.RecoverPublicKey(digest, sig)
+		if err != nil {
+			return fmt.Errorf("verify_block_signature %d: recover: %w", blockNum, err)
+		}
 	}
+
 	w, err := objects.GetWitness(s, auth.AccountName(hdr.Witness))
 	if err != nil {
 		return fmt.Errorf("verify_block_signature %d: witness %q: %w", blockNum, hdr.Witness, err)

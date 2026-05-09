@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"hived-go/internal/chain/evaluator"
+	"hived-go/internal/crypto"
 	"hived-go/internal/fcraw"
 	"hived-go/internal/protocol/auth"
 	"hived-go/internal/protocol/block"
@@ -157,6 +158,16 @@ type ApplyOptions struct {
 	// (treating the op as a no-op). Default false; with the stub registry in
 	// place every op is registered, so this should rarely be needed.
 	SkipUnknownOps bool
+	// PreVerifiedBlockSigner, when non-zero, is the public key recovered
+	// from the witness block signature OUTSIDE of ApplyBlock by a
+	// look-ahead worker pool (see internal/p2p/sync/sigverify.go). When
+	// supplied, verifyBlockSignature skips its own RecoverPublicKey call
+	// (which dominates the apply CPU profile) and just compares the
+	// pre-recovered key against the witness's BlockSigningKey. The
+	// caller is responsible for proving the recovery: hand back a key
+	// the sync layer recovered against the same digest as
+	// verifyBlockSignature would.
+	PreVerifiedBlockSigner crypto.PublicKey
 	// TolerateFailingOps causes ApplyBlock to count, but not abort on, any
 	// evaluator error (insufficient balance, unsupported symbol, etc.).
 	// This is intended for INCREMENTAL P1 development only — when many
@@ -295,7 +306,7 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 		// 65-byte compact signature over SHA256(header_bytes), and
 		// compare to witness_object.BlockSigningKey. Mirrors hived's
 		// validate_block_header in database.cpp:2887.
-		if err := verifyBlockSignature(session, &hdr, rawBlock, hdrLen, blockNum); err != nil {
+		if err := verifyBlockSignatureWithCache(session, &hdr, rawBlock, hdrLen, blockNum, opts.PreVerifiedBlockSigner); err != nil {
 			return objects.DynamicGlobalProperty{}, err
 		}
 		if blockNum > 1 {
