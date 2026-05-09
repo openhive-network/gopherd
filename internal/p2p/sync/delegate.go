@@ -426,6 +426,28 @@ func (d *Delegate) onDequeue() {
 // back-pressured. Exported for tests + observability.
 func (d *Delegate) FetchInhibited() bool { return d.inhibitFetching.Load() }
 
+// isFarBehind reports whether we are >catchupGap blocks behind the
+// highest peer head we've observed. Used by broadcastInv to throttle
+// the per-round inventory size: during catch-up peers already have
+// everything we have, so a single-block INV is sufficient as a
+// keepalive, and the per-peer known-map iteration over ~200 IDs was
+// burning measurable CPU.
+func (d *Delegate) isFarBehind() bool {
+	const catchupGap = 100
+	myHead, _ := d.chain.HeadBlock()
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, st := range d.peers {
+		st.mu.Lock()
+		ph := st.peerHeadNum
+		st.mu.Unlock()
+		if ph > myHead+catchupGap {
+			return true
+		}
+	}
+	return false
+}
+
 // QueueDepth returns the current applyQ depth (atomic, lock-free).
 func (d *Delegate) QueueDepth() int { return int(d.applyQLen.Load()) }
 

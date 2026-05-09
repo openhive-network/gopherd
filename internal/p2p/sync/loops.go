@@ -65,9 +65,18 @@ func (d *Delegate) broadcastInv() {
 		return
 	}
 
-	// Truncate to the most-recent MaxBlocksPerInv.
-	if len(nums) > d.cfg.MaxBlocksPerInv {
-		nums = nums[len(nums)-d.cfg.MaxBlocksPerInv:]
+	// During catch-up, advertise just our most-recent block — peers
+	// already have everything we have (we're behind their head). The
+	// 200-block-per-round broadcast was burning 22 % of CPU on per-peer
+	// known-map iteration during a multi-thousand-bps catch-up. The
+	// single-block INV is enough to keep peers aware of our head
+	// without the per-block bookkeeping cost.
+	maxAdvertise := d.cfg.MaxBlocksPerInv
+	if d.isFarBehind() {
+		maxAdvertise = 1
+	}
+	if len(nums) > maxAdvertise {
+		nums = nums[len(nums)-maxAdvertise:]
 	}
 
 	// Pre-resolve nums → IDs once per round.
