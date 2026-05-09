@@ -1,0 +1,413 @@
+#!/bin/bash
+# hived-at — single-command wrapper around the hived checkpoint framework.
+#
+# Replaces the manual sequence:
+#   scripts/hived-prepare-checkpoint.sh <BLOCK>
+#   scripts/hived-serve-checkpoint.sh <BLOCK> &  (wait for API)
+#   curl -s ...JSON-RPC...                        (or ./bin/cppstate dgpo)
+#   manual kill of the hived process
+#
+# Usage:
+#   hived-at <BLOCK> dgpo                        # dynamic global properties
+#   hived-at <BLOCK> witness <NAME>              # find_witnesses
+#   hived-at <BLOCK> account <NAME>              # find_accounts
+#   hived-at <BLOCK> schedule                    # get_witness_schedule
+#   hived-at <BLOCK> raw <method> [<json_params>] # arbitrary JSON-RPC call
+#   hived-at <BLOCK> shell                       # leave server running, print URL+PID
+#   hived-at <BLOCK> stop                        # kill server, remove pid file
+#   hived-at list                                # show all running checkpoints
+#
+# Reuses an existing /tmp/hived-cp-<BLOCK>/ checkpoint if present.
+# Reuses a still-running hived process for that checkpoint if its pid file
+# is alive and the API responds.
+#
+# Concurrency: each checkpoint binds to its own port (BASE_PORT + BLOCK%1000),
+# so two `hived-at` invocations for different blocks can coexist. If port
+# allocation collides with something else, set HIVED_AT_PORT=<n> as override.
+
+set -euo pipefail
+
+# --------------------------------------------------------------------------
+# Config (overridable via env)
+# --------------------------------------------------------------------------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PREPARE_SCRIPT="${HIVED_AT_PREPARE:-$SCRIPT_DIR/hived-prepare-checkpoint.sh}"
+HIVED_BIN="${HIVED_BIN:-/home/martin/projects/hive/build/programs/hived/hived}"
+BASE_PORT="${HIVED_AT_BASE_PORT:-18090}"
+WAIT_TIMEOUT_SECS="${HIVED_AT_WAIT:-60}"
+
+# --------------------------------------------------------------------------
+# Helpers
+# --------------------------------------------------------------------------
+err() { printf 'hived-at: %s\n' "$*" >&2; }
+die() { err "$*"; exit 1; }
+
+usage() {
+  cat >&2 <<EOF
+usage: hived-at <BLOCK> <subcommand> [args...]
+       hived-at list
+
+subcommands:
+  dgpo                       database_api.get_dynamic_global_properties
+  witness <NAME>             database_api.find_witnesses (owners=[NAME])
+  account <NAME>             database_api.find_accounts (accounts=[NAME])
+  schedule                   database_api.get_witness_schedule
+  raw <method> [<params>]    arbitrary JSON-RPC call; params is a JSON value
+  shell                      ensure server up, print URL+PID, leave running
+  stop                       kill server cleanly, remove pid file
+
+env overrides:
+  HIVED_BIN                  path to hived binary (default: /home/martin/.../hived)
+  HIVED_AT_BASE_PORT         base TCP port (default: 18090, BLOCK%1000 added)
+  HIVED_AT_PORT              override port entirely
+  HIVED_AT_WAIT              seconds to wait for API up (default: 60)
+EOF
+}
+
+# Per-checkpoint paths.
+cp_dir()       { printf '/tmp/hived-cp-%s' "$1"; }
+pid_file()     { printf '%s/server.pid' "$(cp_dir "$1")"; }
+port_file()    { printf '%s/server.port' "$(cp_dir "$1")"; }
+log_file()     { printf '%s/server.log' "$(cp_dir "$1")"; }
+config_file()  { printf '%s/api-config.ini' "$(cp_dir "$1")"; }
+
+# Allocate a port for BLOCK. Honors HIVED_AT_PORT.
+port_for_block() {
+  local block="$1"
+  if [ -n "${HIVED_AT_PORT:-}" ]; then
+    printf '%s' "$HIVED_AT_PORT"
+    return
+  fi
+  printf '%s' "$(( BASE_PORT + (block % 1000) ))"
+}
+
+# Returns 0 if pid in file is alive, else 1. Echoes pid on success.
+read_pid_alive() {
+  local pf="$1"
+  [ -f "$pf" ] || return 1
+  local pid
+  pid="$(cat "$pf" 2>/dev/null || true)"
+  [ -n "$pid" ] || return 1
+  if kill -0 "$pid" 2>/dev/null; then
+    printf '%s' "$pid"
+    return 0
+  fi
+  return 1
+}
+
+# JSON-RPC call helper. Args: PORT METHOD PARAMS_JSON.
+rpc_call() {
+  local port="$1" method="$2" params="$3"
+  local body
+  body=$(printf '{"jsonrpc":"2.0","method":"%s","params":%s,"id":1}' "$method" "$params")
+  curl -fsS -H 'content-type: application/json' --data "$body" \
+    "http://127.0.0.1:${port}" 2>/dev/null
+}
+
+# Ping API at given port. Returns 0 if the JSON-RPC endpoint responds with a
+# non-error envelope.
+api_ping() {
+  local port="$1"
+  local out
+  out=$(rpc_call "$port" "database_api.get_dynamic_global_properties" "{}" 2>/dev/null) || return 1
+  printf '%s' "$out" | grep -q '"result"' || return 1
+  return 0
+}
+
+# Wait until the API at the given port responds, up to WAIT_TIMEOUT_SECS.
+wait_for_api() {
+  local port="$1" deadline="$(( $(date +%s) + WAIT_TIMEOUT_SECS ))"
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    if api_ping "$port"; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+# Verify we have everything we need to even try. Block on missing tools.
+preflight() {
+  command -v curl >/dev/null 2>&1 || die "curl not found in PATH"
+  command -v jq   >/dev/null 2>&1 || die "jq not found in PATH (apt install jq)"
+  [ -x "$HIVED_BIN" ] || die "hived binary missing/non-exec at $HIVED_BIN
+  Build hived first: cd /home/martin/projects/hive && cmake/build steps,
+  or set HIVED_BIN=/path/to/hived"
+}
+
+# Returns 0 if a checkpoint dir looks complete. We treat the presence of
+# blockchain/block_log + blockchain/shared_memory.bin as "prepared". The
+# `prepare` script writes both as its final step.
+checkpoint_complete() {
+  local cp="$1"
+  [ -d "$cp" ] || return 1
+  [ -f "$cp/blockchain/block_log" ] || return 1
+  [ -f "$cp/blockchain/shared_memory.bin" ] || return 1
+  [ -f "$cp/config.ini" ] || return 1
+  return 0
+}
+
+# Build a per-checkpoint config. We must use the same plugin set as the
+# replay that built the shared_memory.bin (otherwise hived aborts with
+# "A new index is created, but other indexes are found in shared_memory_file").
+# So we start from the checkpoint's own config.ini (written by the prepare
+# script from /tmp/cp-base-config.ini) and override only the bind port +
+# p2p hardening.
+write_config() {
+  local block="$1" port="$2" cfg src
+  cfg="$(config_file "$block")"
+  src="$(cp_dir "$block")/config.ini"
+  [ -f "$src" ] || die "checkpoint config missing: $src"
+  awk -v port="$port" '
+    /^webserver-http-endpoint/ { next }
+    /^p2p-endpoint/            { next }
+    /^p2p-max-connections/     { next }
+    /^p2p-seed-node/           { next }
+    { print }
+    END {
+      print ""
+      print "# hived-at: overrides appended below"
+      print "webserver-http-endpoint = 127.0.0.1:" port
+      print "p2p-endpoint = 127.0.0.1:0"
+      print "p2p-max-connections = 0"
+      print "p2p-seed-node ="
+    }
+  ' "$src" > "$cfg"
+}
+
+# Ensure the checkpoint dir is prepared. Re-runs the prepare script only if
+# checkpoint_complete fails.
+ensure_checkpoint() {
+  local block="$1" cp
+  cp="$(cp_dir "$block")"
+  if checkpoint_complete "$cp"; then
+    return 0
+  fi
+  err "preparing checkpoint at $cp (this can take many minutes)..."
+  [ -x "$PREPARE_SCRIPT" ] || die "prepare script missing/non-exec: $PREPARE_SCRIPT"
+  "$PREPARE_SCRIPT" "$block"
+  checkpoint_complete "$cp" || die "prepare ran but $cp still incomplete; see /tmp/hived-cp-${block}.log"
+}
+
+# Ensure a hived API server is running for BLOCK. Reuses a live one if its
+# pid file is healthy and api_ping succeeds. Otherwise starts a fresh one.
+# Echoes the live port on stdout.
+ensure_server() {
+  local block="$1" port pf cp cfg log
+  cp="$(cp_dir "$block")"
+  pf="$(pid_file "$block")"
+  cfg="$(config_file "$block")"
+  log="$(log_file "$block")"
+
+  # Reuse path: pid alive AND api responds AND port file matches.
+  if pid="$(read_pid_alive "$pf")"; then
+    local known_port
+    known_port="$(cat "$(port_file "$block")" 2>/dev/null || true)"
+    if [ -n "$known_port" ] && api_ping "$known_port"; then
+      printf '%s' "$known_port"
+      return 0
+    fi
+    # Stale: pid alive but api dead, or no port. Kill and restart.
+    err "stale server pid $pid (no API response); restarting"
+    kill "$pid" 2>/dev/null || true
+    sleep 1
+    kill -9 "$pid" 2>/dev/null || true
+  fi
+  rm -f "$pf"
+
+  port="$(port_for_block "$block")"
+
+  # If something else is already on that port, refuse.
+  if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+    exec 3<&- 3>&-
+    die "port $port already in use; set HIVED_AT_PORT=<n> to override"
+  fi
+
+  ensure_checkpoint "$block"
+  write_config "$block" "$port"
+
+  err "starting hived API for block $block on port $port (log: $log)"
+  # Daemonize hived: setsid -f forks into a new session, detaches from
+  # our process group, and inherits no controlling terminal. Inside that
+  # forked shell, we exec into hived after rebinding stdio to /dev/null
+  # and the log file — that way hived holds no pipe back to our caller.
+  # The PID we want in the pid file is hived itself, so we record $$ in
+  # the launched shell *just before* exec.
+  : >"$log"
+  rm -f "$pf"
+  (
+    cd "$cp"
+    setsid -f bash -c "
+      echo \$\$ > '$pf'
+      exec </dev/null >>'$log' 2>&1
+      exec '$HIVED_BIN' --data-dir=. --config=api-config.ini
+    " </dev/null >/dev/null 2>&1
+  )
+  # Wait briefly for the pid file (race window: setsid -f returns before
+  # the child has had a chance to write the file).
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ -s "$pf" ] && break
+    sleep 0.2
+  done
+  [ -s "$pf" ] || die "hived launcher did not produce a pid file"
+
+  printf '%s' "$port" >"$(port_file "$block")"
+
+  if ! wait_for_api "$port"; then
+    local pid
+    pid="$(cat "$pf" 2>/dev/null || true)"
+    err "hived API did not respond on port $port within ${WAIT_TIMEOUT_SECS}s"
+    err "see $log; pid=$pid"
+    [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+    rm -f "$pf"
+    exit 1
+  fi
+  printf '%s' "$port"
+}
+
+# --------------------------------------------------------------------------
+# Subcommand handlers
+# --------------------------------------------------------------------------
+do_dgpo() {
+  local port="$1"
+  rpc_call "$port" "database_api.get_dynamic_global_properties" "{}" | jq '.result'
+}
+
+do_witness() {
+  local port="$1" name="$2"
+  [ -n "$name" ] || die "witness subcommand requires <NAME>"
+  local params
+  params=$(printf '{"owners":["%s"]}' "$name")
+  rpc_call "$port" "database_api.find_witnesses" "$params" | jq '.result'
+}
+
+do_account() {
+  local port="$1" name="$2"
+  [ -n "$name" ] || die "account subcommand requires <NAME>"
+  local params
+  params=$(printf '{"accounts":["%s"]}' "$name")
+  rpc_call "$port" "database_api.find_accounts" "$params" | jq '.result'
+}
+
+do_schedule() {
+  local port="$1"
+  rpc_call "$port" "database_api.get_witness_schedule" "{}" | jq '.result'
+}
+
+do_raw() {
+  local port="$1" method="$2" params="${3:-}"
+  [ -n "$method" ] || die "raw subcommand requires <method>"
+  [ -n "$params" ] || params='{}'
+  rpc_call "$port" "$method" "$params" | jq '.'
+}
+
+do_shell() {
+  local block="$1" port="$2" pid
+  pid="$(cat "$(pid_file "$block")" 2>/dev/null || echo '?')"
+  cat <<EOF
+hived API for block $block is up.
+  url:    http://127.0.0.1:${port}
+  pid:    ${pid}
+  log:    $(log_file "$block")
+  stop:   $0 $block stop
+EOF
+}
+
+do_stop() {
+  local block="$1" pf pid
+  pf="$(pid_file "$block")"
+  if pid="$(read_pid_alive "$pf")"; then
+    err "killing hived pid $pid (block $block)"
+    kill "$pid" 2>/dev/null || true
+    # Wait briefly for graceful shutdown.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 1
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      err "pid $pid still alive; SIGKILL"
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+  else
+    err "no live pid for block $block"
+  fi
+  rm -f "$pf" "$(port_file "$block")"
+}
+
+do_list() {
+  local cp pf pid block port status header_printed=0
+  shopt -s nullglob
+  for cp in /tmp/hived-cp-*/; do
+    # Skip non-block-numbered dirs (e.g. .log files match /tmp/hived-cp-* via parent glob? no, only dirs here).
+    block="${cp#/tmp/hived-cp-}"
+    block="${block%/}"
+    case "$block" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    pf="$cp/server.pid"
+    if [ -f "$pf" ]; then
+      pid="$(cat "$pf" 2>/dev/null || true)"
+      port="$(cat "$cp/server.port" 2>/dev/null || echo '?')"
+      if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        status="running"
+      else
+        status="stale"
+      fi
+    else
+      pid="-"
+      port="-"
+      status="prepared"
+    fi
+    if [ "$header_printed" = 0 ]; then
+      printf '%-10s %-10s %-6s %-8s %s\n' "BLOCK" "PID" "PORT" "STATUS" "DIR"
+      header_printed=1
+    fi
+    printf '%-10s %-10s %-6s %-8s %s\n' "$block" "$pid" "$port" "$status" "$cp"
+  done
+  if [ "$header_printed" = 0 ]; then
+    err "no checkpoints found under /tmp/hived-cp-*/"
+  fi
+}
+
+# --------------------------------------------------------------------------
+# Main
+# --------------------------------------------------------------------------
+[ $# -ge 1 ] || { usage; exit 2; }
+
+# Top-level subcommands that don't need a BLOCK arg.
+case "$1" in
+  list) shift; do_list "$@"; exit 0 ;;
+  -h|--help|help) usage; exit 0 ;;
+esac
+
+BLOCK="$1"; shift || true
+case "$BLOCK" in
+  ''|*[!0-9]*) die "BLOCK must be a positive integer (got: $BLOCK)" ;;
+esac
+
+[ $# -ge 1 ] || { usage; exit 2; }
+SUB="$1"; shift || true
+
+case "$SUB" in
+  stop)
+    do_stop "$BLOCK"
+    exit 0
+    ;;
+esac
+
+preflight
+PORT="$(ensure_server "$BLOCK")"
+
+case "$SUB" in
+  dgpo)     do_dgpo "$PORT" ;;
+  witness)  do_witness "$PORT" "${1:-}" ;;
+  account)  do_account "$PORT" "${1:-}" ;;
+  schedule) do_schedule "$PORT" ;;
+  raw)      do_raw "$PORT" "${1:-}" "${2:-}" ;;
+  shell)    do_shell "$BLOCK" "$PORT" ;;
+  *)
+    err "unknown subcommand: $SUB"
+    usage
+    exit 2
+    ;;
+esac
