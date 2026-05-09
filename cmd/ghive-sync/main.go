@@ -1,0 +1,350 @@
+// Command ghive-sync is the live-mainnet sync skeleton.
+//
+// It dials hived peers, downloads blocks via the P2P+sync code, validates
+// each block (signature + merkle + every op evaluator), and appends the raw
+// block bytes to a local block_log that should be byte-identical to what
+// hived would produce.
+//
+// What's wired today:
+//
+//   - State dir bootstrap (mainnet genesis if empty).
+//   - Block_log writer at <data-dir>/blockchain/block_log (uncompressed,
+//     monolithic — see internal/blocklog/writer.go for the limitations).
+//   - P2P node + mainnet seed dial.
+//   - Self-test path that re-applies blocks from an existing block_log
+//     (--source-block-log) and round-trips them via the writer; this
+//     exercises the full validate→append loop without needing real peers.
+//   - --target-block / --verify-against / --max-blocks bounds for testing.
+//
+// What's NOT yet wired (waits on agent-sync):
+//
+//   - The sync delegate hook that the P2P node calls per received block.
+//     Once agent-sync exposes an OnBlockReceived(*Peer, rawBlock []byte) hook
+//     (see TODO in run()), the only change here is to plumb our writeBlock
+//     callback into the delegate.
+//
+// Compile: `go build ./cmd/ghive-sync`.
+// Quick self-test: `go test ./cmd/ghive-sync/`.
+// Live run (once sync agent lands): `ghive-sync --data-dir /tmp/sync-state`.
+package main
+
+import (
+	"encoding/hex"
+	"flag"
+	"fmt"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"syscall"
+	"time"
+
+	"hived-go/internal/blocklog"
+	"hived-go/internal/chain"
+	p2pnode "hived-go/internal/p2p/node"
+	"hived-go/internal/protocol/block"
+	"hived-go/internal/protocol/network"
+	"hived-go/internal/state"
+	"hived-go/internal/state/genesis"
+)
+
+func main() {
+	cfg := parseFlags()
+
+	if cfg.showSeeds {
+		for _, s := range network.MainnetSeeds {
+			fmt.Println(s)
+		}
+		return
+	}
+
+	if cfg.dataDir == "" {
+		fmt.Fprintln(os.Stderr, "ghive-sync: --data-dir is required")
+		os.Exit(2)
+	}
+
+	app, err := newApp(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ghive-sync: %v\n", err)
+		os.Exit(1)
+	}
+	defer app.close()
+
+	if cfg.sourceBlockLog != "" {
+		// Self-replay path. No peers, no sync — just stream blocks from
+		// the source block_log into the validator + writer. This is what
+		// the unit test in main_test.go exercises end-to-end.
+		if err := app.replayFromSource(cfg.sourceBlockLog, cfg.maxBlocks); err != nil {
+			fmt.Fprintf(os.Stderr, "ghive-sync: replay: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	if err := app.run(); err != nil {
+		fmt.Fprintf(os.Stderr, "ghive-sync: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+type flags struct {
+	dataDir         string
+	targetBlock     uint32
+	verifyAgainst   string
+	sourceBlockLog  string
+	maxBlocks       uint32
+	showSeeds       bool
+	listenEndpoint  string
+	extraSeeds      string
+	disableMainSeeds bool
+}
+
+func parseFlags() flags {
+	var f flags
+	var target, max uint
+	flag.StringVar(&f.dataDir, "data-dir", "", "data directory (state + blockchain/block_log live here)")
+	flag.UintVar(&target, "target-block", 0, "stop sync after applying this block number (0 = unlimited)")
+	flag.StringVar(&f.verifyAgainst, "verify-against", "", "path to a reference block_log; assert each applied block's bytes match")
+	flag.StringVar(&f.sourceBlockLog, "source-block-log", "", "self-replay mode: read blocks from this block_log instead of P2P")
+	flag.UintVar(&max, "max-blocks", 0, "in self-replay mode, stop after this many blocks (0 = the source's head)")
+	flag.BoolVar(&f.showSeeds, "show-seeds", false, "print the compiled-in mainnet seed list and exit")
+	flag.StringVar(&f.listenEndpoint, "p2p-endpoint", "", "local listen address (host:port); empty = outbound-only")
+	flag.StringVar(&f.extraSeeds, "extra-seed", "", "additional seed (host:port); pass --extra-seed multiple times to add more")
+	flag.BoolVar(&f.disableMainSeeds, "no-default-seeds", false, "skip the compiled-in mainnet seeds; only --extra-seed peers will be dialed")
+	flag.Parse()
+	f.targetBlock = uint32(target)
+	f.maxBlocks = uint32(max)
+	return f
+}
+
+// app bundles the long-lived per-process resources.
+type app struct {
+	cfg    flags
+	state  *state.Database
+	chain  *chain.Database
+	writer blocklog.Writer
+	verify *blocklog.Reader // optional, for --verify-against
+	p2p    *p2pnode.Node
+	logger *appLogger
+
+	// skipSigsForTest is set by the test harness to bypass block + tx
+	// signature checks. The production live-sync path leaves it false:
+	// hived peers serve real blocks, the witness signature has to verify,
+	// otherwise we'd happily archive forged blocks. Tests against
+	// historical mainnet bytes reuse the same applyBlock flow but flip
+	// this since there's no signing-key infrastructure in unit tests.
+	skipSigsForTest bool
+}
+
+func newApp(cfg flags) (*app, error) {
+	stateDB, err := state.Open(cfg.dataDir, 256<<20)
+	if err != nil {
+		return nil, fmt.Errorf("open state %s: %w", cfg.dataDir, err)
+	}
+	if err := genesis.Apply(stateDB); err != nil {
+		// Apply tolerates an already-bootstrapped dir.
+		_ = err
+	}
+	cdb := chain.New(stateDB)
+
+	blockchainDir := filepath.Join(cfg.dataDir, "blockchain")
+	if err := os.MkdirAll(blockchainDir, 0o755); err != nil {
+		stateDB.Close()
+		return nil, fmt.Errorf("mkdir blockchain: %w", err)
+	}
+	blockLogPath := filepath.Join(blockchainDir, "block_log")
+	w, err := blocklog.OpenForWrite(blockLogPath, false)
+	if err != nil {
+		stateDB.Close()
+		return nil, fmt.Errorf("open block_log writer: %w", err)
+	}
+
+	a := &app{
+		cfg:    cfg,
+		state:  stateDB,
+		chain:  cdb,
+		writer: w,
+		logger: newAppLogger(os.Stderr),
+	}
+
+	if cfg.verifyAgainst != "" {
+		ref, err := blocklog.Open(cfg.verifyAgainst)
+		if err != nil {
+			a.close()
+			return nil, fmt.Errorf("open --verify-against %s: %w", cfg.verifyAgainst, err)
+		}
+		a.verify = ref
+	}
+	return a, nil
+}
+
+func (a *app) close() {
+	if a.p2p != nil {
+		a.p2p.Stop()
+		a.p2p = nil
+	}
+	if a.writer != nil {
+		_ = a.writer.Close()
+		a.writer = nil
+	}
+	if a.verify != nil {
+		_ = a.verify.Close()
+		a.verify = nil
+	}
+	if a.state != nil {
+		_ = a.state.Close()
+		a.state = nil
+	}
+}
+
+// run brings up the P2P node and waits for SIGINT/SIGTERM (or, when
+// --target-block is set, until the chain head reaches it).
+//
+// TODO(agent-sync): wire the per-block delegate hook here. Once
+// agent-sync exports an interface like
+//
+//	type BlockReceiver interface {
+//	    OnBlockReceived(rawBlock []byte) error
+//	}
+//
+// we will pass `a.applyBlock` (which validates + writes + verifies) as the
+// implementation. Until then this function spins up the P2P node only — no
+// blocks ever arrive — and the daemon idles waiting for an interrupt.
+func (a *app) run() error {
+	seeds := []string{}
+	if !a.cfg.disableMainSeeds {
+		seeds = append(seeds, network.MainnetSeeds...)
+	}
+	if a.cfg.extraSeeds != "" {
+		seeds = append(seeds, a.cfg.extraSeeds)
+	}
+	a.logger.printf("starting (seeds=%d, listen=%q, target=%d)", len(seeds), a.cfg.listenEndpoint, a.cfg.targetBlock)
+
+	a.p2p = p2pnode.New(p2pnode.Config{
+		Endpoint:  a.cfg.listenEndpoint,
+		SeedNodes: seeds,
+		UserAgent: "ghive-sync/0.1.0",
+	}, a.chain, nil /* TODO(agent-sync): plumb a sync delegate that calls a.applyBlock */)
+	if err := a.p2p.Start(); err != nil {
+		return fmt.Errorf("p2p start: %w", err)
+	}
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	<-sig
+	a.logger.printf("shutting down...")
+	return nil
+}
+
+// applyBlock validates and persists one block. This is the hook the P2P
+// sync delegate will call for every received block (once agent-sync lands).
+//
+// Validation is FULL: signature + merkle + every op evaluator. Replay
+// optimizations (SkipBlockSignature, SkipTransactionSignatures) are NOT
+// engaged here — live sync must verify the signatures from the wire.
+func (a *app) applyBlock(rawBlock []byte, blockNum uint32) error {
+	if a.verify != nil {
+		want, err := a.verify.Block(blockNum)
+		if err != nil {
+			return fmt.Errorf("verify-against block %d: %w", blockNum, err)
+		}
+		if !bytesEqual(want, rawBlock) {
+			return fmt.Errorf("verify-against mismatch at block %d (got %d bytes, ref %d bytes)",
+				blockNum, len(rawBlock), len(want))
+		}
+	}
+
+	if _, err := a.chain.ApplyBlock(rawBlock, blockNum, chain.ApplyOptions{
+		SkipBlockSignature:        a.skipSigsForTest,
+		SkipTransactionSignatures: a.skipSigsForTest,
+		Sync:                      false,
+	}, nil); err != nil {
+		return fmt.Errorf("apply block %d: %w", blockNum, err)
+	}
+
+	if err := a.writer.Append(rawBlock); err != nil {
+		return fmt.Errorf("append block %d: %w", blockNum, err)
+	}
+
+	if blockNum%1000 == 0 {
+		hash := ""
+		if hdrLen, ok := signedHeaderLen(rawBlock); ok {
+			id := block.ConstructID(rawBlock[:hdrLen], blockNum)
+			hash = hex.EncodeToString(id[:])
+		}
+		a.logger.printf("sync: applied block %d (hash=%s) -> head=%d", blockNum, hash, a.writer.HeadBlock())
+	}
+
+	if a.cfg.targetBlock > 0 && blockNum >= a.cfg.targetBlock {
+		a.logger.printf("sync: reached target-block %d; closing writer and exiting", blockNum)
+		// Close the writer (drains the index sidecar) before signaling
+		// the run loop to exit. The cleanest way is to send ourselves a
+		// SIGINT so the existing shutdown path runs.
+		_ = a.writer.Close()
+		a.writer = nil
+		// Signal the main goroutine to exit. We can't return from inside
+		// a delegate-driven callback, so SIGTERM is the simplest plumbing.
+		if p, err := os.FindProcess(os.Getpid()); err == nil {
+			_ = p.Signal(syscall.SIGTERM)
+		}
+	}
+	return nil
+}
+
+// replayFromSource opens a source block_log, walks it in order, and feeds
+// each block through applyBlock. Used by the unit test and as a smoke
+// test before peers are wired.
+func (a *app) replayFromSource(srcPath string, maxBlocks uint32) error {
+	r, err := blocklog.Open(srcPath)
+	if err != nil {
+		return fmt.Errorf("open source %s: %w", srcPath, err)
+	}
+	defer r.Close()
+
+	head := r.Head()
+	if maxBlocks > 0 && maxBlocks < head {
+		head = maxBlocks
+	}
+	if a.cfg.targetBlock > 0 && a.cfg.targetBlock < head {
+		head = a.cfg.targetBlock
+	}
+
+	a.logger.printf("self-replay: source=%s head=%d", srcPath, head)
+	startedAt := time.Now()
+	for n := uint32(1); n <= head; n++ {
+		raw, err := r.Block(n)
+		if err != nil {
+			return fmt.Errorf("read source block %d: %w", n, err)
+		}
+		if err := a.applyBlock(raw, n); err != nil {
+			return err
+		}
+	}
+	dt := time.Since(startedAt).Seconds()
+	if dt > 0 {
+		a.logger.printf("self-replay: applied %d blocks in %.2fs (%.0f blocks/s)", head, dt, float64(head)/dt)
+	}
+	return nil
+}
+
+// signedHeaderLen returns the length in bytes of the signed_block_header
+// portion of raw, or (0,false) if it cannot be parsed.
+func signedHeaderLen(raw []byte) (int, bool) {
+	_, n, err := block.UnmarshalSignedHeader(raw)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+// bytesEqual is a tiny helper to avoid importing "bytes" just for one call.
+func bytesEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
