@@ -186,6 +186,65 @@ func TestLoadFailsWhenSubsystemUnregistered(t *testing.T) {
 	}
 }
 
+// TestDeterministicSnapshotBytes saves the same in-memory state twice
+// and confirms the on-disk bytes (including manifest sha256s) are
+// identical. This is the property the bisection workflow depends on:
+// snapshot at block N from genesis must equal snapshot at block N from
+// a snapshot+resume.
+func TestDeterministicSnapshotBytes(t *testing.T) {
+	build := func() *state.Database {
+		d := state.OpenMem()
+		s := state.NewSession(d)
+		// Touch every typed store so the snapshot includes all of them.
+		objects.EnsureWitnessStore(s).Put(&objects.Witness{Owner: "a", Created: 1, MaximumBlockSize: 65536})
+		objects.EnsureWitnessStore(s).Put(&objects.Witness{Owner: "b", Created: 2, MaximumBlockSize: 65536})
+		objects.EnsureAccountStore(s).Put(&objects.Account{Name: "a", Balance: 1})
+		objects.EnsureAccountStore(s).Put(&objects.Account{Name: "b", Balance: 2})
+		objects.EnsureCommentStore(s).Put(&objects.Comment{Author: "a", Permlink: "p", Created: 3})
+		objects.EnsureCommentVoteStore(s).Put(&objects.CommentVote{Voter: "b", Author: "a", Permlink: "p", Weight: 4})
+		objects.EnsureWitnessVoteStore(s).Put(auth.AccountName("a"), auth.AccountName("b"))
+		s.Put(state.TableID(0x0001), state.PrimaryIndex, []byte("kv"), []byte("v"))
+		if err := s.Commit(false); err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	d1 := build()
+	t.Cleanup(func() { _ = d1.Close() })
+	d2 := build()
+	t.Cleanup(func() { _ = d2.Close() })
+
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+	p1, err := Save(d1, dir1, 100, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p2, err := Save(d2, dir2, 100, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"mem.bin",
+		"subsystems/witness_store.bin",
+		"subsystems/account_store.bin",
+		"subsystems/comment_store.bin",
+		"subsystems/comment_vote_store.bin",
+		"subsystems/witness_vote_store.bin",
+	} {
+		a, err := os.ReadFile(filepath.Join(p1, name))
+		if err != nil {
+			t.Fatalf("%s read: %v", name, err)
+		}
+		b, err := os.ReadFile(filepath.Join(p2, name))
+		if err != nil {
+			t.Fatalf("%s read: %v", name, err)
+		}
+		if string(a) != string(b) {
+			t.Errorf("%s: snapshot bytes differ between identical builds", name)
+		}
+	}
+}
+
 // TestSaveCreatesAtomicallyNamedDir verifies the .tmp → final rename.
 func TestSaveCreatesAtomicallyNamedDir(t *testing.T) {
 	src := state.OpenMem()

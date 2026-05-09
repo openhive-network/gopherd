@@ -21,6 +21,7 @@ import (
 	"hived-go/internal/state"
 	"hived-go/internal/state/genesis"
 	"hived-go/internal/state/objects"
+	"hived-go/internal/state/snapshot"
 )
 
 func cmdReplay(args []string) int {
@@ -35,9 +36,11 @@ func cmdReplay(args []string) int {
 	pprofAddr := fs.String("pprof", "", "if set, expose net/http/pprof on this addr (e.g. localhost:6060)")
 	cacheMB := fs.Int("cache-mb", 256, "Pebble block cache size in MiB (ignored for --backend=mem)")
 	backend := fs.String("backend", "pebble", "state backend: pebble (persistent) or mem (in-memory btree, faster)")
-	loadSnapshot := fs.String("load-snapshot", "", "if set, load state from this snapshot file (skips genesis + replay before snapshot block)")
-	saveSnapshotAt := fs.Uint("save-snapshot-at", 0, "block number after which to save a snapshot (0 = don't save)")
-	saveSnapshotTo := fs.String("save-snapshot-to", "", "snapshot output path (used with --save-snapshot-at)")
+	loadSnapshot := fs.String("load-snapshot", "", "if set, load state from this snapshot path (file = legacy single-file format; directory = block-N dir produced by --snapshot-every; skips genesis + replay before snapshot block)")
+	saveSnapshotAt := fs.Uint("save-snapshot-at", 0, "block number after which to save a single-file snapshot (0 = don't save)")
+	saveSnapshotTo := fs.String("save-snapshot-to", "", "single-file snapshot output path (used with --save-snapshot-at)")
+	snapshotEvery := fs.Uint("snapshot-every", 0, "save a directory snapshot every N applied blocks (0 = off)")
+	snapshotDir := fs.String("snapshot-dir", "", "directory under which periodic snapshots are saved (block-<N>/ subdir per snapshot, used with --snapshot-every)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -88,11 +91,44 @@ func cmdReplay(args []string) int {
 	}
 	defer stateDB.Close()
 
+	// Pre-register every typed subsystem on the freshly-opened
+	// Database so snapshot saves include a uniform set regardless of
+	// whether the chain has yet exercised each store. Without this,
+	// a snapshot at block 2000 (no comments yet) would lack
+	// comment_store, while a snapshot at block 2000 produced AFTER
+	// loading an earlier snapshot would include it (because the
+	// loader pre-registers all stores) — non-deterministic snapshot
+	// content that breaks bisection.
+	{
+		boot := state.NewSession(stateDB)
+		objects.EnsureWitnessStore(boot)
+		objects.EnsureWitnessVoteStore(boot)
+		objects.EnsureAccountStore(boot)
+		objects.EnsureCommentStore(boot)
+		objects.EnsureCommentVoteStore(boot)
+	}
+
 	if *loadSnapshot != "" {
-		head, err := stateDB.LoadSnapshot(*loadSnapshot)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "replay: load snapshot: %v\n", err)
+		var head uint32
+		st, sterr := os.Stat(*loadSnapshot)
+		if sterr != nil {
+			fmt.Fprintf(os.Stderr, "replay: stat snapshot: %v\n", sterr)
 			return 1
+		}
+		if st.IsDir() {
+			man, err := snapshot.Load(stateDB, *loadSnapshot)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "replay: load snapshot dir: %v\n", err)
+				return 1
+			}
+			head = man.BlockNum
+		} else {
+			h, err := stateDB.LoadSnapshot(*loadSnapshot)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "replay: load snapshot: %v\n", err)
+				return 1
+			}
+			head = h
 		}
 		fmt.Printf("replay: loaded snapshot %s at block %d\n", *loadSnapshot, head)
 		// If --start was left at the default 1, advance to head+1 so the
@@ -199,6 +235,15 @@ func cmdReplay(args []string) int {
 				return 1
 			}
 			fmt.Printf("replay: saved snapshot to %s at block %d\n", *saveSnapshotTo, n)
+		}
+		if *snapshotEvery != 0 && *snapshotDir != "" && uint64(n)%uint64(*snapshotEvery) == 0 {
+			snapStart := time.Now()
+			path, err := snapshot.Save(stateDB, *snapshotDir, n, "")
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "replay: save snapshot dir: %v\n", err)
+				return 1
+			}
+			fmt.Printf("replay: saved snapshot %s (%.1fs)\n", path, time.Since(snapStart).Seconds())
 		}
 	}
 
