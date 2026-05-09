@@ -68,6 +68,28 @@ type Database struct {
 	// new block reaches peers without waiting a full tick. nil =
 	// no hook (default for replay/test contexts).
 	onBlockApplied func(blockNum uint32, id block.ID)
+
+	// commitBatchSize controls how many blocks accumulate in the
+	// session overlay before ApplyBlock fires a real backend Commit.
+	// 0 or 1 → legacy per-block commit (fsync every block under
+	// pebble — the dominant disk cost at chain head).
+	// >1 → batched mode: SoftCommit at end of each block, real
+	// Commit every commitBatchSize blocks. The block_log writer is
+	// independent of state Commit batching, so a crash mid-batch
+	// is recoverable by replaying from the persisted DGPO head.
+	//
+	// Mutated only at construction by SetCommitBatch; read inside
+	// ApplyBlock under the same applyMu write lock.
+	commitBatchSize uint32
+	// batchCounter tracks how many SoftCommits have happened since
+	// the last real Commit. Reset to 0 each time the batch boundary
+	// flushes.
+	batchCounter uint32
+	// commitSync controls whether the batch boundary fsyncs. Mirrors
+	// the legacy ApplyOptions.Sync semantics but moved to the chain-
+	// level driver since the per-block Sync flag is meaningless in
+	// batched mode.
+	commitSync bool
 }
 
 // New wraps an opened state.Database for block application.
@@ -99,6 +121,35 @@ func (d *Database) EnableRecentBlockCache(capacity int) {
 // ApplyBlock, so it should return quickly (just notify a channel).
 func (d *Database) SetOnBlockApplied(cb func(blockNum uint32, id block.ID)) {
 	d.onBlockApplied = cb
+}
+
+// SetCommitBatch enables batched commits at end of ApplyBlock.
+//
+//	0 or 1 → legacy per-block commit path (fsync every block; pebble
+//	         is dominated by this cost at chain head).
+//	N > 1  → SoftCommit each block; one real Commit (with sync=fsync)
+//	         every N blocks. Crash recovery replays from the persisted
+//	         DGPO head against the local block_log.
+//
+// fsync controls whether the batch-boundary Commit fsyncs Pebble.
+// True = full durability per batch (one fsync per N blocks instead
+// of one per block); false = OS write only.
+//
+// Must be called BEFORE the first ApplyBlock — there's no protection
+// against a mid-batch reconfigure.
+func (d *Database) SetCommitBatch(n uint32, fsync bool) {
+	d.applyMu.Lock()
+	defer d.applyMu.Unlock()
+	d.commitBatchSize = n
+	d.commitSync = fsync
+	d.batchCounter = 0
+}
+
+// CommitBatchSize returns the configured batch size (0 or 1 = per-block).
+func (d *Database) CommitBatchSize() uint32 {
+	d.applyMu.RLock()
+	defer d.applyMu.RUnlock()
+	return d.commitBatchSize
 }
 
 // RecentBlockBytes returns the FC-binary bytes of blockNum if the recent-
@@ -180,6 +231,12 @@ type ApplyOptions struct {
 	TolerateFailingOps bool
 	// Sync controls whether each block's commit fsyncs.
 	Sync bool
+	// SoftCommit, when true, finalizes the block via Session.SoftCommit
+	// instead of Session.Commit. The session's overlay accumulates across
+	// blocks and reads in subsequent blocks see the latest writes from
+	// memory; the caller is responsible for invoking
+	// chain.Database.FlushBatch() periodically to fsync.
+	SoftCommit bool
 	// SkipTransactionSignatures bypasses tx-level signature checks
 	// (mirrors hived's skip_transaction_signatures flag). Replay
 	// always sets this true — historical txs already passed validation
@@ -715,8 +772,28 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 		dgpo = updated
 	}
 
-	if err := session.Commit(opts.Sync); err != nil {
-		return dgpo, fmt.Errorf("apply_block %d commit: %w", blockNum, err)
+	// Commit / soft-commit decision:
+	//   - opts.SoftCommit forces SoftCommit (caller drives FlushBatch).
+	//   - commitBatchSize > 1: SoftCommit until the batch counter hits
+	//     the size, then fire one real Commit (with fsync per d.commitSync).
+	//   - else: legacy per-block Commit using opts.Sync.
+	switch {
+	case opts.SoftCommit:
+		session.SoftCommit()
+	case d.commitBatchSize > 1:
+		d.batchCounter++
+		if d.batchCounter >= d.commitBatchSize {
+			d.batchCounter = 0
+			if err := session.Commit(d.commitSync); err != nil {
+				return dgpo, fmt.Errorf("apply_block %d commit: %w", blockNum, err)
+			}
+		} else {
+			session.SoftCommit()
+		}
+	default:
+		if err := session.Commit(opts.Sync); err != nil {
+			return dgpo, fmt.Errorf("apply_block %d commit: %w", blockNum, err)
+		}
 	}
 	// Cache the raw block bytes so the p2p sync layer can re-serve them
 	// to peers requesting `fetch_items`. Done after commit so callers
@@ -729,6 +806,26 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 		d.onBlockApplied(blockNum, dgpo.HeadBlockID)
 	}
 	return dgpo, nil
+}
+
+// FlushBatch flushes the current Session's accumulated overlay to the
+// backend. Used by batched-commit drivers (ghive-sync's commitBatch
+// path) that finalize each block via ApplyOptions.SoftCommit and want
+// to fsync once every N blocks instead of once per block.
+//
+// Acquires applyMu in WRITE mode for the duration of the flush so a
+// concurrent ApplyBlock can't race the overlay reset. sync controls
+// whether the underlying Pebble write is fsync'd; pass true on a
+// catch-up boundary or shutdown for durability.
+//
+// Safe to call when the Session has no pending writes (no-op).
+func (d *Database) FlushBatch(sync bool) error {
+	d.applyMu.Lock()
+	defer d.applyMu.Unlock()
+	if d.session == nil {
+		return nil
+	}
+	return d.session.Commit(sync)
 }
 
 // HeadBlock returns the current head block number per DGPO. Returns 0
