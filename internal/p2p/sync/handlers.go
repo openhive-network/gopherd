@@ -63,10 +63,7 @@ func (d *Delegate) OnMessage(p *node.Peer, t proto.MessageType, body []byte) {
 		// here is a no-op after the first.
 		d.handleBlock(p, body)
 	case proto.CompressedBlockMessageType:
-		// Compressed-block ingestion would need the zstd dictionary
-		// set; deferred to a follow-up. Decompression on the live
-		// path requires sharing the same dictionary catalogue
-		// blocklog uses (internal/blocklog/zstd).
+		d.handleCompressedBlock(p, body)
 	}
 }
 
@@ -423,7 +420,17 @@ func (d *Delegate) handleBlock(p *node.Peer, body []byte) {
 		// is to derive id from bytes; we leave it to the applier so
 		// the queue stays cheap.
 	}
+	d.handleBlockBytes(p, msg.SignedBlockBytes, bid)
+}
 
+// handleBlockBytes is the post-decode common path for block ingestion. It
+// updates per-peer dedup state, skips already-applied or already-cached
+// blocks via the lock-free head hint and recent-block cache, pre-recovers
+// the witness signing key in parallel across receive goroutines, and
+// finally enqueues an applyJob (dropping under back-pressure). Shared by
+// handleBlock (BlockMessage path) and handleCompressedBlock
+// (CompressedBlockMessage path).
+func (d *Delegate) handleBlockBytes(p *node.Peer, signedBlockBytes []byte, bid block.ID) {
 	// Mark known on this peer so we don't ask back for it.
 	if st := d.peerStateFor(p); st != nil {
 		st.mu.Lock()
@@ -471,11 +478,11 @@ func (d *Delegate) handleBlock(p *node.Peer, body []byte) {
 	// We pass the block ID so duplicate deliveries (the same block from
 	// multiple peers, common during catch-up where peers redundantly
 	// answer the same fetch_items) hit the cache and skip the recovery.
-	signer := recoverBlockSignerCached(msg.SignedBlockBytes, d.signerCache, bid)
+	signer := recoverBlockSignerCached(signedBlockBytes, d.signerCache, bid)
 
 	job := applyJob{
 		blockNum:          bid.Num(),
-		rawBlock:          msg.SignedBlockBytes,
+		rawBlock:          signedBlockBytes,
 		id:                bid,
 		srcPeer:           p,
 		preVerifiedSigner: signer,
