@@ -80,12 +80,19 @@ func ReadFeedHistory(src []byte) (FeedHistory, error) {
 
 const feedHistoryAuxKey = "feed_history"
 
-// PutFeedHistory stores h in the singleton slot and invalidates the
-// cross-Session parsed-object cache so subsequent reads re-parse.
+// PutFeedHistory stores h in the singleton slot. Registers a
+// pre-commit hook to refresh the cross-Session parsed-object cache
+// at commit time — deferring the refresh past Restore boundaries so
+// rolled-back txs never poison the cross-block cache (their
+// preCommit hook is dropped by Session.Restore). Mirrors the lazy-
+// caching strategy used by PutWitnessSchedule.
 func PutFeedHistory(s *state.Session, h *FeedHistory) {
 	s.SerScratch = AppendFeedHistory(s.SerScratch[:0], h)
 	s.Put(FeedHistoryTable, state.PrimaryIndex, feedHistorySingletonKey, s.SerScratch)
-	s.DatabaseAuxInvalidate(feedHistoryAuxKey)
+	hCopy := *h
+	s.RegisterPreCommit(func() {
+		s.DatabaseAuxStore(feedHistoryAuxKey, hCopy)
+	})
 }
 
 // GetFeedHistory fetches the singleton feed_history (returning a zero
