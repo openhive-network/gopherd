@@ -191,6 +191,7 @@ func (d *Delegate) applyLoop() {
 				// if the chain is on a recoverable fork.
 				continue
 			}
+			d.logf("applied block %d", job.blockNum)
 			// Fan the freshly-applied block out to peers (other than
 			// the source we got it from). The hook is what replaced
 			// gossip's now-deleted apply loop: gossip.Service wires its
