@@ -480,12 +480,22 @@ func (d *Delegate) handleBlockBytes(p *node.Peer, signedBlockBytes []byte, bid b
 	// answer the same fetch_items) hit the cache and skip the recovery.
 	signer := recoverBlockSignerCached(signedBlockBytes, d.signerCache, bid)
 
+	// Pre-recover every transaction's signer pubkey set in parallel on
+	// this same goroutine. Internal to RecoverBlockTxSignerKeys is a
+	// per-block goroutine fan-out (NumCPU-capped) so a 100-tx block
+	// gets ~8x recovery throughput before the job ever reaches the
+	// single-writer applyLoop. Without this, applyLoop's per-tx
+	// VerifyAuthority dominates CPU on post-HF12 blocks (50-100 txs
+	// each, ~100µs per RecoverPublicKey).
+	txKeys := recoverTxKeysCached(signedBlockBytes, bid.Num(), d.txSigCache, bid)
+
 	job := applyJob{
-		blockNum:          bid.Num(),
-		rawBlock:          signedBlockBytes,
-		id:                bid,
-		srcPeer:           p,
-		preVerifiedSigner: signer,
+		blockNum:           bid.Num(),
+		rawBlock:           signedBlockBytes,
+		id:                 bid,
+		srcPeer:            p,
+		preVerifiedSigner:  signer,
+		preRecoveredTxKeys: txKeys,
 	}
 	select {
 	case d.applyQ <- job:

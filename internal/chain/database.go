@@ -190,6 +190,17 @@ type ApplyOptions struct {
 	// check (mirrors hived's skip_witness_signature). Same rationale
 	// as above for replay.
 	SkipBlockSignature bool
+	// PreRecoveredTxKeys, when non-nil, is the per-tx pre-recovered
+	// signer pubkey set produced by RecoverBlockTxSignerKeys upstream
+	// (typically on a worker pool that runs decode + sig recovery in
+	// parallel with the previous block's apply). The slot at index i
+	// is the recovered key set for tx i; nil slots fall through to the
+	// in-place serial RecoverPublicKey path so the canonical error
+	// message is preserved on failure. When supplied, ApplyBlock skips
+	// secp256k1 RecoverPublicKey for the whole block — leaving only
+	// the cheap account-authority lookup against state.Session in the
+	// per-tx critical section.
+	PreRecoveredTxKeys [][]crypto.PublicKey
 }
 
 // Stats accumulates per-pipeline-run counters. Pass a non-nil pointer to
@@ -397,10 +408,22 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 				chainID = network.ChainID
 			}
 			unsignedBytes := rawBlock[hdrLen+txRes.UnsignedStart : hdrLen+txRes.UnsignedEnd]
-			if err := VerifyAuthority(session, &txRes.SignedTx, unsignedBytes, chainID, false); err != nil {
+			// Use pre-recovered signer keys when the upstream worker
+			// pool already did the secp256k1 work — that lifts the
+			// dominant CPU cost out of this serial loop. Fall through
+			// to the serial path when the slot is nil (recovery failed
+			// upstream — surface the canonical error here) or when
+			// PreRecoveredTxKeys wasn't supplied (replay tools, tests).
+			var sigErr error
+			if int(i) < len(opts.PreRecoveredTxKeys) && opts.PreRecoveredTxKeys[i] != nil {
+				sigErr = VerifyAuthorityWithKeys(session, &txRes.SignedTx, opts.PreRecoveredTxKeys[i])
+			} else {
+				sigErr = VerifyAuthority(session, &txRes.SignedTx, unsignedBytes, chainID, false)
+			}
+			if sigErr != nil {
 				txFailed = true
 				failOp = "tx-sigverify"
-				failErr = err
+				failErr = sigErr
 				session.Restore(txSnap)
 				if stats != nil {
 					stats.recordSkip(failOp, failErr)

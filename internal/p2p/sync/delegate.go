@@ -325,6 +325,11 @@ type Delegate struct {
 	// from multiple peers; without the cache, every duplicate triggers
 	// a fresh secp256k1 recovery (the dominant CPU cost on the hot path).
 	signerCache *signerCache
+	// txSigCache is the per-tx analogue of signerCache: it memoizes the
+	// per-block per-tx signer-pubkey set produced by the look-ahead
+	// recovery pool, so duplicate block deliveries don't re-pay the
+	// (multi-millisecond on a 100-tx block) parallel recovery cost.
+	txSigCache *txSigCache
 
 	// headBlockHint is an atomic mirror of d.chain.HeadBlock(), updated
 	// after each successful apply. handleBlock reads it lock-free to
@@ -373,6 +378,14 @@ type applyJob struct {
 	// when this is set, eliminating the dominant CPU cost from the
 	// hot apply path.
 	preVerifiedSigner crypto.PublicKey
+	// preRecoveredTxKeys, when non-nil, is the per-tx signer-pubkey set
+	// recovered ahead of the apply on the look-ahead worker pool. Slot
+	// i corresponds to tx i in the block; nil slots fall through to
+	// chain.ApplyBlock's serial recovery (preserving canonical error
+	// messages for non-canonical / mis-signed txs). Combined with the
+	// per-block fan-out inside RecoverBlockTxSignerKeys, this lifts the
+	// dominant secp256k1 CPU cost out of the single-writer applyLoop.
+	preRecoveredTxKeys [][]crypto.PublicKey
 }
 
 // New builds a Delegate against a real *chain.Database.
@@ -412,6 +425,7 @@ func newWithChain(cfg Config, c Chain) *Delegate {
 		decompressor:    blockzstd.NewDecompressor(),
 		recentCompSeen:  make(map[block.ID]struct{}, recentCompressedCap),
 		recentCompFIFO:  make([]block.ID, 0, recentCompressedCap),
+		txSigCache:      newTxSigCache(),
 	}
 	return d
 }
