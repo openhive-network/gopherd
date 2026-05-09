@@ -148,6 +148,42 @@ func (d *Delegate) broadcastInv() {
 	d.idleMu.Unlock()
 }
 
+// catchupKickerLoop fires a periodic fetch_blockchain_item_ids to every
+// connected peer while we're far behind. Keeps deep pipelining even
+// when individual peers are slow to walk-forward on their own — the
+// passive walk-forward (in handleBlockchainItemIDsInventory) only fires
+// AFTER the peer answers the prior request, so a slow peer leaves a
+// gap. This loop fills the gap by re-requesting every CatchupKickInterval
+// while isFarBehind() is true.
+func (d *Delegate) catchupKickerLoop() {
+	defer d.wg.Done()
+	t := time.NewTicker(d.cfg.CatchupKickInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-d.stopCh:
+			return
+		case <-t.C:
+			if !d.isFarBehind() {
+				continue
+			}
+			if d.inhibitFetching.Load() {
+				continue
+			}
+			headID, _ := d.chain.HeadBlockID()
+			d.mu.Lock()
+			peers := make([]*node.Peer, 0, len(d.peers))
+			for p := range d.peers {
+				peers = append(peers, p)
+			}
+			d.mu.Unlock()
+			for _, p := range peers {
+				d.sendFetchBlockchainItemIDs(p, headID)
+			}
+		}
+	}
+}
+
 // applyLoop is the SINGLE consumer of d.applyQ. Pulls inbound blocks
 // off the queue and feeds them to chain.ApplyBlock in arrival order.
 // Mirrors the witness production constraint: chain mutation must happen

@@ -87,6 +87,15 @@ const (
 	// can have in flight to us. Keeps a single misbehaving (or simply
 	// faster) peer from monopolising the budget.
 	DefaultMaxOutstandingPerPeer = 2048
+
+	// DefaultCatchupKickInterval is the cadence at which the catchup-
+	// kicker loop pokes every connected peer with a fresh
+	// fetch_blockchain_item_ids while isFarBehind() is true. The
+	// passive walk-forward only fires after a peer answers the prior
+	// request — slow peers stall their own pipeline. The kicker fills
+	// the stall by re-requesting independently of peer responses,
+	// keeping multiple chunks in flight per peer.
+	DefaultCatchupKickInterval = 1 * time.Second
 )
 
 // Chain is the slice of *chain.Database the sync layer needs. Allows
@@ -152,6 +161,10 @@ type Config struct {
 	// MaxOutstandingPerPeer caps in-flight fetches to a single peer.
 	// 0 → DefaultMaxOutstandingPerPeer.
 	MaxOutstandingPerPeer int
+	// CatchupKickInterval is the cadence at which the catch-up kicker
+	// re-issues fetch_blockchain_item_ids to every peer while we're
+	// far behind. 0 → DefaultCatchupKickInterval.
+	CatchupKickInterval time.Duration
 	// Logger receives one-line status messages. nil → os.Stderr.
 	Logger io.Writer
 
@@ -219,6 +232,9 @@ func (c *Config) defaults() {
 	}
 	if c.MaxOutstandingPerPeer == 0 {
 		c.MaxOutstandingPerPeer = DefaultMaxOutstandingPerPeer
+	}
+	if c.CatchupKickInterval == 0 {
+		c.CatchupKickInterval = DefaultCatchupKickInterval
 	}
 	if c.Logger == nil {
 		c.Logger = os.Stderr
@@ -356,12 +372,14 @@ func newWithChain(cfg Config, c Chain) *Delegate {
 	return d
 }
 
-// Start launches the background goroutines: the INV broadcaster and
-// the single-consumer block applier. Idempotent.
+// Start launches the background goroutines: the INV broadcaster, the
+// single-consumer block applier, and the catch-up kicker.
+// Idempotent.
 func (d *Delegate) Start() {
-	d.wg.Add(2)
+	d.wg.Add(3)
 	go d.invLoop()
 	go d.applyLoop()
+	go d.catchupKickerLoop()
 }
 
 // Stop signals the background goroutines and waits for them to exit.
