@@ -13,6 +13,8 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"runtime"
+	"runtime/pprof"
 	"sort"
 	"time"
 
@@ -34,6 +36,8 @@ func cmdReplay(args []string) int {
 	tolerateFailing := fs.Bool("tolerate-failing-ops", false, "skip ops whose evaluator returns an error (use during P1 incremental development; never on a real node)")
 	watchAccount := fs.String("watch-account", "", "if set, print every block where the named account's balance/HBD/vesting changes")
 	pprofAddr := fs.String("pprof", "", "if set, expose net/http/pprof on this addr (e.g. localhost:6060)")
+	cpuProfile := fs.String("cpuprofile", "", "if set, write CPU profile to this file (collected while replay is running)")
+	memProfile := fs.String("memprofile", "", "if set, write heap memory profile to this file at end of replay")
 	cacheMB := fs.Int("cache-mb", 256, "Pebble block cache size in MiB (ignored for --backend=mem)")
 	backend := fs.String("backend", "pebble", "state backend: pebble (persistent) or mem (in-memory btree, faster)")
 	loadSnapshot := fs.String("load-snapshot", "", "if set, load state from this snapshot path (file = legacy single-file format; directory = block-N dir produced by --snapshot-every; skips genesis + replay before snapshot block)")
@@ -53,6 +57,20 @@ func cmdReplay(args []string) int {
 				fmt.Fprintf(os.Stderr, "replay: pprof server: %v\n", err)
 			}
 		}()
+	}
+	if *cpuProfile != "" {
+		f, err := os.Create(*cpuProfile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "replay: cpu profile: %v\n", err)
+			return 1
+		}
+		defer f.Close()
+		if err := pprof.StartCPUProfile(f); err != nil {
+			fmt.Fprintf(os.Stderr, "replay: start cpu profile: %v\n", err)
+			return 1
+		}
+		defer pprof.StopCPUProfile()
+		fmt.Fprintf(os.Stderr, "replay: cpu profile -> %s\n", *cpuProfile)
 	}
 	rest := fs.Args()
 	if len(rest) != 1 {
@@ -258,6 +276,19 @@ func cmdReplay(args []string) int {
 	}
 
 	dur := time.Since(start)
+	if *memProfile != "" {
+		f, err := os.Create(*memProfile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "replay: mem profile: %v\n", err)
+		} else {
+			runtime.GC()
+			if err := pprof.WriteHeapProfile(f); err != nil {
+				fmt.Fprintf(os.Stderr, "replay: write heap profile: %v\n", err)
+			}
+			f.Close()
+			fmt.Fprintf(os.Stderr, "replay: mem profile -> %s\n", *memProfile)
+		}
+	}
 	head, _ := cdb.HeadBlock()
 	dgpo, _ := objects.GetDGPO(state.NewSession(stateDB))
 
