@@ -61,7 +61,7 @@ func Apply(db *state.Database) error {
 	// hardfork seed runs, and clearNullAccountBalance / null transfer
 	// burn paths depend on these existing.
 	systemAuth := auth.Authority{WeightThreshold: 1}
-	for _, name := range []string{"null", "temp", "miner", "steem"} {
+	for _, name := range []string{"null", "temp", "miner"} {
 		objects.PutAccount(s, &objects.Account{
 			Name:                 name,
 			Created:              network.GenesisTimeUnix,
@@ -77,6 +77,36 @@ func Apply(db *state.Database) error {
 			PreviousOwnerUpdate: network.GenesisTimeUnix,
 		})
 	}
+	// "steem" account: hived's database_init.cpp:276-291 creates it as a
+	// system account at genesis with HIVE_STEEM_PUBLIC_KEY_STR
+	// ("STM65wH1LZ7BfSHcK69SShnqCAH5xdoSZpGkUjmzHJ5GCuxEK9V5G") wired
+	// into owner = active = posting at threshold 1. The original chain
+	// later "officially" mined this account in tx
+	// 46ddcba847f2297d13e32be07d72d15c530a7271 — but well before that
+	// happens the key is what the tx signatures recover to.
+	steemKey, err := crypto.DecodePublicKey("STM65wH1LZ7BfSHcK69SShnqCAH5xdoSZpGkUjmzHJ5GCuxEK9V5G")
+	if err != nil {
+		return err
+	}
+	steemAuth := auth.Authority{
+		WeightThreshold: 1,
+		KeyAuths:        []auth.KeyAuth{{Key: steemKey, Weight: 1}},
+	}
+	objects.PutAccount(s, &objects.Account{
+		Name:                 "steem",
+		Created:              network.GenesisTimeUnix,
+		VotingManaCurrent:    10000,
+		VotingManaLastUpdate: network.GenesisTimeUnix,
+		Mined:                true,
+	})
+	objects.PutAccountAuthority(s, &objects.AccountAuthority{
+		Account:             "steem",
+		Owner:               steemAuth,
+		Active:              steemAuth,
+		Posting:             steemAuth,
+		LastOwnerUpdate:     network.GenesisTimeUnix,
+		PreviousOwnerUpdate: network.GenesisTimeUnix,
+	})
 
 	// Genesis witness object for initminer — mirrors hived's
 	// init_genesis_witnesses (database.cpp::init_genesis_witnesses).
