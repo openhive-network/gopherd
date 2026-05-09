@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"hived-go/internal/chain"
+	"hived-go/internal/p2p/node"
 	"hived-go/internal/p2p/proto"
 	"hived-go/internal/protocol/block"
 )
@@ -241,6 +242,76 @@ func TestApplyQueueBackPressure(t *testing.T) {
 	// Sanity: chain head should have advanced.
 	if h, _ := chn.HeadBlock(); h < 10 {
 		t.Errorf("chain head=%d, expected at least 10 after drain", h)
+	}
+}
+
+// TestOutstandingCapsThrottle verifies that handleInv stops marking
+// blocks as outstanding once we hit MaxOutstandingTotal, leaving the
+// extras un-known so a later INV can retry them.
+//
+// Uses inhibitFetching=true to short-circuit sendFetchItems so we
+// don't need a live peer.Conn — the throttle accounting in handleInv
+// runs BEFORE sendFetchItems, so the inhibit is purely to keep the
+// test single-threaded.
+func TestOutstandingCapsThrottle(t *testing.T) {
+	chn := newStubChain()
+	cfg := Config{
+		INVInterval:           time.Hour,
+		IdleINVRounds:         1,
+		Logger:                devNullWriter{},
+		FetchBatch:            10,
+		MaxBlocksPerInv:       50,
+		MaxTxPerInv:           10,
+		MaxOutstandingTotal:   3,
+		MaxOutstandingPerPeer: 100,
+	}
+	d := newWithChain(cfg, chn)
+	d.inhibitFetching.Store(true)
+	// Pre-load Delegate with a fake peer state.
+	st := newPeerState()
+	var fake node.Peer
+	d.peers[&fake] = st
+
+	// Build an INV with 5 fresh hashes; we only have budget for 3.
+	hashes := []proto.ItemHash{
+		proto.ItemHash(makeStubID(101)),
+		proto.ItemHash(makeStubID(102)),
+		proto.ItemHash(makeStubID(103)),
+		proto.ItemHash(makeStubID(104)),
+		proto.ItemHash(makeStubID(105)),
+	}
+	msg := proto.ItemIDsInventoryMessage{
+		ItemType:            proto.ItemTypeBlock,
+		ItemHashesAvailable: hashes,
+	}
+	body, err := msg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.handleInv(&fake, body)
+
+	// inhibitFetching short-circuits sendFetchItems and refunds the 3
+	// outstanding entries we just inserted. So at the end:
+	//   - outstandingTotal == 0 (refunded)
+	//   - st.outstanding empty (refunded)
+	//   - st.known empty (refunded by sendFetchItems' inhibit branch +
+	//     the throttled entries were never marked known to begin with)
+	//   - inhibitedFetches incremented by 3 (one per hash submitted)
+	//   - outstandingThrottled incremented (we hit the cap on entries 4+5)
+	if got := d.outstandingTotal.Load(); got != 0 {
+		t.Errorf("outstandingTotal=%d, want 0 after refund", got)
+	}
+	if got := len(st.outstanding); got != 0 {
+		t.Errorf("st.outstanding size=%d, want 0 after refund", got)
+	}
+	if got := len(st.known); got != 0 {
+		t.Errorf("st.known size=%d, want 0 (throttled hashes must stay unknown, refunded should also clear)", got)
+	}
+	if d.inhibitedFetches.Load() != 3 {
+		t.Errorf("inhibitedFetches=%d, want 3 (one per hash sent through sendFetchItems)", d.inhibitedFetches.Load())
+	}
+	if d.outstandingThrottled.Load() == 0 {
+		t.Errorf("expected outstandingThrottled > 0")
 	}
 }
 
