@@ -126,6 +126,10 @@ type flags struct {
 	// 0 → p2pnode default (24). Tied to maxOutboundPeers — needs to be
 	// large enough to ramp the peer set up quickly once peerdb fills.
 	maxConcurrentDials int
+	// logAdaptiveBatch, when set, asks the sync delegate to log one
+	// trace line per per-peer FetchBatch decision. Useful for tuning
+	// the adaptive sizing curve; off by default to avoid noise.
+	logAdaptiveBatch bool
 }
 
 func parseFlags() flags {
@@ -146,6 +150,7 @@ func parseFlags() flags {
 	flag.BoolVar(&f.noVerifyMerkle, "no-verify-merkle", false, "skip the per-block merkle-root recomputation (faster; only safe with --verify-against)")
 	flag.IntVar(&f.maxOutboundPeers, "max-outbound-peers", 0, "max active outbound P2P peers (0 = p2pnode default, currently 32)")
 	flag.IntVar(&f.maxConcurrentDials, "max-concurrent-dials", 0, "max in-flight dial attempts (0 = p2pnode default, currently 24)")
+	flag.BoolVar(&f.logAdaptiveBatch, "log-adaptive-batch", false, "log one trace per per-peer FetchBatch decision (peer X batch=N rate=Y bps)")
 	flag.Parse()
 	f.targetBlock = uint32(target)
 	f.maxBlocks = uint32(max)
@@ -340,7 +345,9 @@ func (a *app) run() error {
 		MaxOutboundPeers:   a.cfg.maxOutboundPeers,
 		MaxConcurrentDials: a.cfg.maxConcurrentDials,
 	}, a.chain, nil)
-	syncDel := p2psync.New(p2psync.Config{}, a.chain)
+	syncDel := p2psync.New(p2psync.Config{
+		LogAdaptiveBatch: a.cfg.logAdaptiveBatch,
+	}, a.chain)
 	a.p2p.SetDelegate(syncDel)
 	if err := a.p2p.Start(); err != nil {
 		return fmt.Errorf("p2p start: %w", err)
