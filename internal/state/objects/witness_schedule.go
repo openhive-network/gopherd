@@ -245,6 +245,17 @@ func PutWitnessSchedule(s *state.Session, w *WitnessSchedule) {
 			// Session.Restore (rolled-back PutWitnessSchedule callbacks
 			// no longer fire so this code never runs for them).
 			s.DatabaseAuxStore(witnessScheduleAuxKey, cached.val)
+			// Reset dirty so the NEXT block's first PutWitnessSchedule
+			// re-registers this hook. Required for batched-commit mode:
+			// SoftCommit clears s.preCommit at end of every block, so
+			// without this reset the per-Session lazy cache survives
+			// (good — Aux is preserved across SoftCommit) but no new
+			// hook ever registers, the lazy struct's writes never
+			// reach the overlay or DatabaseAux, and the next batch
+			// commit flushes a stale schedule. Witness schedule
+			// rebuilds happen every 21 blocks, so the bug surfaced as
+			// "schedule frozen at initminer" on the second rebuild.
+			cached.dirty = false
 		})
 	}
 }

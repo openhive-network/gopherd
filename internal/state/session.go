@@ -338,6 +338,53 @@ func (s *Session) Delete(table TableID, index IndexID, body []byte) {
 	}
 }
 
+// SoftCommit finalizes one block's worth of state transitions WITHOUT
+// flushing to the backend. The overlay accumulates across blocks; reads
+// in the next block continue to see the latest writes from this Session.
+// Use this from a batched-commit driver that calls Commit() every N
+// blocks to amortize backend fsync over the batch.
+//
+// What SoftCommit does:
+//
+//   - Fires every preCommit hook (so any block-end lazy serialization
+//     — DGPO/FeedHistory/WitnessSchedule — lands in the overlay).
+//   - Releases per-block savepoint tracking (undoLog truncated,
+//     snapshotDepth/Gen reset, mistrustDBAux cleared).
+//   - Calls db.commitAll() so registered subsystems (AccountStore,
+//     WitnessStore, …) drop their accumulated undo entries — their
+//     in-memory primary state remains authoritative for the next block.
+//   - Closes the pooled iterator so SetBounds rebinds cleanly next block.
+//
+// What SoftCommit deliberately keeps:
+//
+//   - overlay + overlayKeys + dirtyKeys: the next real Commit needs
+//     these. Cross-block reads of newly-written keys hit the overlay
+//     first, never the backend.
+//   - readCache: backend hasn't moved, so cached values stay valid.
+//   - Aux: parsed singletons (DGPO etc.) are still authoritative.
+//
+// SoftCommit is safe to call only when no Savepoint is outstanding —
+// per-block apply finishes at savepoint depth 0, so this is fine in
+// practice. The companion Commit() flushes the accumulated overlay.
+func (s *Session) SoftCommit() {
+	for _, fn := range s.preCommit {
+		fn()
+	}
+	s.preCommit = s.preCommit[:0]
+	if s.iter != nil {
+		s.iter.Close()
+		s.iter = nil
+	}
+	// Drop per-block subsystem undo points; the in-memory primary state
+	// remains authoritative for the next block. Equivalent to what
+	// Commit does but without flushing the K/V overlay to the backend.
+	s.undoLog = s.undoLog[:0]
+	s.snapshotDepth = 0
+	s.mistrustDBAux = false
+	s.snapshotGen = 0
+	s.db.commitAll()
+}
+
 // Commit flushes the overlay atomically to the backend. After Commit
 // the overlay is reset and the Session can be reused for the next block.
 //

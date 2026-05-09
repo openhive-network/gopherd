@@ -190,3 +190,57 @@ func TestSessionRangeStop(t *testing.T) {
 		t.Fatalf("Range stop: visited %d entries, want 1", count)
 	}
 }
+
+// TestSessionSoftCommitKeepsOverlay verifies that SoftCommit preserves
+// the overlay across "block" boundaries — reads after SoftCommit must
+// see the just-written value WITHOUT a Pebble round trip, and a final
+// Commit flushes everything to the backend.
+func TestSessionSoftCommitKeepsOverlay(t *testing.T) {
+	db := openTempDB(t)
+	s := NewSession(db)
+
+	// "Block 1": put k1=v1, soft-commit.
+	s.Put(1, 0, []byte("k1"), []byte("v1"))
+	s.SoftCommit()
+	if s.Empty() {
+		t.Fatal("SoftCommit should NOT empty the overlay")
+	}
+
+	// "Block 2": k1 must still be readable from overlay.
+	got, err := s.Get(1, 0, []byte("k1"))
+	if err != nil {
+		t.Fatalf("Get after SoftCommit: %v", err)
+	}
+	if string(got) != "v1" {
+		t.Fatalf("Get after SoftCommit: got %q, want v1", got)
+	}
+	// Add another write, soft-commit again.
+	s.Put(1, 0, []byte("k2"), []byte("v2"))
+	s.SoftCommit()
+
+	// At this point a fresh Session must NOT see either key (nothing
+	// flushed yet).
+	s2 := NewSession(db)
+	if _, err := s2.Get(1, 0, []byte("k1")); err != ErrNotFound {
+		t.Fatalf("fresh session before flush: k1 leaked, err=%v", err)
+	}
+
+	// Real Commit now: flush to backend.
+	if err := s.Commit(false); err != nil {
+		t.Fatal(err)
+	}
+	if !s.Empty() {
+		t.Fatal("Commit should empty the overlay")
+	}
+
+	// After Commit, a fresh session must see both keys.
+	s3 := NewSession(db)
+	got, err = s3.Get(1, 0, []byte("k1"))
+	if err != nil || string(got) != "v1" {
+		t.Fatalf("after Commit: k1=%q err=%v", got, err)
+	}
+	got, err = s3.Get(1, 0, []byte("k2"))
+	if err != nil || string(got) != "v2" {
+		t.Fatalf("after Commit: k2=%q err=%v", got, err)
+	}
+}
