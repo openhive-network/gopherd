@@ -2,6 +2,7 @@ package state
 
 import (
 	"sort"
+	"unsafe"
 
 	"github.com/tidwall/btree"
 )
@@ -231,7 +232,18 @@ func (m *memIter) Next() bool {
 	return m.valid
 }
 
-func (m *memIter) Key() []byte                  { return []byte(m.it.Item().key) }
+// Key returns the iter's current key as a []byte aliasing the
+// underlying btree item's string. Callers MUST treat the result as
+// read-only (mutating the backing string is undefined behavior). The
+// alias avoids a per-step []byte conversion alloc that contributed
+// 1.7GB across a 200K-block window in the cliff region.
+func (m *memIter) Key() []byte {
+	s := m.it.Item().key
+	if len(s) == 0 {
+		return nil
+	}
+	return unsafe.Slice(unsafe.StringData(s), len(s))
+}
 func (m *memIter) ValueAndErr() ([]byte, error) { return m.it.Item().value, nil }
 func (m *memIter) Error() error                 { return nil }
 func (m *memIter) Close() error {
