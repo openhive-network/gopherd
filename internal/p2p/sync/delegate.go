@@ -147,6 +147,19 @@ type Config struct {
 	MaxOutstandingPerPeer int
 	// Logger receives one-line status messages. nil → os.Stderr.
 	Logger io.Writer
+
+	// OnBlockApplied, when non-nil, is invoked from the applyLoop AFTER
+	// each successful chain.ApplyBlock. The gossip layer wires its
+	// BroadcastAppliedBlock here so that sync remains the single owner
+	// of ApplyBlock yet the same goroutine that committed the block
+	// also fans it out to peers.
+	//
+	// rawBlock is the FC-binary signed_block bytes (no trailing
+	// block_id). source is the peer the block arrived from, or nil for
+	// blocks we applied ourselves (currently unused by sync — gossip's
+	// outbound BroadcastBlock from witness still goes through the
+	// gossip layer directly, NOT through this hook).
+	OnBlockApplied func(rawBlock []byte, blockNum uint32, source *node.Peer)
 }
 
 func (c *Config) defaults() {

@@ -187,9 +187,17 @@ func (d *Delegate) applyLoop() {
 				SkipBlockSignature:        false,
 			}, nil); err != nil {
 				d.logf("apply_block %d failed: %v", job.blockNum, err)
-				// Drop and continue — agent-gossip / next INV will
-				// re-deliver if the chain is on a recoverable fork.
+				// Drop and continue — gossip / next INV will re-deliver
+				// if the chain is on a recoverable fork.
 				continue
+			}
+			// Fan the freshly-applied block out to peers (other than
+			// the source we got it from). The hook is what replaced
+			// gossip's now-deleted apply loop: gossip.Service wires its
+			// BroadcastAppliedBlock here so re-broadcast stays on the
+			// same goroutine that owns the chain mutation.
+			if d.cfg.OnBlockApplied != nil {
+				d.cfg.OnBlockApplied(job.rawBlock, job.blockNum, job.srcPeer)
 			}
 			d.poke()
 		}
