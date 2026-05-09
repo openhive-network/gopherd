@@ -1,7 +1,6 @@
 package chain
 
 import (
-	"errors"
 	"fmt"
 
 	"hived-go/internal/crypto"
@@ -95,11 +94,25 @@ func VerifyAuthority(s *state.Session, signedTx *tx.SignedTransaction, unsignedB
 		}
 		keys = append(keys, k)
 	}
-	if len(keys) == 0 {
-		return errors.New("verify_authority: transaction has no signatures")
-	}
 
 	required := RequiredAuthorities(signedTx)
+	// Hived's verify_authority does NOT enforce "len(sigs)>0" globally;
+	// each required authority is checked individually. Operations like
+	// pow_operation declare zero required authorities ("there is no need
+	// to verify authority, the proof of work is sufficient", per
+	// hive_operations.hpp:707) and legitimately ship as 0-sig txs in
+	// early mainnet (every tx in block 1092..N until pow ends). Reject
+	// only when a required authority cannot be satisfied below.
+	if len(required[AuthorityOwner]) == 0 &&
+		len(required[AuthorityActive]) == 0 &&
+		len(required[AuthorityPosting]) == 0 {
+		// No required authorities — nothing to satisfy. (Hived would
+		// also reject "unused signatures" pre-HF28, but in practice
+		// pow txs never carry sigs and we don't currently track
+		// per-key consumption; skip that strictness for now.)
+		return nil
+	}
+
 	fetcher := &sessionAuthFetcher{s: s}
 	state := newSignState(keys, fetcher)
 
