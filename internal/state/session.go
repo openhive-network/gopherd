@@ -242,11 +242,18 @@ func (s *Session) Get(table TableID, index IndexID, body []byte) ([]byte, error)
 		}
 		return e.value, nil
 	}
-	if e, ok := s.db.batchGet(string(s.scratch)); ok {
-		if e.tombstone {
-			return nil, ErrNotFound
+	// Inlined batch-overlay fast path: skip the map probe entirely
+	// when no batched writes are pending. This is the steady state
+	// for the BatchSize=1 (legacy) configuration AND for tools that
+	// haven't enabled batching, so avoiding the call keeps the hot
+	// read path identical to the pre-batch code.
+	if len(s.db.batchOverlay) > 0 {
+		if e, ok := s.db.batchOverlay[string(s.scratch)]; ok {
+			if e.tombstone {
+				return nil, ErrNotFound
+			}
+			return e.value, nil
 		}
-		return e.value, nil
 	}
 	if v, ok := s.readCache[string(s.scratch)]; ok {
 		return v, nil
@@ -268,8 +275,10 @@ func (s *Session) Has(table TableID, index IndexID, body []byte) (bool, error) {
 	if e, ok := s.overlay[string(s.scratch)]; ok {
 		return !e.tombstone, nil
 	}
-	if e, ok := s.db.batchGet(string(s.scratch)); ok {
-		return !e.tombstone, nil
+	if len(s.db.batchOverlay) > 0 {
+		if e, ok := s.db.batchOverlay[string(s.scratch)]; ok {
+			return !e.tombstone, nil
+		}
 	}
 	if _, ok := s.readCache[string(s.scratch)]; ok {
 		return true, nil

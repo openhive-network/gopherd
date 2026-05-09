@@ -61,6 +61,10 @@ type Database struct {
 	// into batchOverlay since the last backend flush. Used to fire
 	// FlushBatch automatically at the BatchSize boundary.
 	pendingBlocks int
+	// flushBuf is the reusable sorted-key slice handed to backend
+	// commitDirty during FlushBatch. Avoids re-allocating a fresh
+	// slice every batch boundary.
+	flushBuf []string
 }
 
 // SnapshotSubsystem is implemented by typed in-memory state containers
@@ -272,12 +276,22 @@ func (d *Database) SetBatchSize(n int) {
 // FlushBatch writes every accumulated batched entry to the backend and
 // resets the pending counter. Safe to call when the batch is empty.
 // sync controls whether the underlying write fsyncs (Pebble only).
+//
+// We funnel through commitDirty when possible because the mem backend's
+// per-key path-hint reuse needs a sorted key list to stay cache-warm,
+// and commitDirty already provides one — pulling from batchOverlayKeys.
 func (d *Database) FlushBatch(sync bool) error {
 	if len(d.batchOverlay) == 0 {
 		d.pendingBlocks = 0
 		return nil
 	}
-	if err := d.backend.commit(d.batchOverlay, sync); err != nil {
+	keys := d.flushBuf[:0]
+	d.batchOverlayKeys.Scan(func(k string) bool {
+		keys = append(keys, k)
+		return true
+	})
+	d.flushBuf = keys
+	if err := d.backend.commitDirty(d.batchOverlay, keys, sync); err != nil {
 		return err
 	}
 	clear(d.batchOverlay)

@@ -25,7 +25,14 @@ const snapshotVersion uint32 = 1
 // Used by the per-block snapshot package (internal/state/snapshot) to
 // dump the K/V backend; the legacy SaveSnapshot wraps this with a
 // header for back-compat.
+//
+// Any batched-but-unflushed writes (BatchSize>1) are flushed to the
+// backend first so the snapshot reflects the true in-memory head and
+// loaders don't see a stale view.
 func (d *Database) WriteAllRows(w *bufio.Writer) error {
+	if err := d.FlushBatch(false); err != nil {
+		return fmt.Errorf("snapshot: flush batch: %w", err)
+	}
 	var lenBuf [binary.MaxVarintLen64]byte
 	err := d.backend.rangeAll(func(key, val []byte) error {
 		n := binary.PutUvarint(lenBuf[:], uint64(len(key)))
