@@ -172,7 +172,7 @@ func (c *Conn) Receive() (proto.MessageType, []byte, error) {
 		uint32(plainFirst[6])<<16 | uint32(plainFirst[7])<<24)
 
 	if size > proto.MaxMessageSize {
-		return 0, nil, proto.ErrTooLarge
+		return 0, nil, proto.ErrMessageTooLarge
 	}
 
 	// First 8 bytes of body live in the tail of the first block.

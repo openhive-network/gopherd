@@ -196,7 +196,7 @@ func (p *Peer) run(ctx context.Context, delegate Delegate) {
 	defer p.close(nil)
 
 	// 1. Send HelloMessage.
-	if err := p.conn.Send(proto.HelloMessage, p.helloPayload); err != nil {
+	if err := p.conn.Send(proto.HelloMessageType, p.helloPayload); err != nil {
 		p.close(fmt.Errorf("send hello: %w", err))
 		return
 	}
@@ -225,10 +225,10 @@ func (p *Peer) run(ctx context.Context, delegate Delegate) {
 			return
 		}
 		switch typeTag {
-		case proto.HelloMessage:
+		case proto.HelloMessageType:
 			// Inbound peer sent its hello after we sent ours. Accept it.
 			p.setState(StateHelloReceived)
-			if err := p.conn.Send(proto.ConnectionAcceptedMessage, nil); err != nil {
+			if err := p.conn.Send(proto.ConnectionAcceptedMessageType, nil); err != nil {
 				p.close(fmt.Errorf("send connection_accepted: %w", err))
 				if delegate != nil {
 					delegate.OnPeerDisconnected(p, p.CloseErr())
@@ -237,7 +237,7 @@ func (p *Peer) run(ctx context.Context, delegate Delegate) {
 			}
 			// Don't fire OnPeerConnected yet — we still want to receive
 			// THEIR ConnectionAccepted so both sides have agreed.
-		case proto.ConnectionAcceptedMessage:
+		case proto.ConnectionAcceptedMessageType:
 			if p.State() != StateActive {
 				p.setState(StateActive)
 				_ = p.conn.SetDeadline(time.Time{}) // clear hello deadline
@@ -249,7 +249,7 @@ func (p *Peer) run(ctx context.Context, delegate Delegate) {
 				}
 				go p.heartbeatLoop(ctx, heartbeatStop)
 			}
-		case proto.ConnectionRejectedMessage:
+		case proto.ConnectionRejectedMessageType:
 			// hived's connection_rejected_message body is FC-encoded
 			// (user_agent, version, endpoint, reason_string, reason_code)
 			// — once agent-p2p-msg lands the proto stub we can decode
@@ -261,11 +261,11 @@ func (p *Peer) run(ctx context.Context, delegate Delegate) {
 				delegate.OnPeerDisconnected(p, err)
 			}
 			return
-		case proto.CurrentTimeRequestMessage:
+		case proto.CurrentTimeRequestMessageType:
 			// Reply immediately. Body would normally echo the request's
 			// timestamp; agent-p2p-msg will fill in the FC encoding,
 			// for now we just bounce the body back.
-			if err := p.conn.Send(proto.CurrentTimeReplyMessage, body); err != nil {
+			if err := p.conn.Send(proto.CurrentTimeReplyMessageType, body); err != nil {
 				p.close(fmt.Errorf("send current_time_reply: %w", err))
 				if delegate != nil {
 					delegate.OnPeerDisconnected(p, p.CloseErr())
@@ -275,7 +275,7 @@ func (p *Peer) run(ctx context.Context, delegate Delegate) {
 			p.mu.Lock()
 			p.lastHeartbeatRX = time.Now()
 			p.mu.Unlock()
-		case proto.CurrentTimeReplyMessage:
+		case proto.CurrentTimeReplyMessageType:
 			p.mu.Lock()
 			p.lastHeartbeatRX = time.Now()
 			p.mu.Unlock()
@@ -315,7 +315,7 @@ func (p *Peer) heartbeatLoop(ctx context.Context, stop <-chan struct{}) {
 			// FC-encoded current_time_request_message body would carry
 			// the request_sent_time. Stub it with 8 zero bytes for now.
 			body := []byte{0, 0, 0, 0, 0, 0, 0, 0}
-			if err := p.conn.Send(proto.CurrentTimeRequestMessage, body); err != nil {
+			if err := p.conn.Send(proto.CurrentTimeRequestMessageType, body); err != nil {
 				p.close(fmt.Errorf("send heartbeat: %w", err))
 				return
 			}

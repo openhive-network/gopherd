@@ -84,7 +84,7 @@ func TestPeerCleanCloseOnRejection(t *testing.T) {
 				t.Logf("server receive: %v", err)
 				return
 			}
-			if err := c.Send(proto.ConnectionRejectedMessage, []byte("nope")); err != nil {
+			if err := c.Send(proto.ConnectionRejectedMessageType, []byte("nope")); err != nil {
 				t.Logf("server send: %v", err)
 				return
 			}

@@ -60,15 +60,15 @@ func TestHandshakeAndRoundTrip(t *testing.T) {
 	defer client.Close()
 
 	want := []byte("hello, peer — this is a stcp test payload")
-	if err := client.Send(proto.HelloMessage, want); err != nil {
+	if err := client.Send(proto.HelloMessageType, want); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 	gotType, gotBody, err := client.Receive()
 	if err != nil {
 		t.Fatalf("Receive: %v", err)
 	}
-	if gotType != proto.HelloMessage {
-		t.Errorf("type: got %d want %d", gotType, proto.HelloMessage)
+	if gotType != proto.HelloMessageType {
+		t.Errorf("type: got %d want %d", gotType, proto.HelloMessageType)
 	}
 	if string(gotBody) != string(want) {
 		t.Errorf("body: got %q want %q", gotBody, want)
@@ -132,7 +132,7 @@ func TestSendsLargerThanOneBlock(t *testing.T) {
 		for i := range body {
 			body[i] = byte(i * 7)
 		}
-		if err := client.Send(proto.HelloMessage, body); err != nil {
+		if err := client.Send(proto.HelloMessageType, body); err != nil {
 			t.Fatalf("Send n=%d: %v", n, err)
 		}
 		_, got, err := client.Receive()
