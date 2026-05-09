@@ -1,6 +1,9 @@
 package objects
 
 import (
+	"encoding/binary"
+	"fmt"
+	"io"
 	"sort"
 
 	"hived-go/internal/protocol/auth"
@@ -161,6 +164,121 @@ func (s *WitnessVoteStore) VotesForSorted(account auth.AccountName) []auth.Accou
 // CountFor returns how many witnesses account votes for.
 func (s *WitnessVoteStore) CountFor(account auth.AccountName) int {
 	return len(s.votes[string(account)])
+}
+
+var witnessVoteStoreSnapshotMagic = [4]byte{'W', 'V', 'O', 'T'}
+
+const witnessVoteStoreSnapshotVersion uint32 = 1
+
+// MarshalSnapshot serializes the account → witnesses graph to w.
+// Format: magic | version | num_voters_u32 |
+//
+//	(varuint(account_len) | account |
+//	 varuint(num_witnesses) |
+//	 (varuint(witness_len) | witness)*)*
+//
+// Both voters and per-voter witnesses are emitted in ascending order
+// for byte-stable snapshots.
+func (s *WitnessVoteStore) MarshalSnapshot(w io.Writer) error {
+	if _, err := w.Write(witnessVoteStoreSnapshotMagic[:]); err != nil {
+		return err
+	}
+	var hdr [8]byte
+	binary.LittleEndian.PutUint32(hdr[0:4], witnessVoteStoreSnapshotVersion)
+	binary.LittleEndian.PutUint32(hdr[4:8], uint32(len(s.votes)))
+	if _, err := w.Write(hdr[:]); err != nil {
+		return err
+	}
+	accounts := make([]string, 0, len(s.votes))
+	for a := range s.votes {
+		accounts = append(accounts, a)
+	}
+	sort.Strings(accounts)
+	var varBuf [binary.MaxVarintLen64]byte
+	witBuf := make([]string, 0, 32)
+	for _, a := range accounts {
+		set := s.votes[a]
+		// account name
+		n := binary.PutUvarint(varBuf[:], uint64(len(a)))
+		if _, err := w.Write(varBuf[:n]); err != nil {
+			return err
+		}
+		if _, err := io.WriteString(w, a); err != nil {
+			return err
+		}
+		// num witnesses
+		n = binary.PutUvarint(varBuf[:], uint64(len(set)))
+		if _, err := w.Write(varBuf[:n]); err != nil {
+			return err
+		}
+		// witness names sorted ascending
+		witBuf = witBuf[:0]
+		for ww := range set {
+			witBuf = append(witBuf, ww)
+		}
+		sort.Strings(witBuf)
+		for _, ww := range witBuf {
+			n = binary.PutUvarint(varBuf[:], uint64(len(ww)))
+			if _, err := w.Write(varBuf[:n]); err != nil {
+				return err
+			}
+			if _, err := io.WriteString(w, ww); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// UnmarshalSnapshot replaces the votes graph from r. Undo log cleared.
+func (s *WitnessVoteStore) UnmarshalSnapshot(r io.Reader) error {
+	br := asByteReader(r)
+	var magic [4]byte
+	if _, err := io.ReadFull(br, magic[:]); err != nil {
+		return fmt.Errorf("witness_vote_store: read magic: %w", err)
+	}
+	if magic != witnessVoteStoreSnapshotMagic {
+		return fmt.Errorf("witness_vote_store: bad magic %q", magic)
+	}
+	var hdr [8]byte
+	if _, err := io.ReadFull(br, hdr[:]); err != nil {
+		return fmt.Errorf("witness_vote_store: read header: %w", err)
+	}
+	ver := binary.LittleEndian.Uint32(hdr[0:4])
+	if ver != witnessVoteStoreSnapshotVersion {
+		return fmt.Errorf("witness_vote_store: unsupported version %d", ver)
+	}
+	numVoters := binary.LittleEndian.Uint32(hdr[4:8])
+	s.votes = make(map[string]map[string]struct{}, numVoters)
+	s.undoLog = s.undoLog[:0]
+	for i := uint32(0); i < numVoters; i++ {
+		nameLen, err := binary.ReadUvarint(br)
+		if err != nil {
+			return fmt.Errorf("witness_vote_store: read voter len[%d]: %w", i, err)
+		}
+		name := make([]byte, nameLen)
+		if _, err := io.ReadFull(br, name); err != nil {
+			return fmt.Errorf("witness_vote_store: read voter[%d]: %w", i, err)
+		}
+		numW, err := binary.ReadUvarint(br)
+		if err != nil {
+			return fmt.Errorf("witness_vote_store: read num_w[%d]: %w", i, err)
+		}
+		set := make(map[string]struct{}, numW)
+		for j := uint64(0); j < numW; j++ {
+			wlen, err := binary.ReadUvarint(br)
+			if err != nil {
+				return fmt.Errorf("witness_vote_store: read w len[%d/%d]: %w", i, j, err)
+			}
+			wbuf := make([]byte, wlen)
+			if _, err := io.ReadFull(br, wbuf); err != nil {
+				return fmt.Errorf("witness_vote_store: read w[%d/%d]: %w", i, j, err)
+			}
+			set[string(wbuf)] = struct{}{}
+		}
+		s.votes[string(name)] = set
+	}
+	return nil
 }
 
 // RangeAllVoters iterates every account that has at least one

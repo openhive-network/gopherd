@@ -77,6 +77,32 @@ func (b *memBackend) getHint(bucket uint32) *btree.PathHint {
 
 func (b *memBackend) Close() error { return nil }
 
+// rangeAll walks every per-table btree in ascending bucket order, then
+// every key within that bucket in ascending order. Used by the snapshot
+// saver. Errors from fn are propagated.
+func (b *memBackend) rangeAll(fn func(key, value []byte) error) error {
+	buckets := make([]uint32, 0, len(b.trees))
+	for k := range b.trees {
+		buckets = append(buckets, k)
+	}
+	sort.Slice(buckets, func(i, j int) bool { return buckets[i] < buckets[j] })
+	for _, bk := range buckets {
+		t := b.trees[bk]
+		var stop error
+		t.Scan(func(it memItem) bool {
+			if err := fn([]byte(it.key), it.value); err != nil {
+				stop = err
+				return false
+			}
+			return true
+		})
+		if stop != nil {
+			return stop
+		}
+	}
+	return nil
+}
+
 func (b *memBackend) rawGet(key []byte) ([]byte, error) {
 	bucket := memTreeKey(key)
 	t, ok := b.trees[bucket]

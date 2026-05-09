@@ -3,6 +3,8 @@ package state
 import (
 	"errors"
 	"fmt"
+	"io"
+	"sort"
 )
 
 // Database wraps a swappable storage backend with a small expiration-time
@@ -46,6 +48,20 @@ type SnapshotSubsystem interface {
 	CommitPoint()
 }
 
+// SnapshotMarshaler is OPTIONAL — implemented by typed subsystems that
+// want their full primary state serialized into a state-snapshot file.
+// The snapshot loader walks every registered subsystem and calls
+// MarshalSnapshot on those that satisfy this interface; loaders mirror
+// it via UnmarshalSnapshot. Format is private to each subsystem.
+//
+// Subsystems that DON'T implement this interface are skipped at
+// snapshot time — useful for transient bookkeeping that can be
+// re-derived from the K/V row plus other subsystem state.
+type SnapshotMarshaler interface {
+	MarshalSnapshot(w io.Writer) error
+	UnmarshalSnapshot(r io.Reader) error
+}
+
 // RegisterSubsystem records a typed container plus its snapshot hooks.
 // Returns the container slot so callers can fetch it back via
 // GetSubsystem(name). Calling twice with the same name overwrites the
@@ -68,6 +84,21 @@ func (d *Database) GetSubsystem(name string) any {
 		return nil
 	}
 	return d.subsystemReg[name]
+}
+
+// SubsystemNames returns every registered subsystem name in
+// deterministic ascending order. Used by the snapshot saver to walk the
+// registry without hardcoding the list.
+func (d *Database) SubsystemNames() []string {
+	if d.subsystemReg == nil {
+		return nil
+	}
+	names := make([]string, 0, len(d.subsystemReg))
+	for n := range d.subsystemReg {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // snapshotAll captures the current undo-log point of every registered

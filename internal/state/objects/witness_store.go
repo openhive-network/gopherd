@@ -2,6 +2,8 @@ package objects
 
 import (
 	"encoding/binary"
+	"fmt"
+	"io"
 	"sort"
 
 	"github.com/tidwall/btree"
@@ -361,6 +363,119 @@ func (s *WitnessStore) RangeByScheduleTime(fn func(w *Witness) (bool, error)) er
 		return ok
 	})
 	return stopErr
+}
+
+// witnessStoreSnapshotMagic identifies a witness_store snapshot stream.
+var witnessStoreSnapshotMagic = [4]byte{'W', 'S', 'T', 'R'}
+
+const witnessStoreSnapshotVersion uint32 = 1
+
+// MarshalSnapshot serializes the primary witness map to w. Format:
+//
+//	magic[4] | version_u32_le | count_u32_le |
+//	(varuint(name_len) | name | varuint(rec_len) | AppendWitness(rec))*
+//
+// Names are emitted in ascending order so snapshots are byte-stable
+// across runs. Secondary indexes are NOT serialized — they're rebuilt
+// from the primary on UnmarshalSnapshot via flushSecondaries.
+func (s *WitnessStore) MarshalSnapshot(w io.Writer) error {
+	if _, err := w.Write(witnessStoreSnapshotMagic[:]); err != nil {
+		return err
+	}
+	var hdr [8]byte
+	binary.LittleEndian.PutUint32(hdr[0:4], witnessStoreSnapshotVersion)
+	binary.LittleEndian.PutUint32(hdr[4:8], uint32(len(s.primary)))
+	if _, err := w.Write(hdr[:]); err != nil {
+		return err
+	}
+	owners := make([]string, 0, len(s.primary))
+	for o := range s.primary {
+		owners = append(owners, o)
+	}
+	sort.Strings(owners)
+	var (
+		varBuf [binary.MaxVarintLen64]byte
+		recBuf []byte
+	)
+	for _, o := range owners {
+		wp := s.primary[o]
+		// Owner name as length-prefixed string (witness key).
+		n := binary.PutUvarint(varBuf[:], uint64(len(o)))
+		if _, err := w.Write(varBuf[:n]); err != nil {
+			return err
+		}
+		if _, err := io.WriteString(w, o); err != nil {
+			return err
+		}
+		// Witness record. Reuse buffer.
+		recBuf = AppendWitness(recBuf[:0], wp)
+		n = binary.PutUvarint(varBuf[:], uint64(len(recBuf)))
+		if _, err := w.Write(varBuf[:n]); err != nil {
+			return err
+		}
+		if _, err := w.Write(recBuf); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// UnmarshalSnapshot replaces the store's primary map (and clears
+// secondaries / undo log) from r. After loading, secondary indexes are
+// marked dirty so the next RangeBy* rebuilds them lazily.
+func (s *WitnessStore) UnmarshalSnapshot(r io.Reader) error {
+	br := asByteReader(r)
+	var magic [4]byte
+	if _, err := io.ReadFull(br, magic[:]); err != nil {
+		return fmt.Errorf("witness_store: read magic: %w", err)
+	}
+	if magic != witnessStoreSnapshotMagic {
+		return fmt.Errorf("witness_store: bad magic %q", magic)
+	}
+	var hdr [8]byte
+	if _, err := io.ReadFull(br, hdr[:]); err != nil {
+		return fmt.Errorf("witness_store: read header: %w", err)
+	}
+	ver := binary.LittleEndian.Uint32(hdr[0:4])
+	if ver != witnessStoreSnapshotVersion {
+		return fmt.Errorf("witness_store: unsupported version %d", ver)
+	}
+	count := binary.LittleEndian.Uint32(hdr[4:8])
+	// Reset state before loading.
+	s.primary = make(map[string]*Witness, count)
+	s.byVote.Clear()
+	s.byVST.Clear()
+	s.byPow.Clear()
+	s.flushed = make(map[string]witnessSecondaryKey, count)
+	s.dirty = make(map[string]struct{}, count)
+	s.undoLog = s.undoLog[:0]
+	for i := uint32(0); i < count; i++ {
+		nameLen, err := binary.ReadUvarint(br)
+		if err != nil {
+			return fmt.Errorf("witness_store: read name len[%d]: %w", i, err)
+		}
+		nameBuf := make([]byte, nameLen)
+		if _, err := io.ReadFull(br, nameBuf); err != nil {
+			return fmt.Errorf("witness_store: read name[%d]: %w", i, err)
+		}
+		recLen, err := binary.ReadUvarint(br)
+		if err != nil {
+			return fmt.Errorf("witness_store: read rec len[%d]: %w", i, err)
+		}
+		rec := make([]byte, recLen)
+		if _, err := io.ReadFull(br, rec); err != nil {
+			return fmt.Errorf("witness_store: read rec[%d]: %w", i, err)
+		}
+		wit, err := ReadWitness(rec)
+		if err != nil {
+			return fmt.Errorf("witness_store: decode rec[%d]: %w", i, err)
+		}
+		cp := wit
+		owner := string(nameBuf)
+		s.primary[owner] = &cp
+		s.dirty[owner] = struct{}{}
+	}
+	return nil
 }
 
 // RangeByPow iterates witnesses by PowWorker ascending. Witnesses

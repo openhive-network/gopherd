@@ -1,6 +1,11 @@
 package objects
 
 import (
+	"encoding/binary"
+	"fmt"
+	"io"
+	"sort"
+
 	"hived-go/internal/protocol/auth"
 	"hived-go/internal/state"
 )
@@ -228,3 +233,105 @@ func (s *CommentVoteStore) DeleteAllForComment(author auth.AccountName, permlink
 func (s *CommentVoteStore) CountForComment(author auth.AccountName, permlink string) int {
 	return len(s.byComment[string(commentKey(author, permlink))])
 }
+
+var commentVoteStoreSnapshotMagic = [4]byte{'C', 'V', 'O', 'T'}
+
+const commentVoteStoreSnapshotVersion uint32 = 1
+
+// MarshalSnapshot serializes the primary CommentVote map to w. Format
+// mirrors witness_store: magic | version | count | (varuint(key)|key|varuint(rec)|AppendCommentVote(rec))*
+// Keys are the raw bytes returned by commentVoteKey(voter, author, permlink),
+// emitted in ascending order. byComment is rebuilt on UnmarshalSnapshot.
+func (s *CommentVoteStore) MarshalSnapshot(w io.Writer) error {
+	if _, err := w.Write(commentVoteStoreSnapshotMagic[:]); err != nil {
+		return err
+	}
+	var hdr [8]byte
+	binary.LittleEndian.PutUint32(hdr[0:4], commentVoteStoreSnapshotVersion)
+	binary.LittleEndian.PutUint32(hdr[4:8], uint32(len(s.primary)))
+	if _, err := w.Write(hdr[:]); err != nil {
+		return err
+	}
+	keys := make([]string, 0, len(s.primary))
+	for k := range s.primary {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var (
+		varBuf [binary.MaxVarintLen64]byte
+		recBuf []byte
+	)
+	for _, k := range keys {
+		cv := s.primary[k]
+		n := binary.PutUvarint(varBuf[:], uint64(len(k)))
+		if _, err := w.Write(varBuf[:n]); err != nil {
+			return err
+		}
+		if _, err := io.WriteString(w, k); err != nil {
+			return err
+		}
+		recBuf = AppendCommentVote(recBuf[:0], cv)
+		n = binary.PutUvarint(varBuf[:], uint64(len(recBuf)))
+		if _, err := w.Write(varBuf[:n]); err != nil {
+			return err
+		}
+		if _, err := w.Write(recBuf); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// UnmarshalSnapshot rebuilds the primary map AND the byComment secondary
+// index from r. Undo log cleared.
+func (s *CommentVoteStore) UnmarshalSnapshot(r io.Reader) error {
+	br := asByteReader(r)
+	var magic [4]byte
+	if _, err := io.ReadFull(br, magic[:]); err != nil {
+		return fmt.Errorf("comment_vote_store: read magic: %w", err)
+	}
+	if magic != commentVoteStoreSnapshotMagic {
+		return fmt.Errorf("comment_vote_store: bad magic %q", magic)
+	}
+	var hdr [8]byte
+	if _, err := io.ReadFull(br, hdr[:]); err != nil {
+		return fmt.Errorf("comment_vote_store: read header: %w", err)
+	}
+	ver := binary.LittleEndian.Uint32(hdr[0:4])
+	if ver != commentVoteStoreSnapshotVersion {
+		return fmt.Errorf("comment_vote_store: unsupported version %d", ver)
+	}
+	count := binary.LittleEndian.Uint32(hdr[4:8])
+	s.primary = make(map[string]*CommentVote, count)
+	s.byComment = make(map[string][]*CommentVote, count/8+1)
+	s.undoLog = s.undoLog[:0]
+	for i := uint32(0); i < count; i++ {
+		keyLen, err := binary.ReadUvarint(br)
+		if err != nil {
+			return fmt.Errorf("comment_vote_store: read key len[%d]: %w", i, err)
+		}
+		keyBuf := make([]byte, keyLen)
+		if _, err := io.ReadFull(br, keyBuf); err != nil {
+			return fmt.Errorf("comment_vote_store: read key[%d]: %w", i, err)
+		}
+		recLen, err := binary.ReadUvarint(br)
+		if err != nil {
+			return fmt.Errorf("comment_vote_store: read rec len[%d]: %w", i, err)
+		}
+		rec := make([]byte, recLen)
+		if _, err := io.ReadFull(br, rec); err != nil {
+			return fmt.Errorf("comment_vote_store: read rec[%d]: %w", i, err)
+		}
+		cv, err := ReadCommentVote(rec)
+		if err != nil {
+			return fmt.Errorf("comment_vote_store: decode rec[%d]: %w", i, err)
+		}
+		cp := cv
+		s.primary[string(keyBuf)] = &cp
+		// Rebuild byComment.
+		cKey := string(commentKey(cv.Author, cv.Permlink))
+		s.byComment[cKey] = append(s.byComment[cKey], &cp)
+	}
+	return nil
+}
+

@@ -117,6 +117,27 @@ func (b *pebbleBackend) commit(overlay map[string]overlayEntry, sync bool) error
 	return b.db.Apply(batch, opts)
 }
 
+// rangeAll iterates the entire database in ascending key order. Used
+// by the snapshot saver — pebble's single-iter handles full scans
+// natively unlike the per-bucket memBackend.
+func (b *pebbleBackend) rangeAll(fn func(key, value []byte) error) error {
+	it, err := b.db.NewIter(nil)
+	if err != nil {
+		return err
+	}
+	defer it.Close()
+	for ok := it.First(); ok; ok = it.Next() {
+		v, verr := it.ValueAndErr()
+		if verr != nil {
+			return verr
+		}
+		if err := fn(it.Key(), v); err != nil {
+			return err
+		}
+	}
+	return it.Error()
+}
+
 // pebbleIter wraps *pebble.Iterator to satisfy the Iter interface. The
 // wrapper is necessary only because pebble.Iterator.First returns a
 // bool with the same semantics we want — we just expose Valid()

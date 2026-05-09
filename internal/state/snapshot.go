@@ -18,6 +18,81 @@ var snapshotMagic = [8]byte{'G', 'H', 'I', 'V', 'E', 'S', 'N', 'P'}
 // keylen==0. Header is magic + version + headBlockNum.
 const snapshotVersion uint32 = 1
 
+// WriteAllRows streams every (physical-key, value) pair in d to w as
+// length-prefixed records terminated by a zero-length sentinel. No
+// header — the snapshot package writes its own around this stream.
+//
+// Used by the per-block snapshot package (internal/state/snapshot) to
+// dump the K/V backend; the legacy SaveSnapshot wraps this with a
+// header for back-compat.
+func (d *Database) WriteAllRows(w *bufio.Writer) error {
+	var lenBuf [binary.MaxVarintLen64]byte
+	err := d.backend.rangeAll(func(key, val []byte) error {
+		n := binary.PutUvarint(lenBuf[:], uint64(len(key)))
+		if _, err := w.Write(lenBuf[:n]); err != nil {
+			return err
+		}
+		if _, err := w.Write(key); err != nil {
+			return err
+		}
+		n = binary.PutUvarint(lenBuf[:], uint64(len(val)))
+		if _, err := w.Write(lenBuf[:n]); err != nil {
+			return err
+		}
+		if _, err := w.Write(val); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("snapshot: iter: %w", err)
+	}
+	// Sentinel: keylen=0.
+	_, err = w.Write([]byte{0x00})
+	return err
+}
+
+// ReadAllRows reads a stream produced by WriteAllRows and re-inserts
+// every (key, value) into d. r must be byte-readable (binary.ReadUvarint
+// requires io.ByteReader).
+func (d *Database) ReadAllRows(r *bufio.Reader) error {
+	overlay := make(map[string]overlayEntry, 1<<20)
+	for {
+		klen, err := binary.ReadUvarint(r)
+		if err != nil {
+			return fmt.Errorf("snapshot: read key len: %w", err)
+		}
+		if klen == 0 {
+			break
+		}
+		key := make([]byte, klen)
+		if _, err := io.ReadFull(r, key); err != nil {
+			return fmt.Errorf("snapshot: read key: %w", err)
+		}
+		vlen, err := binary.ReadUvarint(r)
+		if err != nil {
+			return fmt.Errorf("snapshot: read val len: %w", err)
+		}
+		val := make([]byte, vlen)
+		if _, err := io.ReadFull(r, val); err != nil {
+			return fmt.Errorf("snapshot: read val: %w", err)
+		}
+		overlay[string(key)] = overlayEntry{value: val}
+	}
+	if err := d.backend.commit(overlay, true); err != nil {
+		return fmt.Errorf("snapshot: commit: %w", err)
+	}
+	return nil
+}
+
+// WriteAllRows is the package-level alias for *Database.WriteAllRows so
+// callers in sibling packages can write `state.WriteAllRows(db, w)`
+// without the explicit method-receiver dance.
+func WriteAllRows(d *Database, w *bufio.Writer) error { return d.WriteAllRows(w) }
+
+// ReadAllRows is the package-level alias for *Database.ReadAllRows.
+func ReadAllRows(d *Database, r *bufio.Reader) error { return d.ReadAllRows(r) }
+
 // SaveSnapshot streams every (physical-key, value) pair in d to path,
 // preceded by a small header carrying the chain head block number.
 //
@@ -43,45 +118,7 @@ func (d *Database) SaveSnapshot(path string, headBlockNum uint32) error {
 		return err
 	}
 
-	// Iterate every key. Use [{}, 0xff*8] as bounds — all keys begin
-	// with [tableID:2][indexID:1] so 0xff repeated past the maximum
-	// tableID safely upper-bounds every real key.
-	upper := []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
-	it, err := d.backend.rawIter([]byte{}, upper)
-	if err != nil {
-		return err
-	}
-	defer it.Close()
-
-	var lenBuf [binary.MaxVarintLen64]byte
-	count := 0
-	for ok := it.First(); ok; ok = it.Next() {
-		key := it.Key()
-		val, verr := it.ValueAndErr()
-		if verr != nil {
-			return fmt.Errorf("snapshot: iter value: %w", verr)
-		}
-		n := binary.PutUvarint(lenBuf[:], uint64(len(key)))
-		if _, err := w.Write(lenBuf[:n]); err != nil {
-			return err
-		}
-		if _, err := w.Write(key); err != nil {
-			return err
-		}
-		n = binary.PutUvarint(lenBuf[:], uint64(len(val)))
-		if _, err := w.Write(lenBuf[:n]); err != nil {
-			return err
-		}
-		if _, err := w.Write(val); err != nil {
-			return err
-		}
-		count++
-	}
-	if err := it.Error(); err != nil {
-		return fmt.Errorf("snapshot: iter: %w", err)
-	}
-	// Sentinel: keylen=0.
-	if _, err := w.Write([]byte{0x00}); err != nil {
+	if err := d.WriteAllRows(w); err != nil {
 		return err
 	}
 	if err := w.Flush(); err != nil {
@@ -124,33 +161,8 @@ func (d *Database) LoadSnapshot(path string) (uint32, error) {
 	}
 	headBlockNum := binary.LittleEndian.Uint32(hdr[4:8])
 
-	// Stream records into a single overlay batch and commit at the end.
-	// Sized generously — mainnet at block 8M has ~few-million keys.
-	overlay := make(map[string]overlayEntry, 1<<20)
-	for {
-		klen, err := binary.ReadUvarint(r)
-		if err != nil {
-			return 0, fmt.Errorf("snapshot: read key len: %w", err)
-		}
-		if klen == 0 {
-			break
-		}
-		key := make([]byte, klen)
-		if _, err := io.ReadFull(r, key); err != nil {
-			return 0, fmt.Errorf("snapshot: read key: %w", err)
-		}
-		vlen, err := binary.ReadUvarint(r)
-		if err != nil {
-			return 0, fmt.Errorf("snapshot: read val len: %w", err)
-		}
-		val := make([]byte, vlen)
-		if _, err := io.ReadFull(r, val); err != nil {
-			return 0, fmt.Errorf("snapshot: read val: %w", err)
-		}
-		overlay[string(key)] = overlayEntry{value: val}
-	}
-	if err := d.backend.commit(overlay, true); err != nil {
-		return 0, fmt.Errorf("snapshot: commit: %w", err)
+	if err := d.ReadAllRows(r); err != nil {
+		return 0, err
 	}
 	return headBlockNum, nil
 }

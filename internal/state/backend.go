@@ -13,6 +13,14 @@ type backend interface {
 	rawIter(lower, upper []byte) (Iter, error)
 	commit(overlay map[string]overlayEntry, sync bool) error
 	commitDirty(overlay map[string]overlayEntry, dirtyKeys []string, sync bool) error
+	// rangeAll calls fn(key, value) for every committed row in the
+	// backend, in implementation-defined order (Pebble: ascending key;
+	// mem: ascending bucket then ascending key). Used by the snapshot
+	// saver to dump the entire backend in one pass — rawIter alone
+	// doesn't suffice for memBackend, which keys per-table btrees off
+	// the first 3 bytes of the physical key and so can only iterate
+	// one table at a time.
+	rangeAll(fn func(key, value []byte) error) error
 	Close() error
 }
 

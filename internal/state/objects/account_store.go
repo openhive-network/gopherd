@@ -1,6 +1,9 @@
 package objects
 
 import (
+	"encoding/binary"
+	"fmt"
+	"io"
 	"sort"
 
 	"hived-go/internal/protocol/auth"
@@ -159,3 +162,101 @@ func (s *AccountStore) RangePrimary(fn func(a *Account) (bool, error)) error {
 
 // Count returns the number of accounts currently in the store.
 func (s *AccountStore) Count() int { return len(s.primary) }
+
+// accountStoreSnapshotMagic identifies an account_store snapshot stream.
+var accountStoreSnapshotMagic = [4]byte{'A', 'C', 'C', 'T'}
+
+const accountStoreSnapshotVersion uint32 = 1
+
+// MarshalSnapshot serializes the primary account map to w. Format mirrors
+// witness_store: magic | version | count | (varuint(name)|name|varuint(rec)|AppendAccount(rec))*
+// Names emitted in ascending order.
+func (s *AccountStore) MarshalSnapshot(w io.Writer) error {
+	if _, err := w.Write(accountStoreSnapshotMagic[:]); err != nil {
+		return err
+	}
+	var hdr [8]byte
+	binary.LittleEndian.PutUint32(hdr[0:4], accountStoreSnapshotVersion)
+	binary.LittleEndian.PutUint32(hdr[4:8], uint32(len(s.primary)))
+	if _, err := w.Write(hdr[:]); err != nil {
+		return err
+	}
+	names := make([]string, 0, len(s.primary))
+	for n := range s.primary {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	var (
+		varBuf [binary.MaxVarintLen64]byte
+		recBuf []byte
+	)
+	for _, n := range names {
+		ap := s.primary[n]
+		k := binary.PutUvarint(varBuf[:], uint64(len(n)))
+		if _, err := w.Write(varBuf[:k]); err != nil {
+			return err
+		}
+		if _, err := io.WriteString(w, n); err != nil {
+			return err
+		}
+		recBuf = AppendAccount(recBuf[:0], ap)
+		k = binary.PutUvarint(varBuf[:], uint64(len(recBuf)))
+		if _, err := w.Write(varBuf[:k]); err != nil {
+			return err
+		}
+		if _, err := w.Write(recBuf); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// UnmarshalSnapshot replaces the store's primary map from r. Undo log
+// is cleared.
+func (s *AccountStore) UnmarshalSnapshot(r io.Reader) error {
+	br := asByteReader(r)
+	var magic [4]byte
+	if _, err := io.ReadFull(br, magic[:]); err != nil {
+		return fmt.Errorf("account_store: read magic: %w", err)
+	}
+	if magic != accountStoreSnapshotMagic {
+		return fmt.Errorf("account_store: bad magic %q", magic)
+	}
+	var hdr [8]byte
+	if _, err := io.ReadFull(br, hdr[:]); err != nil {
+		return fmt.Errorf("account_store: read header: %w", err)
+	}
+	ver := binary.LittleEndian.Uint32(hdr[0:4])
+	if ver != accountStoreSnapshotVersion {
+		return fmt.Errorf("account_store: unsupported version %d", ver)
+	}
+	count := binary.LittleEndian.Uint32(hdr[4:8])
+	s.primary = make(map[string]*Account, count)
+	s.undoLog = s.undoLog[:0]
+	for i := uint32(0); i < count; i++ {
+		nameLen, err := binary.ReadUvarint(br)
+		if err != nil {
+			return fmt.Errorf("account_store: read name len[%d]: %w", i, err)
+		}
+		nameBuf := make([]byte, nameLen)
+		if _, err := io.ReadFull(br, nameBuf); err != nil {
+			return fmt.Errorf("account_store: read name[%d]: %w", i, err)
+		}
+		recLen, err := binary.ReadUvarint(br)
+		if err != nil {
+			return fmt.Errorf("account_store: read rec len[%d]: %w", i, err)
+		}
+		rec := make([]byte, recLen)
+		if _, err := io.ReadFull(br, rec); err != nil {
+			return fmt.Errorf("account_store: read rec[%d]: %w", i, err)
+		}
+		acc, err := ReadAccount(rec)
+		if err != nil {
+			return fmt.Errorf("account_store: decode rec[%d]: %w", i, err)
+		}
+		cp := acc
+		s.primary[string(nameBuf)] = &cp
+	}
+	return nil
+}
+
