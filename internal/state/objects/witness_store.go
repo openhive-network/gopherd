@@ -53,6 +53,13 @@ type WitnessStore struct {
 	// flushed[owner]; flushSecondaries reconciles them.
 	flushed map[string]witnessSecondaryKey
 	dirty   map[string]struct{}
+
+	// freeWitness is a freelist of *Witness slots reclaimed at
+	// CommitPoint / RestoreToPoint. Put pulls from here before
+	// allocating a fresh struct, eliminating the per-Put heap
+	// allocation that dominated the WitnessStore alloc profile
+	// (1GB / 1M blocks). Single-threaded replay only — no lock.
+	freeWitness []*Witness
 }
 
 // witnessSecondaryKey snapshots the (votes, vst, pow, created) values
@@ -131,6 +138,10 @@ func (s *WitnessStore) SnapshotPoint() int { return len(s.undoLog) }
 // was in at the moment SnapshotPoint() returned `snap`. Reverted
 // owners are re-marked dirty so the next RangeBy* re-reconciles
 // secondary indexes against the restored primary state.
+//
+// On each restore step the now-unreferenced *Witness slot (the one
+// that had been the live primary but is being replaced by `e.prev`)
+// is appended to freeWitness for reuse by the next Put.
 func (s *WitnessStore) RestoreToPoint(snap int) {
 	if snap < 0 {
 		snap = 0
@@ -140,6 +151,11 @@ func (s *WitnessStore) RestoreToPoint(snap int) {
 	}
 	for i := len(s.undoLog) - 1; i >= snap; i-- {
 		e := s.undoLog[i]
+		// The current primary slot is the live struct; reclaim it
+		// before swapping in e.prev.
+		if cur, ok := s.primary[e.owner]; ok && cur != nil && cur != e.prev {
+			s.freeWitness = append(s.freeWitness, cur)
+		}
 		if e.prev != nil {
 			s.primary[e.owner] = e.prev
 		} else {
@@ -152,8 +168,30 @@ func (s *WitnessStore) RestoreToPoint(snap int) {
 
 // CommitPoint releases accumulated undo entries — called from
 // Session.Commit. After this point the prior images can no longer be
-// restored.
-func (s *WitnessStore) CommitPoint() { s.undoLog = s.undoLog[:0] }
+// restored, so every undo entry's `prev` *Witness becomes
+// unreachable; reclaim into freeWitness for reuse.
+func (s *WitnessStore) CommitPoint() {
+	for i := range s.undoLog {
+		e := &s.undoLog[i]
+		if e.prev != nil {
+			// Don't reclaim a prev that's still the live primary
+			// (no Put after the snapshot for that owner — prev
+			// equals current).
+			if cur, ok := s.primary[e.owner]; !ok || cur != e.prev {
+				s.freeWitness = append(s.freeWitness, e.prev)
+			}
+		}
+		e.prev = nil // help GC if pool overflows
+	}
+	s.undoLog = s.undoLog[:0]
+	// Cap the freelist to keep idle memory bounded; any overflow
+	// falls to the GC. 1024 slots ≈ 256KB resident — enough to
+	// cover a 30-witness producer-reward block plus tx-snapshot
+	// churn without serializing on allocation.
+	if cap(s.freeWitness) > 1024 && len(s.freeWitness) > 1024 {
+		s.freeWitness = s.freeWitness[:1024]
+	}
+}
 
 // Has reports whether owner has a witness row.
 func (s *WitnessStore) Has(owner auth.AccountName) bool {
@@ -184,13 +222,26 @@ func (s *WitnessStore) Get(owner auth.AccountName) (Witness, bool) {
 // flushSecondaries (called by every RangeBy* method). This collapses
 // the typical 21 puts/round per active witness into one delete+insert
 // per round.
+//
+// Allocation: pulls a *Witness slot from the freelist if available
+// (refilled by CommitPoint / RestoreToPoint when prev pointers
+// become unreachable); otherwise allocates a fresh struct. This
+// avoids the per-Put heap allocation in the hot AdjustWitnessVotes /
+// schedule-update loops.
 func (s *WitnessStore) Put(w *Witness) {
 	name := string(w.Owner)
 	prev := s.primary[name]
 	s.undoLog = append(s.undoLog, witnessUndo{owner: name, prev: prev})
 
-	cp := *w
-	s.primary[name] = &cp
+	var cp *Witness
+	if n := len(s.freeWitness); n > 0 {
+		cp = s.freeWitness[n-1]
+		s.freeWitness = s.freeWitness[:n-1]
+	} else {
+		cp = new(Witness)
+	}
+	*cp = *w
+	s.primary[name] = cp
 	s.dirty[name] = struct{}{}
 }
 
