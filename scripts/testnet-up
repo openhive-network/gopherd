@@ -2,7 +2,10 @@
 # scripts/testnet-up — bring up a local N-node ghive testnet.
 #
 # Usage:
-#   scripts/testnet-up [N]      # default N=5
+#   scripts/testnet-up [N]                  # default N=5, full-mesh seeds
+#   MINIMAL_SEEDS=1 scripts/testnet-up [N]  # only node-1 is a seed; the
+#                                           # rest must discover the mesh
+#                                           # via address_message exchange
 #
 # Steps:
 #   1. Build cmd/ghive + cmd/testnet-config (under -tags testnet) if
@@ -44,8 +47,14 @@ build_if_needed() {
 build_if_needed "${BIN_GHIVE}" ./cmd/ghive -tags testnet
 build_if_needed "${BIN_CFG}"   ./cmd/testnet-config
 
+CFG_EXTRA=()
+if [[ "${MINIMAL_SEEDS:-0}" == "1" ]]; then
+  CFG_EXTRA+=(-minimal-seeds)
+  echo "using minimal-seeds mode (only node-1 in seed list; rest discover via address_message)"
+fi
+
 echo "generating ${N}-node configs in ${OUT}..."
-"${BIN_CFG}" -N="${N}" -out-dir="${OUT}"
+"${BIN_CFG}" -N="${N}" -out-dir="${OUT}" "${CFG_EXTRA[@]}"
 
 # Spawn one ghive process per node.
 for i in $(seq 1 "${N}"); do

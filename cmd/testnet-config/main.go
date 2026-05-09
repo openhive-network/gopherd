@@ -39,11 +39,12 @@ const (
 
 func main() {
 	var (
-		nodeCount   int
-		outDir      string
-		baseP2PPort int
-		baseRPCPort int
-		listenIP    string
+		nodeCount    int
+		outDir       string
+		baseP2PPort  int
+		baseRPCPort  int
+		listenIP     string
+		minimalSeeds bool
 	)
 	flag.IntVar(&nodeCount, "N", genesis.DefaultTestnetOperatorCount,
 		"number of nodes (each gets 1 operator account + ~21/N witnesses)")
@@ -55,6 +56,9 @@ func main() {
 		"first webserver-http-endpoint port (0 = disable RPC)")
 	flag.StringVar(&listenIP, "listen-ip", "127.0.0.1",
 		"interface to bind p2p-endpoint and rpc-endpoint to")
+	flag.BoolVar(&minimalSeeds, "minimal-seeds", false,
+		"emit only node-1 as a p2p-seed-node for nodes 2..N (forces "+
+			"discovery via address_message; default is full mesh seeds)")
 	flag.Parse()
 
 	if nodeCount < 1 || nodeCount > 64 {
@@ -86,11 +90,24 @@ func main() {
 
 		ourPort := baseP2PPort + i
 		var seedEndpoints []string
-		for j := 0; j < nodeCount; j++ {
-			if j == i {
-				continue
+		switch {
+		case minimalSeeds:
+			// Discovery test mode: only node-1 acts as a rendezvous;
+			// every other node lists ONLY node-1, and node-1 lists no
+			// seeds. The peer DB + address_message exchange must build
+			// the full mesh dynamically.
+			if i != 0 {
+				seedEndpoints = append(seedEndpoints,
+					fmt.Sprintf("%s:%d", listenIP, baseP2PPort))
 			}
-			seedEndpoints = append(seedEndpoints, fmt.Sprintf("%s:%d", listenIP, baseP2PPort+j))
+		default:
+			for j := 0; j < nodeCount; j++ {
+				if j == i {
+					continue
+				}
+				seedEndpoints = append(seedEndpoints,
+					fmt.Sprintf("%s:%d", listenIP, baseP2PPort+j))
+			}
 		}
 
 		var sb strings.Builder

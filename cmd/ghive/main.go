@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"hived-go/internal/chain"
@@ -12,6 +13,7 @@ import (
 	"hived-go/internal/crypto"
 	"hived-go/internal/p2p/gossip"
 	p2pnode "hived-go/internal/p2p/node"
+	"hived-go/internal/p2p/peerdb"
 	p2psync "hived-go/internal/p2p/sync"
 	"hived-go/internal/plugins/witness"
 	"hived-go/internal/protocol/auth"
@@ -153,9 +155,10 @@ func main() {
 		// broadcast on); wire delegates after construction via
 		// SetDelegate so we can layer them in a MultiDelegate.
 		p2p = p2pnode.New(p2pnode.Config{
-			Endpoint:  cfg.P2PEndpoint,
-			SeedNodes: cfg.P2PSeedNodes,
-			UserAgent: "ghive/0.1.0",
+			Endpoint:   cfg.P2PEndpoint,
+			SeedNodes:  cfg.P2PSeedNodes,
+			UserAgent:  "ghive/0.1.0",
+			PeerDBPath: filepath.Join(cfg.DataDir, peerdb.Filename),
 		}, cdb, nil)
 		syncDel = p2psync.New(p2psync.Config{}, cdb)
 		gossipS = gossip.New(gossip.Config{
@@ -182,9 +185,6 @@ func main() {
 		defer p2p.Stop()
 		// Wire the witness loop to push freshly-produced blocks at the
 		// gossip layer.
-		wp.Broadcaster = gossipS
-		// Wire the witness loop to push freshly-produced blocks at
-		// the gossip layer.
 		wp.Broadcaster = gossipS
 	}
 
