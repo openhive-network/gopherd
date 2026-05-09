@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"strconv"
@@ -11,40 +12,65 @@ import (
 	"hived-go/internal/state"
 	"hived-go/internal/state/genesis"
 	"hived-go/internal/state/objects"
+	snap "hived-go/internal/state/snapshot"
 )
 
-// Usage: dump_account <block_log> <stop_block> <account>
-// Replays Go to <stop_block>, dumps the account's full balance + recent
+// Usage: dump_account [--snapshot=PATH] <block_log> <stop_block> <account>
+// If --snapshot points at a single-file or dir snapshot, loads and skips replay.
+// Otherwise replays Go to <stop_block>, dumps the account's full balance + recent
 // posts (with rshares / reward_weight / cashout state).
 func main() {
-	logPath := os.Args[1]
-	stop, _ := strconv.Atoi(os.Args[2])
-	acct := os.Args[3]
+	snapshotPath := flag.String("snapshot", "", "path to a snapshot (single-file or dir) — skips replay")
+	flag.Parse()
+	args := flag.Args()
+	logPath := args[0]
+	stop, _ := strconv.Atoi(args[1])
+	acct := args[2]
 
 	stateDB := state.OpenMem()
-	if err := genesis.Apply(stateDB); err != nil {
-		_ = err
-	}
-	cdb := chain.New(stateDB)
 
-	r, err := blocklog.Open(logPath)
-	if err != nil {
-		panic(err)
-	}
-	defer r.Close()
-
-	for n := uint32(1); n <= uint32(stop); n++ {
-		raw, err := r.Block(n)
-		if err != nil {
-			continue
+	if *snapshotPath != "" {
+		boot := state.NewSession(stateDB)
+		objects.EnsureWitnessStore(boot)
+		objects.EnsureWitnessVoteStore(boot)
+		objects.EnsureAccountStore(boot)
+		objects.EnsureCommentStore(boot)
+		objects.EnsureCommentVoteStore(boot)
+		if info, err := os.Stat(*snapshotPath); err == nil && info.IsDir() {
+			if _, err := snap.Load(stateDB, *snapshotPath); err != nil {
+				panic(fmt.Errorf("load dir snapshot: %w", err))
+			}
+		} else {
+			if _, err := stateDB.LoadSnapshot(*snapshotPath); err != nil {
+				panic(fmt.Errorf("load file snapshot: %w", err))
+			}
 		}
-		_, err = cdb.ApplyBlock(raw, n, chain.ApplyOptions{
-			SkipTransactionSignatures: true,
-			SkipBlockSignature:        true,
-			TolerateFailingOps:        true,
-		}, nil)
+		fmt.Fprintf(os.Stderr, "loaded snapshot %s\n", *snapshotPath)
+	} else {
+		if err := genesis.Apply(stateDB); err != nil {
+			_ = err
+		}
+		cdb := chain.New(stateDB)
+
+		r, err := blocklog.Open(logPath)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "apply block %d: %v\n", n, err)
+			panic(err)
+		}
+		defer r.Close()
+
+		for n := uint32(1); n <= uint32(stop); n++ {
+			raw, err := r.Block(n)
+			if err != nil {
+				continue
+			}
+			_, err = cdb.ApplyBlock(raw, n, chain.ApplyOptions{
+				SkipTransactionSignatures: true,
+				SkipBlockSignature:        true,
+				TolerateFailingOps:        true,
+			}, nil)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "apply block %d: %v\n", n, err)
+			}
 		}
 	}
 

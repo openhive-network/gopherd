@@ -38,6 +38,7 @@ import (
 	"strings"
 
 	"hived-go/internal/protocol/auth"
+	"hived-go/internal/state/objects"
 )
 
 // runFlags bundles every command-line option. Keeping them in a struct
@@ -51,6 +52,7 @@ type runFlags struct {
 	witnesses   string // comma-separated; "" = top-21 by votes
 	topN        int
 	skipWitness bool
+	accounts    string // comma-separated account names to compare
 }
 
 func parseFlags() *runFlags {
@@ -63,6 +65,7 @@ func parseFlags() *runFlags {
 	flag.StringVar(&f.witnesses, "witness", "", "comma-separated witness names to compare (default: top-N by votes)")
 	flag.IntVar(&f.topN, "top-witnesses", 21, "compare the top-N witnesses by votes")
 	flag.BoolVar(&f.skipWitness, "skip-witness", false, "skip per-witness comparators (DGPO/schedule/feed/funds only)")
+	flag.StringVar(&f.accounts, "account", "", "comma-separated account names to compare (balances + vesting)")
 	flag.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: drift-hunter [flags]")
 		fmt.Fprintln(os.Stderr, "  --block=N                 single block")
@@ -73,6 +76,7 @@ func parseFlags() *runFlags {
 		fmt.Fprintln(os.Stderr, "  --top-witnesses=N         compare top-N witnesses by votes (default 21)")
 		fmt.Fprintln(os.Stderr, "  --witness=A,B,C           compare specific witnesses by name")
 		fmt.Fprintln(os.Stderr, "  --skip-witness            skip per-witness comparators entirely")
+		fmt.Fprintln(os.Stderr, "  --account=A,B,C           compare named accounts (balances + vesting)")
 	}
 	flag.Parse()
 	f.block = uint32(*blockArg)
@@ -203,6 +207,35 @@ func runOne(f *runFlags, rpc *rpcClient, block uint32) ([]drift, error) {
 			// in compareWitness uses a value-copy of gw.
 			gw.Owner = auth.AccountName(name)
 			allDrifts = append(allDrifts, compareWitness(block, gw, hw)...)
+		}
+	}
+
+	// 5. Per-account comparators (--account=A,B,C). Used for chasing
+	// balance-divergence bugs where a specific account is short.
+	if f.accounts != "" {
+		for _, name := range strings.Split(f.accounts, ",") {
+			name = strings.TrimSpace(name)
+			if name == "" {
+				continue
+			}
+			ha, err := rpc.fetchAccountByName(name)
+			if err != nil {
+				allDrifts = append(allDrifts, drift{
+					block: block, table: "account:" + name, field: "_fetch_err",
+					go_: "(skipped)", hived: err.Error(),
+				})
+				continue
+			}
+			ga, gerr := objects.GetAccount(g.session, auth.AccountName(name))
+			if gerr != nil {
+				allDrifts = append(allDrifts, drift{
+					block: block, table: "account:" + name, field: "_present",
+					go_: "absent", hived: "present",
+				})
+				continue
+			}
+			ga.Name = auth.AccountName(name)
+			allDrifts = append(allDrifts, compareAccount(block, ga, ha)...)
 		}
 	}
 

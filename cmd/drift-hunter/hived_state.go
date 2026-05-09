@@ -286,6 +286,50 @@ func (c *rpcClient) fetchTopWitnessesByVotes(limit int) ([]hivedWitness, error) 
 	return page.Witnesses, nil
 }
 
+// hivedAccount mirrors api_account_object — narrowed to balance / vesting
+// fields that drive the cryptos-class divergence investigation.
+type hivedAccount struct {
+	Name                       string     `json:"name"`
+	Balance                    hivedAsset `json:"balance"`
+	HBDBalance                 hivedAsset `json:"hbd_balance"`
+	SavingsBalance             hivedAsset `json:"savings_balance"`
+	SavingsHBDBalance          hivedAsset `json:"savings_hbd_balance"`
+	VestingShares              hivedAsset `json:"vesting_shares"`
+	DelegatedVestingShares     hivedAsset `json:"delegated_vesting_shares"`
+	ReceivedVestingShares      hivedAsset `json:"received_vesting_shares"`
+	RewardHiveBalance          hivedAsset `json:"reward_hive_balance"`
+	RewardHBDBalance           hivedAsset `json:"reward_hbd_balance"`
+	RewardVestingBalance       hivedAsset `json:"reward_vesting_balance"`
+	PostCount                  uint32     `json:"post_count"`
+	PostBandwidth              uint32     `json:"post_bandwidth"`
+	LastRootPost               string     `json:"last_root_post"`
+	LastPost                   string     `json:"last_post"`
+	VestingWithdrawRate        hivedAsset `json:"vesting_withdraw_rate"`
+	NextVestingWithdrawal      string     `json:"next_vesting_withdrawal"`
+	WithdrawnPerPeriod         json.Number `json:"withdrawn"`
+	ToWithdraw                 json.Number `json:"to_withdraw"`
+	WithdrawRoutes             uint16     `json:"withdraw_routes"`
+}
+
+// fetchAccountByName fetches a single account via database_api.find_accounts.
+func (c *rpcClient) fetchAccountByName(name string) (*hivedAccount, error) {
+	params := map[string]interface{}{"accounts": []string{name}}
+	raw, err := c.call("database_api.find_accounts", params)
+	if err != nil {
+		return nil, err
+	}
+	var page struct {
+		Accounts []hivedAccount `json:"accounts"`
+	}
+	if err := json.Unmarshal(raw, &page); err != nil {
+		return nil, fmt.Errorf("decode find_accounts: %w", err)
+	}
+	if len(page.Accounts) == 0 {
+		return nil, fmt.Errorf("account %q not found", name)
+	}
+	return &page.Accounts[0], nil
+}
+
 // fetchWitnessByName fetches a single witness by primary key.
 func (c *rpcClient) fetchWitnessByName(owner string) (*hivedWitness, error) {
 	params := map[string]interface{}{"owners": []string{owner}}

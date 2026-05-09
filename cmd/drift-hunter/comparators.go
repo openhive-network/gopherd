@@ -505,3 +505,55 @@ func compareWitness(block uint32, gw objects.Witness, hw *hivedWitness) []drift 
 func pubkeyToHex(b []byte) string {
 	return hex16(b)
 }
+
+// compareAccount compares one named account's balance / vesting fields.
+// Used for --account=NAME[,NAME] when chasing balance-divergence bugs
+// (cryptos 35.85-HIVE shortfall at 6,198,475 was the motivating case).
+func compareAccount(block uint32, ga objects.Account, ha *hivedAccount) []drift {
+	tname := "account:" + string(ga.Name)
+	var out []drift
+	add := func(d drift, ok bool) {
+		if ok {
+			out = append(out, d)
+		}
+	}
+	if v, err := ha.Balance.AmountInt(); err == nil {
+		add(cmpInt64(block, tname, "balance", ga.Balance, v))
+	}
+	if v, err := ha.HBDBalance.AmountInt(); err == nil {
+		add(cmpInt64(block, tname, "hbd_balance", ga.HBDBalance, v))
+	}
+	if v, err := ha.SavingsBalance.AmountInt(); err == nil {
+		add(cmpInt64(block, tname, "savings_balance", ga.SavingsBalance, v))
+	}
+	if v, err := ha.SavingsHBDBalance.AmountInt(); err == nil {
+		add(cmpInt64(block, tname, "savings_hbd_balance", ga.SavingsHBDBalance, v))
+	}
+	if v, err := ha.VestingShares.AmountInt(); err == nil {
+		add(cmpInt64(block, tname, "vesting_shares", ga.VestingShares, v))
+	}
+	if v, err := ha.DelegatedVestingShares.AmountInt(); err == nil {
+		add(cmpInt64(block, tname, "delegated_vesting_shares", ga.DelegatedVestingShares, v))
+	}
+	if v, err := ha.ReceivedVestingShares.AmountInt(); err == nil {
+		add(cmpInt64(block, tname, "received_vesting_shares", ga.ReceivedVestingShares, v))
+	}
+	if v, err := ha.RewardHiveBalance.AmountInt(); err == nil {
+		add(cmpInt64(block, tname, "reward_hive_balance", ga.RewardHive, v))
+	}
+	if v, err := ha.RewardHBDBalance.AmountInt(); err == nil {
+		add(cmpInt64(block, tname, "reward_hbd_balance", ga.RewardHBD, v))
+	}
+	if v, err := ha.RewardVestingBalance.AmountInt(); err == nil {
+		add(cmpInt64(block, tname, "reward_vesting_balance", ga.RewardVests, v))
+	}
+	add(cmpUint32(block, tname, "post_count", ga.PostCount, ha.PostCount))
+	add(cmpUint32(block, tname, "post_bandwidth", ga.PostBandwidth, ha.PostBandwidth))
+	add(cmpUint32(block, tname, "last_root_post", ga.LastRootPost, parseISO8601Sec(ha.LastRootPost)))
+	add(cmpUint32(block, tname, "last_post", ga.LastPost, parseISO8601Sec(ha.LastPost)))
+	if v, err := ha.VestingWithdrawRate.AmountInt(); err == nil {
+		add(cmpInt64(block, tname, "vesting_withdraw_rate", ga.VestingWithdrawRate, v))
+	}
+	add(cmpUint32(block, tname, "next_vesting_withdrawal", ga.NextVestingWithdrawal, parseISO8601Sec(ha.NextVestingWithdrawal)))
+	return out
+}

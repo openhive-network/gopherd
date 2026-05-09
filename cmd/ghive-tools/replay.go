@@ -39,6 +39,8 @@ func cmdReplay(args []string) int {
 	loadSnapshot := fs.String("load-snapshot", "", "if set, load state from this snapshot path (file = legacy single-file format; directory = block-N dir produced by --snapshot-every; skips genesis + replay before snapshot block)")
 	saveSnapshotAt := fs.Uint("save-snapshot-at", 0, "block number after which to save a single-file snapshot (0 = don't save)")
 	saveSnapshotTo := fs.String("save-snapshot-to", "", "single-file snapshot output path (used with --save-snapshot-at)")
+	saveDirSnapshotAt := fs.Uint("save-dir-snapshot-at", 0, "block number after which to save a directory snapshot (covers typed stores too; 0 = don't save)")
+	saveDirSnapshotTo := fs.String("save-dir-snapshot-to", "", "directory snapshot root (block-N/ subdir is created; used with --save-dir-snapshot-at)")
 	snapshotEvery := fs.Uint("snapshot-every", 0, "save a directory snapshot every N applied blocks (0 = off)")
 	snapshotDir := fs.String("snapshot-dir", "", "directory under which periodic snapshots are saved (block-<N>/ subdir per snapshot, used with --snapshot-every)")
 	if err := fs.Parse(args); err != nil {
@@ -235,6 +237,14 @@ func cmdReplay(args []string) int {
 				return 1
 			}
 			fmt.Printf("replay: saved snapshot to %s at block %d\n", *saveSnapshotTo, n)
+		}
+		if *saveDirSnapshotAt != 0 && n == uint32(*saveDirSnapshotAt) && *saveDirSnapshotTo != "" {
+			path, err := snapshot.Save(stateDB, *saveDirSnapshotTo, n, "")
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "replay: save dir snapshot: %v\n", err)
+				return 1
+			}
+			fmt.Printf("replay: saved dir snapshot %s at block %d\n", path, n)
 		}
 		if *snapshotEvery != 0 && *snapshotDir != "" && uint64(n)%uint64(*snapshotEvery) == 0 {
 			snapStart := time.Now()
