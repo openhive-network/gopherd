@@ -160,12 +160,22 @@ func main() {
 			UserAgent:  "ghive/0.1.0",
 			PeerDBPath: filepath.Join(cfg.DataDir, peerdb.Filename),
 		}, cdb, nil)
-		syncDel = p2psync.New(p2psync.Config{}, cdb)
 		gossipS = gossip.New(gossip.Config{
 			Chain:   cdb,
 			Node:    p2p,
 			Mempool: wp,
 		})
+		// sync owns the SINGLE apply goroutine for chain.Database (see
+		// internal/p2p/sync/loops.go applyLoop). Gossip's own apply
+		// loop used to share the chain.Database session and racing it
+		// against sync's loop corrupted state.Session's maps. The fix
+		// is to delete gossip's apply path and have sync invoke
+		// gossip.BroadcastAppliedBlock from inside its applyLoop —
+		// re-broadcast then runs on the same goroutine that committed
+		// the block.
+		syncDel = p2psync.New(p2psync.Config{
+			OnBlockApplied: gossipS.BroadcastAppliedBlock,
+		}, cdb)
 		// Pipe local block-apply events into the sync layer so it wakes
 		// its INV broadcaster the moment a witness produces a block —
 		// otherwise the new block waits up to one INVInterval before
@@ -174,8 +184,6 @@ func main() {
 			syncDel.NotifyHeadAdvanced()
 		})
 		p2p.SetDelegate(p2pnode.NewMultiDelegate(syncDel, gossipS))
-		gossipS.Start()
-		defer gossipS.Stop()
 		if err := p2p.Start(); err != nil {
 			fmt.Fprintf(os.Stderr, "ghive: p2p start: %v\n", err)
 			os.Exit(1)
