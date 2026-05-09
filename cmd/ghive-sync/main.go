@@ -123,6 +123,21 @@ type flags struct {
 	// if you trust the canonical block_log reference (which already
 	// validated the merkle root upstream).
 	noVerifyMerkle bool
+	// cacheMB sets the Pebble block cache in megabytes. Larger caches
+	// keep more hot rows (recently-touched accounts, witnesses, the
+	// ~5 hot singletons DGPO/FeedHistory/WitnessSchedule/etc.) in
+	// memory between block applies, eliminating the LSM disk reads
+	// that dominate the per-block CPU once the working set exceeds
+	// the cache. Default 1024MB (was hard-coded to 256MB).
+	cacheMB int
+	// commitBatch sets how many blocks accumulate in the per-Session
+	// overlay before a real Pebble Commit fires. 1 = the legacy per-
+	// block-fsync path; 100 (default) lets pebble buffer ~1s of writes
+	// at chain-head speed in one batched LSM apply with a single fsync.
+	// Crash recovery replays from the persisted DGPO head — the
+	// block_log writer is independent of state Commit batching, so the
+	// canonical bytes for any unpersisted block are always on disk.
+	commitBatch int
 }
 
 func parseFlags() flags {
@@ -142,6 +157,8 @@ func parseFlags() flags {
 	flag.StringVar(&f.cpuProfile, "cpuprofile", "", "write runtime/pprof CPU profile to this path")
 	flag.StringVar(&f.memProfile, "memprofile", "", "write runtime/pprof heap profile to this path at shutdown")
 	flag.BoolVar(&f.noVerifyMerkle, "no-verify-merkle", false, "skip the per-block merkle-root recomputation (faster; only safe with --verify-against)")
+	flag.IntVar(&f.cacheMB, "cache-mb", 1024, "pebble block-cache size in MB (default 1024; was 256 hard-coded). Larger = fewer disk reads on hot rows.")
+	flag.IntVar(&f.commitBatch, "commit-batch", 100, "blocks per pebble fsync. 1 = legacy per-block durability; >1 batches commits and replays from DGPO head on restart against the local block_log.")
 	flag.Parse()
 	f.targetBlock = uint32(target)
 	f.maxBlocks = uint32(max)
@@ -200,7 +217,11 @@ func newApp(cfg flags) (*app, error) {
 		stateDB = state.OpenMem()
 	case "", "pebble":
 		var err error
-		stateDB, err = state.Open(cfg.dataDir, 256<<20)
+		cacheBytes := int64(cfg.cacheMB) << 20
+		if cacheBytes <= 0 {
+			cacheBytes = 1024 << 20
+		}
+		stateDB, err = state.Open(cfg.dataDir, cacheBytes)
 		if err != nil {
 			return nil, fmt.Errorf("open state %s: %w", cfg.dataDir, err)
 		}

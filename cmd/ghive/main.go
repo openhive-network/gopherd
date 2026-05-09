@@ -31,12 +31,14 @@ func main() {
 		configPath  string
 		dataDir     string
 		replay      bool
+		cacheMB     int
 	)
 	flag.BoolVar(&showVersion, "version", false, "print version and exit")
 	flag.BoolVar(&showNetwork, "network", false, "print compiled-in network constants and exit")
 	flag.StringVar(&configPath, "config", "", "path to config.ini")
 	flag.StringVar(&dataDir, "data-dir", "", "data directory (overrides config.ini)")
 	flag.BoolVar(&replay, "replay-blockchain", false, "replay the block_log into a fresh state dir before starting")
+	flag.IntVar(&cacheMB, "cache-mb", 1024, "pebble block-cache size in MB (default 1024; was 256 hard-coded)")
 	flag.Parse()
 
 	if showVersion {
@@ -68,7 +70,11 @@ func main() {
 		os.Exit(2)
 	}
 
-	stateDB, err := state.Open(cfg.DataDir, 256<<20)
+	cacheBytes := int64(cacheMB) << 20
+	if cacheBytes <= 0 {
+		cacheBytes = 1024 << 20
+	}
+	stateDB, err := state.Open(cfg.DataDir, cacheBytes)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ghive: open state: %v\n", err)
 		os.Exit(1)
