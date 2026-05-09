@@ -214,7 +214,16 @@ func (r *Reader) ReadBytesAlias() ([]byte, error) {
 	return out, nil
 }
 
-// ReadString reads a length-prefixed UTF-8 string.
+// ReadString reads a length-prefixed UTF-8 string. Short strings
+// (≤ HiveAccountNameMaxLen, the protocol-bounded account-name length)
+// are interned via fcraw's process-wide cache so repeated names ("steemit",
+// "initminer", every active witness, every chronic voter) collapse to a
+// single backing string. Longer strings (URLs, memos, JSON metadata,
+// permlinks past the cap) skip the cache and allocate normally.
+//
+// Account names are deserialized 30M+ times per million blocks (every
+// op carrying a from/to/voter/author/witness field) — interning was
+// the largest single allocator in the early-chain replay profile.
 func (r *Reader) ReadString() (string, error) {
 	n, err := r.readLengthPrefix()
 	if err != nil {
@@ -222,6 +231,9 @@ func (r *Reader) ReadString() (string, error) {
 	}
 	src := r.src[r.pos : r.pos+n]
 	r.pos += n
+	if n <= HiveAccountNameMaxLen {
+		return InternString(src), nil
+	}
 	return string(src), nil
 }
 
