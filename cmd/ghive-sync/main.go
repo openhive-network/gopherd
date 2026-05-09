@@ -41,6 +41,7 @@ import (
 	"hived-go/internal/blocklog"
 	"hived-go/internal/chain"
 	p2pnode "hived-go/internal/p2p/node"
+	p2psync "hived-go/internal/p2p/sync"
 	"hived-go/internal/protocol/block"
 	"hived-go/internal/protocol/network"
 	"hived-go/internal/state"
@@ -196,19 +197,15 @@ func (a *app) close() {
 	}
 }
 
-// run brings up the P2P node and waits for SIGINT/SIGTERM (or, when
-// --target-block is set, until the chain head reaches it).
+// run brings up the P2P node + sync delegate and waits for SIGINT/SIGTERM
+// (or, when --target-block is set, until the chain head reaches it).
 //
-// TODO(agent-sync): wire the per-block delegate hook here. Once
-// agent-sync exports an interface like
-//
-//	type BlockReceiver interface {
-//	    OnBlockReceived(rawBlock []byte) error
-//	}
-//
-// we will pass `a.applyBlock` (which validates + writes + verifies) as the
-// implementation. Until then this function spins up the P2P node only — no
-// blocks ever arrive — and the daemon idles waiting for an interrupt.
+// Architecture: p2psync.Delegate handles peer state machine, INV exchange,
+// and the catch-up sync flow (FetchBlockchainItemIDs → BlockchainItemIDsInventory
+// → FetchItems → BlockMessage). Each accepted block fires
+// chain.Database.SetOnBlockApplied which we intercept to (1) write to the
+// block_log writer + (2) compare against --verify-against if set + (3)
+// short-circuit at --target-block.
 func (a *app) run() error {
 	seeds := []string{}
 	if !a.cfg.disableMainSeeds {
@@ -219,19 +216,71 @@ func (a *app) run() error {
 	}
 	a.logger.printf("starting (seeds=%d, listen=%q, target=%d)", len(seeds), a.cfg.listenEndpoint, a.cfg.targetBlock)
 
+	// Wire the per-block hook BEFORE starting the sync delegate so the
+	// first APPLIED already lands in the block_log.
+	stopCh := make(chan struct{}, 1)
+	a.chain.SetOnBlockApplied(func(blockNum uint32, _ block.ID) {
+		raw := a.chain.RecentBlockBytes(blockNum)
+		if raw == nil {
+			a.logger.printf("WARN no raw bytes for applied block %d (cache miss)", blockNum)
+			return
+		}
+		if err := a.afterApply(raw, blockNum); err != nil {
+			a.logger.printf("ERROR post-apply hook block %d: %v", blockNum, err)
+		}
+		if a.cfg.targetBlock > 0 && blockNum >= a.cfg.targetBlock {
+			select {
+			case stopCh <- struct{}{}:
+			default:
+			}
+		}
+	})
+
 	a.p2p = p2pnode.New(p2pnode.Config{
 		Endpoint:  a.cfg.listenEndpoint,
 		SeedNodes: seeds,
 		UserAgent: "ghive-sync/0.1.0",
-	}, a.chain, nil /* TODO(agent-sync): plumb a sync delegate that calls a.applyBlock */)
+	}, a.chain, nil)
+	syncDel := p2psync.New(p2psync.Config{}, a.chain)
+	a.p2p.SetDelegate(syncDel)
 	if err := a.p2p.Start(); err != nil {
 		return fmt.Errorf("p2p start: %w", err)
 	}
+	syncDel.Start()
+	defer syncDel.Stop()
+	defer a.p2p.Stop()
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-	<-sig
-	a.logger.printf("shutting down...")
+	select {
+	case <-sig:
+		a.logger.printf("shutting down (signal)...")
+	case <-stopCh:
+		a.logger.printf("shutting down (target block %d reached)...", a.cfg.targetBlock)
+	}
+	return nil
+}
+
+// afterApply is invoked from chain.SetOnBlockApplied (i.e. after the
+// block has already passed the full validator pipeline). We append it to
+// the block_log writer + diff against --verify-against if set.
+func (a *app) afterApply(rawBlock []byte, blockNum uint32) error {
+	if a.verify != nil {
+		want, err := a.verify.Block(blockNum)
+		if err != nil {
+			return fmt.Errorf("verify-against block %d: %w", blockNum, err)
+		}
+		if !bytesEqual(want, rawBlock) {
+			return fmt.Errorf("verify-against mismatch at block %d (got %d bytes, ref %d bytes)",
+				blockNum, len(rawBlock), len(want))
+		}
+	}
+	if err := a.writer.Append(rawBlock); err != nil {
+		return fmt.Errorf("append block %d: %w", blockNum, err)
+	}
+	if blockNum%1000 == 0 {
+		a.logger.printf("applied block %d -> head=%d", blockNum, blockNum)
+	}
 	return nil
 }
 
