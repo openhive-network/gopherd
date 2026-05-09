@@ -31,8 +31,11 @@ type Config struct {
 	Plugins []string
 	// P2PEndpoint, RPCEndpoint, DataDir, etc.
 	P2PEndpoint string
-	RPCEndpoint string
-	DataDir     string
+	// P2PSeedNodes is the list of "host:port" peers to attempt to dial
+	// on startup (boost-style "p2p-seed-node" key, repeats allowed).
+	P2PSeedNodes []string
+	RPCEndpoint  string
+	DataDir      string
 	// SharedFileSize is the soft memory bound (Boost INI string like
 	// "20G", "8G"). We parse it into bytes for our Pebble cache.
 	SharedFileSize string
@@ -87,6 +90,12 @@ func Parse(r io.Reader) (*Config, error) {
 			}
 		case "p2p-endpoint":
 			c.P2PEndpoint = val
+		case "p2p-seed-node":
+			// Repeated "p2p-seed-node = host:port" lines accumulate.
+			// Boost also accepts space-separated lists on one line.
+			for _, s := range strings.Fields(val) {
+				c.P2PSeedNodes = append(c.P2PSeedNodes, s)
+			}
 		case "rpc-endpoint", "webserver-http-endpoint":
 			c.RPCEndpoint = val
 		case "data-dir":

@@ -10,6 +10,7 @@ import (
 	"hived-go/internal/chain"
 	"hived-go/internal/config"
 	"hived-go/internal/crypto"
+	p2pnode "hived-go/internal/p2p/node"
 	"hived-go/internal/plugins/witness"
 	"hived-go/internal/protocol/auth"
 	"hived-go/internal/protocol/network"
@@ -120,6 +121,22 @@ func main() {
 		fmt.Printf("ghive: starting with %d witness producer(s)\n", len(producers))
 	} else {
 		fmt.Println("ghive: starting in observer mode (no witnesses configured)")
+	}
+
+	// P2P. If no endpoint AND no seeds, skip entirely. Otherwise spin
+	// up a Node — agent-gossip will hook a delegate into it later.
+	var p2p *p2pnode.Node
+	if cfg.P2PEndpoint != "" || len(cfg.P2PSeedNodes) > 0 {
+		p2p = p2pnode.New(p2pnode.Config{
+			Endpoint:  cfg.P2PEndpoint,
+			SeedNodes: cfg.P2PSeedNodes,
+			UserAgent: "ghive/0.1.0",
+		}, cdb, nil)
+		if err := p2p.Start(); err != nil {
+			fmt.Fprintf(os.Stderr, "ghive: p2p start: %v\n", err)
+			os.Exit(1)
+		}
+		defer p2p.Stop()
 	}
 
 	// Wait for interrupt.
