@@ -173,10 +173,10 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	// only advances dgpo.time after tx application. Read it now and pass
 	// to evaluators so they match C++.
 	headBlockTime := hdr.Timestamp
-	prevHeadBlockNum := uint32(0)
+	prevCurrentAslot := uint64(0)
 	if dgpo, err := objects.GetDGPO(session); err == nil {
 		headBlockTime = dgpo.Time
-		prevHeadBlockNum = dgpo.HeadBlockNumber
+		prevCurrentAslot = dgpo.CurrentAslot
 	}
 
 	// Witness-scheduling assert + block-level invariants (chain
@@ -192,7 +192,7 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 			slot := slotNumForBlockTime(headBlockTime, hdr.Timestamp)
 			if slot > 0 {
 				if ws, wErr := objects.GetWitnessSchedule(session); wErr == nil {
-					expected := ws.ScheduledWitnessForSlot(prevHeadBlockNum, slot)
+					expected := ws.ScheduledWitnessForSlotAslot(prevCurrentAslot, slot)
 					if expected != "" && expected != hdr.Witness {
 						return objects.DynamicGlobalProperty{}, fmt.Errorf(
 							"apply_block %d: witness mismatch: header=%q expected=%q (slot=%d)",
@@ -397,7 +397,7 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	// `head_block_num() != 0` guard; mirror that with `blockNum > 1`.
 	slotForBlock := slotNumForBlockTime(headBlockTime, hdr.Timestamp)
 	if blockNum > 1 && slotForBlock > 1 {
-		updateWitnessMissedBlocks(session, hdr.Witness, slotForBlock-1, hf, blockNum, prevHeadBlockNum)
+		updateWitnessMissedBlocks(session, hdr.Witness, slotForBlock-1, hf, blockNum)
 	}
 	dgpo, err := objects.GetDGPO(session)
 	if err != nil && err != state.ErrNotFound {
@@ -604,7 +604,7 @@ func (d *Database) ScheduledWitness(slotNum uint32) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return string(ws.ScheduledWitnessForSlot(dgpo.HeadBlockNumber, slotNum)), nil
+	return string(ws.ScheduledWitnessForSlotAslot(dgpo.CurrentAslot, slotNum)), nil
 }
 
 // HIVE_BLOCK_INTERVAL: seconds between blocks (libraries/protocol/include/
@@ -645,7 +645,7 @@ const hiveWitnessShutdownThresholdBlocks uint32 = 28800
 // total_missed counter, and HF14-HF20 zeroes their BlockSigningKey if
 // their last_confirmed is too far behind head — which causes the next
 // witness-schedule rebuild to drop them from the active set entirely.
-func updateWitnessMissedBlocks(s *state.Session, blockWitness auth.AccountName, missedBlocks uint32, hf hardfork.Set, blockNum, prevHeadBlockNum uint32) {
+func updateWitnessMissedBlocks(s *state.Session, blockWitness auth.AccountName, missedBlocks uint32, hf hardfork.Set, blockNum uint32) {
 	if missedBlocks == 0 {
 		return
 	}
