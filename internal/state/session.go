@@ -569,21 +569,52 @@ func (s *Session) Range(table TableID, index IndexID, prefix []byte, fn func(bod
 	// the corresponding emit but never the overlay's smaller-key
 	// advancement.
 	upperStr := string(upper)
-	overlayItr := s.overlayKeys.Iter()
-	defer overlayItr.Release()
-	overlayValid := false
-	if s.overlayKeys.Len() > 0 {
-		overlayValid = overlayItr.Seek(string(lower)) && overlayItr.Item() < upperStr
+	// Skip the overlay-iterator allocation entirely when the overlay
+	// is empty (the common case: most per-block hooks Range tables
+	// they don't write to). overlayKeys.Iter() escapes to the heap
+	// (stack-bound iterStackItemG slice) and dominated Range alloc
+	// pressure (364MB / 1M blocks).
+	hasOverlay := s.overlayKeys.Len() > 0
+	if !hasOverlay {
+		// Backend-only fast path: no overlay merge.
+		iter.First()
+		for iter.Valid() {
+			k := iter.Key()
+			v, err := iter.ValueAndErr()
+			if err != nil {
+				return err
+			}
+			body := k[keyPrefixLen:]
+			if err := emit(body, v); err != nil {
+				if errors.Is(err, errStopIteration) {
+					return nil
+				}
+				return err
+			}
+			iter.Next()
+		}
+		return iter.Error()
 	}
+	overlayItr := s.overlayKeys.Iter()
+	overlayValid := overlayItr.Seek(string(lower)) && overlayItr.Item() < upperStr
 	iter.First()
+	rangeErr := s.rangeMerge(iter, &overlayItr, &overlayValid, upperStr, emit)
+	overlayItr.Release()
+	return rangeErr
+}
+
+// rangeMerge implements the merge loop used by Range when both backend
+// and overlay sides may have entries. Extracted so Range can release
+// the overlay iterator promptly after the loop returns.
+func (s *Session) rangeMerge(iter Iter, overlayItr *btree.IterG[string], overlayValid *bool, upperStr string, emit func(body, value []byte) error) error {
 	for {
 		backendValid := iter.Valid()
-		if !backendValid && !overlayValid {
+		if !backendValid && !*overlayValid {
 			break
 		}
 		// Decide which side to consume next.
 		consumeOverlay := false
-		if backendValid && overlayValid {
+		if backendValid && *overlayValid {
 			bk := iter.Key()
 			ok := overlayItr.Item()
 			cmp := compareBytes(bk, []byte(ok))
@@ -602,9 +633,9 @@ func (s *Session) Range(table TableID, index IndexID, prefix []byte, fn func(bod
 			}
 			// Advance overlay cursor.
 			if !overlayItr.Next() {
-				overlayValid = false
+				*overlayValid = false
 			} else if overlayItr.Item() >= upperStr {
-				overlayValid = false
+				*overlayValid = false
 			}
 			if e.tombstone {
 				continue
