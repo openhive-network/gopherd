@@ -190,3 +190,136 @@ func TestSessionRangeStop(t *testing.T) {
 		t.Fatalf("Range stop: visited %d entries, want 1", count)
 	}
 }
+
+// TestBatchCommitVisibleToReaders verifies that BatchSize>1 keeps
+// pending Commits invisible to the backend but VISIBLE to subsequent
+// fresh Sessions. Crash-recovery contracts depend on this — a daemon
+// process that batches still serves correct reads to its own
+// witness/RPC goroutines from in-memory state.
+func TestBatchCommitVisibleToReaders(t *testing.T) {
+	db := OpenMem()
+	t.Cleanup(func() { _ = db.Close() })
+	db.SetBatchSize(8)
+
+	for i := 0; i < 5; i++ {
+		s := NewSession(db)
+		s.Put(1, 0, []byte{byte('a' + i)}, []byte{byte('A' + i)})
+		if err := s.Commit(false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := db.PendingBatch(); got != 5 {
+		t.Fatalf("PendingBatch: got %d, want 5", got)
+	}
+	// Each fresh session must observe every batched Put.
+	r := NewSession(db)
+	for i := 0; i < 5; i++ {
+		v, err := r.Get(1, 0, []byte{byte('a' + i)})
+		if err != nil {
+			t.Fatalf("Get %c: %v", 'a'+i, err)
+		}
+		want := []byte{byte('A' + i)}
+		if string(v) != string(want) {
+			t.Fatalf("Get %c: got %q want %q", 'a'+i, v, want)
+		}
+	}
+	// Backend must NOT see them yet (still in batch overlay).
+	for i := 0; i < 5; i++ {
+		_, err := db.backend.rawGet(EncodeKey(1, 0, []byte{byte('a' + i)}))
+		if err != ErrNotFound {
+			t.Fatalf("backend rawGet %c: should be missing pre-flush, got err=%v", 'a'+i, err)
+		}
+	}
+	if err := db.FlushBatch(false); err != nil {
+		t.Fatal(err)
+	}
+	if got := db.PendingBatch(); got != 0 {
+		t.Fatalf("PendingBatch after Flush: got %d, want 0", got)
+	}
+	// Now the backend has them.
+	for i := 0; i < 5; i++ {
+		v, err := db.backend.rawGet(EncodeKey(1, 0, []byte{byte('a' + i)}))
+		if err != nil {
+			t.Fatalf("backend rawGet %c after flush: %v", 'a'+i, err)
+		}
+		want := []byte{byte('A' + i)}
+		if string(v) != string(want) {
+			t.Fatalf("backend rawGet %c: got %q want %q", 'a'+i, v, want)
+		}
+	}
+}
+
+// TestBatchAutoFlushAtBoundary checks the BatchSize boundary auto-fires
+// FlushBatch — no caller intervention required.
+func TestBatchAutoFlushAtBoundary(t *testing.T) {
+	db := OpenMem()
+	t.Cleanup(func() { _ = db.Close() })
+	db.SetBatchSize(3)
+	for i := 0; i < 3; i++ {
+		s := NewSession(db)
+		s.Put(1, 0, []byte{byte(i)}, []byte{byte(0xa0 | byte(i))})
+		if err := s.Commit(false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := db.PendingBatch(); got != 0 {
+		t.Fatalf("PendingBatch after 3 commits at BatchSize=3: got %d, want 0 (auto-flush)", got)
+	}
+}
+
+// TestBatchRangeMergesAllThreeSources confirms Range's 3-way merge
+// correctly orders backend + batch overlay + session overlay entries
+// in lexicographic key order with the documented precedence.
+func TestBatchRangeMergesAllThreeSources(t *testing.T) {
+	db := OpenMem()
+	t.Cleanup(func() { _ = db.Close() })
+
+	// Land "alpha" in backend.
+	{
+		db.SetBatchSize(0) // disable batching for the seed write
+		s := NewSession(db)
+		s.Put(7, 0, []byte("alpha"), []byte("backend-a"))
+		s.Put(7, 0, []byte("delta"), []byte("backend-d"))
+		if err := s.Commit(false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.SetBatchSize(8)
+	// Land "bravo" + override "alpha" in batch overlay.
+	{
+		s := NewSession(db)
+		s.Put(7, 0, []byte("alpha"), []byte("batch-a"))
+		s.Put(7, 0, []byte("bravo"), []byte("batch-b"))
+		s.Delete(7, 0, []byte("delta"))
+		if err := s.Commit(false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Add session-overlay entries that override "bravo" + add "charlie".
+	r := NewSession(db)
+	r.Put(7, 0, []byte("bravo"), []byte("session-b"))
+	r.Put(7, 0, []byte("charlie"), []byte("session-c"))
+
+	got := map[string]string{}
+	err := r.Range(7, 0, nil, func(body, value []byte) (bool, error) {
+		got[string(body)] = string(value)
+		return true, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"alpha":   "batch-a",   // batch overrides backend
+		"bravo":   "session-b", // session overrides batch
+		"charlie": "session-c", // session-only
+		// delta tombstoned in batch overlay.
+	}
+	if len(got) != len(want) {
+		t.Fatalf("range count: got %d (%v), want %d (%v)", len(got), got, len(want), want)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("range[%q] = %q, want %q", k, got[k], v)
+		}
+	}
+}

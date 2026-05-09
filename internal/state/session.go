@@ -225,7 +225,9 @@ func newOverlayKeyTree() *btree.BTreeG[string] {
 }
 
 // Get returns the latest value for (table, index, body) — checking the
-// overlay first, then the per-Session read cache, then the backend.
+// overlay first, then the Database batch overlay (pending writes that
+// haven't yet flushed to the backend, only used when BatchSize>1),
+// then the per-Session read cache, then the backend.
 //
 // The returned []byte aliases internal storage and MUST NOT be modified
 // by callers. The contract holds for the lifetime of the Session: any
@@ -235,6 +237,12 @@ func newOverlayKeyTree() *btree.BTreeG[string] {
 func (s *Session) Get(table TableID, index IndexID, body []byte) ([]byte, error) {
 	s.scratch = EncodeKeyInto(s.scratch, table, index, body)
 	if e, ok := s.overlay[string(s.scratch)]; ok {
+		if e.tombstone {
+			return nil, ErrNotFound
+		}
+		return e.value, nil
+	}
+	if e, ok := s.db.batchGet(string(s.scratch)); ok {
 		if e.tombstone {
 			return nil, ErrNotFound
 		}
@@ -258,6 +266,9 @@ func (s *Session) Get(table TableID, index IndexID, body []byte) ([]byte, error)
 func (s *Session) Has(table TableID, index IndexID, body []byte) (bool, error) {
 	s.scratch = EncodeKeyInto(s.scratch, table, index, body)
 	if e, ok := s.overlay[string(s.scratch)]; ok {
+		return !e.tombstone, nil
+	}
+	if e, ok := s.db.batchGet(string(s.scratch)); ok {
 		return !e.tombstone, nil
 	}
 	if _, ok := s.readCache[string(s.scratch)]; ok {
@@ -338,12 +349,16 @@ func (s *Session) Delete(table TableID, index IndexID, body []byte) {
 	}
 }
 
-// Commit flushes the overlay atomically to the backend. After Commit
-// the overlay is reset and the Session can be reused for the next block.
+// Commit flushes the overlay atomically to the backend (or, when
+// Database.BatchSize>1, into the Database batch overlay until the
+// batch boundary is reached). After Commit the overlay is reset and
+// the Session can be reused for the next block.
 //
 // sync controls whether the underlying write is fsync'd (Pebble only).
 // For replay we pass false — durability comes from periodic flushes;
-// for live sync / witness production callers should pass true.
+// for live sync / witness production callers should pass true. With
+// batching enabled, sync only takes effect on the actual backend
+// write fired at the batch boundary.
 func (s *Session) Commit(sync bool) error {
 	for _, fn := range s.preCommit {
 		fn()
@@ -363,6 +378,29 @@ func (s *Session) Commit(sync bool) error {
 		s.mistrustDBAux = false
 		s.snapshotGen = 0
 		s.db.commitAll()
+		// An empty Commit still bumps the batch boundary so a
+		// caller relying purely on FlushBatch semantics doesn't
+		// silently delay a pending flush by one block.
+		if s.db.BatchSize > 1 && s.db.pendingBlocks > 0 && s.db.pendingBlocks >= s.db.BatchSize {
+			return s.db.FlushBatch(sync)
+		}
+		return nil
+	}
+	if s.db.BatchSize > 1 {
+		s.db.mergeSessionIntoBatch(s.overlay, s.dirtyKeys)
+		clear(s.overlay)
+		clear(s.readCache)
+		clear(s.Aux)
+		s.overlayKeys.Clear()
+		s.dirtyKeys = s.dirtyKeys[:0]
+		s.undoLog = s.undoLog[:0]
+		s.snapshotDepth = 0
+		s.mistrustDBAux = false
+		s.snapshotGen = 0
+		s.db.commitAll()
+		if s.db.pendingBlocks >= s.db.BatchSize {
+			return s.db.FlushBatch(sync)
+		}
 		return nil
 	}
 	if err := s.db.backend.commitDirty(s.overlay, s.dirtyKeys, sync); err != nil {
@@ -575,7 +613,8 @@ func (s *Session) Range(table TableID, index IndexID, prefix []byte, fn func(bod
 	// (stack-bound iterStackItemG slice) and dominated Range alloc
 	// pressure (364MB / 1M blocks).
 	hasOverlay := s.overlayKeys.Len() > 0
-	if !hasOverlay {
+	hasBatch := s.db.batchOverlayKeys != nil && s.db.batchOverlayKeys.Len() > 0
+	if !hasOverlay && !hasBatch {
 		// Backend-only fast path: no overlay merge.
 		iter.First()
 		for iter.Valid() {
@@ -595,12 +634,130 @@ func (s *Session) Range(table TableID, index IndexID, prefix []byte, fn func(bod
 		}
 		return iter.Error()
 	}
-	overlayItr := s.overlayKeys.Iter()
-	overlayValid := overlayItr.Seek(string(lower)) && overlayItr.Item() < upperStr
+	if !hasBatch {
+		overlayItr := s.overlayKeys.Iter()
+		overlayValid := overlayItr.Seek(string(lower)) && overlayItr.Item() < upperStr
+		iter.First()
+		rangeErr := s.rangeMerge(iter, &overlayItr, &overlayValid, upperStr, emit)
+		overlayItr.Release()
+		return rangeErr
+	}
+	// 3-way merge: session overlay > batch overlay > backend.
+	var overlayItr btree.IterG[string]
+	overlayValid := false
+	if hasOverlay {
+		overlayItr = s.overlayKeys.Iter()
+		overlayValid = overlayItr.Seek(string(lower)) && overlayItr.Item() < upperStr
+	}
+	batchItr := s.db.batchOverlayKeys.Iter()
+	batchValid := batchItr.Seek(string(lower)) && batchItr.Item() < upperStr
 	iter.First()
-	rangeErr := s.rangeMerge(iter, &overlayItr, &overlayValid, upperStr, emit)
-	overlayItr.Release()
+	rangeErr := s.rangeMerge3(iter, &overlayItr, &overlayValid, &batchItr, &batchValid, upperStr, emit)
+	if hasOverlay {
+		overlayItr.Release()
+	}
+	batchItr.Release()
 	return rangeErr
+}
+
+// rangeMerge3 merges session overlay (highest precedence) + batch
+// overlay (medium) + backend (lowest) in lexicographic key order.
+// Session overlay tombstones suppress the corresponding emit; batch
+// overlay tombstones suppress the backend row only when no session
+// override exists for the same key.
+func (s *Session) rangeMerge3(
+	iter Iter,
+	overlayItr *btree.IterG[string], overlayValid *bool,
+	batchItr *btree.IterG[string], batchValid *bool,
+	upperStr string,
+	emit func(body, value []byte) error,
+) error {
+	for {
+		backendValid := iter.Valid()
+		if !backendValid && !*overlayValid && !*batchValid {
+			break
+		}
+		// Find the smallest pending key across the three sources.
+		var minKey string
+		first := true
+		if backendValid {
+			minKey = string(iter.Key())
+			first = false
+		}
+		if *batchValid {
+			bk := batchItr.Item()
+			if first || bk < minKey {
+				minKey = bk
+				first = false
+			}
+		}
+		if *overlayValid {
+			ok := overlayItr.Item()
+			if first || ok < minKey {
+				minKey = ok
+			}
+		}
+
+		// Resolve the value at minKey by precedence:
+		//   1. session overlay (if it owns minKey)
+		//   2. batch overlay (if it owns minKey)
+		//   3. backend (if it owns minKey)
+		// Advance every cursor that was sitting on minKey.
+		var emitVal []byte
+		emitTombstone := false
+		emitFromAny := false
+
+		if *overlayValid && overlayItr.Item() == minKey {
+			e := s.overlay[minKey]
+			emitVal = e.value
+			emitTombstone = e.tombstone
+			emitFromAny = true
+			if !overlayItr.Next() {
+				*overlayValid = false
+			} else if overlayItr.Item() >= upperStr {
+				*overlayValid = false
+			}
+		}
+		if *batchValid && batchItr.Item() == minKey {
+			if !emitFromAny {
+				e := s.db.batchOverlay[minKey]
+				emitVal = e.value
+				emitTombstone = e.tombstone
+				emitFromAny = true
+			}
+			if !batchItr.Next() {
+				*batchValid = false
+			} else if batchItr.Item() >= upperStr {
+				*batchValid = false
+			}
+		}
+		if backendValid && string(iter.Key()) == minKey {
+			if !emitFromAny {
+				v, err := iter.ValueAndErr()
+				if err != nil {
+					return err
+				}
+				emitVal = v
+				emitFromAny = true
+			}
+			iter.Next()
+		}
+
+		if emitTombstone || !emitFromAny {
+			continue
+		}
+		body := []byte(minKey)[keyPrefixLen:]
+		if err := emit(body, emitVal); err != nil {
+			if errors.Is(err, errStopIteration) {
+				return nil
+			}
+			return err
+		}
+	}
+	if err := iter.Error(); err != nil {
+		return err
+	}
+	return nil
 }
 
 // rangeMerge implements the merge loop used by Range when both backend

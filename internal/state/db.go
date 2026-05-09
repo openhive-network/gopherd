@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"sort"
+
+	"github.com/tidwall/btree"
 )
 
 // Database wraps a swappable storage backend with a small expiration-time
@@ -32,6 +34,33 @@ type Database struct {
 	// cycle. Lookup is cold (once per Session, then cached on the
 	// caller side), so map overhead doesn't matter.
 	subsystemReg map[string]any
+
+	// BatchSize controls how many Session.Commit calls are coalesced
+	// into a single backend write. With BatchSize<=1 every Commit
+	// flushes immediately (legacy behavior). With BatchSize>1 the
+	// session overlay is moved into a Database-level batch overlay on
+	// each Commit; the actual backend write fires only once we reach
+	// BatchSize accumulated commits OR FlushBatch is invoked.
+	//
+	// Subsequent Sessions consult the batch overlay before falling
+	// through to the backend, so reads remain consistent within the
+	// process. Crash safety relies on the caller (chain.Database +
+	// the block_log writer) being able to re-replay from the persisted
+	// head on restart — see ghive-sync's recovery path.
+	BatchSize int
+	// batchOverlay holds writes from completed sessions that haven't
+	// yet been flushed to backend. Mutated only under the chain's
+	// applyMu write lock; safe to read under applyMu read lock from
+	// other Session instances.
+	batchOverlay map[string]overlayEntry
+	// batchOverlayKeys is a sorted-by-key btree mirroring batchOverlay
+	// so 3-way Range merges (session > batch > backend) advance both
+	// cursors in lockstep without rescanning the whole map.
+	batchOverlayKeys *btree.BTreeG[string]
+	// pendingBlocks counts how many session.Commit calls have landed
+	// into batchOverlay since the last backend flush. Used to fire
+	// FlushBatch automatically at the BatchSize boundary.
+	pendingBlocks int
 }
 
 // SnapshotSubsystem is implemented by typed in-memory state containers
@@ -151,14 +180,26 @@ func Open(path string, cacheSize int64) (*Database, error) {
 	if err != nil {
 		return nil, fmt.Errorf("state.Open %s: %w", path, err)
 	}
-	return &Database{backend: b, expHints: make(map[uint32]uint32, 16), Aux: make(map[string]any, 4)}, nil
+	return newDatabase(b), nil
 }
 
 // OpenMem opens a Database backed by an in-memory btree. State is
 // volatile — intended for replay where we can re-derive from
 // block_log on restart. Trades durability for ~3-5x throughput.
 func OpenMem() *Database {
-	return &Database{backend: openMem(), expHints: make(map[uint32]uint32, 16), Aux: make(map[string]any, 4)}
+	return newDatabase(openMem())
+}
+
+// newDatabase wraps a backend in a Database with the standard auxiliary
+// maps populated. Callers can tune BatchSize after construction.
+func newDatabase(b backend) *Database {
+	return &Database{
+		backend:          b,
+		expHints:         make(map[uint32]uint32, 16),
+		Aux:              make(map[string]any, 4),
+		batchOverlay:     make(map[string]overlayEntry, 64),
+		batchOverlayKeys: newOverlayKeyTree(),
+	}
 }
 
 // expHintKey packs (table, index) into a single uint32 for the
@@ -200,14 +241,100 @@ func (d *Database) NudgeExpHint(table TableID, index IndexID, newTime uint32) {
 }
 
 // Close releases the database. After Close, all Sessions backed by this
-// Database are invalid.
+// Database are invalid. Any pending batched writes are flushed first;
+// callers that wanted to discard them should call DiscardBatch beforehand.
 func (d *Database) Close() error {
 	if d.backend == nil {
 		return nil
 	}
+	if err := d.FlushBatch(true); err != nil {
+		return err
+	}
 	err := d.backend.Close()
 	d.backend = nil
 	return err
+}
+
+// SetBatchSize updates the commit-batch boundary. n<=1 disables
+// batching (every Session.Commit flushes immediately). n>1 coalesces
+// up to n consecutive Session.Commit calls into one backend write.
+//
+// If a partial batch is already pending it is flushed at the next
+// Commit boundary that the new boundary covers; callers that need an
+// immediate flush should follow up with FlushBatch(false).
+func (d *Database) SetBatchSize(n int) {
+	if n < 1 {
+		n = 1
+	}
+	d.BatchSize = n
+}
+
+// FlushBatch writes every accumulated batched entry to the backend and
+// resets the pending counter. Safe to call when the batch is empty.
+// sync controls whether the underlying write fsyncs (Pebble only).
+func (d *Database) FlushBatch(sync bool) error {
+	if len(d.batchOverlay) == 0 {
+		d.pendingBlocks = 0
+		return nil
+	}
+	if err := d.backend.commit(d.batchOverlay, sync); err != nil {
+		return err
+	}
+	clear(d.batchOverlay)
+	d.batchOverlayKeys.Clear()
+	d.pendingBlocks = 0
+	return nil
+}
+
+// DiscardBatch drops every pending batched entry without writing them
+// to the backend. Used by crash-recovery paths that intend to roll the
+// in-memory state back to the persisted head and re-replay forward.
+func (d *Database) DiscardBatch() {
+	clear(d.batchOverlay)
+	d.batchOverlayKeys.Clear()
+	d.pendingBlocks = 0
+}
+
+// PendingBatch reports the number of session.Commit calls that have
+// landed in the batch overlay since the last backend flush. Used by
+// snapshot save / shutdown paths that need to force a flush.
+func (d *Database) PendingBatch() int { return d.pendingBlocks }
+
+// mergeSessionIntoBatch moves the contents of (overlay, dirtyKeys) into
+// the Database batch overlay. Called by Session.Commit when batching is
+// enabled. Returns the new pendingBlocks count after the merge.
+//
+// dirtyKeys may contain duplicates (Session.Put dedups consecutive
+// writes only); the merge replays them in order so the final value
+// wins. Tombstones are merged the same as Puts — they suppress the
+// row at flush time even if a prior batched Put set a value.
+func (d *Database) mergeSessionIntoBatch(overlay map[string]overlayEntry, dirtyKeys []string) int {
+	for _, k := range dirtyKeys {
+		e, ok := overlay[k]
+		if !ok {
+			continue
+		}
+		if _, present := d.batchOverlay[k]; !present {
+			d.batchOverlayKeys.Set(k)
+		}
+		// Drop the snapshot-gen marker — once merged into the batch it
+		// is never reused-in-place by another session, and a fresh
+		// Session starts at gen 0 anyway.
+		d.batchOverlay[k] = overlayEntry{value: e.value, tombstone: e.tombstone}
+	}
+	d.pendingBlocks++
+	return d.pendingBlocks
+}
+
+// batchGet returns the batched entry for a fully-encoded key, if any.
+// Returns the entry, true if found in the batch overlay; entry.tombstone
+// distinguishes a pending delete from a pending value.
+func (d *Database) batchGet(key string) (overlayEntry, bool) {
+	if len(d.batchOverlay) == 0 {
+		return overlayEntry{}, false
+	}
+	e, ok := d.batchOverlay[key]
+	return e, ok
 }
 
 // rawGet fetches the raw value for a fully-encoded physical key, returning
