@@ -89,6 +89,11 @@ var HelloTimeout = 30 * time.Second
 //
 // All callbacks run inline on the peer's reader goroutine; do non-trivial
 // work asynchronously.
+//
+// Higher-level subsystems (sync, gossip, discovery) plug in by composing
+// Delegate implementations: each wraps the next and forwards calls it
+// doesn't claim. See internal/p2p/sync.NewDelegate for the catch-up
+// catalogue, and internal/p2p/node.MultiDelegate for the fan-out helper.
 type Delegate interface {
 	// OnPeerConnected is fired exactly once per peer, the first time it
 	// reaches StateActive.

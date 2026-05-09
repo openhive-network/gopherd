@@ -37,6 +37,12 @@ type Database struct {
 	// (only updateProducerLastConfirmed mutates LCB), so consistency
 	// holds as long as we update cache and state together.
 	lcbCache map[string]uint32
+
+	// recent caches the FC-binary bytes of the last N successfully-applied
+	// blocks so the p2p sync layer can re-serve them to peers requesting
+	// `fetch_items` during catch-up. nil = caching disabled (callers that
+	// don't need to serve sync — replay tools, tests — can leave it nil).
+	recent *RecentBlocks
 }
 
 // New wraps an opened state.Database for block application.
@@ -50,6 +56,66 @@ func New(s *state.Database) *Database {
 
 // State returns the underlying state.Database.
 func (d *Database) State() *state.Database { return d.state }
+
+// EnableRecentBlockCache turns on the in-memory ring of last-N-applied
+// raw block bytes. Required for serving p2p sync responses; callers that
+// only replay block_log can leave it disabled. Safe to call once at
+// startup (idempotent on the same capacity).
+func (d *Database) EnableRecentBlockCache(capacity int) {
+	if d.recent != nil {
+		return
+	}
+	d.recent = NewRecentBlocks(capacity)
+}
+
+// RecentBlockBytes returns the FC-binary bytes of blockNum if the recent-
+// block cache is enabled and contains it, else nil.
+func (d *Database) RecentBlockBytes(blockNum uint32) []byte {
+	if d.recent == nil {
+		return nil
+	}
+	return d.recent.ByNum(blockNum)
+}
+
+// RecentBlockBytesByID returns the FC-binary bytes of the block with the
+// given block_id if the recent-block cache is enabled and contains it.
+func (d *Database) RecentBlockBytesByID(id block.ID) []byte {
+	if d.recent == nil {
+		return nil
+	}
+	return d.recent.ByID(id)
+}
+
+// RecentBlockNums returns the block_nums currently held in the recent-
+// block cache (oldest-first).
+func (d *Database) RecentBlockNums() []uint32 {
+	if d.recent == nil {
+		return nil
+	}
+	return d.recent.RecentNums()
+}
+
+// RecentBlockIDForNum returns the cached block ID for blockNum.
+func (d *Database) RecentBlockIDForNum(blockNum uint32) (block.ID, bool) {
+	if d.recent == nil {
+		return block.ID{}, false
+	}
+	return d.recent.IDForNum(blockNum)
+}
+
+// HeadBlockID returns the current head block's 20-byte ID per DGPO.
+// Returns the zero ID + nil error when no blocks have been applied yet.
+func (d *Database) HeadBlockID() (block.ID, error) {
+	s := state.NewSession(d.state)
+	p, err := objects.GetDGPO(s)
+	if err == state.ErrNotFound {
+		return block.ID{}, nil
+	}
+	if err != nil {
+		return block.ID{}, err
+	}
+	return p.HeadBlockID, nil
+}
 
 // ApplyOptions tunes ApplyBlock behavior.
 type ApplyOptions struct {
@@ -580,6 +646,13 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 
 	if err := session.Commit(opts.Sync); err != nil {
 		return dgpo, fmt.Errorf("apply_block %d commit: %w", blockNum, err)
+	}
+	// Cache the raw block bytes so the p2p sync layer can re-serve them
+	// to peers requesting `fetch_items`. Done after commit so callers
+	// only see entries for blocks that successfully landed.
+	if d.recent != nil {
+		raw := append([]byte(nil), rawBlock...)
+		d.recent.Put(blockNum, dgpo.HeadBlockID, raw)
 	}
 	return dgpo, nil
 }
