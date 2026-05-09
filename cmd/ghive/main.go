@@ -10,6 +10,7 @@ import (
 	"hived-go/internal/chain"
 	"hived-go/internal/config"
 	"hived-go/internal/crypto"
+	"hived-go/internal/p2p/gossip"
 	p2pnode "hived-go/internal/p2p/node"
 	"hived-go/internal/plugins/witness"
 	"hived-go/internal/protocol/auth"
@@ -106,8 +107,9 @@ func main() {
 		})
 	}
 	wp := witness.New(cdb, stateDB, producers)
-	wp.Start()
-	defer wp.Stop()
+	// wp.Start is deferred until after the gossip+p2p wiring below so
+	// the broadcaster handle is in place before the production loop
+	// possibly fires its first APPLIED.
 
 	// Sanity-check producer pubkeys against the witness_object on chain
 	// so misconfiguration is caught at startup rather than every block.
@@ -132,21 +134,45 @@ func main() {
 		fmt.Println("ghive: starting in observer mode (no witnesses configured)")
 	}
 
-	// P2P. If no endpoint AND no seeds, skip entirely. Otherwise spin
-	// up a Node — agent-gossip will hook a delegate into it later.
-	var p2p *p2pnode.Node
+	// P2P + gossip. If no endpoint AND no seeds, skip entirely.
+	// Otherwise spin up a Node, then layer the gossip Service on top of
+	// it (so inbound block/tx messages go somewhere meaningful) and
+	// wire wp's Broadcaster to the gossip layer (so locally-produced
+	// blocks fan out to peers).
+	var (
+		p2p     *p2pnode.Node
+		gossipS *gossip.Service
+	)
 	if cfg.P2PEndpoint != "" || len(cfg.P2PSeedNodes) > 0 {
+		// Two-step bootstrap: build the Node + gossip Service against
+		// each other (gossip needs Node for Broadcast, Node needs
+		// gossip as Delegate), then install the delegate before Start.
 		p2p = p2pnode.New(p2pnode.Config{
 			Endpoint:  cfg.P2PEndpoint,
 			SeedNodes: cfg.P2PSeedNodes,
 			UserAgent: "ghive/0.1.0",
 		}, cdb, nil)
+		gossipS = gossip.New(gossip.Config{
+			Chain:   cdb,
+			Node:    p2p,
+			Mempool: wp,
+		})
+		p2p.SetDelegate(gossipS)
+		gossipS.Start()
+		defer gossipS.Stop()
 		if err := p2p.Start(); err != nil {
 			fmt.Fprintf(os.Stderr, "ghive: p2p start: %v\n", err)
 			os.Exit(1)
 		}
 		defer p2p.Stop()
+		// Wire the witness loop to push freshly-produced blocks at
+		// the gossip layer.
+		wp.Broadcaster = gossipS
 	}
+
+	// Now that the broadcaster is in place, start the production loop.
+	wp.Start()
+	defer wp.Stop()
 
 	// Wait for interrupt.
 	sigCh := make(chan os.Signal, 1)

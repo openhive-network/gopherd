@@ -110,6 +110,15 @@ func (n *Node) buildHelloPayload() []byte {
 	return body
 }
 
+// SetDelegate installs (or replaces) the application-layer delegate.
+// MUST be called before Start; once peers are running there is no
+// guard against the delegate pointer being read from another
+// goroutine while we replace it.
+func (n *Node) SetDelegate(d Delegate) {
+	n.delegate = d
+	// rebuild helloPayload not necessary — delegate doesn't influence it.
+}
+
 // Start launches the listener and dial-out goroutines. Idempotent — calling
 // Start twice does nothing on the second call.
 func (n *Node) Start() error {

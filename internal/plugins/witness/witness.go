@@ -25,12 +25,24 @@ import (
 
 	"hived-go/internal/chain"
 	"hived-go/internal/crypto"
+	"hived-go/internal/fcraw"
 	"hived-go/internal/protocol/block"
 	"hived-go/internal/protocol/op"
 	"hived-go/internal/protocol/tx"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
 )
+
+// Broadcaster is the slice of the gossip layer the witness plugin uses
+// to push freshly-produced blocks at the network. The daemon hands in a
+// *gossip.Service (whose BroadcastBlock method satisfies this interface).
+//
+// Kept as a small interface here so the witness package never imports
+// the gossip / p2p packages directly — production-only callers (e.g.
+// the unit-test that just exercises buildBlock) can leave it nil.
+type Broadcaster interface {
+	BroadcastBlock(rawBlock []byte, blockNum uint32)
+}
 
 // BlockInterval — HIVE_BLOCK_INTERVAL = 3 seconds.
 const BlockInterval = 3 * time.Second
@@ -44,9 +56,10 @@ type Producer struct {
 
 // Plugin holds the witness daemon state.
 type Plugin struct {
-	Chain     *chain.Database
-	State     *state.Database
-	Producers []Producer
+	Chain       *chain.Database
+	State       *state.Database
+	Producers   []Producer
+	Broadcaster Broadcaster // optional; nil = no gossip
 
 	mu      sync.Mutex
 	pending []op.Operation // mempool — ops to include in our next block
@@ -93,6 +106,37 @@ func (p *Plugin) AddPending(o op.Operation) {
 	p.mu.Lock()
 	p.pending = append(p.pending, o)
 	p.mu.Unlock()
+}
+
+// AddPendingRaw decodes a raw signed_transaction body and queues each of
+// its operations into the mempool. This is the entry point used by the
+// gossip layer for inbound TrxMessage bodies.
+//
+// LIMITATION (2.2 milestone scope): the mempool is currently a flat
+// []op.Operation, not a []SignedTransaction. We re-pack the inbound ops
+// into a single tx at block-build time (see buildBlock). Multi-op txs
+// arriving from the network DO survive this round-trip but lose their
+// original (ref_block_*, expiration, signatures) — they're re-signed
+// under the producer's key. This is fine for testnet smoke flows where
+// the wallet signs locally and broadcasts only to the producer's own
+// daemon; it WILL need a proper mempool refactor before mainnet sync
+// can run.
+func (p *Plugin) AddPendingRaw(body []byte) error {
+	r := fcraw.NewReader(body)
+	res, err := tx.ReadSignedTransaction(r)
+	if err != nil {
+		return fmt.Errorf("witness.AddPendingRaw: decode: %w", err)
+	}
+	if !r.AtEnd() {
+		return fmt.Errorf("witness.AddPendingRaw: %d trailing bytes", r.Remaining())
+	}
+	if len(res.SignedTx.Operations) == 0 {
+		return errors.New("witness.AddPendingRaw: tx has no operations")
+	}
+	p.mu.Lock()
+	p.pending = append(p.pending, res.SignedTx.Operations...)
+	p.mu.Unlock()
+	return nil
 }
 
 // Start launches the production loop in a goroutine. Returns immediately.
@@ -189,6 +233,12 @@ func (p *Plugin) maybeProduceBlock() error {
 	p.mu.Lock()
 	p.pending = p.pending[:0]
 	p.mu.Unlock()
+	// Broadcast to peers. The gossip layer marks the block ID as seen
+	// before fanning out so peers' echo of OUR block doesn't trigger a
+	// re-apply on this node.
+	if p.Broadcaster != nil {
+		p.Broadcaster.BroadcastBlock(rawBlock, dgpo.HeadBlockNumber+1)
+	}
 	return nil
 }
 
