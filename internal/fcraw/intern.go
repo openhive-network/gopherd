@@ -1,5 +1,7 @@
 package fcraw
 
+import "sync"
+
 // HiveAccountNameMaxLen is the protocol-bounded maximum length for a
 // Hive account_name (HIVE_MAX_ACCOUNT_NAME_LENGTH in libraries/protocol/
 // include/hive/protocol/config.hpp = 16). Used by ReadString to decide
@@ -18,9 +20,15 @@ const HiveAccountNameMaxLen = 16
 // `m[string(byteSlice)]` which avoids allocating during the lookup
 // itself; only the miss path allocates the canonical string.
 //
-// Single-threaded replay only — no lock. Production use (concurrent
-// readers) would need sync.RWMutex around the map.
-var internedStrings = make(map[string]string, 1<<14)
+// Phase 2 onward this map is hit concurrently by p2p sync, gossip, and
+// witness goroutines all deserializing blocks in parallel. RWMutex is
+// required to avoid the runtime's "concurrent map read and map write"
+// fatal. Reads use RLock (no contention between readers); the rare
+// miss escalates to Lock for the insert with a re-check inside.
+var (
+	internMu        sync.RWMutex
+	internedStrings = make(map[string]string, 1<<14)
+)
 
 // InternString returns a canonical instance of the string contents of
 // b. For repeated short strings (account names) this avoids the per-
@@ -30,10 +38,19 @@ func InternString(b []byte) string {
 	if len(b) > HiveAccountNameMaxLen {
 		return string(b)
 	}
+	internMu.RLock()
 	if s, ok := internedStrings[string(b)]; ok {
+		internMu.RUnlock()
 		return s
 	}
+	internMu.RUnlock()
 	s := string(b)
+	internMu.Lock()
+	if existing, ok := internedStrings[s]; ok {
+		internMu.Unlock()
+		return existing
+	}
 	internedStrings[s] = s
+	internMu.Unlock()
 	return s
 }
