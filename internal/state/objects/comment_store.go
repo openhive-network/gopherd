@@ -35,10 +35,13 @@ type CommentStore struct {
 }
 
 type commentUndo struct {
-	key        string  // primary key
+	key        string   // primary key
 	prev       *Comment // nil = the row didn't exist before this mutation
-	prevInRoot string  // root_key of `prev` (for restoring to byRoot)
-	curInRoot  string  // root_key of the post-mutation row (for removing from byRoot)
+	cur        *Comment // pointer that was added to byRoot[curInRoot] in the
+	// post-mutation state; identity-equal removal is O(N) but
+	// avoids the per-comparison commentKey allocation.
+	prevInRoot string // root_key of `prev` (for restoring to byRoot)
+	curInRoot  string // root_key of the post-mutation row (for removing from byRoot)
 }
 
 const commentStoreSubsystemKey = "comment_store"
@@ -77,9 +80,9 @@ func (s *CommentStore) RestoreToPoint(snap int) {
 	for i := len(s.undoLog) - 1; i >= snap; i-- {
 		e := s.undoLog[i]
 		// Reverse the byRoot membership change first.
-		if e.curInRoot != "" {
-			// Mutation added a comment with cur root — remove it.
-			s.byRootRemove(e.curInRoot, e.key)
+		if e.curInRoot != "" && e.cur != nil {
+			// Mutation added e.cur with cur root — remove it.
+			s.byRootRemove(e.curInRoot, e.cur)
 		}
 		if e.prev != nil {
 			s.primary[e.key] = e.prev
@@ -107,11 +110,16 @@ func (s *CommentStore) rootKeyOf(c *Comment) string {
 	return string(commentKey(rootAuthor, rootPermlink))
 }
 
-// byRootRemove drops `key` from byRoot[rootKey]. No-op if not present.
-func (s *CommentStore) byRootRemove(rootKey, key string) {
+// byRootRemove drops the comment whose pointer matches `target` from
+// byRoot[rootKey]. No-op if not present. Pointer identity (not key
+// equality) is the matching predicate so the inner loop is a cheap
+// integer compare rather than per-iteration commentKey() allocation
+// + string compare. byRoot stores the SAME pointer that primary[]
+// stores for each comment, so identity is the correct predicate.
+func (s *CommentStore) byRootRemove(rootKey string, target *Comment) {
 	list := s.byRoot[rootKey]
 	for i, c := range list {
-		if string(commentKey(c.Author, c.Permlink)) == key {
+		if c == target {
 			// Swap-remove: O(1) instead of O(N).
 			list[i] = list[len(list)-1]
 			list = list[:len(list)-1]
@@ -157,7 +165,7 @@ func (s *CommentStore) Put(c *Comment) {
 		prevRoot = s.rootKeyOf(prev)
 		// Remove the OLD pointer from byRoot[prevRoot] so we can re-add
 		// the new pointer cleanly.
-		s.byRootRemove(prevRoot, key)
+		s.byRootRemove(prevRoot, prev)
 	}
 	s.byRoot[curRoot] = append(s.byRoot[curRoot], &cp)
 	s.primary[key] = &cp
@@ -165,6 +173,7 @@ func (s *CommentStore) Put(c *Comment) {
 	s.undoLog = append(s.undoLog, commentUndo{
 		key:        key,
 		prev:       prev,
+		cur:        &cp,
 		prevInRoot: prevRoot,
 		curInRoot:  curRoot,
 	})
@@ -178,11 +187,12 @@ func (s *CommentStore) Delete(author auth.AccountName, permlink string) {
 		return
 	}
 	prevRoot := s.rootKeyOf(prev)
-	s.byRootRemove(prevRoot, key)
+	s.byRootRemove(prevRoot, prev)
 	delete(s.primary, key)
 	s.undoLog = append(s.undoLog, commentUndo{
 		key:        key,
 		prev:       prev,
+		cur:        nil,
 		prevInRoot: prevRoot,
 		curInRoot:  "",
 	})

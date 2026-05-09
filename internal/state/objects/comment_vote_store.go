@@ -82,7 +82,7 @@ func (s *CommentVoteStore) RestoreToPoint(snap int) {
 		// Undo the byComment membership change first.
 		if e.cur != nil && e.prev == nil {
 			// Mutation added a new entry — remove it from byComment.
-			s.byCommentRemove(e.commentKey, e.key)
+			s.byCommentRemove(e.commentKey, e.cur)
 		} else if e.cur == nil && e.prev != nil {
 			// Mutation deleted an entry — re-add it.
 			s.byComment[e.commentKey] = append(s.byComment[e.commentKey], e.prev)
@@ -108,12 +108,14 @@ func (s *CommentVoteStore) RestoreToPoint(snap int) {
 
 func (s *CommentVoteStore) CommitPoint() { s.undoLog = s.undoLog[:0] }
 
-// byCommentRemove drops the entry whose primary key == primKey from
-// byComment[commentKey].
-func (s *CommentVoteStore) byCommentRemove(commentKey, primKey string) {
+// byCommentRemove drops the entry whose pointer matches `target` from
+// byComment[commentKey]. Pointer-identity matching avoids the per-loop
+// commentVoteKey() allocation that the previous string-equality form
+// performed (~2GB of needless allocations across a 1M-block window).
+func (s *CommentVoteStore) byCommentRemove(commentKey string, target *CommentVote) {
 	list := s.byComment[commentKey]
 	for i, cv := range list {
-		if string(commentVoteKey(cv.Voter, cv.Author, cv.Permlink)) == primKey {
+		if cv == target {
 			list[i] = list[len(list)-1]
 			list = list[:len(list)-1]
 			if len(list) == 0 {
@@ -181,7 +183,7 @@ func (s *CommentVoteStore) Delete(voter, author auth.AccountName, permlink strin
 		return
 	}
 	cKey := string(commentKey(author, permlink))
-	s.byCommentRemove(cKey, key)
+	s.byCommentRemove(cKey, prev)
 	delete(s.primary, key)
 	s.undoLog = append(s.undoLog, commentVoteUndo{
 		key:        key,
