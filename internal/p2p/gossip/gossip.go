@@ -1,37 +1,42 @@
-// Package gossip wires the p2p Node's per-peer message stream into the
-// daemon's chain.Database and witness mempool. It is the "what to do
-// with an inbound block / tx" half of the Phase-2.2 milestone.
+// Package gossip is the OUTBOUND broadcast half of the daemon's p2p
+// wiring. It hands inbound transactions to the local mempool and
+// re-fans-out blocks once they've been applied locally — but it does
+// NOT itself drain inbound blocks into chain.Database.ApplyBlock.
 //
-// Responsibilities
+// Why not? chain.Database.ApplyBlock is single-writer (one shared
+// *state.Session). The agent-sync delegate already owns the only
+// goroutine that may legally call ApplyBlock; gossip used to have its
+// own apply loop too, which raced sync's on every block (concurrent map
+// writes against state.Session.Aux). The fix is to delete gossip's
+// apply path: sync's MultiDelegate sibling drains EVERY inbound block,
+// gossip's OnBlockReceived is a no-op, and gossip only fires on the
+// OUTBOUND side — local production (witness plugin) and post-apply
+// re-broadcast (driven by sync's applyLoop).
 //
-//   - Implement node.Delegate. Inbound BlockMessage / TrxMessage bodies
-//     come in here; outbound peer life-cycle events are forwarded.
-//   - Apply inbound blocks SERIALLY. chain.Database.ApplyBlock is not
-//     goroutine-safe (single shared *state.Session); a buffered queue
-//     plus a single drain goroutine guarantees that.
-//   - Dedup. Each block (and each tx) is identified by a 20-byte hash.
-//     Once we've seen one, we drop subsequent copies — both for "don't
-//     apply twice" and "don't echo forever". The dedup window is a
-//     simple LRU map sized at gossipDedupCapacity.
-//   - Re-broadcast. On successful apply we forward the block to every
-//     OTHER peer (the sender is excluded so traffic doesn't bounce
-//     between us and them on every block). For tx messages we also
-//     re-broadcast on successful AddPending.
+// Responsibilities now:
+//
+//   - Implement node.Delegate. Inbound TrxMessage bodies hit
+//     OnTransactionReceived (mempool + re-broadcast). Inbound blocks
+//     are claimed by sync; gossip's OnBlockReceived is a no-op.
 //   - Originate. The witness plugin calls BroadcastBlock once it has
-//     locally applied its produced block. The gossip layer marks the
-//     block ID as seen so the inevitable peer-echo of OUR OWN block
-//     is silently dropped instead of re-applied.
-//
-// Inventory + catch-up sync (item_ids_inventory exchange, blockchain
-// synopsis, fetch_items round-trips) are NOT here — that's agent-sync's
-// territory. This layer assumes peers gossip every freshly-produced
-// block on its first hop and that catch-up needs are out of scope for
-// the 3-node testnet smoke test.
+//     locally applied its produced block; gossip marks the block ID
+//     as seen (so the inevitable peer-echo of OUR own block is dropped
+//     by the per-peer dedup) and fans the body out to every peer.
+//   - Re-broadcast. After sync's applyLoop successfully applies an
+//     inbound block, it invokes BroadcastAppliedBlock here (wired via
+//     sync.Config.OnBlockApplied). We fan the block out to every peer
+//     OTHER than the one we got it from. The recipient's gossip layer
+//     dedups its own seenSet; even without per-block source tracking
+//     loops would still terminate at the recipient's chain head check,
+//     but excluding the source saves one hop of bandwidth per peer.
+//   - Tx dedup. Inbound transaction IDs go through seenTx so we don't
+//     re-broadcast the same tx forever. Block dedup is now done in two
+//     places: gossip's seenBlk (for locally-produced blocks, so we
+//     don't double-broadcast on the apply hook) and sync's per-peer
+//     known set (for inbound).
 package gossip
 
 import (
-	"sync"
-
 	"hived-go/internal/chain"
 	"hived-go/internal/crypto"
 	p2pnode "hived-go/internal/p2p/node"
@@ -57,7 +62,9 @@ type MempoolAdder interface {
 
 // Config tunes a Service.
 type Config struct {
-	// Chain is the chain.Database to ApplyBlock against. Required.
+	// Chain is retained for source-compatibility with callers that still
+	// pass it; gossip no longer reads from it (the apply path lives in
+	// p2p/sync now). Safe to leave nil.
 	Chain *chain.Database
 	// Node is the p2p Node to broadcast / re-broadcast on. Required.
 	Node *p2pnode.Node
@@ -66,9 +73,6 @@ type Config struct {
 	Mempool MempoolAdder
 	// Logger optional — if nil, falls back to Node.Logf via NewService.
 	Logger Logger
-	// QueueSize sets the buffered-channel depth between the peer
-	// goroutines and the single ApplyBlock drain. Default 256.
-	QueueSize int
 	// DedupCapacity caps the number of remembered block IDs / tx IDs.
 	// When the cap is reached, oldest entries are evicted. Default 4096.
 	DedupCapacity int
@@ -79,29 +83,13 @@ type Service struct {
 	cfg    Config
 	logger Logger
 
-	blockQ chan inboundBlock
-
-	mu       sync.Mutex
-	seenBlk  *seenSet
-	seenTx   *seenSet
-	stopOnce sync.Once
-	stopCh   chan struct{}
-	doneCh   chan struct{}
+	seenBlk *seenSet
+	seenTx  *seenSet
 }
 
-// inboundBlock pairs a raw block body with the peer it arrived from
-// (so we can re-broadcast to everyone EXCEPT the sender). origin == nil
-// means "the local witness produced this block".
-type inboundBlock struct {
-	body   []byte
-	origin *p2pnode.Peer
-}
-
-// New builds an unstarted *Service. Call Start to launch the apply loop.
+// New builds a Service. There are no background goroutines to start;
+// the apply path now lives in p2p/sync.
 func New(cfg Config) *Service {
-	if cfg.QueueSize <= 0 {
-		cfg.QueueSize = 256
-	}
 	if cfg.DedupCapacity <= 0 {
 		cfg.DedupCapacity = 4096
 	}
@@ -112,117 +100,79 @@ func New(cfg Config) *Service {
 	return &Service{
 		cfg:     cfg,
 		logger:  logger,
-		blockQ:  make(chan inboundBlock, cfg.QueueSize),
 		seenBlk: newSeenSet(cfg.DedupCapacity),
 		seenTx:  newSeenSet(cfg.DedupCapacity),
-		stopCh:  make(chan struct{}),
-		doneCh:  make(chan struct{}),
 	}
 }
 
-// Start launches the single apply goroutine.
-func (s *Service) Start() {
-	go s.applyLoop()
-}
+// Start is a no-op preserved for backward compatibility with callers
+// that still wrap Service in a Start/Stop lifecycle. Gossip no longer
+// owns any goroutines.
+func (s *Service) Start() {}
 
-// Stop signals the apply goroutine to exit and waits for it to drain.
-func (s *Service) Stop() {
-	s.stopOnce.Do(func() {
-		close(s.stopCh)
-	})
-	<-s.doneCh
-}
-
-// applyLoop is the single drainer for inbound blocks. ApplyBlock is
-// called only from this goroutine, ensuring chain.Database's shared
-// session stays single-writer.
-func (s *Service) applyLoop() {
-	defer close(s.doneCh)
-	for {
-		select {
-		case <-s.stopCh:
-			return
-		case ib := <-s.blockQ:
-			s.applyOne(ib)
-		}
-	}
-}
-
-// applyOne handles one queued inbound block: parse the BlockMessage
-// envelope, dedup, ApplyBlock, re-broadcast on success.
-func (s *Service) applyOne(ib inboundBlock) {
-	rawBlock, blockID, ok := splitBlockMessage(ib.body)
-	if !ok {
-		s.logger.Logf("gossip: drop malformed block (%d bytes)", len(ib.body))
-		return
-	}
-	// Dedup. Mark the ID seen FIRST so concurrent inbound copies of the
-	// same block (which can race past the queue from multiple peers in
-	// quick succession) collapse to one apply.
-	if !s.seenBlk.add(blockID) {
-		// Already seen — silently drop.
-		return
-	}
-
-	headBN, err := s.cfg.Chain.HeadBlock()
-	if err != nil {
-		s.logger.Logf("gossip: head_block lookup: %v", err)
-		return
-	}
-	nextBN := headBN + 1
-	stats := chain.Stats{}
-	_, err = s.cfg.Chain.ApplyBlock(rawBlock, nextBN, chain.ApplyOptions{
-		Sync:               true,
-		SkipBlockSignature: false, // real verification on the inbound path
-	}, &stats)
-	if err != nil {
-		// Apply failure could be "duplicate block we already had via
-		// another path" or "out-of-order arrival" or "real bad block".
-		// Don't disconnect — log + drop.
-		s.logger.Logf("gossip: apply block %d failed: %v", nextBN, err)
-		return
-	}
-	s.logger.Logf("gossip: applied block %d from peer %s", nextBN, peerName(ib.origin))
-	// Re-broadcast to everyone OTHER than the sender. ib.origin == nil
-	// means the local witness originated this block — broadcast to all.
-	s.cfg.Node.Broadcast(proto.BlockMessageType, ib.body, ib.origin)
-}
-
-// splitBlockMessage cracks a BlockMessage body into (signed_block, block_id).
-// The body layout (proto.BlockMessage.Marshal) is signed_block_bytes
-// concatenated with a trailing 20-byte block_id.
-func splitBlockMessage(body []byte) (rawBlock []byte, id block.ID, ok bool) {
-	if len(body) < block.IDSize {
-		return nil, block.ID{}, false
-	}
-	bodyEnd := len(body) - block.IDSize
-	rawBlock = body[:bodyEnd]
-	copy(id[:], body[bodyEnd:])
-	return rawBlock, id, true
-}
+// Stop is a no-op preserved for backward compatibility.
+func (s *Service) Stop() {}
 
 // BroadcastBlock is called by the witness plugin once it has locally
-// applied its newly-produced block. The block ID is marked seen so
-// peers' inevitable echo of our own block doesn't trigger a re-apply,
-// and the body is fanned out to every peer.
+// applied its newly-produced block. The block ID is marked seen so we
+// don't double-broadcast when the chain.SetOnBlockApplied hook fires
+// from inside ApplyBlock for the same body, and so peers' inevitable
+// echo of our own block doesn't trigger a re-apply.
 //
 // rawBlock is JUST the signed_block bytes (no trailing block_id);
 // the gossip layer derives the block_id from the header itself.
 func (s *Service) BroadcastBlock(rawBlock []byte, blockNum uint32) {
-	// Parse the signed-header byte range so we can compute the block_id.
-	_, hdrLen, err := block.UnmarshalSignedHeader(rawBlock)
-	if err != nil {
-		s.logger.Logf("gossip: broadcast — local block header parse: %v", err)
+	id, ok := blockIDFromHeader(rawBlock, blockNum)
+	if !ok {
+		s.logger.Logf("gossip: broadcast — local block header parse failed")
 		return
 	}
-	id := block.ConstructID(rawBlock[:hdrLen], blockNum)
-	s.seenBlk.add(id)
+	if !s.seenBlk.add(id) {
+		// Already broadcast (e.g. apply hook fired first).
+		return
+	}
+	body := buildBlockMessageBody(rawBlock, id)
+	s.cfg.Node.Broadcast(proto.BlockMessageType, body, nil)
+}
 
-	// BlockMessage on the wire = signed_block_bytes + 20-byte block_id.
+// BroadcastAppliedBlock is wired into sync.Config.OnBlockApplied. It
+// fires from sync's applyLoop AFTER a successful ApplyBlock; we fan
+// the block out to every peer other than `source`. `source == nil`
+// indicates a locally-produced block (in which case BroadcastBlock has
+// usually already broadcast it; this call short-circuits via the
+// seenBlk dedup).
+func (s *Service) BroadcastAppliedBlock(rawBlock []byte, blockNum uint32, source *p2pnode.Peer) {
+	id, ok := blockIDFromHeader(rawBlock, blockNum)
+	if !ok {
+		s.logger.Logf("gossip: re-broadcast block %d — header parse failed", blockNum)
+		return
+	}
+	if !s.seenBlk.add(id) {
+		// We've already broadcast this body (e.g. local witness path
+		// already fired BroadcastBlock above).
+		return
+	}
+	body := buildBlockMessageBody(rawBlock, id)
+	s.cfg.Node.Broadcast(proto.BlockMessageType, body, source)
+}
+
+// blockIDFromHeader derives the canonical 20-byte block_id from the
+// signed_block bytes' header range and the consumer-known block_num.
+func blockIDFromHeader(rawBlock []byte, blockNum uint32) (block.ID, bool) {
+	_, hdrLen, err := block.UnmarshalSignedHeader(rawBlock)
+	if err != nil {
+		return block.ID{}, false
+	}
+	return block.ConstructID(rawBlock[:hdrLen], blockNum), true
+}
+
+// buildBlockMessageBody returns a fresh BlockMessage body =
+// signed_block_bytes || 20-byte block_id, ready to hand to Node.Broadcast.
+func buildBlockMessageBody(rawBlock []byte, id block.ID) []byte {
 	body := make([]byte, 0, len(rawBlock)+block.IDSize)
 	body = append(body, rawBlock...)
 	body = append(body, id[:]...)
-	s.cfg.Node.Broadcast(proto.BlockMessageType, body, nil)
+	return body
 }
 
 // --- node.Delegate ---
@@ -244,27 +194,15 @@ func (s *Service) OnAddressesReceived(p *p2pnode.Peer, addrs []proto.AddressInfo
 // (loggingDelegate.BuildAddressReply routes through n.buildAddressReply).
 func (s *Service) BuildAddressReply(p *p2pnode.Peer) []proto.AddressInfo { return nil }
 
-// OnBlockReceived enqueues the block for application + re-broadcast on
-// the apply goroutine. We DO NOT apply inline — peers' read loops would
-// block until ApplyBlock returned, freezing heartbeat traffic in the
-// process.
-func (s *Service) OnBlockReceived(p *p2pnode.Peer, body []byte) {
-	// Cheap pre-dedup: if we've already seen this block, drop here so
-	// the queue doesn't fill with redundant copies during a fan-out
-	// storm. The drain loop's add() is the authoritative gate; this
-	// is a load-shedder.
-	if _, id, ok := splitBlockMessage(body); ok && s.seenBlk.contains(id) {
-		return
-	}
-	select {
-	case s.blockQ <- inboundBlock{body: body, origin: p}:
-	default:
-		// Queue full — drop. The block will be re-gossipped by some
-		// other peer on the next hop. Better to drop than to stall the
-		// peer goroutine (which would also stall heartbeats).
-		s.logger.Logf("gossip: drop block from %s — apply queue full", peerName(p))
-	}
-}
+// OnBlockReceived is a NO-OP. Inbound blocks are claimed by the sync
+// delegate's OnBlockReceived (sibling under the same MultiDelegate),
+// which drains them through its single applyLoop. Having gossip ALSO
+// apply blocks would race sync on chain.Database's shared session.
+//
+// On apply success, sync invokes BroadcastAppliedBlock to fan the
+// block out to peers — that re-broadcast is the only outbound role
+// gossip plays for inbound traffic now.
+func (s *Service) OnBlockReceived(p *p2pnode.Peer, body []byte) {}
 
 // OnTransactionReceived dedupes and pushes the tx body into the local
 // mempool, then re-broadcasts to everyone except the sender. Mempool
