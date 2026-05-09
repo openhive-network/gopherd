@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"hived-go/internal/blocklog/zstd"
 )
 
 // Writer is the append-only counterpart to Reader. Each Append writes one
@@ -60,12 +62,17 @@ type Writer interface {
 // resume after its head — the caller is responsible for ensuring path was
 // written by a compatible writer (same on-disk format).
 //
-// compressBlocks is currently a no-op flag; the parameter is preserved for
-// API forward-compatibility with a future compressing writer.
+// compressBlocks=true makes Append zstd-compress each block before writing,
+// using hived's per-block-million dictionary scheme and the same parameters
+// (magicless format, no checksum, no content size, no in-frame dict ID, level
+// 15 — see internal/blocklog/zstd/encoder.go). The output of each Append is
+// byte-identical to what hived's `compress_block_log` utility emits for the
+// same block.
+//
+// compressBlocks=false (legacy default) writes uncompressed blocks; existing
+// callers and unit tests that compare against an uncompressed reference still
+// work unchanged.
 func OpenForWrite(path string, compressBlocks bool) (Writer, error) {
-	if compressBlocks {
-		return nil, errors.New("blocklog: compressing writer not yet implemented; use Append on already-compressed bytes via AppendRaw")
-	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("blocklog: mkdir for %s: %w", path, err)
 	}
@@ -103,10 +110,14 @@ func OpenForWrite(path string, compressBlocks bool) (Writer, error) {
 	}
 
 	w := &fileWriter{
-		main:        main,
-		idx:         idx,
-		mainSize:    uint64(mainStat.Size()),
-		idxEntries:  uint32(idxStat.Size() / indexEntrySize),
+		main:       main,
+		idx:        idx,
+		mainSize:   uint64(mainStat.Size()),
+		idxEntries: uint32(idxStat.Size() / indexEntrySize),
+		compress:   compressBlocks,
+	}
+	if compressBlocks {
+		w.compressor = zstd.NewCompressor()
 	}
 	return w, nil
 }
@@ -123,11 +134,48 @@ type fileWriter struct {
 	// idxEntries is the number of 8-byte entries written so far == head
 	// block number when the writer started from an empty file.
 	idxEntries uint32
+
+	// compress is true when Append should zstd-compress the block bytes
+	// before writing. AppendRaw bypasses compression — the caller is
+	// expected to have done it.
+	compress bool
+
+	// compressor is non-nil when compress is true. Reused across Append
+	// calls to amortize per-block setup.
+	compressor *zstd.Compressor
 }
 
-// Append writes block bytes with the uncompressed flag.
+// Append writes one block. When the writer was opened with
+// compressBlocks=true, the block is zstd-compressed using hived's per-block
+// dictionary scheme before being written; otherwise it's stored verbatim.
+//
+// The compressed-path block number is derived from idxEntries + 1 (the next
+// block we're about to record). hived selects dict #
+// `min(blockNum/1_000_000, last_available_dict)`, which we mirror via
+// zstd.BestDictNumberForBlock.
 func (w *fileWriter) Append(rawBlock []byte) error {
-	return w.AppendRaw(rawBlock, Attributes{Compressed: false})
+	if !w.compress {
+		return w.AppendRaw(rawBlock, Attributes{Compressed: false})
+	}
+	blockNum := w.idxEntries + 1
+	dictNum, hasDict := zstd.BestDictNumberForBlock(blockNum)
+	var (
+		payload []byte
+		err     error
+	)
+	if hasDict {
+		payload, err = w.compressor.Compress(rawBlock, dictNum)
+	} else {
+		payload, err = w.compressor.CompressNoDict(rawBlock)
+	}
+	if err != nil {
+		return fmt.Errorf("blocklog: compress block %d: %w", blockNum, err)
+	}
+	return w.AppendRaw(payload, Attributes{
+		Compressed:    true,
+		HasDictNum:    hasDict,
+		DictionaryNum: dictNum,
+	})
 }
 
 // AppendRaw is the low-level append. Writes bytes followed by the packed

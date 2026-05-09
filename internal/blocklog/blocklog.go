@@ -241,6 +241,38 @@ func (r *Reader) Block(blockNum uint32) ([]byte, error) {
 	return out, nil
 }
 
+// RawBlockBytes returns the on-disk bytes for blockNum WITHOUT decompressing
+// them, plus the block's attributes (so callers know whether to decompress
+// themselves). Used by the parity tests in cmd/ghive-sync to compare a freshly
+// re-compressed slice against the source file.
+func (r *Reader) RawBlockBytes(blockNum uint32) ([]byte, Attributes, error) {
+	if blockNum == 0 || blockNum > r.headBlock {
+		return nil, Attributes{}, fmt.Errorf("blocklog: block %d out of range [1, %d]", blockNum, r.headBlock)
+	}
+	p := r.partFor(blockNum)
+	if p == nil {
+		return nil, Attributes{}, fmt.Errorf("blocklog: no part covers block %d", blockNum)
+	}
+	relIdx := blockNum - p.first
+	packed, err := p.lookupTrailer(relIdx)
+	if err != nil {
+		return nil, Attributes{}, fmt.Errorf("blocklog: lookup block %d: %w", blockNum, err)
+	}
+	off, attr := decodeTrailer(packed)
+	endOff, err := p.endOffset(relIdx)
+	if err != nil {
+		return nil, Attributes{}, fmt.Errorf("blocklog: end offset for block %d: %w", blockNum, err)
+	}
+	if endOff < off {
+		return nil, Attributes{}, fmt.Errorf("blocklog: corrupt offsets for block %d (start %d > end %d)", blockNum, off, endOff)
+	}
+	raw := make([]byte, endOff-off)
+	if _, err := p.main.ReadAt(raw, int64(off)); err != nil {
+		return nil, Attributes{}, fmt.Errorf("blocklog: read block %d: %w", blockNum, err)
+	}
+	return raw, attr, nil
+}
+
 // Attributes returns the parsed attributes for blockNum without touching the
 // main file. Useful for diagnostics.
 func (r *Reader) Attributes(blockNum uint32) (Attributes, error) {
