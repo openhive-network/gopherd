@@ -58,6 +58,12 @@ type Conn struct {
 	closeOnce   sync.Once
 	remotePub   crypto.PublicKey
 	localPub    crypto.PublicKey
+	// localPriv is the ephemeral secp256k1 private key we generated for
+	// this connection's stcp handshake. Hived's hello_message handler
+	// requires us to sign sha256(shared_secret_64) with this key and
+	// echo our pubkey back; the signature lets the peer recover the
+	// pubkey and prove we both completed the same ECDHE.
+	localPriv *crypto.PrivateKey
 }
 
 // performHandshake exchanges 33-byte pubkeys with the remote and
@@ -121,6 +127,7 @@ func performHandshake(raw net.Conn) (*Conn, error) {
 		decrypter: dec,
 		remotePub: remotePub,
 		localPub:  localPub,
+		localPriv: priv,
 	}, nil
 }
 
@@ -216,6 +223,12 @@ func (c *Conn) RemotePublicKey() crypto.PublicKey { return c.remotePub }
 // node layer to sign / verify the `signed_shared_secret` field in
 // hello_message.
 func (c *Conn) SharedSecret() crypto.SharedSecret512 { return c.sharedKey }
+
+// LocalPrivateKey returns the ephemeral secp256k1 private key generated
+// for this connection. The hello-message builder signs sha256(shared_secret)
+// with it so hived can recover the pubkey from the signature and prove
+// we own LocalPublicKey + completed the same ECDHE.
+func (c *Conn) LocalPrivateKey() *crypto.PrivateKey { return c.localPriv }
 
 // RemoteAddr returns the underlying TCP RemoteAddr.
 func (c *Conn) RemoteAddr() net.Addr { return c.raw.RemoteAddr() }

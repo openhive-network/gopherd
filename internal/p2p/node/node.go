@@ -2,16 +2,20 @@ package node
 
 import (
 	"context"
-	"encoding/binary"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net"
 	"net/netip"
 	"os"
+	"runtime"
+	"strconv"
 	"sync"
 	"time"
 
 	"hived-go/internal/chain"
+	"hived-go/internal/crypto"
 	"hived-go/internal/p2p/peerdb"
 	"hived-go/internal/p2p/proto"
 	"hived-go/internal/p2p/transport"
@@ -84,7 +88,7 @@ type Node struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
-	helloPayload []byte // built once at New
+	// helloPayload removed: now built per-peer in buildHelloPayload(c).
 	peerdb       *peerdb.Store
 
 	// localAddrPorts caches the parsed forms of cfg.Endpoint so
@@ -120,7 +124,6 @@ func New(cfg Config, ch ChainView, delegate Delegate) *Node {
 		pendingDials:    make(map[string]struct{}),
 		selfEndpoints:   make(map[string]struct{}),
 	}
-	n.helloPayload = n.buildHelloPayload()
 	n.populateSelfEndpoints()
 	return n
 }
@@ -166,35 +169,87 @@ func (n *Node) populateSelfEndpoints() {
 	}
 }
 
-// buildHelloPayload assembles a stub HelloMessage body. Wire format will
-// be replaced by agent-p2p-msg's FC-encoded version on merge.
+// buildHelloPayload assembles the FC-encoded body of hived's hello_message
+// for one outbound connection. Hived's on_hello_message handler verifies:
 //
-// Layout (LE everywhere):
+//  1. node_public_key matches the ephemeral pubkey we presented during
+//     the stcp ECDHE handshake (so we own LocalPublicKey).
+//  2. recovered pubkey from signed_shared_secret over sha256(shared_secret)
+//     equals node_public_key (proves we computed the same shared secret,
+//     i.e. no MITM).
+//  3. user_data["chain_id"] (when present) matches the local chain.
 //
-//   [u32 user_agent_len][user_agent bytes]
-//   [32 bytes chain_id]
-//   [u32 head_block_num]
-//
-// agent-p2p-msg's HelloMessage carries more fields (core_protocol_version,
-// inbound_address, ports, node_public_key, signed_shared_secret, user_data),
-// but for transport-only validation we just need bytes that survive the
-// round-trip.
-func (n *Node) buildHelloPayload() []byte {
-	ua := []byte(n.cfg.UserAgent)
-	headBlock := uint32(0)
-	if n.chain != nil {
-		if h, err := n.chain.HeadBlock(); err == nil {
-			headBlock = h
+// Each peer connection has a distinct ephemeral key + shared secret, so
+// hello must be built lazily per-connection (after performHandshake
+// completes). The returned bytes are the FC-encoded body; the envelope
+// header is added by transport.Conn.Send.
+func (n *Node) buildHelloPayload(c *transport.Conn) ([]byte, error) {
+	priv := c.LocalPrivateKey()
+	if priv == nil {
+		return nil, fmt.Errorf("hello: stcp local ephemeral key not exposed")
+	}
+	shared := c.SharedSecret()
+	digest := sha256.Sum256(shared[:])
+	sig, err := crypto.SignCompact(priv, digest)
+	if err != nil {
+		return nil, fmt.Errorf("hello: sign shared secret: %w", err)
+	}
+
+	localPub := c.LocalPublicKey()
+	var nodePub proto.PublicKeyData
+	copy(nodePub[:], localPub[:])
+	var sigBytes proto.CompactSignature
+	copy(sigBytes[:], sig[:])
+
+	// Inbound port = our listening port (0 if outbound-only).
+	var inboundPort uint16
+	if n.cfg.Endpoint != "" {
+		if _, p, err := net.SplitHostPort(n.cfg.Endpoint); err == nil {
+			if v, err := strconv.ParseUint(p, 10, 16); err == nil {
+				inboundPort = uint16(v)
+			}
 		}
 	}
-	body := make([]byte, 4+len(ua)+32+4)
-	binary.LittleEndian.PutUint32(body[0:4], uint32(len(ua)))
-	copy(body[4:], ua)
-	off := 4 + len(ua)
-	copy(body[off:off+32], network.ChainID[:])
-	off += 32
-	binary.LittleEndian.PutUint32(body[off:off+4], headBlock)
-	return body
+	// outbound_port mirrors inbound_port for hived (see node.cpp:on_hello).
+	outboundPort := inboundPort
+	// inbound_address is filled by the peer side from the TCP connection
+	// (see hived's on_hello_message — it reads originating_peer's
+	// inbound_address from this field but actually uses get_remote_endpoint
+	// for routing). Send loopback as a placeholder; hived ignores.
+	inboundAddr := netip.MustParseAddr("0.0.0.0")
+
+	// user_data carries chain_id + node_id + version stamps. All fields
+	// are optional per hived's parse_hello_user_data_for_peer, but
+	// chain_id is checked against the local chain when present, which is
+	// the difference between "known peer on the same network" and
+	// "stranger; close politely". We send the canonical fields hived
+	// sends back.
+	ud := proto.NewVarObject()
+	ud.Set("chain_id", proto.NewVariantString(network.ChainID.Hex()))
+	// node_id: stable identity. For now reuse our ephemeral pubkey hex
+	// (hived dedups by this; same value across reconnects is a separate
+	// identity-key concern we'll layer in later).
+	ud.Set("node_id", proto.NewVariantString(hex.EncodeToString(localPub[:])))
+	ud.Set("graphene_git_revision_sha", proto.NewVariantString("ghive-go"))
+	ud.Set("graphene_git_revision_unix_timestamp", proto.NewVariantUint64(uint64(time.Now().Unix())))
+	ud.Set("platform", proto.NewVariantString(runtime.GOOS))
+	ud.Set("bitness", proto.NewVariantUint64(64))
+
+	hello := proto.HelloMessage{
+		UserAgent:           n.cfg.UserAgent,
+		CoreProtocolVersion: proto.CoreProtocolVersion,
+		InboundAddress:      inboundAddr,
+		InboundPort:         inboundPort,
+		OutboundPort:        outboundPort,
+		NodePublicKey:       nodePub,
+		SignedSharedSecret:  sigBytes,
+		UserData:            ud,
+	}
+	body, err := hello.Marshal()
+	if err != nil {
+		return nil, fmt.Errorf("hello: marshal: %w", err)
+	}
+	return body, nil
 }
 
 // SetDelegate installs (or replaces) the application-layer delegate.
@@ -436,7 +491,7 @@ func (n *Node) handleNewConn(c *transport.Conn, dir Direction, dialEndpoint stri
 		}
 	}
 
-	peer := newPeer(c, dir, n.helloPayload)
+	peer := newPeer(c, dir, n.buildHelloPayload)
 	info := &peerInfo{endpoint: dialEndpoint, dir: dir}
 	n.mu.Lock()
 	n.peers[peer] = info

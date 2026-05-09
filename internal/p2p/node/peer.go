@@ -137,7 +137,8 @@ type Peer struct {
 
 	state atomic.Int32 // PeerState
 
-	helloPayload []byte // local HelloMessage body (built once at New time)
+	helloPayload []byte                            // local HelloMessage body (built per-peer because the signed shared-secret depends on the per-conn ECDHE)
+	buildHello   func(c *transport.Conn) ([]byte, error) // optional override (testing)
 
 	mu              sync.Mutex
 	lastHeartbeatRX time.Time
@@ -147,14 +148,16 @@ type Peer struct {
 	doneCh    chan struct{}
 }
 
-// newPeer wraps a fresh transport.Conn. helloPayload is the FC-encoded
-// HelloMessage body to send on connect (the node layer builds it).
-func newPeer(c *transport.Conn, dir Direction, helloPayload []byte) *Peer {
+// newPeer wraps a fresh transport.Conn. helloBuilder is called once at
+// run-start to produce the FC-encoded HelloMessage body — must be lazy
+// because the signed_shared_secret field depends on the per-connection
+// stcp ECDHE result, which only becomes known AFTER performHandshake.
+func newPeer(c *transport.Conn, dir Direction, helloBuilder func(c *transport.Conn) ([]byte, error)) *Peer {
 	p := &Peer{
-		conn:         c,
-		direction:    dir,
-		helloPayload: helloPayload,
-		doneCh:       make(chan struct{}),
+		conn:       c,
+		direction:  dir,
+		buildHello: helloBuilder,
+		doneCh:     make(chan struct{}),
 	}
 	p.state.Store(int32(StateConnecting))
 	return p
@@ -222,7 +225,16 @@ func (p *Peer) close(cause error) {
 func (p *Peer) run(ctx context.Context, delegate Delegate) {
 	defer p.close(nil)
 
-	// 1. Send HelloMessage.
+	// 1. Build + send HelloMessage. The body is built lazily here
+	// because signed_shared_secret depends on the per-conn ECDHE
+	// shared secret + our ephemeral key, both only available after
+	// performHandshake completes inside transport.Dial/Listen.
+	hello, err := p.buildHello(p.conn)
+	if err != nil {
+		p.close(fmt.Errorf("build hello: %w", err))
+		return
+	}
+	p.helloPayload = hello
 	if err := p.conn.Send(proto.HelloMessageType, p.helloPayload); err != nil {
 		p.close(fmt.Errorf("send hello: %w", err))
 		return
