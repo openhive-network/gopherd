@@ -146,6 +146,11 @@ func newApp(cfg flags) (*app, error) {
 		_ = err
 	}
 	cdb := chain.New(stateDB)
+	// Enable the recent-block cache so afterApply can pull each freshly-
+	// applied block's raw bytes back out and stream them into the writer.
+	// Without this, RecentBlockBytes returns nil and our block_log stays
+	// empty even though every block validates.
+	cdb.EnableRecentBlockCache(2048)
 
 	blockchainDir := filepath.Join(cfg.dataDir, "blockchain")
 	if err := os.MkdirAll(blockchainDir, 0o755); err != nil {
@@ -223,9 +228,7 @@ func (a *app) run() error {
 		raw := a.chain.RecentBlockBytes(blockNum)
 		if raw == nil {
 			a.logger.printf("WARN no raw bytes for applied block %d (cache miss)", blockNum)
-			return
-		}
-		if err := a.afterApply(raw, blockNum); err != nil {
+		} else if err := a.afterApply(raw, blockNum); err != nil {
 			a.logger.printf("ERROR post-apply hook block %d: %v", blockNum, err)
 		}
 		if a.cfg.targetBlock > 0 && blockNum >= a.cfg.targetBlock {
