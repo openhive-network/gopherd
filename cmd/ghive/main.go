@@ -9,10 +9,13 @@ import (
 
 	"hived-go/internal/chain"
 	"hived-go/internal/config"
+	"hived-go/internal/crypto"
 	"hived-go/internal/plugins/witness"
+	"hived-go/internal/protocol/auth"
 	"hived-go/internal/protocol/network"
 	"hived-go/internal/state"
 	"hived-go/internal/state/genesis"
+	"hived-go/internal/state/objects"
 )
 
 func main() {
@@ -80,14 +83,38 @@ func main() {
 	// observer-only.
 	var producers []witness.Producer
 	for i := 0; i < len(cfg.Witnesses) && i < len(cfg.PrivateKeys); i++ {
+		priv, err := parsePrivateKey(cfg.PrivateKeys[i])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ghive: witness %q: %v\n", cfg.Witnesses[i], err)
+			os.Exit(1)
+		}
+		pub := priv.PublicKey()
 		producers = append(producers, witness.Producer{
-			Account:    cfg.Witnesses[i],
-			PrivateKey: parsePrivateKey(cfg.PrivateKeys[i]),
+			Account:     cfg.Witnesses[i],
+			PrivateKey:  priv,
+			PublicKey33: pub,
 		})
 	}
 	wp := witness.New(cdb, stateDB, producers)
 	wp.Start()
 	defer wp.Stop()
+
+	// Sanity-check producer pubkeys against the witness_object on chain
+	// so misconfiguration is caught at startup rather than every block.
+	if len(producers) > 0 {
+		sess := state.NewSession(stateDB)
+		for _, p := range producers {
+			w, err := objects.GetWitness(sess, auth.AccountName(p.Account))
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "ghive: warning: witness %q has no on-chain witness object yet (%v); produced blocks will be rejected\n", p.Account, err)
+				continue
+			}
+			if w.BlockSigningKey != p.PublicKey33 {
+				fmt.Fprintf(os.Stderr, "ghive: warning: configured key for %q (%s) does not match on-chain BlockSigningKey (%s); produced blocks will be rejected\n",
+					p.Account, p.PublicKey33.EncodeBase58(), w.BlockSigningKey.EncodeBase58())
+			}
+		}
+	}
 
 	if len(producers) > 0 {
 		fmt.Printf("ghive: starting with %d witness producer(s)\n", len(producers))
@@ -102,8 +129,16 @@ func main() {
 	fmt.Println("ghive: shutting down...")
 }
 
-// parsePrivateKey is a stub. A real implementation decodes WIF
-// (Wallet Import Format) — base58check with prefix 0x80 — into a
-// 32-byte secp256k1 secret. P0 sigverify+signer code lands the real
-// version.
-func parsePrivateKey(_ string) []byte { return nil }
+// parsePrivateKey decodes a config.ini `private-key` string in WIF format
+// (base58check, 0x80-prefix, 32-byte secret) into a *crypto.PrivateKey.
+// Mirrors hived's `fc::ecc::private_key::wif_to_key`.
+func parsePrivateKey(wif string) (*crypto.PrivateKey, error) {
+	if wif == "" {
+		return nil, fmt.Errorf("config: empty private-key")
+	}
+	priv, err := crypto.DecodeWIF(wif)
+	if err != nil {
+		return nil, fmt.Errorf("config: parse WIF private-key: %w", err)
+	}
+	return priv, nil
+}
