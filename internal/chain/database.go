@@ -188,6 +188,13 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 		if err := validateBlock(session, &hdr, rawBlock, hdrLen, blockNum, hf); err != nil {
 			return objects.DynamicGlobalProperty{}, err
 		}
+		// Witness signature check: recover the pubkey from the
+		// 65-byte compact signature over SHA256(header_bytes), and
+		// compare to witness_object.BlockSigningKey. Mirrors hived's
+		// validate_block_header in database.cpp:2887.
+		if err := verifyBlockSignature(session, &hdr, rawBlock, hdrLen, blockNum); err != nil {
+			return objects.DynamicGlobalProperty{}, err
+		}
 		if blockNum > 1 {
 			slot := slotNumForBlockTime(headBlockTime, hdr.Timestamp)
 			if slot > 0 {

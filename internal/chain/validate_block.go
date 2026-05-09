@@ -3,7 +3,9 @@ package chain
 import (
 	"fmt"
 
+	"hived-go/internal/crypto"
 	"hived-go/internal/fcraw"
+	"hived-go/internal/protocol/auth"
 	"hived-go/internal/protocol/block"
 	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/tx"
@@ -65,6 +67,47 @@ func validateBlock(s *state.Session, hdr *block.SignedHeader, rawBlock []byte, h
 		}
 	}
 
+	return nil
+}
+
+// verifyBlockSignature recovers the pubkey from the 65-byte witness
+// signature over SHA256(serialized block_header bytes) and asserts it
+// matches the producing witness's BlockSigningKey on chain. Mirrors
+// hived's validate_block_header (database.cpp:2887): if the recovered
+// public_key disagrees with witness_object.signing_key, the block is
+// rejected.
+//
+// rawBlock is the full block payload starting at the unsigned header;
+// hdrLen is the number of bytes consumed by UnmarshalSignedHeader, so
+// rawBlock[:hdrLen-block.SignatureSize] is the unsigned header bytes
+// hived feeds into SHA256 to derive the digest.
+func verifyBlockSignature(s *state.Session, hdr *block.SignedHeader, rawBlock []byte, hdrLen int, blockNum uint32) error {
+	if hdrLen < block.SignatureSize {
+		return fmt.Errorf("verify_block_signature %d: header too short (%d bytes, signature alone is %d)",
+			blockNum, hdrLen, block.SignatureSize)
+	}
+	unsignedHeader := rawBlock[:hdrLen-block.SignatureSize]
+	digest := block.BlockSigningDigest(unsignedHeader)
+
+	var sig crypto.CompactSignature
+	copy(sig[:], hdr.WitnessSignature[:])
+
+	got, err := crypto.RecoverPublicKey(digest, sig)
+	if err != nil {
+		return fmt.Errorf("verify_block_signature %d: recover: %w", blockNum, err)
+	}
+	w, err := objects.GetWitness(s, auth.AccountName(hdr.Witness))
+	if err != nil {
+		return fmt.Errorf("verify_block_signature %d: witness %q: %w", blockNum, hdr.Witness, err)
+	}
+	if w.BlockSigningKey.IsZero() {
+		return fmt.Errorf("verify_block_signature %d: witness %q has no signing_key (disabled)",
+			blockNum, hdr.Witness)
+	}
+	if got != w.BlockSigningKey {
+		return fmt.Errorf("verify_block_signature %d: signing key mismatch for %q (recovered=%s, expected=%s)",
+			blockNum, hdr.Witness, got.EncodeBase58(), w.BlockSigningKey.EncodeBase58())
+	}
 	return nil
 }
 
