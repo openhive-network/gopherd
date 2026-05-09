@@ -23,11 +23,22 @@ func (d *Delegate) OnPeerConnected(p *node.Peer) {
 }
 
 // OnPeerDisconnected is invoked once per peer when it transitions to
-// StateClosed. Drops the per-peer state.
+// StateClosed. Drops the per-peer state and refunds the dropped peer's
+// outstanding budget so the global cap doesn't leak across reconnects.
 func (d *Delegate) OnPeerDisconnected(p *node.Peer, _ error) {
 	d.mu.Lock()
+	st := d.peers[p]
 	delete(d.peers, p)
 	d.mu.Unlock()
+	if st != nil {
+		st.mu.Lock()
+		n := len(st.outstanding)
+		st.outstanding = make(map[block.ID]struct{})
+		st.mu.Unlock()
+		if n > 0 {
+			d.outstandingTotal.Add(int32(-n))
+		}
+	}
 }
 
 // OnMessage routes inbound business messages to per-type handlers. We
@@ -99,33 +110,54 @@ func (d *Delegate) handleInv(p *node.Peer, body []byte) {
 
 	// Bin into "blocks I don't have" vs "txs I don't have".
 	missing := make([]proto.ItemHash, 0, len(msg.ItemHashesAvailable))
+	throttled := false
 	st.mu.Lock()
 	for _, h := range msg.ItemHashesAvailable {
-		// Mark known immediately so the next round doesn't re-fetch.
 		bid := block.ID(h)
-		st.known[bid] = struct{}{}
 		switch msg.ItemType {
 		case proto.ItemTypeBlock, proto.ItemTypeBlockCompressed:
 			// Skip if we already have this block locally.
 			if d.chain.RecentBlockBytesByID(bid) != nil {
+				st.known[bid] = struct{}{}
 				continue
 			}
-			// Skip if its embedded block_num is at or below our head
-			// AND we have that block num cached (saves a fetch on the
-			// happy path where INV crosses with our own production).
+			// Skip if its embedded block_num is at or below our head.
 			if bid.Num() != 0 {
 				head, _ := d.chain.HeadBlock()
 				if bid.Num() <= head {
+					st.known[bid] = struct{}{}
 					continue
 				}
 			}
+			// Already requested? skip (and remember as known).
+			if _, ok := st.outstanding[bid]; ok {
+				st.known[bid] = struct{}{}
+				continue
+			}
+			// Budget gates — DON'T mark known when throttling so the
+			// next INV from this peer (post-drain) re-triggers.
+			if len(st.outstanding) >= d.cfg.MaxOutstandingPerPeer {
+				throttled = true
+				continue
+			}
+			if d.outstandingTotal.Load() >= int32(d.cfg.MaxOutstandingTotal) {
+				throttled = true
+				continue
+			}
+			st.outstanding[bid] = struct{}{}
+			st.known[bid] = struct{}{}
+			d.outstandingTotal.Add(1)
 			missing = append(missing, h)
 		case proto.ItemTypeTrx:
 			// We don't run a tx mempool yet; ignore tx INV until that
 			// lands. Recording it in known prevents repeated re-asks.
+			st.known[bid] = struct{}{}
 		}
 	}
 	st.mu.Unlock()
+	if throttled {
+		d.outstandingThrottled.Add(1)
+	}
 
 	if len(missing) == 0 {
 		return
@@ -205,7 +237,8 @@ func (d *Delegate) handleFetchBlockchainItemIDs(p *node.Peer, body []byte) {
 
 // handleBlockchainItemIDsInventory is the catch-up REQUESTER side: peer
 // has answered our fetch_blockchain_item_ids with the forward block
-// list. Queue fetch_items batches for those we don't already have.
+// list. Queue fetch_items batches for those we don't already have,
+// honoring both per-peer and total in-flight caps.
 func (d *Delegate) handleBlockchainItemIDsInventory(p *node.Peer, body []byte) {
 	var msg proto.BlockchainItemIDsInventoryMessage
 	if err := msg.Unmarshal(body); err != nil {
@@ -221,6 +254,7 @@ func (d *Delegate) handleBlockchainItemIDsInventory(p *node.Peer, body []byte) {
 	}
 	myHead, _ := d.chain.HeadBlock()
 	missing := make([]proto.ItemHash, 0, len(msg.ItemHashesAvailable))
+	throttled := false
 	st.mu.Lock()
 	for _, h := range msg.ItemHashesAvailable {
 		bid := block.ID(h)
@@ -239,10 +273,25 @@ func (d *Delegate) handleBlockchainItemIDsInventory(p *node.Peer, body []byte) {
 		if _, ok := st.outstanding[bid]; ok {
 			continue
 		}
+		// Per-peer + total budget enforcement. If we hit either cap we
+		// stop adding to outstanding for this round; the next INV after
+		// drainage will re-trigger the rest.
+		if len(st.outstanding) >= d.cfg.MaxOutstandingPerPeer {
+			throttled = true
+			break
+		}
+		if d.outstandingTotal.Load() >= int32(d.cfg.MaxOutstandingTotal) {
+			throttled = true
+			break
+		}
 		st.outstanding[bid] = struct{}{}
+		d.outstandingTotal.Add(1)
 		missing = append(missing, h)
 	}
 	st.mu.Unlock()
+	if throttled {
+		d.outstandingThrottled.Add(1)
+	}
 
 	// Issue fetch_items in cfg.FetchBatch-sized chunks.
 	for i := 0; i < len(missing); i += d.cfg.FetchBatch {
@@ -253,11 +302,11 @@ func (d *Delegate) handleBlockchainItemIDsInventory(p *node.Peer, body []byte) {
 		d.sendFetchItems(p, msg.ItemType, missing[i:end])
 	}
 
-	// If the peer signalled there's more remaining and we had at least
-	// one missing entry above, immediately send another
-	// fetch_blockchain_item_ids with our updated head as the synopsis
-	// so the catch-up walks the chain forward.
-	if msg.TotalRemainingItemCount > 0 {
+	// If the peer signalled there's more remaining AND we managed to
+	// queue something AND we didn't throttle THIS round, walk forward.
+	// Throttling is an intentional pause: don't immediately re-request
+	// MORE work when we're already at the cap.
+	if msg.TotalRemainingItemCount > 0 && len(missing) > 0 && !throttled && !d.inhibitFetching.Load() {
 		// Use the highest-num hash we received as the new synopsis
 		// anchor — it will become our head once those blocks apply.
 		anchor := block.ID(msg.ItemHashesAvailable[len(msg.ItemHashesAvailable)-1])
@@ -335,9 +384,14 @@ func (d *Delegate) handleItemNotAvailable(p *node.Peer, body []byte) {
 		return
 	}
 	if st := d.peerStateFor(p); st != nil {
+		bid := block.ID(msg.RequestedItem.ItemHash)
 		st.mu.Lock()
-		delete(st.outstanding, block.ID(msg.RequestedItem.ItemHash))
+		_, was := st.outstanding[bid]
+		delete(st.outstanding, bid)
 		st.mu.Unlock()
+		if was {
+			d.outstandingTotal.Add(-1)
+		}
 	}
 }
 
@@ -362,8 +416,12 @@ func (d *Delegate) handleBlock(p *node.Peer, body []byte) {
 	if st := d.peerStateFor(p); st != nil {
 		st.mu.Lock()
 		st.known[bid] = struct{}{}
+		_, wasOut := st.outstanding[bid]
 		delete(st.outstanding, bid)
 		st.mu.Unlock()
+		if wasOut {
+			d.outstandingTotal.Add(-1)
+		}
 	}
 
 	job := applyJob{
@@ -380,11 +438,13 @@ func (d *Delegate) handleBlock(p *node.Peer, body []byte) {
 		// INV / blockchain_item_ids cycle. Also re-arm the per-peer
 		// outstanding map so we'll re-ask once we drain.
 		d.droppedQueueFull.Add(1)
+		// (We already cleared outstanding above on the receipt path;
+		// the bid was probably never in there for gossip-pushed blocks
+		// either, so the Add(-1) is gated on "was actually present".)
+		// Un-mark known so the next INV from the same peer re-triggers
+		// a fetch once back-pressure releases.
 		if st := d.peerStateFor(p); st != nil {
 			st.mu.Lock()
-			delete(st.outstanding, bid)
-			// Also un-mark known so the next INV from the same peer
-			// re-triggers a fetch once back-pressure releases.
 			delete(st.known, bid)
 			st.mu.Unlock()
 		}
@@ -440,10 +500,19 @@ func (d *Delegate) sendFetchItems(p *node.Peer, itemType uint32, hashes []proto.
 		// subsequent INV (post-resume) will re-queue them.
 		if st := d.peerStateFor(p); st != nil {
 			st.mu.Lock()
+			released := 0
 			for _, h := range hashes {
-				delete(st.outstanding, block.ID(h))
+				if _, ok := st.outstanding[block.ID(h)]; ok {
+					delete(st.outstanding, block.ID(h))
+					released++
+				}
+				// Also un-mark known so the next INV re-triggers a fetch.
+				delete(st.known, block.ID(h))
 			}
 			st.mu.Unlock()
+			if released > 0 {
+				d.outstandingTotal.Add(int32(-released))
+			}
 		}
 		return
 	}

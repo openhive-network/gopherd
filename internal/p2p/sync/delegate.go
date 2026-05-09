@@ -68,6 +68,18 @@ const (
 	// once the gap closes. Without this guardrail an adversarial peer
 	// streaming far-future block IDs could OOM us.
 	DefaultMaxPendingReorder = 1024
+
+	// DefaultMaxOutstandingTotal caps the total number of blocks we have
+	// in flight (fetched but not yet applied) across all peers. Together
+	// with ApplyQueueSize this is the upper bound on memory consumed by
+	// inbound block traffic. Set to about half the apply queue so a peer
+	// stream burst can't fully saturate the queue alone.
+	DefaultMaxOutstandingTotal = 2048
+
+	// DefaultMaxOutstandingPerPeer caps how many blocks any single peer
+	// can have in flight to us. Keeps a single misbehaving (or simply
+	// faster) peer from monopolising the budget.
+	DefaultMaxOutstandingPerPeer = 512
 )
 
 // Chain is the slice of *chain.Database the sync layer needs. Allows
@@ -127,6 +139,12 @@ type Config struct {
 	// MaxPendingReorder caps the in-applyLoop reorder buffer.
 	// 0 → DefaultMaxPendingReorder.
 	MaxPendingReorder int
+	// MaxOutstandingTotal caps total in-flight fetches across all peers.
+	// 0 → DefaultMaxOutstandingTotal.
+	MaxOutstandingTotal int
+	// MaxOutstandingPerPeer caps in-flight fetches to a single peer.
+	// 0 → DefaultMaxOutstandingPerPeer.
+	MaxOutstandingPerPeer int
 	// Logger receives one-line status messages. nil → os.Stderr.
 	Logger io.Writer
 }
@@ -166,6 +184,12 @@ func (c *Config) defaults() {
 	}
 	if c.MaxPendingReorder == 0 {
 		c.MaxPendingReorder = DefaultMaxPendingReorder
+	}
+	if c.MaxOutstandingTotal == 0 {
+		c.MaxOutstandingTotal = DefaultMaxOutstandingTotal
+	}
+	if c.MaxOutstandingPerPeer == 0 {
+		c.MaxOutstandingPerPeer = DefaultMaxOutstandingPerPeer
 	}
 	if c.Logger == nil {
 		c.Logger = os.Stderr
@@ -214,9 +238,16 @@ type Delegate struct {
 
 	// dropCounters track soft load-shedding events; exposed for
 	// observability + tests.
-	droppedQueueFull atomic.Uint64
-	droppedReorder   atomic.Uint64
-	inhibitedFetches atomic.Uint64
+	droppedQueueFull   atomic.Uint64
+	droppedReorder     atomic.Uint64
+	inhibitedFetches   atomic.Uint64
+	outstandingThrottled atomic.Uint64
+
+	// outstandingTotal is the cumulative in-flight fetch count across
+	// all peers. Incremented when we add a hash to st.outstanding,
+	// decremented when we receive the matching block, drop it via
+	// item_not_available, or evict it on queue-full.
+	outstandingTotal atomic.Int32
 
 	stopCh chan struct{}
 	wg     sync.WaitGroup
@@ -260,6 +291,9 @@ func New(cfg Config, db *chain.Database) *Delegate {
 
 // newWithChain is the test-friendly constructor.
 func newWithChain(cfg Config, c Chain) *Delegate {
+	// Tests construct Config literals directly without going through New;
+	// fill in defaults here so MaxOutstanding* etc. are non-zero.
+	cfg.defaults()
 	cap := cfg.ApplyQueueSize
 	if cap <= 0 {
 		cap = DefaultApplyQueueSize
@@ -364,21 +398,25 @@ func (d *Delegate) QueueCapacity() int { return cap(d.applyQ) }
 
 // Stats returns a snapshot of the cumulative load-shedding counters.
 type Stats struct {
-	QueueDepth       int
-	QueueCapacity    int
-	FetchInhibited   bool
-	DroppedQueueFull uint64
-	DroppedReorder   uint64
-	InhibitedFetches uint64
+	QueueDepth           int
+	QueueCapacity        int
+	FetchInhibited       bool
+	OutstandingTotal     int
+	DroppedQueueFull     uint64
+	DroppedReorder       uint64
+	InhibitedFetches     uint64
+	OutstandingThrottled uint64
 }
 
 func (d *Delegate) Stats() Stats {
 	return Stats{
-		QueueDepth:       d.QueueDepth(),
-		QueueCapacity:    d.QueueCapacity(),
-		FetchInhibited:   d.FetchInhibited(),
-		DroppedQueueFull: d.droppedQueueFull.Load(),
-		DroppedReorder:   d.droppedReorder.Load(),
-		InhibitedFetches: d.inhibitedFetches.Load(),
+		QueueDepth:           d.QueueDepth(),
+		QueueCapacity:        d.QueueCapacity(),
+		FetchInhibited:       d.FetchInhibited(),
+		OutstandingTotal:     int(d.outstandingTotal.Load()),
+		DroppedQueueFull:     d.droppedQueueFull.Load(),
+		DroppedReorder:       d.droppedReorder.Load(),
+		InhibitedFetches:     d.inhibitedFetches.Load(),
+		OutstandingThrottled: d.outstandingThrottled.Load(),
 	}
 }
