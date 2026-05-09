@@ -2,10 +2,8 @@ package node
 
 import (
 	"context"
-	"errors"
 	"net"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -217,8 +215,4 @@ func TestPeerInitialState(t *testing.T) {
 	if dummy.State() != StateConnecting {
 		t.Fatalf("got %v want %v", dummy.State(), StateConnecting)
 	}
-	// Suppress unused-import warning if this is the only place we use atomic
-	// outside peer.go's own atomic ops.
-	_ = atomic.Int32{}
-	_ = errors.New
 }

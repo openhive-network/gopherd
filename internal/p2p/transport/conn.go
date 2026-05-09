@@ -25,7 +25,6 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/sha256"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -227,5 +226,3 @@ func (c *Conn) LocalAddr() net.Addr { return c.raw.LocalAddr() }
 // SetDeadline sets read/write deadlines on the underlying socket.
 // Some transports (e.g. net.Pipe) silently no-op.
 func (c *Conn) SetDeadline(t time.Time) error { return c.raw.SetDeadline(t) }
-
-var _ = errors.New
