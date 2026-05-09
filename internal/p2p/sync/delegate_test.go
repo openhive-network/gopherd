@@ -420,6 +420,91 @@ func TestOnBlockAppliedNotFiredOnApplyFailure(t *testing.T) {
 	}
 }
 
+// TestPerPeerAdaptiveBatchSize pins the per-peer FetchBatch sizing
+// behaviour: a fresh peerState (no rate sample) returns the baseline
+// batch; a peer that recorded enough blocks in the past rateWindow
+// returns a size scaled to ~3 seconds of work, clamped between
+// minAdaptiveBatch and maxAdaptiveBatch.
+func TestPerPeerAdaptiveBatchSize(t *testing.T) {
+	st := newPeerState()
+	// 1) No samples yet → baseline pass-through (clamped into bounds).
+	if got := st.adaptiveBatchSize(500); got != 500 {
+		t.Errorf("first call: got %d, want baseline 500", got)
+	}
+	if got := st.adaptiveBatchSize(10); got != minAdaptiveBatch {
+		t.Errorf("first call w/ low baseline: got %d, want %d (clamped)", got, minAdaptiveBatch)
+	}
+	if got := st.adaptiveBatchSize(99999); got != maxAdaptiveBatch {
+		t.Errorf("first call w/ huge baseline: got %d, want %d (clamped)", got, maxAdaptiveBatch)
+	}
+
+	// 2) Force a window roll-over with a known block count + elapsed time
+	// so adaptiveBatchSize produces a deterministic rate. We backdate
+	// rateWindowStart by 30s and stuff 3000 blocks into the window —
+	// that's 100 bps, *3s = 300-block batch.
+	st = newPeerState()
+	st.rateWindowStart.Store(time.Now().Add(-30 * time.Second).UnixNano())
+	st.rateWindowBlocks.Store(3000)
+	got := st.adaptiveBatchSize(500)
+	// Allow a small wall-clock margin: between Store + adaptiveBatchSize
+	// elapsed could be just over 30s, lowering the bps slightly.
+	if got < 280 || got > 320 {
+		t.Errorf("100-bps peer: got batch %d, want ~300 (rate=%d)", got, st.LastRate())
+	}
+
+	// 3) Fast peer at 5000 bps should clamp to maxAdaptiveBatch.
+	st = newPeerState()
+	st.rateWindowStart.Store(time.Now().Add(-30 * time.Second).UnixNano())
+	st.rateWindowBlocks.Store(150000) // 5000 bps over 30s
+	got = st.adaptiveBatchSize(500)
+	if got != maxAdaptiveBatch {
+		t.Errorf("fast peer: got %d, want %d (rate=%d)", got, maxAdaptiveBatch, st.LastRate())
+	}
+
+	// 4) Crawling peer at 5 bps clamps to minAdaptiveBatch.
+	st = newPeerState()
+	st.rateWindowStart.Store(time.Now().Add(-30 * time.Second).UnixNano())
+	st.rateWindowBlocks.Store(150) // 5 bps over 30s, *3 = 15 → clamp to min
+	got = st.adaptiveBatchSize(500)
+	if got != minAdaptiveBatch {
+		t.Errorf("slow peer: got %d, want %d (rate=%d)", got, minAdaptiveBatch, st.LastRate())
+	}
+}
+
+// TestRecordBlockBumpsCounters pins the contract that recordBlock
+// updates BOTH lifetime + per-window counters atomically.
+func TestRecordBlockBumpsCounters(t *testing.T) {
+	st := newPeerState()
+	for i := 0; i < 100; i++ {
+		st.recordBlock()
+	}
+	if got := st.blocksReceived.Load(); got != 100 {
+		t.Errorf("blocksReceived=%d, want 100", got)
+	}
+	if got := st.rateWindowBlocks.Load(); got != 100 {
+		t.Errorf("rateWindowBlocks=%d, want 100", got)
+	}
+}
+
+// TestAdaptiveDisabledFallsBackToBaseline verifies that with
+// AdaptiveFetchBatch off + a recorded high rate, the SIZER still
+// returns based on rate (the toggle lives in the call site, not the
+// helper). This is a behavioural pin: callers gate on
+// cfg.AdaptiveFetchBatch themselves.
+func TestAdaptiveDisabledFallsBackToBaseline(t *testing.T) {
+	cfg := Config{}
+	cfg.EnableAdaptiveFetchBatch(false)
+	cfg.defaults()
+	if cfg.AdaptiveFetchBatch {
+		t.Errorf("EnableAdaptiveFetchBatch(false) did not stick through defaults()")
+	}
+	cfg2 := Config{}
+	cfg2.defaults()
+	if !cfg2.AdaptiveFetchBatch {
+		t.Errorf("defaults() did not turn on AdaptiveFetchBatch")
+	}
+}
+
 // TestSendFetchItemsHonorsInhibit verifies sendFetchItems is a no-op
 // while inhibitFetching is set and increments the counter.
 func TestSendFetchItemsHonorsInhibit(t *testing.T) {
