@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	blockzstd "hived-go/internal/blocklog/zstd"
 	"hived-go/internal/chain"
 	"hived-go/internal/crypto"
 	"hived-go/internal/p2p/node"
@@ -288,6 +289,31 @@ type Delegate struct {
 	inhibitedFetches   atomic.Uint64
 	outstandingThrottled atomic.Uint64
 
+	// compressed-block accounting. compressedReceived counts every
+	// compressed_block_message that decoded cleanly (regardless of whether
+	// it was a duplicate of an already-applied block). compressedDecompressed
+	// counts how many of those required actual zstd decompression (cache
+	// miss), and compressedCacheHits counts the pre-apply duplicate path
+	// where the same blockID arrived again before applyLoop caught up and
+	// we were able to skip the zstd work entirely.
+	compressedReceived      atomic.Uint64
+	compressedDecompressed  atomic.Uint64
+	compressedCacheHits     atomic.Uint64
+	compressedDecodeErrors  atomic.Uint64
+
+	// decompressor + recentCompressed cache for the inbound
+	// compressed_block_message path. The decompressor is shared across all
+	// peer-receive goroutines (it is internally synchronised). The cache
+	// is a tiny FIFO of the most recent compressed-block IDs we've seen,
+	// so a duplicate compressed delivery (peer A and peer B both pushing
+	// the same compressed_block to us during catch-up) doesn't redo the
+	// zstd work — we drop the duplicate by ID and skip everything past
+	// the 2-byte parse + cache hit accounting.
+	decompressor   *blockzstd.Decompressor
+	recentCompMu   sync.Mutex
+	recentCompSeen map[block.ID]struct{}
+	recentCompFIFO []block.ID
+
 	// outstandingTotal is the cumulative in-flight fetch count across
 	// all peers. Incremented when we add a hash to st.outstanding,
 	// decremented when we receive the matching block, drop it via
@@ -383,9 +409,18 @@ func newWithChain(cfg Config, c Chain) *Delegate {
 		applyQHighWater: hi,
 		applyQLowWater:  lo,
 		signerCache:     newSignerCache(),
+		decompressor:    blockzstd.NewDecompressor(),
+		recentCompSeen:  make(map[block.ID]struct{}, recentCompressedCap),
+		recentCompFIFO:  make([]block.ID, 0, recentCompressedCap),
 	}
 	return d
 }
+
+// recentCompressedCap bounds the in-flight dedup ring for
+// compressed_block_message arrivals. Sized well above
+// MaxOutstandingPerPeer * a handful of peers so a peer fan-out of the
+// same compressed block during catch-up can't thrash the ring.
+const recentCompressedCap = 256
 
 // Start launches the background goroutines: the INV broadcaster, the
 // single-consumer block applier, and the catch-up kicker.
@@ -497,17 +532,33 @@ type Stats struct {
 	DroppedReorder       uint64
 	InhibitedFetches     uint64
 	OutstandingThrottled uint64
+	// CompressedReceived is every compressed_block_message we decoded
+	// (including duplicates we then short-circuited via the per-ID cache).
+	CompressedReceived uint64
+	// CompressedDecompressed is the subset that actually went through zstd
+	// decompression. Difference from Received is the cache-hit count.
+	CompressedDecompressed uint64
+	// CompressedCacheHits counts how many times a duplicate compressed
+	// arrival was short-circuited by recent-block / dedup cache.
+	CompressedCacheHits uint64
+	// CompressedDecodeErrors counts decode failures (bad flags, dict not
+	// embedded, zstd error, header parse). Useful as a sanity gauge.
+	CompressedDecodeErrors uint64
 }
 
 func (d *Delegate) Stats() Stats {
 	return Stats{
-		QueueDepth:           d.QueueDepth(),
-		QueueCapacity:        d.QueueCapacity(),
-		FetchInhibited:       d.FetchInhibited(),
-		OutstandingTotal:     int(d.outstandingTotal.Load()),
-		DroppedQueueFull:     d.droppedQueueFull.Load(),
-		DroppedReorder:       d.droppedReorder.Load(),
-		InhibitedFetches:     d.inhibitedFetches.Load(),
-		OutstandingThrottled: d.outstandingThrottled.Load(),
+		QueueDepth:             d.QueueDepth(),
+		QueueCapacity:          d.QueueCapacity(),
+		FetchInhibited:         d.FetchInhibited(),
+		OutstandingTotal:       int(d.outstandingTotal.Load()),
+		DroppedQueueFull:       d.droppedQueueFull.Load(),
+		DroppedReorder:         d.droppedReorder.Load(),
+		InhibitedFetches:       d.inhibitedFetches.Load(),
+		OutstandingThrottled:   d.outstandingThrottled.Load(),
+		CompressedReceived:     d.compressedReceived.Load(),
+		CompressedDecompressed: d.compressedDecompressed.Load(),
+		CompressedCacheHits:    d.compressedCacheHits.Load(),
+		CompressedDecodeErrors: d.compressedDecodeErrors.Load(),
 	}
 }
