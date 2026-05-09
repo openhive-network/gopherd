@@ -188,17 +188,19 @@ func (p *Plugin) maybeProduceBlock() error {
 		p.logEvery(5*time.Second, "scheduled=%q (not owned by this node)", scheduled)
 		return nil // not our turn
 	}
-	headBN, _ := func() (uint32, error) {
-		d, e := objects.GetDGPO(state.NewSession(p.State))
-		return d.HeadBlockNumber, e
-	}()
+	// All DGPO reads go through chain.Database accessors so they
+	// serialize against in-flight ApplyBlock via the chain-level
+	// applyMu. Direct state.NewSession(p.State) bypasses that lock and
+	// races the cross-Session Aux cache that ApplyBlock mutates on
+	// commit.
+	headBN, _ := p.Chain.HeadBlock()
 	fmt.Fprintf(os.Stderr, "witness: producing for %s (head=%d)\n", scheduled, headBN)
 
 	// Time-of-block: align to the next 3-second boundary AFTER head.
 	// On a fresh chain (block 1) dgpo.Time is genesis (years ago);
 	// fall back to wall-clock aligned to the next 3-second boundary so
 	// produced blocks carry sane timestamps.
-	dgpo, err := objects.GetDGPO(state.NewSession(p.State))
+	dgpo, err := p.Chain.GetDGPO()
 	if err != nil {
 		return err
 	}

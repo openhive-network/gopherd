@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 
 	"hived-go/internal/chain/evaluator"
 	"hived-go/internal/fcraw"
@@ -25,6 +26,22 @@ import (
 // hive::chain::database in spirit, scoped to what current evaluators need.
 type Database struct {
 	state *state.Database
+	// applyMu serializes ApplyBlock against all concurrent callers (the
+	// witness production goroutine, p2p/sync's apply loop, and any
+	// read-side accessor that materializes a new state.Session — see
+	// HeadBlock / HeadBlockID / ScheduledWitness below).
+	//
+	// ApplyBlock takes the WRITE lock for the entire block-apply (it
+	// is inherently serial — there's exactly one chain head — so the
+	// lock has zero effect on a correctly-driven workload).
+	//
+	// Read-side accessors that create their own state.Session take the
+	// READ lock around the call. The shared *state.Database.Aux map
+	// (cross-Session typed-object cache) is mutated during commit and
+	// read on every GetDGPO/GetWitness/etc; without an external lock
+	// the witness goroutine reading dgpo while sync's apply loop
+	// commits triggers the Go runtime concurrent-map-access detector.
+	applyMu sync.RWMutex
 	// reused across ApplyBlock calls; maps are clear()'d on Commit so
 	// the underlying buckets stay warm and we avoid 14M+ map allocations
 	// per replay.
@@ -121,6 +138,8 @@ func (d *Database) RecentBlockIDForNum(blockNum uint32) (block.ID, bool) {
 // HeadBlockID returns the current head block's 20-byte ID per DGPO.
 // Returns the zero ID + nil error when no blocks have been applied yet.
 func (d *Database) HeadBlockID() (block.ID, error) {
+	d.applyMu.RLock()
+	defer d.applyMu.RUnlock()
 	s := state.NewSession(d.state)
 	p, err := objects.GetDGPO(s)
 	if err == state.ErrNotFound {
@@ -242,6 +261,9 @@ func indexOfByte(s string, c byte) int {
 // (signed_block_header + transactions vector). blockNum is the 1-indexed
 // block number. stats may be nil.
 func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOptions, stats *Stats) (objects.DynamicGlobalProperty, error) {
+	d.applyMu.Lock()
+	defer d.applyMu.Unlock()
+
 	hdr, hdrLen, err := block.UnmarshalSignedHeader(rawBlock)
 	if err != nil {
 		return objects.DynamicGlobalProperty{}, fmt.Errorf("apply_block %d header: %w", blockNum, err)
@@ -678,6 +700,8 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 // HeadBlock returns the current head block number per DGPO. Returns 0
 // when no blocks have been applied yet.
 func (d *Database) HeadBlock() (uint32, error) {
+	d.applyMu.RLock()
+	defer d.applyMu.RUnlock()
 	s := state.NewSession(d.state)
 	p, err := objects.GetDGPO(s)
 	if err == state.ErrNotFound {
@@ -689,10 +713,24 @@ func (d *Database) HeadBlock() (uint32, error) {
 	return p.HeadBlockNumber, nil
 }
 
+// GetDGPO returns a snapshot of the dynamic_global_properties object.
+// Wraps state.NewSession + objects.GetDGPO inside the chain-level
+// applyMu read lock so callers (witness production loop, RPC layers)
+// don't race ApplyBlock's commit. The returned struct is a value copy,
+// safe to use after the lock is released.
+func (d *Database) GetDGPO() (objects.DynamicGlobalProperty, error) {
+	d.applyMu.RLock()
+	defer d.applyMu.RUnlock()
+	s := state.NewSession(d.state)
+	return objects.GetDGPO(s)
+}
+
 // ScheduledWitness returns the witness who should produce the block
 // at slot_num counting from 1 (1 = next block). Mirrors hived's
 // database::get_scheduled_witness.
 func (d *Database) ScheduledWitness(slotNum uint32) (string, error) {
+	d.applyMu.RLock()
+	defer d.applyMu.RUnlock()
 	s := state.NewSession(d.state)
 	dgpo, err := objects.GetDGPO(s)
 	if err != nil {
