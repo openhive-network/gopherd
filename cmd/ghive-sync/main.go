@@ -190,6 +190,10 @@ type flags struct {
 	// maxConcurrentDials caps in-flight dial attempts. 0 = p2pnode
 	// default (24).
 	maxConcurrentDials int
+	// logAdaptiveBatch, when set, asks the sync delegate to log one
+	// trace line per per-peer FetchBatch decision. Useful for tuning
+	// the adaptive sizing curve; off by default to avoid noise.
+	logAdaptiveBatch bool
 }
 
 func parseFlags() flags {
@@ -214,6 +218,7 @@ func parseFlags() flags {
 	flag.BoolVar(&f.commitBatchFsync, "commit-batch-fsync", true, "fsync each batch boundary (default true)")
 	flag.IntVar(&f.maxOutboundPeers, "max-outbound-peers", 0, "max active outbound P2P peers (0 = default 32)")
 	flag.IntVar(&f.maxConcurrentDials, "max-concurrent-dials", 0, "max in-flight dial attempts (0 = default 24)")
+	flag.BoolVar(&f.logAdaptiveBatch, "log-adaptive-batch", false, "log one trace per per-peer FetchBatch decision (peer X batch=N rate=Y bps)")
 	flag.Parse()
 	f.targetBlock = uint32(target)
 	f.maxBlocks = uint32(max)
@@ -558,7 +563,9 @@ func (a *app) run() error {
 		MaxOutboundPeers:   a.cfg.maxOutboundPeers,
 		MaxConcurrentDials: a.cfg.maxConcurrentDials,
 	}, a.chain, nil)
-	syncDel := p2psync.New(p2psync.Config{}, a.chain)
+	syncDel := p2psync.New(p2psync.Config{
+		LogAdaptiveBatch: a.cfg.logAdaptiveBatch,
+	}, a.chain)
 	a.p2p.SetDelegate(syncDel)
 	if err := a.p2p.Start(); err != nil {
 		return fmt.Errorf("p2p start: %w", err)
