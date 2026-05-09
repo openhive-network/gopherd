@@ -118,6 +118,14 @@ type flags struct {
 	// if you trust the canonical block_log reference (which already
 	// validated the merkle root upstream).
 	noVerifyMerkle bool
+	// maxOutboundPeers caps active outbound peer count. 0 → use the
+	// p2pnode default (32). Bigger value = more parallel block fetches
+	// but more sockets + more INV traffic.
+	maxOutboundPeers int
+	// maxConcurrentDials caps in-flight dial attempts at any moment.
+	// 0 → p2pnode default (24). Tied to maxOutboundPeers — needs to be
+	// large enough to ramp the peer set up quickly once peerdb fills.
+	maxConcurrentDials int
 }
 
 func parseFlags() flags {
@@ -136,6 +144,8 @@ func parseFlags() flags {
 	flag.StringVar(&f.backend, "backend", "", "state backend: pebble (persistent) or mem (volatile, ~3-5x faster); default = pebble unless --verify-against is set, in which case mem (since the run is throwaway anyway)")
 	flag.StringVar(&f.cpuProfile, "cpuprofile", "", "write runtime/pprof CPU profile to this path")
 	flag.BoolVar(&f.noVerifyMerkle, "no-verify-merkle", false, "skip the per-block merkle-root recomputation (faster; only safe with --verify-against)")
+	flag.IntVar(&f.maxOutboundPeers, "max-outbound-peers", 0, "max active outbound P2P peers (0 = p2pnode default, currently 32)")
+	flag.IntVar(&f.maxConcurrentDials, "max-concurrent-dials", 0, "max in-flight dial attempts (0 = p2pnode default, currently 24)")
 	flag.Parse()
 	f.targetBlock = uint32(target)
 	f.maxBlocks = uint32(max)
@@ -324,9 +334,11 @@ func (a *app) run() error {
 	})
 
 	a.p2p = p2pnode.New(p2pnode.Config{
-		Endpoint:  a.cfg.listenEndpoint,
-		SeedNodes: seeds,
-		UserAgent: "ghive-sync/0.1.0",
+		Endpoint:           a.cfg.listenEndpoint,
+		SeedNodes:          seeds,
+		UserAgent:          "ghive-sync/0.1.0",
+		MaxOutboundPeers:   a.cfg.maxOutboundPeers,
+		MaxConcurrentDials: a.cfg.maxConcurrentDials,
 	}, a.chain, nil)
 	syncDel := p2psync.New(p2psync.Config{}, a.chain)
 	a.p2p.SetDelegate(syncDel)

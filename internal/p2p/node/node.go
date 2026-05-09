@@ -33,16 +33,28 @@ type ChainView interface {
 var _ ChainView = (*chain.Database)(nil)
 
 // Defaults for the dial scheduler. Exposed as vars so tests can shorten them.
+//
+// These are package-wide DEFAULTS used when Config.MaxConcurrentDials /
+// Config.TargetOutboundPeers are zero. Callers that want to override them
+// per-Node should set those Config fields rather than mutating the
+// globals (the globals are kept for back-compat with discovery_test.go
+// which speeds up DialTickInterval).
 var (
 	// DialTickInterval is how often the dialer wakes up to look for new
 	// dial candidates (peerdb back-off changes, etc).
 	DialTickInterval = 1 * time.Second
 	// MaxConcurrentDials caps how many outbound dials can be in flight
-	// at once.
-	MaxConcurrentDials = 8
+	// at once. Bumped from 8 → 24 so we ramp up the peer set faster once
+	// the peerdb fills via address_message gossip; the previous cap kept
+	// us pinned to the seed list (8 mainnet seeds) for the first ~minute
+	// of catch-up which throttled fan-out.
+	MaxConcurrentDials = 24
 	// TargetOutboundPeers is the number of active outbound peers we try
 	// to maintain. Once we hit this we stop initiating new dials.
-	TargetOutboundPeers = 12
+	// Bumped from 12 → 32 so adaptive FetchBatch has more parallel
+	// requestees during catch-up. Each idle peer costs ~1 TCP socket +
+	// the per-peer state map; 32 is well within OS file-descriptor limits.
+	TargetOutboundPeers = 32
 )
 
 // Config tunes a Node.
@@ -66,6 +78,15 @@ type Config struct {
 	// (suitable for tests). Production callers usually pass
 	// filepath.Join(cfg.DataDir, peerdb.Filename).
 	PeerDBPath string
+	// MaxOutboundPeers, when > 0, overrides the package-wide
+	// TargetOutboundPeers default for this Node only. The dial loop
+	// stops initiating new outbound dials once active outbound count
+	// reaches this value.
+	MaxOutboundPeers int
+	// MaxConcurrentDials, when > 0, overrides the package-wide
+	// MaxConcurrentDials default for this Node only. Caps the number of
+	// in-flight dial attempts at any given moment.
+	MaxConcurrentDials int
 }
 
 // Node is the daemon-wide P2P singleton. One instance per process.
@@ -411,15 +432,24 @@ func (n *Node) dialPass() {
 	pending := len(n.pendingDials)
 	n.mu.Unlock()
 
-	if outboundCount+pending >= TargetOutboundPeers {
+	target := n.cfg.MaxOutboundPeers
+	if target <= 0 {
+		target = TargetOutboundPeers
+	}
+	maxConc := n.cfg.MaxConcurrentDials
+	if maxConc <= 0 {
+		maxConc = MaxConcurrentDials
+	}
+
+	if outboundCount+pending >= target {
 		return
 	}
-	want := TargetOutboundPeers - (outboundCount + pending)
+	want := target - (outboundCount + pending)
 	if want <= 0 {
 		return
 	}
-	if want > MaxConcurrentDials-pending {
-		want = MaxConcurrentDials - pending
+	if want > maxConc-pending {
+		want = maxConc - pending
 	}
 	if want <= 0 {
 		return

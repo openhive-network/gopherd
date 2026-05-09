@@ -155,10 +155,12 @@ func main() {
 		// broadcast on); wire delegates after construction via
 		// SetDelegate so we can layer them in a MultiDelegate.
 		p2p = p2pnode.New(p2pnode.Config{
-			Endpoint:   cfg.P2PEndpoint,
-			SeedNodes:  cfg.P2PSeedNodes,
-			UserAgent:  "ghive/0.1.0",
-			PeerDBPath: filepath.Join(cfg.DataDir, peerdb.Filename),
+			Endpoint:           cfg.P2PEndpoint,
+			SeedNodes:          cfg.P2PSeedNodes,
+			UserAgent:          "ghive/0.1.0",
+			PeerDBPath:         filepath.Join(cfg.DataDir, peerdb.Filename),
+			MaxOutboundPeers:   cfg.P2PMaxOutboundPeers,
+			MaxConcurrentDials: cfg.P2PMaxConcurrentDials,
 		}, cdb, nil)
 		gossipS = gossip.New(gossip.Config{
 			Chain:   cdb,

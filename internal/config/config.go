@@ -34,6 +34,12 @@ type Config struct {
 	// P2PSeedNodes is the list of "host:port" peers to attempt to dial
 	// on startup (boost-style "p2p-seed-node" key, repeats allowed).
 	P2PSeedNodes []string
+	// P2PMaxOutboundPeers caps active outbound peer count. 0 = p2pnode
+	// default (32). Maps to "p2p-max-outbound-peers = N" in config.ini.
+	P2PMaxOutboundPeers int
+	// P2PMaxConcurrentDials caps in-flight dial attempts. 0 = p2pnode
+	// default (24). Maps to "p2p-max-concurrent-dials = N" in config.ini.
+	P2PMaxConcurrentDials int
 	RPCEndpoint  string
 	DataDir      string
 	// SharedFileSize is the soft memory bound (Boost INI string like
@@ -100,6 +106,18 @@ func Parse(r io.Reader) (*Config, error) {
 			// Boost also accepts space-separated lists on one line.
 			for _, s := range strings.Fields(val) {
 				c.P2PSeedNodes = append(c.P2PSeedNodes, s)
+			}
+		case "p2p-max-outbound-peers":
+			// Optional integer override for the outbound peer cap.
+			// Parse-tolerant: invalid values just leave the default.
+			var v int
+			if _, err := fmt.Sscanf(val, "%d", &v); err == nil && v > 0 {
+				c.P2PMaxOutboundPeers = v
+			}
+		case "p2p-max-concurrent-dials":
+			var v int
+			if _, err := fmt.Sscanf(val, "%d", &v); err == nil && v > 0 {
+				c.P2PMaxConcurrentDials = v
 			}
 		case "rpc-endpoint", "webserver-http-endpoint":
 			c.RPCEndpoint = val
