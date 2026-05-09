@@ -1,6 +1,8 @@
 package network
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"testing"
 )
@@ -26,6 +28,41 @@ func TestNameMatchesPrefix(t *testing.T) {
 		}
 	default:
 		t.Fatalf("unknown network %q", Name)
+	}
+}
+
+// mainnetChainIDHex is the well-known mainnet chain_id, repeated here
+// so we can assert the active build's ChainID is NOT equal to it
+// (regardless of which build tag we're under).
+const mainnetChainIDHex = "beeab0de00000000000000000000000000000000000000000000000000000000"
+
+// TestChainIDDifferentFromMainnet ensures the active build (whichever
+// network it targets) does not collide with mainnet's chain_id. Without
+// this check the testnet-build accidentally re-deriving "beeab0de..."
+// would let testnet signatures replay against mainnet.
+func TestChainIDDifferentFromMainnet(t *testing.T) {
+	if Name == "mainnet" {
+		// On mainnet, the chain_id IS the literal mainnet hex — this
+		// test is only meaningful on alternate builds.
+		return
+	}
+	if ChainID.Hex() == mainnetChainIDHex {
+		t.Fatalf("network %q ChainID collides with mainnet (%s) — must differ", Name, mainnetChainIDHex)
+	}
+}
+
+// TestTestnetChainIDIsGhiveSeed pins the testnet chain_id to
+// sha256("ghive-testnet-v1"). This is a regression guard — anyone who
+// changes the seed (or accidentally reverts to fc::sha256::hash("testnet"))
+// has to update this constant explicitly.
+func TestTestnetChainIDIsGhiveSeed(t *testing.T) {
+	if Name != "testnet" {
+		return
+	}
+	want := sha256.Sum256([]byte("ghive-testnet-v1"))
+	if ChainID.Hex() != hex.EncodeToString(want[:]) {
+		t.Fatalf("testnet ChainID = %s, want sha256(ghive-testnet-v1) = %s",
+			ChainID.Hex(), hex.EncodeToString(want[:]))
 	}
 }
 
