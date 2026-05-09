@@ -19,7 +19,14 @@ import (
 // will add a reverse-undo log later (see plan).
 type Session struct {
 	db      *Database
-	overlay map[string]overlayEntry
+	// snapshotGen is incremented every Snapshot() and reset to 0 on
+	// Commit/Undo. Overlay entries record the gen at which they were
+	// allocated; Put can safely mutate an entry's value buffer in
+	// place IFF the entry's gen equals the current snapshotGen
+	// (otherwise an active Savepoint may be aliasing the buffer and
+	// in-place mutation would corrupt the snapshot's view).
+	snapshotGen uint32
+	overlay     map[string]overlayEntry
 	// overlayKeys is a sorted-by-physical-key btree of every key written
 	// via Put/Delete this Session. Range walks this tree from the prefix
 	// lower-bound to its exclusive upper-bound, looking up entries in
@@ -188,6 +195,12 @@ func (s *Session) NudgeExpHint(table TableID, index IndexID, newTime uint32) {
 type overlayEntry struct {
 	value     []byte
 	tombstone bool
+	// gen is the snapshotGen at which this value buffer was allocated
+	// (or last mutated in place). Put may reuse the buffer in place
+	// when entry.gen == s.snapshotGen — guaranteeing no live Savepoint
+	// aliases it. After a Snapshot bumps the gen counter, any
+	// subsequent Put-to-same-key falls through to a fresh allocation.
+	gen uint32
 }
 
 // NewSession returns a fresh in-memory session over db.
@@ -255,25 +268,40 @@ func (s *Session) Has(table TableID, index IndexID, body []byte) (bool, error) {
 
 // Put stores value for (table, index, body) in the overlay. The slices are
 // copied; callers may reuse their buffers.
+//
+// Allocation: when the same key is Put multiple times in a block (the
+// common case for DGPO — 5+ writes per block from per-block hooks),
+// the overlay entry's value buffer is REUSED in place when its
+// capacity is sufficient, eliminating the per-Put make+copy. Only the
+// first Put-per-key allocates; subsequent Puts to the same key amortize
+// to a copy into the existing slot.
 func (s *Session) Put(table TableID, index IndexID, body, value []byte) {
 	s.scratch = EncodeKeyInto(s.scratch, table, index, body)
-	// Secondary-index writes ship a zero-length value (the sort key
-	// lives in the body); skip the per-call make+copy in that case so
-	// each index update only allocates the overlay key string.
+	fullKey := string(s.scratch)
+	// Reuse-in-place: if the overlay already holds a (non-tombstoned)
+	// entry for this key with sufficient capacity, copy into the
+	// existing buffer. The Get contract documents that returned slices
+	// are invalidated by subsequent Put to the same key, so aliasing
+	// callers who held the prior slice are already responsible for
+	// re-fetching — the in-place mutation matches that contract.
+	existing, hadEntry := s.overlay[fullKey]
 	var cv []byte
 	if len(value) > 0 {
-		cv = make([]byte, len(value))
-		copy(cv, value)
+		if hadEntry && !existing.tombstone && existing.gen == s.snapshotGen && cap(existing.value) >= len(value) {
+			cv = existing.value[:len(value)]
+			copy(cv, value)
+		} else {
+			cv = make([]byte, len(value))
+			copy(cv, value)
+		}
 	}
-	fullKey := string(s.scratch)
-	prev, exists := s.overlay[fullKey]
-	if !exists {
+	if !hadEntry {
 		s.overlayKeys.Set(fullKey)
 	}
 	if s.snapshotDepth > 0 {
-		s.undoLog = append(s.undoLog, sessionUndoEntry{key: fullKey, prev: prev, had: exists})
+		s.undoLog = append(s.undoLog, sessionUndoEntry{key: fullKey, prev: existing, had: hadEntry})
 	}
-	s.overlay[fullKey] = overlayEntry{value: cv}
+	s.overlay[fullKey] = overlayEntry{value: cv, gen: s.snapshotGen}
 	// Append to dirtyKeys, deduping consecutive writes to the same key.
 	// Catches the common DGPO read-modify-write pattern where the same
 	// key gets Put 2-5× in a row from adjacent per-block hooks. Without
@@ -333,6 +361,7 @@ func (s *Session) Commit(sync bool) error {
 		s.undoLog = s.undoLog[:0]
 		s.snapshotDepth = 0
 		s.mistrustDBAux = false
+		s.snapshotGen = 0
 		s.db.commitAll()
 		return nil
 	}
@@ -347,6 +376,7 @@ func (s *Session) Commit(sync bool) error {
 	s.undoLog = s.undoLog[:0]
 	s.snapshotDepth = 0
 	s.mistrustDBAux = false
+	s.snapshotGen = 0
 	s.db.commitAll()
 	return nil
 }
@@ -366,6 +396,7 @@ func (s *Session) Undo() {
 	s.undoLog = s.undoLog[:0]
 	s.snapshotDepth = 0
 	s.mistrustDBAux = false
+	s.snapshotGen = 0
 	s.db.undoAll()
 }
 
@@ -411,6 +442,9 @@ type Savepoint struct {
 func (s *Session) Snapshot() Savepoint {
 	s.snapshotDepth++
 	subPts := s.db.snapshotAll(make([]int, 0, len(s.db.subsystems)))
+	// Bump snapshotGen so any subsequent Put cannot reuse-in-place a
+	// value buffer aliased by this Savepoint's overlay copy.
+	s.snapshotGen++
 	return Savepoint{
 		undoLogLen:      len(s.undoLog),
 		dirtyKeysLen:    len(s.dirtyKeys),
