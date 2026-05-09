@@ -302,11 +302,14 @@ func (d *Delegate) handleBlockchainItemIDsInventory(p *node.Peer, body []byte) {
 		d.sendFetchItems(p, msg.ItemType, missing[i:end])
 	}
 
-	// If the peer signalled there's more remaining AND we managed to
-	// queue something AND we didn't throttle THIS round, walk forward.
-	// Throttling is an intentional pause: don't immediately re-request
-	// MORE work when we're already at the cap.
-	if msg.TotalRemainingItemCount > 0 && len(missing) > 0 && !throttled && !d.inhibitFetching.Load() {
+	// If the peer signalled there's more remaining AND we didn't throttle
+	// THIS round, walk forward. We DO NOT gate on len(missing)>0 anymore:
+	// when 8 peers all hand back the same first 200 IDs in a sync, the
+	// later peers see all-deduped (we already have / already requested)
+	// and len(missing)==0 — but if we don't walk them forward they go
+	// silent until the 5s INV tick, killing throughput. Walking them
+	// forward immediately gets each peer onto fresh ground.
+	if msg.TotalRemainingItemCount > 0 && !throttled && !d.inhibitFetching.Load() {
 		// Use the highest-num hash we received as the new synopsis
 		// anchor — it will become our head once those blocks apply.
 		anchor := block.ID(msg.ItemHashesAvailable[len(msg.ItemHashesAvailable)-1])

@@ -191,7 +191,15 @@ func (d *Delegate) applyLoop() {
 				// if the chain is on a recoverable fork.
 				continue
 			}
-			d.logf("applied block %d", job.blockNum)
+			// Per-block "applied block N" line was the dominant
+			// stderr-overhead source on a fast catch-up (15K writes/s on
+			// a 12K bps stream). The chain-level per-N-block / per-second
+			// progress line in cmd/ghive-sync's afterApply replaces it
+			// for normal operation; debug ladders can re-enable via the
+			// optional Config.LogEveryBlock flag.
+			if d.cfg.LogEveryBlock {
+				d.logf("applied block %d", job.blockNum)
+			}
 			// Fan the freshly-applied block out to peers (other than
 			// the source we got it from). The hook is what replaced
 			// gossip's now-deleted apply loop: gossip.Service wires its

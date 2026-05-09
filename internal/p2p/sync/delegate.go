@@ -23,8 +23,13 @@ const (
 
 	// DefaultFetchBatch is the maximum number of item IDs we put on a
 	// single fetch_items_message. Hived's GRAPHENE_NET_MAX_ITEMS_PER_BATCH
-	// is 10000; we cap lower to keep individual responses bounded.
-	DefaultFetchBatch = 100
+	// is 10000; we used to cap at 100 to keep individual responses bounded
+	// (hived sends one block_message per item asynchronously, so a 10K
+	// fetch generates 10K replies, not one big one). 500 keeps the per-RTT
+	// bookkeeping cheap while letting catch-up pipeline more deeply per
+	// peer — the per-peer outstanding cap (MaxOutstandingPerPeer = 512)
+	// is the real ceiling.
+	DefaultFetchBatch = 500
 
 	// DefaultMaxBlocksPerInv bounds how many block IDs we list in one
 	// item_ids_inventory_message. Hived advertises blocks one-by-one
@@ -44,11 +49,13 @@ const (
 
 	// DefaultApplyQueueSize bounds the inbound block channel feeding the
 	// single applyLoop. Mainnet blocks are ≤ ~64 KiB on the wire so a
-	// 4096-deep queue caps worst-case in-flight memory at ~256 MiB even
+	// 16384-deep queue caps worst-case in-flight memory at ~1 GiB even
 	// during a multi-peer fan-out storm. Combined with the high-water
 	// back-pressure below it should never get close to that on the happy
-	// path; it's the upper guardrail.
-	DefaultApplyQueueSize = 4096
+	// path; it's the upper guardrail. Bumped from 4096 to 16384 to keep
+	// the queue out of the way during a multi-peer catch-up where 8
+	// peers each push thousands of blocks in flight.
+	DefaultApplyQueueSize = 16384
 
 	// DefaultApplyQueueHighWaterPct — when the apply queue passes this
 	// fraction of capacity we tell every peer to STOP sending us blocks
@@ -72,14 +79,18 @@ const (
 	// DefaultMaxOutstandingTotal caps the total number of blocks we have
 	// in flight (fetched but not yet applied) across all peers. Together
 	// with ApplyQueueSize this is the upper bound on memory consumed by
-	// inbound block traffic. Set to about half the apply queue so a peer
-	// stream burst can't fully saturate the queue alone.
-	DefaultMaxOutstandingTotal = 2048
+	// inbound block traffic. Bumped from 2048 to 8192 because a fast
+	// catch-up against 8 peers needs deep pipelining: at ~30 KiB/block
+	// average, 8192 ≈ 240 MiB worst-case, well within budget.
+	DefaultMaxOutstandingTotal = 8192
 
 	// DefaultMaxOutstandingPerPeer caps how many blocks any single peer
 	// can have in flight to us. Keeps a single misbehaving (or simply
-	// faster) peer from monopolising the budget.
-	DefaultMaxOutstandingPerPeer = 512
+	// faster) peer from monopolising the budget. Bumped from 512 to 2048
+	// — the 200-block-per-fetch_blockchain_item_ids reply means 2 RTTs
+	// of pipeline depth at the previous cap; 2048 is closer to what the
+	// hived-side response queue can absorb without wasting our budget.
+	DefaultMaxOutstandingPerPeer = 2048
 )
 
 // Chain is the slice of *chain.Database the sync layer needs. Allows
@@ -160,6 +171,15 @@ type Config struct {
 	// outbound BroadcastBlock from witness still goes through the
 	// gossip layer directly, NOT through this hook).
 	OnBlockApplied func(rawBlock []byte, blockNum uint32, source *node.Peer)
+
+	// LogEveryBlock, when true, emits one "p2p/sync: applied block N"
+	// line per applied block. Off by default — the chain layer's
+	// per-second progress line is sufficient for normal catch-up
+	// operation and the per-block writes were measurably slowing
+	// down a fast multi-thousand-bps sync (stderr formatting + write
+	// syscall overhead dominated). Tests that grep the per-block line
+	// can opt back in.
+	LogEveryBlock bool
 }
 
 func (c *Config) defaults() {
