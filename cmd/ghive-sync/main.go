@@ -49,7 +49,53 @@ import (
 	"hived-go/internal/protocol/network"
 	"hived-go/internal/state"
 	"hived-go/internal/state/genesis"
+	"hived-go/internal/state/objects"
 )
+
+// peekPersistedHead reads the DGPO row from the state backend without
+// constructing a chain.Database (so genesis.Apply hasn't reset it yet)
+// and returns the persisted head block number. Returns 0 when the
+// backend is empty or the row is not yet seeded.
+func peekPersistedHead(db *state.Database) uint32 {
+	s := state.NewSession(db)
+	dgpo, err := objects.GetDGPO(s)
+	if err != nil {
+		return 0
+	}
+	return dgpo.HeadBlockNumber
+}
+
+// wipePebbleFiles removes pebble's state files from dir while preserving
+// the blockchain/ subtree (block_log + index sidecar) and the peerdb.
+// Used at startup when crash recovery has to rebuild state from genesis
+// — pebble may hold partially-applied transactions (dedup table) from
+// the previous run that would conflict with the replay. Once the typed-
+// stores get pebble persistence (out of scope here), this can be a
+// targeted "reset DGPO + dedup table only" operation instead.
+func wipePebbleFiles(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	for _, e := range entries {
+		name := e.Name()
+		switch name {
+		case "blockchain", "peerdb":
+			// Preserve.
+			continue
+		}
+		// Pebble files: *.log, *.sst, MANIFEST-*, CURRENT, OPTIONS-*,
+		// LOCK, marker.* — we just nuke everything in the dir other
+		// than the explicitly-preserved entries above.
+		if err := os.RemoveAll(filepath.Join(dir, name)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 func main() {
 	cfg := parseFlags()
@@ -82,6 +128,13 @@ func main() {
 			os.Exit(1)
 		}
 		return
+	}
+
+	// Crash recovery: bring the in-memory typed-stores back to the
+	// persisted DGPO head by replaying the local block_log.
+	if err := app.recover(); err != nil {
+		fmt.Fprintf(os.Stderr, "ghive-sync: %v\n", err)
+		os.Exit(1)
 	}
 
 	if err := app.run(); err != nil {
@@ -180,13 +233,20 @@ func parseFlags() flags {
 
 // app bundles the long-lived per-process resources.
 type app struct {
-	cfg    flags
-	state  *state.Database
-	chain  *chain.Database
-	writer blocklog.Writer
-	verify *blocklog.Reader // optional, for --verify-against
-	p2p    *p2pnode.Node
-	logger *appLogger
+	cfg          flags
+	state        *state.Database
+	chain        *chain.Database
+	writer       blocklog.Writer
+	verify       *blocklog.Reader // optional, for --verify-against
+	p2p          *p2pnode.Node
+	logger       *appLogger
+	blockLogPath string
+	// recoverFrom > 0 when the daemon detected a non-empty pebble or
+	// non-empty blocklog at startup; recover() will replay blocks
+	// 1..recoverFrom against the local blocklog before opening the
+	// p2p subsystem to bring the in-memory typed-stores back in sync
+	// with the persisted DGPO. 0 = cold start, no recovery needed.
+	recoverFrom uint32
 
 	// progress tracking — afterApply rate-limits its log line to one
 	// emission per progressInterval (or per progressBlocks blocks).
@@ -211,6 +271,23 @@ type app struct {
 }
 
 func newApp(cfg flags) (*app, error) {
+	// Crash-recovery preflight: if the local block_log has any blocks
+	// AND we're using pebble (i.e. there's persisted state to clean up),
+	// wipe the pebble directory so we don't end up double-applying
+	// transactions that already landed in the previous run's dedup
+	// table. The block_log is preserved (writer reopens at HEAD); the
+	// in-memory typed-stores get rebuilt by recover() replaying from
+	// genesis. This is the only way to avoid stale-K/V corruption while
+	// typed-stores remain volatile across restarts.
+	blockLogPath := filepath.Join(cfg.dataDir, "blockchain", "block_log")
+	if cfg.backend != "mem" {
+		if _, err := os.Stat(blockLogPath); err == nil {
+			if err := wipePebbleFiles(cfg.dataDir); err != nil {
+				return nil, fmt.Errorf("wipe stale pebble at %s: %w", cfg.dataDir, err)
+			}
+		}
+	}
+
 	var stateDB *state.Database
 	switch cfg.backend {
 	case "mem":
@@ -228,6 +305,9 @@ func newApp(cfg flags) (*app, error) {
 	default:
 		return nil, fmt.Errorf("unknown --backend %q (want pebble or mem)", cfg.backend)
 	}
+	// After wipe, peek is always 0 — but keep the call so the recovery
+	// path also works for callers that wire it differently.
+	persistedHead := peekPersistedHead(stateDB)
 	if err := genesis.Apply(stateDB); err != nil {
 		// Apply tolerates an already-bootstrapped dir.
 		_ = err
@@ -238,17 +318,43 @@ func newApp(cfg flags) (*app, error) {
 	// Without this, RecentBlockBytes returns nil and our block_log stays
 	// empty even though every block validates.
 	cdb.EnableRecentBlockCache(2048)
+	// Configure batched commits when running pebble — hides the per-block
+	// fsync cost behind a single batch fsync. Mem backend is already
+	// volatile so batching adds no value (fsync is a no-op on memBackend).
+	if cfg.commitBatch > 1 && cfg.backend != "mem" {
+		cdb.SetCommitBatch(uint32(cfg.commitBatch), true)
+	}
 
 	blockchainDir := filepath.Join(cfg.dataDir, "blockchain")
 	if err := os.MkdirAll(blockchainDir, 0o755); err != nil {
 		stateDB.Close()
 		return nil, fmt.Errorf("mkdir blockchain: %w", err)
 	}
-	blockLogPath := filepath.Join(blockchainDir, "block_log")
 	w, err := blocklog.OpenForWrite(blockLogPath, cfg.compressBlocks)
 	if err != nil {
 		stateDB.Close()
 		return nil, fmt.Errorf("open block_log writer: %w", err)
+	}
+
+	// Crash recovery: if the local block_log has blocks (writer reopened
+	// at HEAD>0) AND pebble previously had DGPO at some N, replay from
+	// block 1 (typed-stores are volatile and need rebuilding from genesis)
+	// to whichever of writer-head/persistedHead is higher. Replay uses
+	// the same fast batched-commit + skip-sigs settings as a fresh sync.
+	//
+	// Why replay from 1 instead of from persistedHead+1: the typed
+	// stores (Account, Witness, Comment, CommentVote, WitnessVote) are
+	// in-memory only and were just re-seeded by genesis.Apply. To bring
+	// them up to N requires applying every block from 1..N. The pebble
+	// K/V state from a previous run is overwritten as the replay
+	// proceeds, so the persistedHead is only relevant as a sanity hint
+	// (we expect blocklog.HeadBlock >= persistedHead).
+	recoverFrom := uint32(0)
+	if w.HeadBlock() > 0 || persistedHead > 0 {
+		recoverFrom = w.HeadBlock()
+		if persistedHead > recoverFrom {
+			recoverFrom = persistedHead
+		}
 	}
 
 	a := &app{
@@ -256,6 +362,8 @@ func newApp(cfg flags) (*app, error) {
 		state:            stateDB,
 		chain:            cdb,
 		writer:           w,
+		blockLogPath:     blockLogPath,
+		recoverFrom:      recoverFrom,
 		logger:           newAppLogger(os.Stderr),
 		progressBlocks:   1000,
 		progressInterval: time.Second,
@@ -310,6 +418,16 @@ func (a *app) close() {
 		a.p2p.Stop()
 		a.p2p = nil
 	}
+	// Flush any partial batched-commit before closing pebble — otherwise
+	// up to commitBatch blocks of K/V state would be lost. The block_log
+	// is independent so the bytes survive regardless, but the persisted
+	// DGPO head would be a batch-boundary behind on next start, forcing
+	// the crash-recovery replay to redo work.
+	if a.chain != nil && a.chain.CommitBatchSize() > 1 {
+		if err := a.chain.FlushBatch(true); err != nil {
+			a.logger.printf("WARN final FlushBatch: %v", err)
+		}
+	}
 	if a.writer != nil {
 		_ = a.writer.Close()
 		a.writer = nil
@@ -327,6 +445,71 @@ func (a *app) close() {
 		_ = a.cpuProfileFile.Close()
 		a.cpuProfileFile = nil
 	}
+}
+
+// recover replays blocks 1..a.recoverFrom from the local block_log
+// against the freshly-genesised in-memory state. Required because the
+// typed-stores (Account, Witness, Comment, CommentVote, WitnessVote)
+// are NOT persisted in pebble — every restart starts them at genesis,
+// so we must re-apply the canonical block_log to bring them up to the
+// persisted DGPO head. Callers should invoke this BEFORE wiring the
+// per-block onBlockApplied callback that re-appends to the writer.
+//
+// Uses skip-sigs (the canonical bytes already passed validation
+// upstream) and the daemon's batched-commit setting to keep the
+// catch-up fast. Aborts at the first apply failure — a corrupted
+// block_log or pebble in an inconsistent state shouldn't silently
+// produce a half-recovered head.
+func (a *app) recover() error {
+	if a.recoverFrom == 0 {
+		return nil
+	}
+	r, err := blocklog.Open(a.blockLogPath)
+	if err != nil {
+		return fmt.Errorf("recover: open block_log: %w", err)
+	}
+	defer r.Close()
+	target := a.recoverFrom
+	if r.Head() < target {
+		// pebble previously persisted further than the local block_log.
+		// Replay only what the block_log can give us; the remaining
+		// gap will close once the p2p layer pulls the missing blocks.
+		a.logger.printf("recover: warning persisted DGPO head %d > block_log head %d; replaying only %d blocks", a.recoverFrom, r.Head(), r.Head())
+		target = r.Head()
+	}
+	if target == 0 {
+		return nil
+	}
+	a.logger.printf("recover: replaying %d blocks from local block_log (typed-stores rebuild)", target)
+	startedAt := time.Now()
+	for n := uint32(1); n <= target; n++ {
+		raw, err := r.Block(n)
+		if err != nil {
+			return fmt.Errorf("recover: read block %d: %w", n, err)
+		}
+		if _, err := a.chain.ApplyBlock(raw, n, chain.ApplyOptions{
+			SkipBlockSignature:        true,
+			SkipTransactionSignatures: true,
+			Sync:                      false,
+		}, nil); err != nil {
+			return fmt.Errorf("recover: apply block %d: %w", n, err)
+		}
+		if n%5000 == 0 {
+			elapsed := time.Since(startedAt).Seconds()
+			rate := float64(n) / elapsed
+			a.logger.printf("recover: head=%d (%.0f bps)", n, rate)
+		}
+	}
+	// Flush any partial batch so the next start sees a consistent
+	// head if it crashes here.
+	if a.chain.CommitBatchSize() > 1 {
+		if err := a.chain.FlushBatch(true); err != nil {
+			return fmt.Errorf("recover: flush: %w", err)
+		}
+	}
+	dt := time.Since(startedAt).Seconds()
+	a.logger.printf("recover: caught up to block %d in %.1fs (%.0f bps)", target, dt, float64(target)/dt)
+	return nil
 }
 
 // run brings up the P2P node + sync delegate and waits for SIGINT/SIGTERM
