@@ -411,20 +411,21 @@ func AdjustWitnessVotesForVoter(s *state.Session, account auth.AccountName, delt
 	// witness vote (30+ saves per producer-reward block).
 	ws, wsErr := GetWitnessSchedule(s)
 	wstore := EnsureWitnessStore(s)
+	currentVT := ws.CurrentVirtualTime
 	for _, witnessName := range votes {
-		w, ok := wstore.Get(witnessName)
-		if !ok {
-			continue
-		}
-		if wsErr == nil {
-			adjustWitnessVoteWith(&w, delta, hf, ws.CurrentVirtualTime)
-		} else {
-			// Fall back to the public path (no schedule yet).
-			// No negative clamp — C++ allows w.votes to go negative
-			// (`safe<int64_t>` only guards overflow). See applyWitnessVoteDelta.
-			w.TotalVotesVests += delta
-		}
-		wstore.Put(&w)
+		// Use Mutate to skip the 256-byte Witness copy on Get + Put.
+		// Hot path — fires 30+ times per producer-reward block.
+		wstore.Mutate(witnessName, func(w *Witness) {
+			if wsErr == nil {
+				adjustWitnessVoteWith(w, delta, hf, currentVT)
+			} else {
+				// Fall back to the public path (no schedule yet).
+				// No negative clamp — C++ allows w.votes to go negative
+				// (`safe<int64_t>` only guards overflow). See
+				// applyWitnessVoteDelta.
+				w.TotalVotesVests += delta
+			}
+		})
 	}
 }
 
