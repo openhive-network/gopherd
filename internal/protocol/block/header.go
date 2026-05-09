@@ -1,10 +1,25 @@
 package block
 
 import (
+	"crypto/sha256"
 	"fmt"
 
 	"hived-go/internal/fcraw"
 )
+
+// BlockSigningDigest is the message hash a witness signs to produce
+// signed_block_header.witness_signature: SHA-256 of the serialized
+// (unsigned) block header bytes. Mirrors hived's
+// `digest_type::hash(uncompressed_block.raw_bytes, block_header_size)`
+// in libraries/chain/full_block.cpp:144.
+//
+// Important: blocks do NOT mix in chain_id — that's a transaction-only
+// thing. The witness_object's signing_key is a single key (no
+// network-binding), so cross-chain replay protection here relies on
+// previous-block-id chain continuity, not on the digest's preimage.
+func BlockSigningDigest(headerBytes []byte) [32]byte {
+	return sha256.Sum256(headerBytes)
+}
 
 // block_header_extensions is a flat_set<static_variant<void_t, version, hardfork_version_vote>>.
 // Wire size of each variant body, indexed by tag:

@@ -16,7 +16,6 @@
 package witness
 
 import (
-	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -24,8 +23,8 @@ import (
 	"time"
 
 	"hived-go/internal/chain"
+	"hived-go/internal/crypto"
 	"hived-go/internal/protocol/block"
-	"hived-go/internal/protocol/network"
 	"hived-go/internal/protocol/op"
 	"hived-go/internal/protocol/tx"
 	"hived-go/internal/state"
@@ -38,8 +37,8 @@ const BlockInterval = 3 * time.Second
 // Producer is one (witness account, private key) pair we can sign for.
 type Producer struct {
 	Account     string
-	PrivateKey  []byte // 32-byte secp256k1 secret
-	PublicKey33 [33]byte
+	PrivateKey  *crypto.PrivateKey // secp256k1 secret
+	PublicKey33 crypto.PublicKey
 }
 
 // Plugin holds the witness daemon state.
@@ -201,11 +200,23 @@ func (p *Plugin) buildBlock(prod *Producer, dgpo objects.DynamicGlobalProperty, 
 	hdr.TransactionMerkleRoot = tx.MerkleRoot(digests)
 
 	headerBytes := block.MarshalHeader(nil, &hdr)
-	signedHeader := make([]byte, 0, len(headerBytes)+65)
+
+	if prod.PrivateKey == nil {
+		return nil, errors.New("buildBlock: producer has no private key")
+	}
+	// Hived's digest formula (libraries/chain/full_block.cpp:142-149) is
+	// SHA256 over the unsigned block-header bytes — NO chain_id prefix
+	// (only transactions splice in chain_id; blocks don't). The recovered
+	// pubkey from the resulting compact signature is checked against
+	// witness_object::signing_key in validate_block_header.
+	digest := block.BlockSigningDigest(headerBytes)
+	sig, err := crypto.SignCompact(prod.PrivateKey, digest)
+	if err != nil {
+		return nil, fmt.Errorf("buildBlock: sign: %w", err)
+	}
+
+	signedHeader := make([]byte, 0, len(headerBytes)+block.SignatureSize)
 	signedHeader = append(signedHeader, headerBytes...)
-	// Stub signature: 65 zero bytes. A real witness signs
-	// ripemd160(headerBytes ⊕ chain_id) with secp256k1.
-	var sig [65]byte
 	signedHeader = append(signedHeader, sig[:]...)
 
 	out := make([]byte, 0, len(signedHeader)+1+len(txBytes))
@@ -237,15 +248,3 @@ func appendVarUint(dst []byte, v uint32) []byte {
 	return append(dst, byte(v))
 }
 
-// _digestNetwork returns the chain id for binding signatures to network.
-// Stub for now; we don't sign in this implementation.
-func _digestNetwork() [32]byte {
-	id := network.ChainID
-	if len(id) == 32 {
-		var out [32]byte
-		copy(out[:], id[:])
-		return out
-	}
-	// Fallback: hash the network name.
-	return sha256.Sum256([]byte(network.Name))
-}
