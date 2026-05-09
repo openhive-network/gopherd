@@ -8,6 +8,86 @@ import (
 	"hived-go/internal/fcraw"
 )
 
+// LegacyHelloMessage is graphene::net::legacy_hello_message — the IPv4-only
+// version of HelloMessage used by older hived peers (mainnet seeds in
+// particular). Same field set as HelloMessage but uses fc::ip::legacy_address
+// (raw uint32 LE, no family byte) for inbound_address.
+//
+// Wire-format note: hived's send_hello_message in node.cpp:4854 sends BOTH
+// the new (5018) and the legacy (5006) hello back-to-back so older peers
+// that don't recognize 5018 can still handshake on 5006. We emit the same
+// pair on every outbound dial for the same reason — without the legacy
+// hello, mainnet seeds stuck on a pre-IPv6 hived will silently drop the
+// connection after sending us their own legacy hello.
+type LegacyHelloMessage struct {
+	UserAgent           string
+	CoreProtocolVersion uint32
+	InboundAddress      netip.Addr // must be IPv4-only
+	InboundPort         uint16
+	OutboundPort        uint16
+	NodePublicKey       PublicKeyData
+	SignedSharedSecret  CompactSignature
+	UserData            *VarObject
+}
+
+// Type returns the message type tag.
+func (LegacyHelloMessage) Type() MessageType { return LegacyHelloMessageType }
+
+// Marshal returns the FC binary encoding of m's body (no envelope header).
+func (m *LegacyHelloMessage) Marshal() ([]byte, error) {
+	w := fcraw.NewWriter()
+	w.WriteString(m.UserAgent)
+	w.WriteUint32(m.CoreProtocolVersion)
+	out, err := AppendLegacyAddress(w.Bytes(), m.InboundAddress)
+	if err != nil {
+		return nil, fmt.Errorf("legacy_hello.inbound_address: %w", err)
+	}
+	out = append(out, byte(m.InboundPort), byte(m.InboundPort>>8))
+	out = append(out, byte(m.OutboundPort), byte(m.OutboundPort>>8))
+	out = append(out, m.NodePublicKey[:]...)
+	out = append(out, m.SignedSharedSecret[:]...)
+	out = AppendVariantObject(out, m.UserData)
+	return out, nil
+}
+
+// Unmarshal parses src into m.
+func (m *LegacyHelloMessage) Unmarshal(src []byte) error {
+	r := fcraw.NewReader(src)
+	var err error
+	if m.UserAgent, err = r.ReadString(); err != nil {
+		return fmt.Errorf("legacy_hello.user_agent: %w", err)
+	}
+	if m.CoreProtocolVersion, err = r.ReadUint32(); err != nil {
+		return fmt.Errorf("legacy_hello.core_protocol_version: %w", err)
+	}
+	addr, err := ReadLegacyAddress(r)
+	if err != nil {
+		return fmt.Errorf("legacy_hello.inbound_address: %w", err)
+	}
+	m.InboundAddress = addr
+	if m.InboundPort, err = r.ReadUint16(); err != nil {
+		return fmt.Errorf("legacy_hello.inbound_port: %w", err)
+	}
+	if m.OutboundPort, err = r.ReadUint16(); err != nil {
+		return fmt.Errorf("legacy_hello.outbound_port: %w", err)
+	}
+	if err := r.ReadInto(m.NodePublicKey[:]); err != nil {
+		return fmt.Errorf("legacy_hello.node_public_key: %w", err)
+	}
+	if err := r.ReadInto(m.SignedSharedSecret[:]); err != nil {
+		return fmt.Errorf("legacy_hello.signed_shared_secret: %w", err)
+	}
+	o, err := ReadVariantObject(r)
+	if err != nil {
+		return fmt.Errorf("legacy_hello.user_data: %w", err)
+	}
+	m.UserData = o
+	if !r.AtEnd() {
+		return fmt.Errorf("legacy_hello: %d trailing bytes", r.Remaining())
+	}
+	return nil
+}
+
 // HelloMessage is graphene::net::hello_message — the first message a peer
 // sends after the stcp handshake.
 //
