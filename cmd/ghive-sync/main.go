@@ -176,27 +176,20 @@ type flags struct {
 	// if you trust the canonical block_log reference (which already
 	// validated the merkle root upstream).
 	noVerifyMerkle bool
-	// cacheMB sets the Pebble block cache in megabytes. Larger caches
-	// keep more hot rows (recently-touched accounts, witnesses, the
-	// ~5 hot singletons DGPO/FeedHistory/WitnessSchedule/etc.) in
-	// memory between block applies, eliminating the LSM disk reads
-	// that dominate the per-block CPU once the working set exceeds
-	// the cache. Default 1024MB (was hard-coded to 256MB).
+	// cacheMB sets the Pebble block cache in megabytes. Default 1024MB
+	// (was 256MB hard-coded).
 	cacheMB int
-	// commitBatch sets how many blocks accumulate in the per-Session
-	// overlay before a real Pebble Commit fires. 1 = the legacy per-
-	// block-fsync path; 100 (default) lets pebble buffer ~1s of writes
-	// at chain-head speed in one batched LSM apply with a single fsync.
-	// Crash recovery replays from the persisted DGPO head — the
-	// block_log writer is independent of state Commit batching, so the
-	// canonical bytes for any unpersisted block are always on disk.
+	// commitBatch sets how many blocks accumulate before pebble Commit
+	// fires. 1 = legacy per-block; 100 = batched.
 	commitBatch int
-	// commitBatchFsync controls whether the per-batch Commit fsyncs.
-	// True = durable (one fsync per commit-batch blocks); false =
-	// kernel-buffered (matches the legacy per-block NoSync behaviour
-	// for max throughput, with the data-loss window expanding from
-	// "since last block" to "since last batch").
+	// commitBatchFsync controls whether per-batch Commit fsyncs.
 	commitBatchFsync bool
+	// maxOutboundPeers caps active outbound peer count. 0 = p2pnode
+	// default (32). Bigger value = more parallel block fetches.
+	maxOutboundPeers int
+	// maxConcurrentDials caps in-flight dial attempts. 0 = p2pnode
+	// default (24).
+	maxConcurrentDials int
 }
 
 func parseFlags() flags {
@@ -216,9 +209,11 @@ func parseFlags() flags {
 	flag.StringVar(&f.cpuProfile, "cpuprofile", "", "write runtime/pprof CPU profile to this path")
 	flag.StringVar(&f.memProfile, "memprofile", "", "write runtime/pprof heap profile to this path at shutdown")
 	flag.BoolVar(&f.noVerifyMerkle, "no-verify-merkle", false, "skip the per-block merkle-root recomputation (faster; only safe with --verify-against)")
-	flag.IntVar(&f.cacheMB, "cache-mb", 1024, "pebble block-cache size in MB (default 1024; was 256 hard-coded). Larger = fewer disk reads on hot rows.")
-	flag.IntVar(&f.commitBatch, "commit-batch", 100, "blocks per pebble Apply. 1 = per-block (legacy); >1 batches commits and replays from DGPO head on restart against the local block_log.")
-	flag.BoolVar(&f.commitBatchFsync, "commit-batch-fsync", true, "fsync each batch boundary (default true = one fsync per commit-batch blocks vs the legacy per-block NoSync behaviour)")
+	flag.IntVar(&f.cacheMB, "cache-mb", 1024, "pebble block-cache size in MB (default 1024)")
+	flag.IntVar(&f.commitBatch, "commit-batch", 100, "blocks per pebble Apply (1 = legacy per-block; >1 batches)")
+	flag.BoolVar(&f.commitBatchFsync, "commit-batch-fsync", true, "fsync each batch boundary (default true)")
+	flag.IntVar(&f.maxOutboundPeers, "max-outbound-peers", 0, "max active outbound P2P peers (0 = default 32)")
+	flag.IntVar(&f.maxConcurrentDials, "max-concurrent-dials", 0, "max in-flight dial attempts (0 = default 24)")
 	flag.Parse()
 	f.targetBlock = uint32(target)
 	f.maxBlocks = uint32(max)
@@ -557,9 +552,11 @@ func (a *app) run() error {
 	})
 
 	a.p2p = p2pnode.New(p2pnode.Config{
-		Endpoint:  a.cfg.listenEndpoint,
-		SeedNodes: seeds,
-		UserAgent: "ghive-sync/0.1.0",
+		Endpoint:           a.cfg.listenEndpoint,
+		SeedNodes:          seeds,
+		UserAgent:          "ghive-sync/0.1.0",
+		MaxOutboundPeers:   a.cfg.maxOutboundPeers,
+		MaxConcurrentDials: a.cfg.maxConcurrentDials,
 	}, a.chain, nil)
 	syncDel := p2psync.New(p2psync.Config{}, a.chain)
 	a.p2p.SetDelegate(syncDel)
