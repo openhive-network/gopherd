@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,6 +22,24 @@ import (
 	"hived-go/internal/p2p/proto"
 	"hived-go/internal/p2p/transport"
 )
+
+// TraceEnabled toggles a per-peer wire-trace dump on stderr. Driven by the
+// GHIVE_P2P_TRACE env var ("1" / "true") at process start; useful when
+// diff'ing handshake sequences against a real hived peer.
+var TraceEnabled = func() bool {
+	v := os.Getenv("GHIVE_P2P_TRACE")
+	return v == "1" || v == "true" || v == "TRUE"
+}()
+
+// tracef writes a one-line peer-scoped trace message to stderr when
+// TraceEnabled. Cheap no-op when disabled (just an interface check).
+func (p *Peer) tracef(format string, args ...interface{}) {
+	if !TraceEnabled {
+		return
+	}
+	pre := fmt.Sprintf("p2p-trace [%s/%s] ", p.Conn().RemoteAddr(), p.direction)
+	fmt.Fprintf(os.Stderr, pre+format+"\n", args...)
+}
 
 // PeerState mirrors the lifecycle of a hived peer_connection.
 type PeerState int32
@@ -137,8 +156,10 @@ type Peer struct {
 
 	state atomic.Int32 // PeerState
 
-	helloPayload []byte                            // local HelloMessage body (built per-peer because the signed shared-secret depends on the per-conn ECDHE)
-	buildHello   func(c *transport.Conn) ([]byte, error) // optional override (testing)
+	helloPayload       []byte                                  // local HelloMessage body (built per-peer because the signed shared-secret depends on the per-conn ECDHE)
+	legacyHelloPayload []byte                                  // optional IPv4-only legacy_hello_message body
+	buildHello         func(c *transport.Conn) ([]byte, error) // optional override (testing)
+	buildLegacyHello   func(c *transport.Conn) ([]byte, error) // optional legacy_hello builder
 
 	mu              sync.Mutex
 	lastHeartbeatRX time.Time
@@ -152,12 +173,20 @@ type Peer struct {
 // run-start to produce the FC-encoded HelloMessage body — must be lazy
 // because the signed_shared_secret field depends on the per-connection
 // stcp ECDHE result, which only becomes known AFTER performHandshake.
-func newPeer(c *transport.Conn, dir Direction, helloBuilder func(c *transport.Conn) ([]byte, error)) *Peer {
+//
+// legacyHelloBuilder, if non-nil, is invoked the same way to produce the
+// IPv4-only legacy_hello_message body (graphene::net::legacy_hello_message,
+// 5006). When set, peer.run sends the legacy body immediately after the new
+// HelloMessage on every outbound dial — mirroring hived's send_hello_message
+// which always emits both forms so older peers that don't recognize 5018
+// can still complete the handshake on 5006.
+func newPeer(c *transport.Conn, dir Direction, helloBuilder, legacyHelloBuilder func(c *transport.Conn) ([]byte, error)) *Peer {
 	p := &Peer{
-		conn:       c,
-		direction:  dir,
-		buildHello: helloBuilder,
-		doneCh:     make(chan struct{}),
+		conn:             c,
+		direction:        dir,
+		buildHello:       helloBuilder,
+		buildLegacyHello: legacyHelloBuilder,
+		doneCh:           make(chan struct{}),
 	}
 	p.state.Store(int32(StateConnecting))
 	return p
@@ -178,7 +207,12 @@ func (p *Peer) Conn() *transport.Conn { return p.conn }
 
 // Send forwards to the underlying transport. Safe for concurrent use.
 func (p *Peer) Send(typeTag proto.MessageType, body []byte) error {
-	return p.conn.Send(typeTag, body)
+	p.tracef("--> SEND %s len=%d", typeTag, len(body))
+	err := p.conn.Send(typeTag, body)
+	if err != nil {
+		p.tracef("    SEND %s err=%v", typeTag, err)
+	}
+	return err
 }
 
 // Done returns a channel that is closed when the peer is fully torn down.
@@ -235,9 +269,28 @@ func (p *Peer) run(ctx context.Context, delegate Delegate) {
 		return
 	}
 	p.helloPayload = hello
-	if err := p.conn.Send(proto.HelloMessageType, p.helloPayload); err != nil {
+	if err := p.Send(proto.HelloMessageType, p.helloPayload); err != nil {
 		p.close(fmt.Errorf("send hello: %w", err))
 		return
+	}
+	// Mirror hived's send_hello_message: emit the IPv4-only legacy hello
+	// (5006) right after the new hello (5018). Mainnet seeds running older
+	// hived versions only understand 5006 and will silently EOF if they
+	// don't see it; newer peers see both, accept the new one, and ignore
+	// the legacy duplicate.
+	if p.buildLegacyHello != nil {
+		legacy, lerr := p.buildLegacyHello(p.conn)
+		if lerr == nil && len(legacy) > 0 {
+			p.legacyHelloPayload = legacy
+			if err := p.Send(proto.LegacyHelloMessageType, p.legacyHelloPayload); err != nil {
+				p.close(fmt.Errorf("send legacy_hello: %w", err))
+				return
+			}
+		} else if lerr != nil {
+			// Non-fatal: the new-hello path may still complete on a
+			// recent peer.
+			p.tracef("legacy hello build skipped: %v", lerr)
+		}
 	}
 	p.setState(StateHelloSent)
 
@@ -254,8 +307,10 @@ func (p *Peer) run(ctx context.Context, delegate Delegate) {
 		if err != nil {
 			// Distinguish ctx cancel vs real error.
 			if ctx.Err() != nil {
+				p.tracef("<-- RECV err=ctx-cancelled state=%s", p.State())
 				p.close(nil)
 			} else {
+				p.tracef("<-- RECV err=%v state=%s", err, p.State())
 				p.close(fmt.Errorf("receive: %w", err))
 			}
 			if delegate != nil {
@@ -263,16 +318,23 @@ func (p *Peer) run(ctx context.Context, delegate Delegate) {
 			}
 			return
 		}
+		p.tracef("<-- RECV %s len=%d state=%s", typeTag, len(body), p.State())
 		switch typeTag {
-		case proto.HelloMessageType:
+		case proto.HelloMessageType, proto.LegacyHelloMessageType:
 			// Inbound peer sent its hello after we sent ours. Accept it.
-			p.setState(StateHelloReceived)
-			if err := p.conn.Send(proto.ConnectionAcceptedMessageType, nil); err != nil {
-				p.close(fmt.Errorf("send connection_accepted: %w", err))
-				if delegate != nil {
-					delegate.OnPeerDisconnected(p, p.CloseErr())
+			// Hived sends both 5018 and 5006 on every dial; the second
+			// one arrives slightly after the first. Treat them
+			// identically — once we've answered with ConnectionAccepted
+			// once, the second one is a no-op (we stay in Active).
+			if p.State() == StateHelloSent || p.State() == StateConnecting {
+				p.setState(StateHelloReceived)
+				if err := p.Send(proto.ConnectionAcceptedMessageType, nil); err != nil {
+					p.close(fmt.Errorf("send connection_accepted: %w", err))
+					if delegate != nil {
+						delegate.OnPeerDisconnected(p, p.CloseErr())
+					}
+					return
 				}
-				return
 			}
 			// Don't fire OnPeerConnected yet — we still want to receive
 			// THEIR ConnectionAccepted so both sides have agreed.
@@ -321,6 +383,14 @@ func (p *Peer) run(ctx context.Context, delegate Delegate) {
 				delegate.OnPeerDisconnected(p, p.CloseErr())
 				return
 			}
+		case proto.LegacyAddressMessageType:
+			// Legacy address_message (5010) — vector of legacy_address_info
+			// (IPv4-only endpoint). We don't currently maintain a separate
+			// peerdb for legacy peers; treat this as an inbound discovery
+			// signal but skip parsing for now (the new 5020 path covers
+			// modern peers). A future cleanup can teach the peerdb to
+			// accept legacy addresses too.
+			_ = body
 		case proto.AddressMessageType:
 			if delegate == nil {
 				continue
@@ -332,23 +402,62 @@ func (p *Peer) run(ctx context.Context, delegate Delegate) {
 				continue
 			}
 			delegate.OnAddressesReceived(p, msg.Addresses)
+		case proto.LegacyConnectionRejectedMessageType:
+			// Older peers send the IPv4-only legacy_connection_rejected
+			// (5008). Body fields match the new connection_rejected modulo
+			// the endpoint encoding; for diagnostics we just record the
+			// raw size — older peers usually wrap the same human-readable
+			// reason string we'd see from a 5019.
+			err := fmt.Errorf("peer rejected connection (legacy, %d-byte reason)", len(body))
+			p.tracef("LEGACY-REJECTED: %v", err)
+			p.close(err)
+			if delegate != nil {
+				delegate.OnPeerDisconnected(p, err)
+			}
+			return
 		case proto.ConnectionRejectedMessageType:
-			// hived's connection_rejected_message body is FC-encoded
-			// (user_agent, version, endpoint, reason_string, reason_code)
-			// — once agent-p2p-msg lands the proto stub we can decode
-			// the reason. For now we record the raw body length in the
-			// error message.
-			err := fmt.Errorf("peer rejected connection (%d-byte reason)", len(body))
+			// Decode the reason for inclusion in the error so the operator
+			// can see why hived rejected the handshake.
+			var rej proto.ConnectionRejectedMessage
+			var err error
+			if dErr := rej.Unmarshal(body); dErr == nil {
+				err = fmt.Errorf("peer rejected connection: code=%d reason=%q", rej.ReasonCode, rej.ReasonString)
+			} else {
+				err = fmt.Errorf("peer rejected connection (%d-byte reason; decode err=%v)", len(body), dErr)
+			}
+			p.tracef("REJECTED: %v", err)
 			p.close(err)
 			if delegate != nil {
 				delegate.OnPeerDisconnected(p, err)
 			}
 			return
 		case proto.CurrentTimeRequestMessageType:
-			// Reply immediately. Body would normally echo the request's
-			// timestamp; agent-p2p-msg will fill in the FC encoding,
-			// for now we just bounce the body back.
-			if err := p.conn.Send(proto.CurrentTimeReplyMessageType, body); err != nil {
+			// Decode the request to recover request_sent_time, then build
+			// a proper 3-timestamp current_time_reply_message body. Hived
+			// closes the connection if the reply is the wrong size (8 vs
+			// 24 bytes) — the request and reply are NOT the same shape,
+			// despite the names being symmetrical.
+			now := uint64(time.Now().UnixMicro())
+			var req proto.CurrentTimeRequestMessage
+			if err := req.Unmarshal(body); err != nil {
+				// Fall back to zero so we still answer; hived's own
+				// clock_offset math handles bogus values.
+				req.RequestSentTime = 0
+			}
+			reply := proto.CurrentTimeReplyMessage{
+				RequestSentTime:      req.RequestSentTime,
+				RequestReceivedTime:  now,
+				ReplyTransmittedTime: now,
+			}
+			rb, err := reply.Marshal()
+			if err != nil {
+				p.close(fmt.Errorf("marshal current_time_reply: %w", err))
+				if delegate != nil {
+					delegate.OnPeerDisconnected(p, p.CloseErr())
+				}
+				return
+			}
+			if err := p.Send(proto.CurrentTimeReplyMessageType, rb); err != nil {
 				p.close(fmt.Errorf("send current_time_reply: %w", err))
 				if delegate != nil {
 					delegate.OnPeerDisconnected(p, p.CloseErr())
@@ -403,10 +512,17 @@ func (p *Peer) heartbeatLoop(ctx context.Context, stop <-chan struct{}) {
 				p.close(errors.New("heartbeat timeout"))
 				return
 			}
-			// FC-encoded current_time_request_message body would carry
-			// the request_sent_time. Stub it with 8 zero bytes for now.
-			body := []byte{0, 0, 0, 0, 0, 0, 0, 0}
-			if err := p.conn.Send(proto.CurrentTimeRequestMessageType, body); err != nil {
+			// FC-encoded current_time_request_message body carries the
+			// request_sent_time as a uint64 LE microseconds-since-epoch.
+			req := proto.CurrentTimeRequestMessage{
+				RequestSentTime: uint64(time.Now().UnixMicro()),
+			}
+			rb, err := req.Marshal()
+			if err != nil {
+				p.close(fmt.Errorf("marshal heartbeat: %w", err))
+				return
+			}
+			if err := p.Send(proto.CurrentTimeRequestMessageType, rb); err != nil {
 				p.close(fmt.Errorf("send heartbeat: %w", err))
 				return
 			}

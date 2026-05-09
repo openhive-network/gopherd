@@ -252,6 +252,66 @@ func (n *Node) buildHelloPayload(c *transport.Conn) ([]byte, error) {
 	return body, nil
 }
 
+// buildLegacyHelloPayload mirrors buildHelloPayload but emits the IPv4-only
+// legacy_hello_message body (graphene::net::legacy_hello_message, msg_type
+// 5006). hived's send_hello_message sends both the new hello and this legacy
+// form back-to-back so older peers without 5018 support can still complete
+// the handshake. Returns the serialized body or nil if the local inbound
+// address isn't IPv4 (legacy_address can't carry v6).
+func (n *Node) buildLegacyHelloPayload(c *transport.Conn) ([]byte, error) {
+	priv := c.LocalPrivateKey()
+	if priv == nil {
+		return nil, fmt.Errorf("legacy hello: stcp local ephemeral key not exposed")
+	}
+	shared := c.SharedSecret()
+	digest := sha256.Sum256(shared[:])
+	sig, err := crypto.SignCompact(priv, digest)
+	if err != nil {
+		return nil, fmt.Errorf("legacy hello: sign shared secret: %w", err)
+	}
+
+	localPub := c.LocalPublicKey()
+	var nodePub proto.PublicKeyData
+	copy(nodePub[:], localPub[:])
+	var sigBytes proto.CompactSignature
+	copy(sigBytes[:], sig[:])
+
+	var inboundPort uint16
+	if n.cfg.Endpoint != "" {
+		if _, p, err := net.SplitHostPort(n.cfg.Endpoint); err == nil {
+			if v, err := strconv.ParseUint(p, 10, 16); err == nil {
+				inboundPort = uint16(v)
+			}
+		}
+	}
+	outboundPort := inboundPort
+	inboundAddr := netip.MustParseAddr("0.0.0.0")
+
+	ud := proto.NewVarObject()
+	ud.Set("chain_id", proto.NewVariantString(network.ChainID.Hex()))
+	ud.Set("node_id", proto.NewVariantString(hex.EncodeToString(localPub[:])))
+	ud.Set("graphene_git_revision_sha", proto.NewVariantString("ghive-go"))
+	ud.Set("graphene_git_revision_unix_timestamp", proto.NewVariantUint64(uint64(time.Now().Unix())))
+	ud.Set("platform", proto.NewVariantString(runtime.GOOS))
+	ud.Set("bitness", proto.NewVariantUint64(64))
+
+	legacy := proto.LegacyHelloMessage{
+		UserAgent:           n.cfg.UserAgent,
+		CoreProtocolVersion: proto.CoreProtocolVersion,
+		InboundAddress:      inboundAddr,
+		InboundPort:         inboundPort,
+		OutboundPort:        outboundPort,
+		NodePublicKey:       nodePub,
+		SignedSharedSecret:  sigBytes,
+		UserData:            ud,
+	}
+	body, err := legacy.Marshal()
+	if err != nil {
+		return nil, fmt.Errorf("legacy hello: marshal: %w", err)
+	}
+	return body, nil
+}
+
 // SetDelegate installs (or replaces) the application-layer delegate.
 // MUST be called before Start; once peers are running there is no
 // guard against the delegate pointer being read from another
@@ -491,7 +551,7 @@ func (n *Node) handleNewConn(c *transport.Conn, dir Direction, dialEndpoint stri
 		}
 	}
 
-	peer := newPeer(c, dir, n.buildHelloPayload)
+	peer := newPeer(c, dir, n.buildHelloPayload, n.buildLegacyHelloPayload)
 	info := &peerInfo{endpoint: dialEndpoint, dir: dir}
 	n.mu.Lock()
 	n.peers[peer] = info
