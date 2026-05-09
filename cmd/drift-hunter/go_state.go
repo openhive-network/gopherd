@@ -15,12 +15,14 @@ package main
 
 import (
 	"fmt"
+	"os"
 
 	"hived-go/internal/blocklog"
 	"hived-go/internal/chain"
 	"hived-go/internal/state"
 	"hived-go/internal/state/genesis"
 	"hived-go/internal/state/objects"
+	"hived-go/internal/state/snapshot"
 )
 
 // goState bundles a session and a few pre-fetched singletons. Multiple
@@ -31,13 +33,33 @@ type goState struct {
 	blockNum uint32
 }
 
-// loadGoSnapshot opens the named snapshot file. Returns the head block
+// loadGoSnapshot opens the named snapshot. Auto-detects file (legacy
+// single-file format) vs directory (the dir-based format produced by
+// `ghive-tools replay --snapshot-every=N`). Returns the head block
 // recorded in the snapshot header alongside the live state.
 func loadGoSnapshot(path string) (*goState, error) {
 	db := state.OpenMem()
-	headBN, err := db.LoadSnapshot(path)
-	if err != nil {
-		return nil, fmt.Errorf("load snapshot %s: %w", path, err)
+	var headBN uint32
+	if info, err := os.Stat(path); err == nil && info.IsDir() {
+		// Pre-register every typed subsystem on the freshly-opened DB
+		// so Load matches the producing process's subsystem set.
+		boot := state.NewSession(db)
+		objects.EnsureWitnessStore(boot)
+		objects.EnsureWitnessVoteStore(boot)
+		objects.EnsureAccountStore(boot)
+		objects.EnsureCommentStore(boot)
+		objects.EnsureCommentVoteStore(boot)
+		m, lerr := snapshot.Load(db, path)
+		if lerr != nil {
+			return nil, fmt.Errorf("load snapshot dir %s: %w", path, lerr)
+		}
+		headBN = m.BlockNum
+	} else {
+		bn, lerr := db.LoadSnapshot(path)
+		if lerr != nil {
+			return nil, fmt.Errorf("load snapshot %s: %w", path, lerr)
+		}
+		headBN = bn
 	}
 	return &goState{
 		db:       db,
