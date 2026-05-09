@@ -80,21 +80,43 @@ func VerifyAuthority(s *state.Session, signedTx *tx.SignedTransaction, unsignedB
 	if skipSig {
 		return nil
 	}
+	keys, err := RecoverTxSignerKeys(signedTx, unsignedBytes, chainID)
+	if err != nil {
+		return err
+	}
+	return VerifyAuthorityWithKeys(s, signedTx, keys)
+}
+
+// RecoverTxSignerKeys recovers the public keys behind each tx.Signatures
+// entry. Pure CPU work — no state access — so callers may run it in
+// parallel across goroutines (the apply pipeline fans this out before
+// handing the job to the single-writer applyLoop).
+//
+// chainID is the prefix mixed into the sig digest (zero pre-HF24,
+// network.ChainID HF24+).
+func RecoverTxSignerKeys(signedTx *tx.SignedTransaction, unsignedBytes []byte, chainID network.Hash32) ([]crypto.PublicKey, error) {
 	digest := crypto.SHA256Of2(chainID[:], unsignedBytes)
 	keys := make([]crypto.PublicKey, 0, len(signedTx.Signatures))
 	for i, sig := range signedTx.Signatures {
 		var compact crypto.CompactSignature
 		copy(compact[:], sig[:])
 		if !compact.IsCanonical() {
-			return fmt.Errorf("verify_authority: signature %d non-canonical", i)
+			return nil, fmt.Errorf("verify_authority: signature %d non-canonical", i)
 		}
 		k, err := crypto.RecoverPublicKey(digest, compact)
 		if err != nil {
-			return fmt.Errorf("verify_authority: recover signature %d: %w", i, err)
+			return nil, fmt.Errorf("verify_authority: recover signature %d: %w", i, err)
 		}
 		keys = append(keys, k)
 	}
+	return keys, nil
+}
 
+// VerifyAuthorityWithKeys is VerifyAuthority's second half: given the
+// pre-recovered set of signer pubkeys, walk the required authorities
+// against state and confirm each is covered. Uses no goroutines; the
+// state.Session must be owned by the caller.
+func VerifyAuthorityWithKeys(s *state.Session, signedTx *tx.SignedTransaction, keys []crypto.PublicKey) error {
 	required := RequiredAuthorities(signedTx)
 	// Hived's verify_authority does NOT enforce "len(sigs)>0" globally;
 	// each required authority is checked individually. Operations like

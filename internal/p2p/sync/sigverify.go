@@ -3,6 +3,7 @@ package sync
 import (
 	"sync"
 
+	"hived-go/internal/chain"
 	"hived-go/internal/crypto"
 	"hived-go/internal/protocol/block"
 )
@@ -109,4 +110,75 @@ func recoverBlockSignerCached(rawBlock []byte, cache *signerCache, hintID block.
 		cache.put(hintID, got)
 	}
 	return got
+}
+
+// txSigCache memoizes the per-tx signer-pubkey set for a freshly-decoded
+// block, keyed by block.ID. Mirrors signerCache's role for the witness
+// signature: when the same block arrives from multiple peers during
+// catch-up, we only fan-out the per-tx secp256k1 recovery once. The
+// stored value is the slice slot returned by chain.RecoverBlockTxSignerKeys
+// — already shaped to drop straight into ApplyOptions.PreRecoveredTxKeys.
+//
+// Capacity is bounded by the same eviction strategy as signerCache (drop
+// oldest 1/4 when full). Each cached value is a slice of slices of
+// 33-byte PublicKeys; even at 100 txs × 4 sigs that's ~14 KB per block,
+// so 8192 entries cap memory at ~115 MB worst case.
+type txSigCache struct {
+	mu    sync.RWMutex
+	cap   int
+	order []block.ID
+	keys  map[block.ID][][]crypto.PublicKey
+}
+
+const txSigCacheCap = 8192
+
+func newTxSigCache() *txSigCache {
+	return &txSigCache{
+		cap:   txSigCacheCap,
+		order: make([]block.ID, 0, txSigCacheCap),
+		keys:  make(map[block.ID][][]crypto.PublicKey, txSigCacheCap),
+	}
+}
+
+func (c *txSigCache) get(id block.ID) ([][]crypto.PublicKey, bool) {
+	c.mu.RLock()
+	v, ok := c.keys[id]
+	c.mu.RUnlock()
+	return v, ok
+}
+
+func (c *txSigCache) put(id block.ID, v [][]crypto.PublicKey) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, exists := c.keys[id]; exists {
+		return
+	}
+	if len(c.keys) >= c.cap {
+		drop := c.cap / 4
+		if drop < 1 {
+			drop = 1
+		}
+		for i := 0; i < drop && i < len(c.order); i++ {
+			delete(c.keys, c.order[i])
+		}
+		c.order = append(c.order[:0], c.order[drop:]...)
+	}
+	c.order = append(c.order, id)
+	c.keys[id] = v
+}
+
+// recoverTxKeysCached fans out per-tx signer recovery (parallel, internal
+// to chain.RecoverBlockTxSignerKeys) and memoizes the result so duplicate
+// block deliveries during catch-up don't re-pay the recovery cost.
+func recoverTxKeysCached(rawBlock []byte, blockNum uint32, cache *txSigCache, hintID block.ID) [][]crypto.PublicKey {
+	if cache != nil && hintID != (block.ID{}) {
+		if v, ok := cache.get(hintID); ok {
+			return v
+		}
+	}
+	res := chain.RecoverBlockTxSignerKeys(rawBlock, blockNum)
+	if cache != nil && hintID != (block.ID{}) && res.TxKeys != nil {
+		cache.put(hintID, res.TxKeys)
+	}
+	return res.TxKeys
 }
