@@ -35,6 +35,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"runtime/pprof"
 	"sync/atomic"
 	"syscall"
@@ -113,6 +114,10 @@ type flags struct {
 	// CPU profile to. The profile is started at app boot and stopped on
 	// shutdown.
 	cpuProfile string
+	// memProfile, when non-empty, is the path to write a runtime/pprof
+	// heap (allocation) profile to at shutdown. Captures alloc_space and
+	// inuse_space samples.
+	memProfile string
 	// noVerifyMerkle disables the per-block merkle-root recomputation
 	// inside validateBlock. Saves ~5% CPU on the apply path; only safe
 	// if you trust the canonical block_log reference (which already
@@ -135,6 +140,7 @@ func parseFlags() flags {
 	flag.BoolVar(&f.compressBlocks, "compress-blocks", false, "zstd-compress each block in the local block_log (matches hived's on-disk format byte-for-byte)")
 	flag.StringVar(&f.backend, "backend", "", "state backend: pebble (persistent) or mem (volatile, ~3-5x faster); default = pebble unless --verify-against is set, in which case mem (since the run is throwaway anyway)")
 	flag.StringVar(&f.cpuProfile, "cpuprofile", "", "write runtime/pprof CPU profile to this path")
+	flag.StringVar(&f.memProfile, "memprofile", "", "write runtime/pprof heap profile to this path at shutdown")
 	flag.BoolVar(&f.noVerifyMerkle, "no-verify-merkle", false, "skip the per-block merkle-root recomputation (faster; only safe with --verify-against)")
 	flag.Parse()
 	f.targetBlock = uint32(target)
@@ -263,6 +269,22 @@ func newApp(cfg flags) (*app, error) {
 }
 
 func (a *app) close() {
+	// Heap profile is written BEFORE we tear anything else down so the
+	// snapshot reflects what was live at peak, not after Close has freed
+	// the writer/state buffers.
+	if a.cfg.memProfile != "" {
+		if f, err := os.Create(a.cfg.memProfile); err == nil {
+			runtime.GC()
+			if werr := pprof.WriteHeapProfile(f); werr != nil {
+				a.logger.printf("WARN write heap profile: %v", werr)
+			} else {
+				a.logger.printf("heap profile -> %s", a.cfg.memProfile)
+			}
+			_ = f.Close()
+		} else {
+			a.logger.printf("WARN create memprofile %s: %v", a.cfg.memProfile, err)
+		}
+	}
 	if a.p2p != nil {
 		a.p2p.Stop()
 		a.p2p = nil
