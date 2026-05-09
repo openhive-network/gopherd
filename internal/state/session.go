@@ -74,6 +74,28 @@ type Session struct {
 	// committed before this Session started, which is now stale
 	// relative to the surviving overlay state.
 	mistrustDBAux bool
+	// undoLog records overlay pre-images for every Put/Delete made
+	// while at least one Savepoint is active. Snapshot only captures
+	// the current undo-log length; Restore replays entries in reverse
+	// to revert. This collapses the prior O(overlay-size) per-tx
+	// shallow-copy snapshot into O(tx-edits) — the dominant 3.5M+
+	// cliff cost (Snapshot was 55% of CPU at block 3.6M).
+	undoLog []sessionUndoEntry
+	// snapshotDepth counts active Savepoints. Put/Delete only append
+	// to undoLog when depth > 0 (avoids per-Put overhead for the
+	// common case of no in-flight tx — e.g., per-block hooks like
+	// updateWitnessSchedule that mutate freely between txs).
+	snapshotDepth int
+}
+
+// sessionUndoEntry captures the overlay state for one key BEFORE a
+// Put/Delete overwrote it. `had` distinguishes "key didn't exist in
+// overlay (undo by deleting both overlay + overlayKeys)" from "key
+// existed with prev value (undo by restoring overlay[key]=prev)".
+type sessionUndoEntry struct {
+	key  string
+	prev overlayEntry
+	had  bool
 }
 
 // RegisterPreCommit schedules fn to run just before this Session's
@@ -237,8 +259,12 @@ func (s *Session) Put(table TableID, index IndexID, body, value []byte) {
 		copy(cv, value)
 	}
 	fullKey := string(s.scratch)
-	if _, exists := s.overlay[fullKey]; !exists {
+	prev, exists := s.overlay[fullKey]
+	if !exists {
 		s.overlayKeys.Set(fullKey)
+	}
+	if s.snapshotDepth > 0 {
+		s.undoLog = append(s.undoLog, sessionUndoEntry{key: fullKey, prev: prev, had: exists})
 	}
 	s.overlay[fullKey] = overlayEntry{value: cv}
 	// Append to dirtyKeys, deduping consecutive writes to the same key.
@@ -259,8 +285,12 @@ func (s *Session) Put(table TableID, index IndexID, body, value []byte) {
 func (s *Session) Delete(table TableID, index IndexID, body []byte) {
 	s.scratch = EncodeKeyInto(s.scratch, table, index, body)
 	fullKey := string(s.scratch)
-	if _, exists := s.overlay[fullKey]; !exists {
+	prev, exists := s.overlay[fullKey]
+	if !exists {
 		s.overlayKeys.Set(fullKey)
+	}
+	if s.snapshotDepth > 0 {
+		s.undoLog = append(s.undoLog, sessionUndoEntry{key: fullKey, prev: prev, had: exists})
 	}
 	s.overlay[fullKey] = overlayEntry{tombstone: true}
 	// Same consecutive-key dedup as Put — Delete-then-Delete to the same
@@ -293,6 +323,8 @@ func (s *Session) Commit(sync bool) error {
 		clear(s.Aux)
 		s.overlayKeys.Clear()
 		s.dirtyKeys = s.dirtyKeys[:0]
+		s.undoLog = s.undoLog[:0]
+		s.snapshotDepth = 0
 		s.mistrustDBAux = false
 		s.db.commitAll()
 		return nil
@@ -305,6 +337,8 @@ func (s *Session) Commit(sync bool) error {
 	clear(s.Aux)
 	s.overlayKeys.Clear()
 	s.dirtyKeys = s.dirtyKeys[:0]
+	s.undoLog = s.undoLog[:0]
+	s.snapshotDepth = 0
 	s.mistrustDBAux = false
 	s.db.commitAll()
 	return nil
@@ -322,6 +356,8 @@ func (s *Session) Undo() {
 	s.overlayKeys.Clear()
 	s.preCommit = s.preCommit[:0]
 	s.dirtyKeys = s.dirtyKeys[:0]
+	s.undoLog = s.undoLog[:0]
+	s.snapshotDepth = 0
 	s.mistrustDBAux = false
 	s.db.undoAll()
 }
@@ -336,13 +372,15 @@ func (s *Session) Empty() bool { return len(s.overlay) == 0 }
 //
 // In hived this is the chainbase undo_session pushed at
 // `_db.start_undo_session(true)` for every push_transaction inside
-// apply_block. Failure throws and the session pop unwinds. Our model
-// is a shallow map snapshot — far cheaper than a per-modification
-// reverse log for the common case where tx failure is rare.
+// apply_block. Failure throws and the session pop unwinds. We mirror
+// it via a per-Session undo log: Snapshot only records the current
+// undo-log length (and dirtyKeys/preCommit lengths); Restore replays
+// undo entries in reverse to revert. The previous design did a full
+// O(overlay-size) shallow copy per Snapshot, which became 55% of CPU
+// at block 3.6M as overlay grew with per-block edits.
 type Savepoint struct {
-	overlay      map[string]overlayEntry
-	keys         []string
-	dirtyKeys    []string
+	undoLogLen   int
+	dirtyKeysLen int
 	preCommitLen int
 	// subsystemPoints captures the SnapshotPoint() of each registered
 	// state.Database subsystem (typed in-memory containers like
@@ -352,60 +390,66 @@ type Savepoint struct {
 	subsystemPoints []int
 }
 
-// Snapshot captures the current overlay state. Subsequent Put/Delete
-// calls modify the live overlay; Restore(sp) reverts to the snapshot.
+// Snapshot captures the current overlay position so a later Restore
+// can revert any Put/Delete made between Snapshot and Restore.
 //
-// Cost: O(len(overlay)) — a shallow copy of the map. The values slice
-// is shared, since Put always allocates a fresh slice.
+// Cost: O(1) for the K/V overlay (just a length read). Subsystem
+// snapshots remain O(num-registered-subsystems).
 //
-// preCommitLen records the count of registered pre-commit hooks at
-// snapshot time; Restore truncates the slice back so any hooks added
-// by the rolled-back tx don't fire at commit (their captured lazy
-// state is now invalid).
+// While at least one Snapshot is outstanding, every Put/Delete logs
+// a pre-image into s.undoLog, so the per-mutation cost rises by one
+// append. That is the chainbase trade-off: cheap rollback at the
+// cost of small per-mutation bookkeeping. Without an outstanding
+// Snapshot the per-mutation cost is unchanged from before.
 func (s *Session) Snapshot() Savepoint {
-	cp := make(map[string]overlayEntry, len(s.overlay))
-	for k, v := range s.overlay {
-		cp[k] = v
-	}
-	keys := make([]string, 0, s.overlayKeys.Len())
-	s.overlayKeys.Scan(func(k string) bool { keys = append(keys, k); return true })
-	dk := append([]string(nil), s.dirtyKeys...)
+	s.snapshotDepth++
 	subPts := s.db.snapshotAll(make([]int, 0, len(s.db.subsystems)))
 	return Savepoint{
-		overlay:         cp,
-		keys:            keys,
-		dirtyKeys:       dk,
+		undoLogLen:      len(s.undoLog),
+		dirtyKeysLen:    len(s.dirtyKeys),
 		preCommitLen:    len(s.preCommit),
 		subsystemPoints: subPts,
 	}
 }
 
 // Restore reverts the overlay to the state captured by sp. Any
-// Put/Delete since the snapshot is discarded. The typed-subsystem
-// stores roll back via their own undo logs to the captured points.
+// Put/Delete since the snapshot is discarded by replaying undo
+// entries in reverse from len(s.undoLog)-1 down to sp.undoLogLen.
+// The typed-subsystem stores roll back via their own undo logs to
+// the captured points.
 //
-// Per-Session caches (readCache, Aux) and pre-commit hooks are
-// intentionally NOT cleared — they may carry values from the
-// rolled-back tx, but the pre-typed-store replay was tuned against
-// that historical leakage, so cv-cleanup / vote-rshares accounting
-// matches C++ only when those caches survive Restore. Tightening
-// them broke acidsun's HBD at block 2,904,813 (3 sat short).
+// Per-Session caches (readCache, Aux) and pre-commit hooks beyond
+// preCommitLen are intentionally NOT cleared — they may carry values
+// from the rolled-back tx, but the pre-typed-store replay was tuned
+// against that historical leakage, so cv-cleanup / vote-rshares
+// accounting matches C++ only when those caches survive Restore.
+// Tightening them broke acidsun's HBD at block 2,904,813 (3 sat short).
 func (s *Session) Restore(sp Savepoint) {
-	cp := make(map[string]overlayEntry, len(sp.overlay))
-	for k, v := range sp.overlay {
-		cp[k] = v
+	for i := len(s.undoLog) - 1; i >= sp.undoLogLen; i-- {
+		e := s.undoLog[i]
+		if e.had {
+			s.overlay[e.key] = e.prev
+		} else {
+			delete(s.overlay, e.key)
+			s.overlayKeys.Delete(e.key)
+		}
+		// Invalidate any read-cache entry — overlay just reverted.
+		if s.readCache != nil {
+			delete(s.readCache, e.key)
+		}
 	}
-	s.overlay = cp
-	s.overlayKeys.Clear()
-	for _, k := range sp.keys {
-		s.overlayKeys.Set(k)
+	s.undoLog = s.undoLog[:sp.undoLogLen]
+	if sp.dirtyKeysLen >= 0 && sp.dirtyKeysLen <= len(s.dirtyKeys) {
+		s.dirtyKeys = s.dirtyKeys[:sp.dirtyKeysLen]
 	}
-	s.dirtyKeys = append(s.dirtyKeys[:0], sp.dirtyKeys...)
 	// Truncate preCommit hooks back to snapshot length. Hooks added by
 	// the rolled-back tx would otherwise still fire at commit and
 	// serialize stale state.
 	if sp.preCommitLen >= 0 && sp.preCommitLen <= len(s.preCommit) {
 		s.preCommit = s.preCommit[:sp.preCommitLen]
+	}
+	if s.snapshotDepth > 0 {
+		s.snapshotDepth--
 	}
 	// Invalidate the dgpo Aux cache: PutDGPO writes the overlay
 	// directly so Restore reverted the actual state, but the parsed
