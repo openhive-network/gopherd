@@ -117,6 +117,16 @@ type Delegate interface {
 	// body (the FC-binary signed_transaction). Same ownership rules
 	// as OnBlockReceived.
 	OnTransactionReceived(*Peer, []byte)
+	// OnAddressesReceived is fired when a remote sends us an
+	// address_message (typically in response to our address_request after
+	// the connection is active). The Node uses this to feed its peer
+	// database.
+	OnAddressesReceived(*Peer, []proto.AddressInfo)
+	// BuildAddressReply is called when a remote sends us an
+	// address_request_message and we need to assemble an address_message
+	// reply. The implementation should return the set of currently-known
+	// peer endpoints (typically active peers + the local listener).
+	BuildAddressReply(*Peer) []proto.AddressInfo
 }
 
 // Peer is one peering session. Cheap; holds no state larger than the
@@ -265,7 +275,51 @@ func (p *Peer) run(ctx context.Context, delegate Delegate) {
 					delegate.OnPeerConnected(p)
 				}
 				go p.heartbeatLoop(ctx, heartbeatStop)
+				// Mirror hived: every freshly-active peer sends an
+				// address_request to learn the remote's view of the
+				// network. We send ours immediately. Failure here
+				// drops the peer — discovery is essential.
+				if err := p.conn.Send(proto.AddressRequestMessageType, nil); err != nil {
+					p.close(fmt.Errorf("send address_request: %w", err))
+					if delegate != nil {
+						delegate.OnPeerDisconnected(p, p.CloseErr())
+					}
+					return
+				}
 			}
+		case proto.AddressRequestMessageType:
+			// Remote wants to know who we know about. Build the reply
+			// from our peer DB via the delegate hook and send it
+			// straight back. Per hived: address_request is allowed
+			// pre-Active too, but we only honor it once active so a
+			// half-open peer can't pull our address book.
+			if p.State() != StateActive || delegate == nil {
+				continue
+			}
+			infos := delegate.BuildAddressReply(p)
+			reply := &proto.AddressMessage{Addresses: infos}
+			body, err := reply.Marshal()
+			if err != nil {
+				p.close(fmt.Errorf("marshal address_message: %w", err))
+				delegate.OnPeerDisconnected(p, p.CloseErr())
+				return
+			}
+			if err := p.conn.Send(proto.AddressMessageType, body); err != nil {
+				p.close(fmt.Errorf("send address_message: %w", err))
+				delegate.OnPeerDisconnected(p, p.CloseErr())
+				return
+			}
+		case proto.AddressMessageType:
+			if delegate == nil {
+				continue
+			}
+			var msg proto.AddressMessage
+			if err := msg.Unmarshal(body); err != nil {
+				// A malformed address_message is non-fatal: ignore and
+				// keep the peer. Mirrors hived's lenient behavior here.
+				continue
+			}
+			delegate.OnAddressesReceived(p, msg.Addresses)
 		case proto.ConnectionRejectedMessageType:
 			// hived's connection_rejected_message body is FC-encoded
 			// (user_agent, version, endpoint, reason_string, reason_code)

@@ -74,3 +74,27 @@ func (m *MultiDelegate) OnTransactionReceived(p *Peer, body []byte) {
 		}
 	}
 }
+
+// OnAddressesReceived dispatches to every child.
+func (m *MultiDelegate) OnAddressesReceived(p *Peer, addrs []proto.AddressInfo) {
+	for _, c := range m.children {
+		if c != nil {
+			c.OnAddressesReceived(p, addrs)
+		}
+	}
+}
+
+// BuildAddressReply returns the first non-empty result from a child, else
+// nil. Returning nil signals the Node to use its built-in active-peers
+// reply (loggingDelegate.BuildAddressReply already routes to that path).
+func (m *MultiDelegate) BuildAddressReply(p *Peer) []proto.AddressInfo {
+	for _, c := range m.children {
+		if c == nil {
+			continue
+		}
+		if r := c.BuildAddressReply(p); len(r) > 0 {
+			return r
+		}
+	}
+	return nil
+}

@@ -237,6 +237,13 @@ func (s *Service) OnPeerDisconnected(p *p2pnode.Peer, err error) {}
 // elsewhere).
 func (s *Service) OnMessage(p *p2pnode.Peer, t proto.MessageType, body []byte) {}
 
+// OnAddressesReceived — no-op; the discovery layer feeds the peerdb.
+func (s *Service) OnAddressesReceived(p *p2pnode.Peer, addrs []proto.AddressInfo) {}
+
+// BuildAddressReply — no-op; let the Node assemble its own reply
+// (loggingDelegate.BuildAddressReply routes through n.buildAddressReply).
+func (s *Service) BuildAddressReply(p *p2pnode.Peer) []proto.AddressInfo { return nil }
+
 // OnBlockReceived enqueues the block for application + re-broadcast on
 // the apply goroutine. We DO NOT apply inline — peers' read loops would
 // block until ApplyBlock returned, freezing heartbeat traffic in the

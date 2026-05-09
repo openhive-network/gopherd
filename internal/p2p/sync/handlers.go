@@ -72,6 +72,14 @@ func (d *Delegate) OnBlockReceived(p *node.Peer, body []byte) {
 // via gossip's path); this is a no-op here.
 func (d *Delegate) OnTransactionReceived(p *node.Peer, body []byte) {}
 
+// OnAddressesReceived satisfies the node.Delegate typed hook for the
+// discovery layer's address_message; the peerdb owns this path.
+func (d *Delegate) OnAddressesReceived(p *node.Peer, addrs []proto.AddressInfo) {}
+
+// BuildAddressReply satisfies the node.Delegate typed hook used to
+// answer a peer's address_request; let the Node assemble its own reply.
+func (d *Delegate) BuildAddressReply(p *node.Peer) []proto.AddressInfo { return nil }
+
 // handleInv is the inbound side of item_ids_inventory_message: list of
 // item hashes the peer has. We dedup against our local known set and
 // queue any unknowns onto a fetch_items request.
