@@ -1,8 +1,6 @@
 package chain
 
 import (
-	"math/big"
-
 	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
@@ -126,16 +124,40 @@ func percentRewardCompound(virtualSupply, aprPercent int64, multiplyConstant uin
 	if virtualSupply <= 0 || aprPercent <= 0 {
 		return 0
 	}
-	// reward = ((supply × percent × multiply) + half) >> shift, in uint128.
-	prod := new(big.Int).Mul(big.NewInt(virtualSupply), big.NewInt(aprPercent))
-	prod.Mul(prod, new(big.Int).SetUint64(multiplyConstant))
-	half := new(big.Int).Lsh(big.NewInt(1), shiftConstant-1)
-	prod.Add(prod, half)
-	prod.Rsh(prod, shiftConstant)
-	if !prod.IsInt64() {
+	// reward = ((supply × percent × multiply) + half) >> shift, in
+	// uint128 (mirrors the int128 calc_percent_reward path in
+	// libraries/protocol/include/hive/protocol/misc_utilities.hpp).
+	// Native Uint128 path replaces the math/big.Int chain (3 heap
+	// allocations + 1 Lsh) that was 5%+ of replay alloc volume.
+	supply := objects.Uint128{Lo: uint64(virtualSupply)}
+	prod := supply.Mul64(uint64(aprPercent))
+	prod = prod.Mul64(multiplyConstant)
+	// half = 1 << (shiftConstant - 1)
+	var half objects.Uint128
+	if shiftConstant >= 1 && shiftConstant <= 128 {
+		if shiftConstant-1 < 64 {
+			half = objects.Uint128{Lo: 1 << (shiftConstant - 1)}
+		} else {
+			half = objects.Uint128{Hi: 1 << (shiftConstant - 1 - 64)}
+		}
+	}
+	prod = prod.Add(half)
+	// >> shiftConstant
+	if shiftConstant >= 128 {
+		return 0
+	}
+	if shiftConstant >= 64 {
+		prod = objects.Uint128{Lo: prod.Hi >> (shiftConstant - 64)}
+	} else if shiftConstant > 0 {
+		prod = objects.Uint128{
+			Hi: prod.Hi >> shiftConstant,
+			Lo: (prod.Lo >> shiftConstant) | (prod.Hi << (64 - shiftConstant)),
+		}
+	}
+	if prod.Hi != 0 || prod.Lo > uint64(int64(^uint64(0)>>1)) {
 		return int64(^uint64(0) >> 1) // saturate
 	}
-	return prod.Int64()
+	return int64(prod.Lo)
 }
 
 // processProducerReward credits the producing witness 1 HIVE per block.
@@ -325,15 +347,18 @@ func processFundsHF16(s *state.Session, dgpo *objects.DynamicGlobalProperty, blo
 	// `virtualSupply / 10000` form below truncates the bottom 4 digits
 	// of the supply before the rate multiply, losing up to ~rate satoshi
 	// per block (cumulating to thousands of satoshis over a full
-	// replay). math/big keeps the full precision.
-	prodBig := new(big.Int).Mul(big.NewInt(virtualSupply), big.NewInt(rate))
-	prodBig.Quo(prodBig, big.NewInt(10000*blocksPerYear))
-	if prodBig.Sign() < 0 {
-		prodBig.SetInt64(0)
-	}
+	// replay). Native Uint128 keeps full precision without a big.Int
+	// alloc per per-block call.
 	newHive := int64(0)
-	if prodBig.IsInt64() {
-		newHive = prodBig.Int64()
+	if virtualSupply > 0 && rate > 0 {
+		prod := objects.Uint128{Lo: uint64(virtualSupply)}.Mul64(uint64(rate))
+		divisor := uint64(10000) * uint64(blocksPerYear)
+		quo := prod.Quo64(divisor)
+		if quo.Hi == 0 && quo.Lo <= uint64(int64(^uint64(0)>>1)) {
+			newHive = int64(quo.Lo)
+		} else {
+			newHive = int64(^uint64(0) >> 1)
+		}
 	}
 
 	contentPct := int64(dgpo.ContentRewardPercent)
