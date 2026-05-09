@@ -75,16 +75,21 @@ type Session struct {
 	// relative to the surviving overlay state.
 	mistrustDBAux bool
 	// undoLog records overlay pre-images for every Put/Delete made
-	// while at least one Savepoint is active. Snapshot only captures
-	// the current undo-log length; Restore replays entries in reverse
-	// to revert. This collapses the prior O(overlay-size) per-tx
-	// shallow-copy snapshot into O(tx-edits) — the dominant 3.5M+
-	// cliff cost (Snapshot was 55% of CPU at block 3.6M).
-	undoLog []sessionUndoEntry
-	// snapshotDepth counts active Savepoints. Put/Delete only append
-	// to undoLog when depth > 0 (avoids per-Put overhead for the
-	// common case of no in-flight tx — e.g., per-block hooks like
-	// updateWitnessSchedule that mutate freely between txs).
+	// while at least one Savepoint is OUTSTANDING (incremented by
+	// Snapshot, decremented by Restore). Restore replays the relevant
+	// undo-log slice in reverse to revert. Collapses the prior
+	// O(overlay-size) shallow-copy per Snapshot into O(tx-edits) —
+	// the dominant 3.5M+ cliff cost (Snapshot was 55% of CPU at
+	// block 3.6M).
+	//
+	// snapshotDepth is decremented on Restore but NOT on tx-success
+	// (callers don't notify us of successful txs). The simplest
+	// pragmatic outcome: after the first successful tx, depth stays
+	// > 0 and subsequent Puts log entries we'll never use, until
+	// Commit resets. The cost is small in practice (~one append
+	// per Put after the first tx); the alternative — full undo
+	// always — was measurably slower on a clean 3.0M→3.5M run.
+	undoLog       []sessionUndoEntry
 	snapshotDepth int
 }
 
@@ -191,6 +196,8 @@ func NewSession(db *Database) *Session {
 		db:          db,
 		overlay:     make(map[string]overlayEntry, 64),
 		overlayKeys: newOverlayKeyTree(),
+		dirtyKeys:   make([]string, 0, 256),
+		undoLog:     make([]sessionUndoEntry, 0, 256),
 	}
 }
 
@@ -396,11 +403,11 @@ type Savepoint struct {
 // Cost: O(1) for the K/V overlay (just a length read). Subsystem
 // snapshots remain O(num-registered-subsystems).
 //
-// While at least one Snapshot is outstanding, every Put/Delete logs
-// a pre-image into s.undoLog, so the per-mutation cost rises by one
-// append. That is the chainbase trade-off: cheap rollback at the
-// cost of small per-mutation bookkeeping. Without an outstanding
-// Snapshot the per-mutation cost is unchanged from before.
+// While snapshotDepth > 0, every subsequent Put/Delete in this
+// Session logs a pre-image into s.undoLog. Restore decrements depth;
+// per-block hooks that fire BEFORE any tx (when depth==0) pay zero
+// cost. Hooks that fire AFTER all txs still pay because tx-success
+// does not decrement depth.
 func (s *Session) Snapshot() Savepoint {
 	s.snapshotDepth++
 	subPts := s.db.snapshotAll(make([]int, 0, len(s.db.subsystems)))
