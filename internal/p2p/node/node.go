@@ -237,6 +237,42 @@ func (n *Node) Peers() []*Peer {
 	return out
 }
 
+// Broadcast fans the (typeTag, body) pair out to every active peer EXCEPT
+// `exclude` (which may be nil). Used by:
+//
+//   - the witness plugin: after locally producing a block, push it to
+//     all peers (exclude=nil).
+//   - the gossip layer: after applying a block we received from peer X,
+//     re-broadcast to all peers OTHER than X (exclude=X).
+//
+// Send errors are logged but not surfaced — a wedged peer should be
+// pruned by its heartbeat loop, not by a failed broadcast.
+func (n *Node) Broadcast(typeTag proto.MessageType, body []byte, exclude *Peer) {
+	n.mu.Lock()
+	peers := make([]*Peer, 0, len(n.peers))
+	for p := range n.peers {
+		if p == exclude {
+			continue
+		}
+		peers = append(peers, p)
+	}
+	n.mu.Unlock()
+	for _, p := range peers {
+		if p.State() != StateActive {
+			continue
+		}
+		if err := p.Send(typeTag, body); err != nil {
+			n.logf("p2p: broadcast %s to %s: %v", typeTag, p.Conn().RemoteAddr(), err)
+		}
+	}
+}
+
+// Logf exposes the node's logger for daemon-level subsystems (witness,
+// gossip) that want their messages on the same stream.
+func (n *Node) Logf(format string, args ...interface{}) {
+	n.logf(format, args...)
+}
+
 // PeerCount returns the current number of active peers.
 func (n *Node) PeerCount() int {
 	n.mu.Lock()
@@ -289,6 +325,18 @@ func (l *loggingDelegate) OnPeerDisconnected(p *Peer, cause error) {
 func (l *loggingDelegate) OnMessage(p *Peer, t proto.MessageType, body []byte) {
 	if l.inner != nil {
 		l.inner.OnMessage(p, t, body)
+	}
+}
+
+func (l *loggingDelegate) OnBlockReceived(p *Peer, body []byte) {
+	if l.inner != nil {
+		l.inner.OnBlockReceived(p, body)
+	}
+}
+
+func (l *loggingDelegate) OnTransactionReceived(p *Peer, body []byte) {
+	if l.inner != nil {
+		l.inner.OnTransactionReceived(p, body)
 	}
 }
 

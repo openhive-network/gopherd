@@ -98,8 +98,20 @@ type Delegate interface {
 	OnPeerDisconnected(*Peer, error)
 	// OnMessage is fired for every business message after the peer is
 	// active (i.e. NOT for hello/connection_accepted/heartbeat messages
-	// which the peer state machine consumes itself).
+	// which the peer state machine consumes itself, and NOT for the
+	// gossip messages BlockMessage / TrxMessage which we route through
+	// dedicated callbacks below).
 	OnMessage(*Peer, proto.MessageType, []byte)
+	// OnBlockReceived is fired when a peer hands us a BlockMessage body
+	// (the FC-binary signed_block + trailing 20-byte block_id). The
+	// callee owns the slice; the peer goroutine does no further work
+	// with it. The callee should NOT block — apply work belongs on a
+	// dedicated drain goroutine.
+	OnBlockReceived(*Peer, []byte)
+	// OnTransactionReceived is fired when a peer hands us a TrxMessage
+	// body (the FC-binary signed_transaction). Same ownership rules
+	// as OnBlockReceived.
+	OnTransactionReceived(*Peer, []byte)
 }
 
 // Peer is one peering session. Cheap; holds no state larger than the
@@ -279,6 +291,14 @@ func (p *Peer) run(ctx context.Context, delegate Delegate) {
 			p.mu.Lock()
 			p.lastHeartbeatRX = time.Now()
 			p.mu.Unlock()
+		case proto.BlockMessageType:
+			if p.State() == StateActive && delegate != nil {
+				delegate.OnBlockReceived(p, body)
+			}
+		case proto.TrxMessageType:
+			if p.State() == StateActive && delegate != nil {
+				delegate.OnTransactionReceived(p, body)
+			}
 		default:
 			if p.State() == StateActive {
 				if delegate != nil {

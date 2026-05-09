@@ -51,6 +51,10 @@ func (d *captureDelegate) OnPeerDisconnected(p *Peer, err error) {
 
 func (d *captureDelegate) OnMessage(p *Peer, t proto.MessageType, body []byte) {}
 
+func (d *captureDelegate) OnBlockReceived(p *Peer, body []byte) {}
+
+func (d *captureDelegate) OnTransactionReceived(p *Peer, body []byte) {}
+
 // TestPeerCleanCloseOnRejection wires two ghive Nodes together over a real
 // loopback TCP socket and forces one side to send a ConnectionRejected
 // message. The other side's Peer should:
