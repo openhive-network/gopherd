@@ -43,6 +43,13 @@ type Database struct {
 	// `fetch_items` during catch-up. nil = caching disabled (callers that
 	// don't need to serve sync — replay tools, tests — can leave it nil).
 	recent *RecentBlocks
+
+	// onBlockApplied is fired once after each successful ApplyBlock,
+	// AFTER the recent-block cache is updated. Used by the p2p sync
+	// layer to wake its INV broadcaster from idle backoff so the
+	// new block reaches peers without waiting a full tick. nil =
+	// no hook (default for replay/test contexts).
+	onBlockApplied func(blockNum uint32, id block.ID)
 }
 
 // New wraps an opened state.Database for block application.
@@ -66,6 +73,14 @@ func (d *Database) EnableRecentBlockCache(capacity int) {
 		return
 	}
 	d.recent = NewRecentBlocks(capacity)
+}
+
+// SetOnBlockApplied registers a callback fired after every successful
+// ApplyBlock. Pass nil to disable. Single-slot — last writer wins.
+// The callback runs synchronously on the goroutine that called
+// ApplyBlock, so it should return quickly (just notify a channel).
+func (d *Database) SetOnBlockApplied(cb func(blockNum uint32, id block.ID)) {
+	d.onBlockApplied = cb
 }
 
 // RecentBlockBytes returns the FC-binary bytes of blockNum if the recent-
@@ -653,6 +668,9 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	if d.recent != nil {
 		raw := append([]byte(nil), rawBlock...)
 		d.recent.Put(blockNum, dgpo.HeadBlockID, raw)
+	}
+	if d.onBlockApplied != nil {
+		d.onBlockApplied(blockNum, dgpo.HeadBlockID)
 	}
 	return dgpo, nil
 }

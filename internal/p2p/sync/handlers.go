@@ -1,0 +1,404 @@
+package sync
+
+import (
+	"hived-go/internal/p2p/node"
+	"hived-go/internal/p2p/proto"
+	"hived-go/internal/protocol/block"
+)
+
+// OnPeerConnected is invoked once per peer when it reaches StateActive.
+// Allocates per-peer dedup state and kicks off the catch-up handshake.
+func (d *Delegate) OnPeerConnected(p *node.Peer) {
+	st := newPeerState()
+	d.mu.Lock()
+	d.peers[p] = st
+	d.mu.Unlock()
+
+	// Catch-up handshake: send fetch_blockchain_item_ids_message with
+	// our current head as the synopsis. The peer replies with the
+	// forward block-id list. Even if the peer is BEHIND us this is
+	// a no-op for the peer (it returns an empty list).
+	headID, _ := d.chain.HeadBlockID()
+	d.sendFetchBlockchainItemIDs(p, headID)
+}
+
+// OnPeerDisconnected is invoked once per peer when it transitions to
+// StateClosed. Drops the per-peer state.
+func (d *Delegate) OnPeerDisconnected(p *node.Peer, _ error) {
+	d.mu.Lock()
+	delete(d.peers, p)
+	d.mu.Unlock()
+}
+
+// OnMessage routes inbound business messages to per-type handlers. We
+// claim the sync-related types and silently ignore the rest (gossip and
+// discovery delegates handle theirs).
+func (d *Delegate) OnMessage(p *node.Peer, t proto.MessageType, body []byte) {
+	switch t {
+	case proto.ItemIDsInventoryMessageType:
+		d.handleInv(p, body)
+	case proto.FetchBlockchainItemIDsMessageType:
+		d.handleFetchBlockchainItemIDs(p, body)
+	case proto.BlockchainItemIDsInventoryMessageType:
+		d.handleBlockchainItemIDsInventory(p, body)
+	case proto.FetchItemsMessageType:
+		d.handleFetchItems(p, body)
+	case proto.ItemNotAvailableMessageType:
+		d.handleItemNotAvailable(p, body)
+	case proto.BlockMessageType:
+		d.handleBlock(p, body)
+	case proto.CompressedBlockMessageType:
+		// Compressed-block ingestion would need the zstd dictionary
+		// set; deferred to a follow-up. Decompression on the live
+		// path requires sharing the same dictionary catalogue
+		// blocklog uses (internal/blocklog/zstd).
+	}
+}
+
+// handleInv is the inbound side of item_ids_inventory_message: list of
+// item hashes the peer has. We dedup against our local known set and
+// queue any unknowns onto a fetch_items request.
+func (d *Delegate) handleInv(p *node.Peer, body []byte) {
+	var msg proto.ItemIDsInventoryMessage
+	if err := msg.Unmarshal(body); err != nil {
+		d.logf("inv decode: %v", err)
+		return
+	}
+	if len(msg.ItemHashesAvailable) == 0 {
+		return
+	}
+	st := d.peerStateFor(p)
+	if st == nil {
+		return
+	}
+
+	// Bin into "blocks I don't have" vs "txs I don't have".
+	missing := make([]proto.ItemHash, 0, len(msg.ItemHashesAvailable))
+	st.mu.Lock()
+	for _, h := range msg.ItemHashesAvailable {
+		// Mark known immediately so the next round doesn't re-fetch.
+		bid := block.ID(h)
+		st.known[bid] = struct{}{}
+		switch msg.ItemType {
+		case proto.ItemTypeBlock, proto.ItemTypeBlockCompressed:
+			// Skip if we already have this block locally.
+			if d.chain.RecentBlockBytesByID(bid) != nil {
+				continue
+			}
+			// Skip if its embedded block_num is at or below our head
+			// AND we have that block num cached (saves a fetch on the
+			// happy path where INV crosses with our own production).
+			if bid.Num() != 0 {
+				head, _ := d.chain.HeadBlock()
+				if bid.Num() <= head {
+					continue
+				}
+			}
+			missing = append(missing, h)
+		case proto.ItemTypeTrx:
+			// We don't run a tx mempool yet; ignore tx INV until that
+			// lands. Recording it in known prevents repeated re-asks.
+		}
+	}
+	st.mu.Unlock()
+
+	if len(missing) == 0 {
+		return
+	}
+	d.sendFetchItems(p, msg.ItemType, missing)
+	d.poke()
+}
+
+// handleFetchBlockchainItemIDs is the catch-up RECEIVER side: peer is
+// telling us "here's my chain head; tell me what comes next." We
+// reply with blockchain_item_ids_inventory_message listing the block
+// IDs immediately after the synopsis-implied head, up to MaxBlocksPerInv.
+func (d *Delegate) handleFetchBlockchainItemIDs(p *node.Peer, body []byte) {
+	var msg proto.FetchBlockchainItemIDsMessage
+	if err := msg.Unmarshal(body); err != nil {
+		d.logf("fetch_blockchain_item_ids decode: %v", err)
+		return
+	}
+	// Synopsis: the LAST hash in the list is the peer's head_block_id.
+	// Older entries are exponentially-older history (hived's chain
+	// synopsis structure) — for now we only need the head, since both
+	// nodes are on the same fork.
+	var peerHeadID block.ID
+	if n := len(msg.BlockchainSynopsis); n > 0 {
+		peerHeadID = block.ID(msg.BlockchainSynopsis[n-1])
+	}
+
+	// Map peer's head_id → block_num (peer head_id has block_num in its
+	// first 4 BE bytes).
+	peerHeadNum := uint32(0)
+	if peerHeadID != (block.ID{}) {
+		peerHeadNum = peerHeadID.Num()
+	}
+
+	// Update peer state with their head.
+	if st := d.peerStateFor(p); st != nil {
+		st.mu.Lock()
+		if peerHeadNum > st.peerHeadNum {
+			st.peerHeadNum = peerHeadNum
+		}
+		st.mu.Unlock()
+	}
+
+	// Fetch our recent blocks AFTER peer's head.
+	hashes := make([]proto.ItemHash, 0, d.cfg.MaxBlocksPerInv)
+	myHead, _ := d.chain.HeadBlock()
+	if myHead > peerHeadNum {
+		// Walk forward from peerHeadNum+1 until we run out of cached
+		// blocks or hit MaxBlocksPerInv.
+		for n := peerHeadNum + 1; n <= myHead && len(hashes) < d.cfg.MaxBlocksPerInv; n++ {
+			id, ok := d.chain.RecentBlockIDForNum(n)
+			if !ok {
+				break
+			}
+			hashes = append(hashes, proto.ItemHash(id))
+		}
+	}
+
+	remaining := uint32(0)
+	if myHead > peerHeadNum+uint32(len(hashes)) {
+		remaining = myHead - peerHeadNum - uint32(len(hashes))
+	}
+	reply := proto.BlockchainItemIDsInventoryMessage{
+		TotalRemainingItemCount: remaining,
+		ItemType:                proto.ItemTypeBlock,
+		ItemHashesAvailable:     hashes,
+	}
+	encoded, err := reply.Marshal()
+	if err != nil {
+		d.logf("blockchain_item_ids_inventory encode: %v", err)
+		return
+	}
+	if err := p.Send(proto.BlockchainItemIDsInventoryMessageType, encoded); err != nil {
+		d.logf("blockchain_item_ids_inventory send: %v", err)
+	}
+}
+
+// handleBlockchainItemIDsInventory is the catch-up REQUESTER side: peer
+// has answered our fetch_blockchain_item_ids with the forward block
+// list. Queue fetch_items batches for those we don't already have.
+func (d *Delegate) handleBlockchainItemIDsInventory(p *node.Peer, body []byte) {
+	var msg proto.BlockchainItemIDsInventoryMessage
+	if err := msg.Unmarshal(body); err != nil {
+		d.logf("blockchain_item_ids_inventory decode: %v", err)
+		return
+	}
+	if len(msg.ItemHashesAvailable) == 0 {
+		return
+	}
+	st := d.peerStateFor(p)
+	if st == nil {
+		return
+	}
+	myHead, _ := d.chain.HeadBlock()
+	missing := make([]proto.ItemHash, 0, len(msg.ItemHashesAvailable))
+	st.mu.Lock()
+	for _, h := range msg.ItemHashesAvailable {
+		bid := block.ID(h)
+		st.known[bid] = struct{}{}
+		// Track peer's head-num from the highest ID we see.
+		if n := bid.Num(); n > st.peerHeadNum {
+			st.peerHeadNum = n
+		}
+		// Skip already-applied + already-outstanding.
+		if bid.Num() != 0 && bid.Num() <= myHead {
+			continue
+		}
+		if d.chain.RecentBlockBytesByID(bid) != nil {
+			continue
+		}
+		if _, ok := st.outstanding[bid]; ok {
+			continue
+		}
+		st.outstanding[bid] = struct{}{}
+		missing = append(missing, h)
+	}
+	st.mu.Unlock()
+
+	// Issue fetch_items in cfg.FetchBatch-sized chunks.
+	for i := 0; i < len(missing); i += d.cfg.FetchBatch {
+		end := i + d.cfg.FetchBatch
+		if end > len(missing) {
+			end = len(missing)
+		}
+		d.sendFetchItems(p, msg.ItemType, missing[i:end])
+	}
+
+	// If the peer signalled there's more remaining and we had at least
+	// one missing entry above, immediately send another
+	// fetch_blockchain_item_ids with our updated head as the synopsis
+	// so the catch-up walks the chain forward.
+	if msg.TotalRemainingItemCount > 0 {
+		// Use the highest-num hash we received as the new synopsis
+		// anchor — it will become our head once those blocks apply.
+		anchor := block.ID(msg.ItemHashesAvailable[len(msg.ItemHashesAvailable)-1])
+		d.sendFetchBlockchainItemIDs(p, anchor)
+	}
+	if len(missing) > 0 {
+		d.poke()
+	}
+}
+
+// handleFetchItems is the SERVER side: peer is asking for raw items by
+// hash. Reply with one block_message per known block, or
+// item_not_available per unknown.
+func (d *Delegate) handleFetchItems(p *node.Peer, body []byte) {
+	var msg proto.FetchItemsMessage
+	if err := msg.Unmarshal(body); err != nil {
+		d.logf("fetch_items decode: %v", err)
+		return
+	}
+	for _, h := range msg.ItemsToFetch {
+		switch msg.ItemType {
+		case proto.ItemTypeBlock, proto.ItemTypeBlockCompressed:
+			bid := block.ID(h)
+			raw := d.chain.RecentBlockBytesByID(bid)
+			if raw == nil {
+				// Fall back to block-num lookup (the embedded num in
+				// id[:4] is canonical) so peers re-asking by num can
+				// still get an answer if the cache evicted by id.
+				if n := bid.Num(); n != 0 {
+					raw = d.chain.RecentBlockBytes(n)
+				}
+			}
+			if raw == nil {
+				notAvail := proto.ItemNotAvailableMessage{
+					RequestedItem: proto.ItemID{
+						ItemType: msg.ItemType,
+						ItemHash: h,
+					},
+				}
+				enc, _ := notAvail.Marshal()
+				_ = p.Send(proto.ItemNotAvailableMessageType, enc)
+				continue
+			}
+			out := proto.BlockMessage{
+				SignedBlockBytes: raw,
+				BlockID:          proto.ItemHash(bid),
+			}
+			enc, err := out.Marshal()
+			if err != nil {
+				d.logf("block_message encode: %v", err)
+				continue
+			}
+			if err := p.Send(proto.BlockMessageType, enc); err != nil {
+				d.logf("block_message send: %v", err)
+				return
+			}
+		case proto.ItemTypeTrx:
+			notAvail := proto.ItemNotAvailableMessage{
+				RequestedItem: proto.ItemID{
+					ItemType: msg.ItemType,
+					ItemHash: h,
+				},
+			}
+			enc, _ := notAvail.Marshal()
+			_ = p.Send(proto.ItemNotAvailableMessageType, enc)
+		}
+	}
+}
+
+// handleItemNotAvailable lets us drop the corresponding outstanding
+// fetch so a future INV from another peer can re-trigger the request.
+func (d *Delegate) handleItemNotAvailable(p *node.Peer, body []byte) {
+	var msg proto.ItemNotAvailableMessage
+	if err := msg.Unmarshal(body); err != nil {
+		return
+	}
+	if st := d.peerStateFor(p); st != nil {
+		st.mu.Lock()
+		delete(st.outstanding, block.ID(msg.RequestedItem.ItemHash))
+		st.mu.Unlock()
+	}
+}
+
+// handleBlock queues an inbound block onto the apply pipeline.
+func (d *Delegate) handleBlock(p *node.Peer, body []byte) {
+	var msg proto.BlockMessage
+	if err := msg.Unmarshal(body); err != nil {
+		d.logf("block_message decode: %v", err)
+		return
+	}
+	bid := block.ID(msg.BlockID)
+	// If the wire-trailing block_id was zero, derive it from the bytes
+	// — agent-gossip's broadcast path may leave it zero when re-using
+	// the block they just produced.
+	if bid == (block.ID{}) {
+		// Find the header end by parsing it. The cheaper alternative
+		// is to derive id from bytes; we leave it to the applier so
+		// the queue stays cheap.
+	}
+
+	// Mark known on this peer so we don't ask back for it.
+	if st := d.peerStateFor(p); st != nil {
+		st.mu.Lock()
+		st.known[bid] = struct{}{}
+		delete(st.outstanding, bid)
+		st.mu.Unlock()
+	}
+
+	job := applyJob{
+		blockNum: bid.Num(),
+		rawBlock: msg.SignedBlockBytes,
+		id:       bid,
+		srcPeer:  p,
+	}
+	select {
+	case d.applyQ <- job:
+	default:
+		// Queue full — drop. Catch-up will re-trigger via the next
+		// INV / blockchain_item_ids cycle.
+		d.logf("apply queue full, dropping block %d", job.blockNum)
+	}
+}
+
+// peerStateFor returns the per-peer state, or nil if the peer was
+// dropped between the message arriving and us being scheduled.
+func (d *Delegate) peerStateFor(p *node.Peer) *peerState {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.peers[p]
+}
+
+// sendFetchBlockchainItemIDs encodes and sends the catch-up handshake.
+func (d *Delegate) sendFetchBlockchainItemIDs(p *node.Peer, headID block.ID) {
+	var synopsis []proto.ItemHash
+	if headID != (block.ID{}) {
+		synopsis = []proto.ItemHash{proto.ItemHash(headID)}
+	}
+	msg := proto.FetchBlockchainItemIDsMessage{
+		ItemType:           proto.ItemTypeBlock,
+		BlockchainSynopsis: synopsis,
+	}
+	enc, err := msg.Marshal()
+	if err != nil {
+		d.logf("fetch_blockchain_item_ids encode: %v", err)
+		return
+	}
+	if err := p.Send(proto.FetchBlockchainItemIDsMessageType, enc); err != nil {
+		d.logf("fetch_blockchain_item_ids send: %v", err)
+	}
+}
+
+// sendFetchItems encodes and sends one fetch_items batch.
+func (d *Delegate) sendFetchItems(p *node.Peer, itemType uint32, hashes []proto.ItemHash) {
+	if len(hashes) == 0 {
+		return
+	}
+	msg := proto.FetchItemsMessage{
+		ItemType:     itemType,
+		ItemsToFetch: hashes,
+	}
+	enc, err := msg.Marshal()
+	if err != nil {
+		d.logf("fetch_items encode: %v", err)
+		return
+	}
+	if err := p.Send(proto.FetchItemsMessageType, enc); err != nil {
+		d.logf("fetch_items send: %v", err)
+	}
+}
