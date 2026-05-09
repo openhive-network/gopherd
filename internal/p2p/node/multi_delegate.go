@@ -56,3 +56,21 @@ func (m *MultiDelegate) OnMessage(p *Peer, t proto.MessageType, body []byte) {
 		}
 	}
 }
+
+// OnBlockReceived dispatches to every child.
+func (m *MultiDelegate) OnBlockReceived(p *Peer, body []byte) {
+	for _, c := range m.children {
+		if c != nil {
+			c.OnBlockReceived(p, body)
+		}
+	}
+}
+
+// OnTransactionReceived dispatches to every child.
+func (m *MultiDelegate) OnTransactionReceived(p *Peer, body []byte) {
+	for _, c := range m.children {
+		if c != nil {
+			c.OnTransactionReceived(p, body)
+		}
+	}
+}

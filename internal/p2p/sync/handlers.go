@@ -46,6 +46,10 @@ func (d *Delegate) OnMessage(p *node.Peer, t proto.MessageType, body []byte) {
 	case proto.ItemNotAvailableMessageType:
 		d.handleItemNotAvailable(p, body)
 	case proto.BlockMessageType:
+		// Note: in the merged Phase 2.2 wiring, BlockMessage is also
+		// dispatched via OnBlockReceived (gossip's typed hook). Both
+		// paths feed the same applyLoop / dedup, so duplicate dispatch
+		// here is a no-op after the first.
 		d.handleBlock(p, body)
 	case proto.CompressedBlockMessageType:
 		// Compressed-block ingestion would need the zstd dictionary
@@ -54,6 +58,19 @@ func (d *Delegate) OnMessage(p *node.Peer, t proto.MessageType, body []byte) {
 		// blocklog uses (internal/blocklog/zstd).
 	}
 }
+
+// OnBlockReceived satisfies the node.Delegate typed hook for blocks.
+// We forward to the same handler as OnMessage's BlockMessage case, so
+// blocks landing via gossip's typed dispatch reach the sync layer's
+// applyLoop + dedup the same way.
+func (d *Delegate) OnBlockReceived(p *node.Peer, body []byte) {
+	d.handleBlock(p, body)
+}
+
+// OnTransactionReceived satisfies the node.Delegate typed hook for txs.
+// Sync currently only consumes blocks (the witness mempool handles txs
+// via gossip's path); this is a no-op here.
+func (d *Delegate) OnTransactionReceived(p *node.Peer, body []byte) {}
 
 // handleInv is the inbound side of item_ids_inventory_message: list of
 // item hashes the peer has. We dedup against our local known set and

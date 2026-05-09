@@ -12,8 +12,10 @@ import (
 	"hived-go/internal/crypto"
 	"hived-go/internal/p2p/gossip"
 	p2pnode "hived-go/internal/p2p/node"
+	p2psync "hived-go/internal/p2p/sync"
 	"hived-go/internal/plugins/witness"
 	"hived-go/internal/protocol/auth"
+	"hived-go/internal/protocol/block"
 	"hived-go/internal/protocol/network"
 	"hived-go/internal/state"
 	"hived-go/internal/state/genesis"
@@ -88,6 +90,9 @@ func main() {
 	}
 
 	cdb := chain.New(stateDB)
+	// Enable in-memory recent-block cache so the p2p sync layer can
+	// re-serve fetch_items requests without going to disk.
+	cdb.EnableRecentBlockCache(chain.RecentBlockCacheSize)
 
 	// Load witness producers from config. Each (witness, private-key)
 	// pair becomes a Producer entry. Without producers the daemon is
@@ -134,37 +139,50 @@ func main() {
 		fmt.Println("ghive: starting in observer mode (no witnesses configured)")
 	}
 
-	// P2P + gossip. If no endpoint AND no seeds, skip entirely.
-	// Otherwise spin up a Node, then layer the gossip Service on top of
-	// it (so inbound block/tx messages go somewhere meaningful) and
-	// wire wp's Broadcaster to the gossip layer (so locally-produced
-	// blocks fan out to peers).
+	// P2P + sync + gossip. If no endpoint AND no seeds, skip entirely.
+	// Otherwise stack both delegates onto a MultiDelegate: sync handles
+	// catch-up + INV exchange; gossip handles direct block/tx broadcast
+	// and the local-production fan-out.
 	var (
 		p2p     *p2pnode.Node
 		gossipS *gossip.Service
+		syncDel *p2psync.Delegate
 	)
 	if cfg.P2PEndpoint != "" || len(cfg.P2PSeedNodes) > 0 {
-		// Two-step bootstrap: build the Node + gossip Service against
-		// each other (gossip needs Node for Broadcast, Node needs
-		// gossip as Delegate), then install the delegate before Start.
+		// Build the Node first (gossip + sync both need a Node handle to
+		// broadcast on); wire delegates after construction via
+		// SetDelegate so we can layer them in a MultiDelegate.
 		p2p = p2pnode.New(p2pnode.Config{
 			Endpoint:  cfg.P2PEndpoint,
 			SeedNodes: cfg.P2PSeedNodes,
 			UserAgent: "ghive/0.1.0",
 		}, cdb, nil)
+		syncDel = p2psync.New(p2psync.Config{}, cdb)
 		gossipS = gossip.New(gossip.Config{
 			Chain:   cdb,
 			Node:    p2p,
 			Mempool: wp,
 		})
-		p2p.SetDelegate(gossipS)
+		// Pipe local block-apply events into the sync layer so it wakes
+		// its INV broadcaster the moment a witness produces a block —
+		// otherwise the new block waits up to one INVInterval before
+		// peers learn of it.
+		cdb.SetOnBlockApplied(func(_ uint32, _ block.ID) {
+			syncDel.NotifyHeadAdvanced()
+		})
+		p2p.SetDelegate(p2pnode.NewMultiDelegate(syncDel, gossipS))
 		gossipS.Start()
 		defer gossipS.Stop()
 		if err := p2p.Start(); err != nil {
 			fmt.Fprintf(os.Stderr, "ghive: p2p start: %v\n", err)
 			os.Exit(1)
 		}
+		syncDel.Start()
+		defer syncDel.Stop()
 		defer p2p.Stop()
+		// Wire the witness loop to push freshly-produced blocks at the
+		// gossip layer.
+		wp.Broadcaster = gossipS
 		// Wire the witness loop to push freshly-produced blocks at
 		// the gossip layer.
 		wp.Broadcaster = gossipS
