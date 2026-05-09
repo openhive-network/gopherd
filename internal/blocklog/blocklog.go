@@ -273,6 +273,31 @@ func (r *Reader) RawBlockBytes(blockNum uint32) ([]byte, Attributes, error) {
 	return raw, attr, nil
 }
 
+// BlockExtent returns the [start, end) byte offsets of blockNum within its
+// owning part file (start..end-1 covers the raw block bytes; the trailer
+// occupies bytes end..end+7). Useful for slicing the on-disk file by block
+// range.
+func (r *Reader) BlockExtent(blockNum uint32) (start, end uint64, err error) {
+	if blockNum == 0 || blockNum > r.headBlock {
+		return 0, 0, fmt.Errorf("blocklog: block %d out of range [1, %d]", blockNum, r.headBlock)
+	}
+	p := r.partFor(blockNum)
+	if p == nil {
+		return 0, 0, fmt.Errorf("blocklog: no part covers block %d", blockNum)
+	}
+	relIdx := blockNum - p.first
+	packed, err := p.lookupTrailer(relIdx)
+	if err != nil {
+		return 0, 0, err
+	}
+	start, _ = decodeTrailer(packed)
+	end, err = p.endOffset(relIdx)
+	if err != nil {
+		return 0, 0, err
+	}
+	return start, end, nil
+}
+
 // Attributes returns the parsed attributes for blockNum without touching the
 // main file. Useful for diagnostics.
 func (r *Reader) Attributes(blockNum uint32) (Attributes, error) {

@@ -200,6 +200,150 @@ func TestSelfReplayBlocks(t *testing.T) {
 	}
 }
 
+// TestSelfReplayBlocksCompressed runs the same self-replay as
+// TestSelfReplayBlocks but with --compress-blocks enabled. The end state has
+// to satisfy two extra invariants that the uncompressed path doesn't:
+//
+//  1. The Reader transparently decompresses each freshly-written block
+//     and we round-trip every byte back to the source.
+//  2. The on-disk bytes for the first 100 blocks are byte-identical to
+//     the corresponding slice of ./block_log — i.e. the writer produces
+//     exactly what hived's compress_block_log utility would produce.
+func TestSelfReplayBlocksCompressed(t *testing.T) {
+	src := projectBlockLog(t)
+	const n = 100
+
+	srcReader, err := blocklog.Open(src)
+	if err != nil {
+		t.Fatalf("open source: %v", err)
+	}
+	if srcReader.Head() < n {
+		srcReader.Close()
+		t.Skipf("source block_log only has %d blocks; need at least %d", srcReader.Head(), n)
+	}
+	rawBlocks := make([][]byte, n)
+	for i := uint32(1); i <= n; i++ {
+		b, err := srcReader.Block(i)
+		if err != nil {
+			srcReader.Close()
+			t.Fatalf("read source block %d: %v", i, err)
+		}
+		rawBlocks[i-1] = b
+	}
+	srcReader.Close()
+
+	dataDir := t.TempDir()
+	stateDB, err := state.Open(dataDir, 64<<20)
+	if err != nil {
+		t.Fatalf("open state: %v", err)
+	}
+	defer stateDB.Close()
+	if err := genesis.Apply(stateDB); err != nil {
+		_ = err
+	}
+	cdb := chain.New(stateDB)
+
+	blockLogDir := filepath.Join(dataDir, "blockchain")
+	if err := os.MkdirAll(blockLogDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	blockLogPath := filepath.Join(blockLogDir, "block_log")
+	w, err := blocklog.OpenForWrite(blockLogPath, true)
+	if err != nil {
+		t.Fatalf("open writer: %v", err)
+	}
+	for i, raw := range rawBlocks {
+		blockNum := uint32(i + 1)
+		if _, err := cdb.ApplyBlock(raw, blockNum, chain.ApplyOptions{
+			SkipBlockSignature:        true,
+			SkipTransactionSignatures: true,
+			Sync:                      false,
+		}, nil); err != nil {
+			t.Fatalf("ApplyBlock %d: %v", blockNum, err)
+		}
+		if err := w.Append(raw); err != nil {
+			t.Fatalf("Append %d: %v", blockNum, err)
+		}
+	}
+	if got := w.HeadBlock(); got != n {
+		t.Errorf("writer HeadBlock: got %d, want %d", got, n)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Round-trip: every block must read back identical to the source.
+	verifyR, err := blocklog.Open(blockLogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer verifyR.Close()
+	if got := verifyR.Head(); got != n {
+		t.Fatalf("verifier Head: got %d, want %d", got, n)
+	}
+	for i := uint32(1); i <= n; i++ {
+		got, err := verifyR.Block(i)
+		if err != nil {
+			t.Fatalf("verifier Block(%d): %v", i, err)
+		}
+		if !bytes.Equal(got, rawBlocks[i-1]) {
+			t.Errorf("round-trip block %d: %d bytes, source %d", i, len(got), len(rawBlocks[i-1]))
+		}
+	}
+
+	// Byte-identical: the on-disk slice covering blocks 1..n in our writer
+	// output must match the corresponding slice of ./block_log.
+	srcEnd := mustEndOfBlockOffsetForTest(t, src, n)
+	srcSlice := make([]byte, srcEnd)
+	sf, err := os.Open(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sf.ReadAt(srcSlice, 0); err != nil {
+		sf.Close()
+		t.Fatal(err)
+	}
+	sf.Close()
+
+	gotBytes, err := os.ReadFile(blockLogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(gotBytes, srcSlice) {
+		minLen := len(gotBytes)
+		if len(srcSlice) < minLen {
+			minLen = len(srcSlice)
+		}
+		first := -1
+		for i := 0; i < minLen; i++ {
+			if gotBytes[i] != srcSlice[i] {
+				first = i
+				break
+			}
+		}
+		t.Fatalf("byte-identical mismatch: got %d, src %d, first diff at %d",
+			len(gotBytes), len(srcSlice), first)
+	}
+}
+
+// mustEndOfBlockOffsetForTest returns the byte offset just past block N's
+// trailer in path — i.e. the size of the prefix slice that covers the first
+// blockN blocks. Used to slice ./block_log for byte-identical comparison.
+func mustEndOfBlockOffsetForTest(t *testing.T, path string, blockN uint32) int {
+	t.Helper()
+	r, err := blocklog.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	_, end, err := r.BlockExtent(blockN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// end is the start offset of the trailer; the trailer is 8 bytes.
+	return int(end + 8)
+}
+
 // TestApplyBlockHookIntegration exercises a.applyBlock end-to-end against
 // real mainnet bytes — the same call site the future sync-delegate hook
 // will use. Differs from TestSelfReplayBlocks in that it runs through the

@@ -348,42 +348,20 @@ func findMainnetBlockLogForTest() string {
 }
 
 // mustEndOfBlockOffset returns the file offset of the byte immediately after
-// blockN's 8-byte trailer, by walking the trailer chain forward via the
-// public Reader API. If the source has an .index sidecar that's used instead.
+// blockN's 8-byte trailer (i.e. the size of the prefix that covers blocks
+// 1..blockN). Used to slice the source file for byte-identical comparisons.
 func mustEndOfBlockOffset(t *testing.T, path string, blockN uint32) int {
 	t.Helper()
-	// Fast path: read entry blockN+1 from the .index sidecar if present, or
-	// the file size if blockN is the head.
 	r, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer r.Close()
-	if blockN > r.Head() {
-		t.Fatalf("blockN %d > head %d", blockN, r.Head())
-	}
-	if blockN == r.Head() {
-		stat, err := os.Stat(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return int(stat.Size())
-	}
-	// We want the start of block (blockN+1) trailer's preceding block end —
-	// equivalent to: offset of block (blockN+1) start MINUS 8 bytes for
-	// blockN's trailer, but the trailer is already INCLUDED before block
-	// (blockN+1)'s payload, so the right answer is just the start offset
-	// of block (blockN+1).
-	p := r.partFor(blockN + 1)
-	if p == nil {
-		t.Fatalf("no part covers block %d", blockN+1)
-	}
-	packed, err := p.lookupTrailer((blockN + 1) - p.first)
+	_, end, err := r.BlockExtent(blockN)
 	if err != nil {
 		t.Fatal(err)
 	}
-	off, _ := decodeTrailer(packed)
-	return int(off)
+	return int(end + 8)
 }
 
 // TestWriterByteIdenticalAcrossDictBoundary checks that the per-block dict

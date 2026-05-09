@@ -88,15 +88,21 @@ func main() {
 }
 
 type flags struct {
-	dataDir         string
-	targetBlock     uint32
-	verifyAgainst   string
-	sourceBlockLog  string
-	maxBlocks       uint32
-	showSeeds       bool
-	listenEndpoint  string
-	extraSeeds      string
+	dataDir          string
+	targetBlock      uint32
+	verifyAgainst    string
+	sourceBlockLog   string
+	maxBlocks        uint32
+	showSeeds        bool
+	listenEndpoint   string
+	extraSeeds       string
 	disableMainSeeds bool
+	// compressBlocks controls whether the on-disk block_log we write is
+	// zstd-compressed (per-block, with the hived dictionary scheme) or
+	// stored uncompressed. Off by default to keep existing tests +
+	// downstream tooling that compares byte-identical against an
+	// uncompressed reference unchanged.
+	compressBlocks bool
 }
 
 func parseFlags() flags {
@@ -111,6 +117,7 @@ func parseFlags() flags {
 	flag.StringVar(&f.listenEndpoint, "p2p-endpoint", "", "local listen address (host:port); empty = outbound-only")
 	flag.StringVar(&f.extraSeeds, "extra-seed", "", "additional seed (host:port); pass --extra-seed multiple times to add more")
 	flag.BoolVar(&f.disableMainSeeds, "no-default-seeds", false, "skip the compiled-in mainnet seeds; only --extra-seed peers will be dialed")
+	flag.BoolVar(&f.compressBlocks, "compress-blocks", false, "zstd-compress each block in the local block_log (matches hived's on-disk format byte-for-byte)")
 	flag.Parse()
 	f.targetBlock = uint32(target)
 	f.maxBlocks = uint32(max)
@@ -158,7 +165,7 @@ func newApp(cfg flags) (*app, error) {
 		return nil, fmt.Errorf("mkdir blockchain: %w", err)
 	}
 	blockLogPath := filepath.Join(blockchainDir, "block_log")
-	w, err := blocklog.OpenForWrite(blockLogPath, false)
+	w, err := blocklog.OpenForWrite(blockLogPath, cfg.compressBlocks)
 	if err != nil {
 		stateDB.Close()
 		return nil, fmt.Errorf("open block_log writer: %w", err)
