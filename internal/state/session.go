@@ -544,17 +544,6 @@ func (s *Session) Range(table TableID, index IndexID, prefix []byte, fn func(bod
 	}
 	iter := s.iter
 
-	emit := func(body, value []byte) error {
-		ok, err := fn(body, value)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return errStopIteration
-		}
-		return nil
-	}
-
 	// Merge backend + overlay entries in physical-key (sort) order so the
 	// caller sees the same ordering chainbase does: every limit-order
 	// matching pass needs an opposite-side order placed THIS BLOCK to
@@ -576,7 +565,9 @@ func (s *Session) Range(table TableID, index IndexID, prefix []byte, fn func(bod
 	// pressure (364MB / 1M blocks).
 	hasOverlay := s.overlayKeys.Len() > 0
 	if !hasOverlay {
-		// Backend-only fast path: no overlay merge.
+		// Backend-only fast path: no overlay merge. Inlined emit to
+		// keep the closure off the heap when fn never strays into the
+		// merge path.
 		iter.First()
 		for iter.Valid() {
 			k := iter.Key()
@@ -585,15 +576,26 @@ func (s *Session) Range(table TableID, index IndexID, prefix []byte, fn func(bod
 				return err
 			}
 			body := k[keyPrefixLen:]
-			if err := emit(body, v); err != nil {
-				if errors.Is(err, errStopIteration) {
-					return nil
-				}
-				return err
+			ok, ferr := fn(body, v)
+			if ferr != nil {
+				return ferr
+			}
+			if !ok {
+				return nil
 			}
 			iter.Next()
 		}
 		return iter.Error()
+	}
+	emit := func(body, value []byte) error {
+		ok, err := fn(body, value)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errStopIteration
+		}
+		return nil
 	}
 	overlayItr := s.overlayKeys.Iter()
 	overlayValid := overlayItr.Seek(string(lower)) && overlayItr.Item() < upperStr
