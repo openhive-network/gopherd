@@ -9,6 +9,7 @@ build:
 	mkdir -p $(BIN_DIR)
 	$(GO) build -o $(BIN_DIR)/ghive ./cmd/ghive
 	$(GO) build -o $(BIN_DIR)/ghive-tools ./cmd/ghive-tools
+	$(GO) build -o $(BIN_DIR)/drift-hunter ./cmd/drift-hunter
 
 test:
 	$(GO) test ./...
