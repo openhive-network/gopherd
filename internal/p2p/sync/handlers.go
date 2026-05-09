@@ -374,10 +374,22 @@ func (d *Delegate) handleBlock(p *node.Peer, body []byte) {
 	}
 	select {
 	case d.applyQ <- job:
+		d.onEnqueue()
 	default:
 		// Queue full — drop. Catch-up will re-trigger via the next
-		// INV / blockchain_item_ids cycle.
-		d.logf("apply queue full, dropping block %d", job.blockNum)
+		// INV / blockchain_item_ids cycle. Also re-arm the per-peer
+		// outstanding map so we'll re-ask once we drain.
+		d.droppedQueueFull.Add(1)
+		if st := d.peerStateFor(p); st != nil {
+			st.mu.Lock()
+			delete(st.outstanding, bid)
+			// Also un-mark known so the next INV from the same peer
+			// re-triggers a fetch once back-pressure releases.
+			delete(st.known, bid)
+			st.mu.Unlock()
+		}
+		d.logf("apply queue full (%d/%d), dropping block %d",
+			d.QueueDepth(), d.QueueCapacity(), job.blockNum)
 	}
 }
 
@@ -410,8 +422,29 @@ func (d *Delegate) sendFetchBlockchainItemIDs(p *node.Peer, headID block.ID) {
 }
 
 // sendFetchItems encodes and sends one fetch_items batch.
+//
+// Honors apply-queue back-pressure: while we're inhibited we DROP the
+// fetch and clear the matching per-peer outstanding entries so they get
+// re-tried after the queue drains. This mirrors hived's
+// _inhibit_fetching_sync_blocks_until per-peer pause: we keep the TCP
+// session open + answering pings, we just stop pulling new work.
 func (d *Delegate) sendFetchItems(p *node.Peer, itemType uint32, hashes []proto.ItemHash) {
 	if len(hashes) == 0 {
+		return
+	}
+	if d.inhibitFetching.Load() {
+		d.inhibitedFetches.Add(uint64(len(hashes)))
+		// Don't keep the IDs marked as outstanding — peer would never
+		// hear our request and we'd never re-issue. Caller already
+		// inserted them in st.outstanding; pull them back out so a
+		// subsequent INV (post-resume) will re-queue them.
+		if st := d.peerStateFor(p); st != nil {
+			st.mu.Lock()
+			for _, h := range hashes {
+				delete(st.outstanding, block.ID(h))
+			}
+			st.mu.Unlock()
+		}
 		return
 	}
 	msg := proto.FetchItemsMessage{

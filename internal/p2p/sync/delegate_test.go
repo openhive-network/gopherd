@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"hived-go/internal/chain"
+	"hived-go/internal/p2p/proto"
 	"hived-go/internal/protocol/block"
 )
 
@@ -165,3 +166,109 @@ func TestSyncDelegateIdleBackoff(t *testing.T) {
 type devNullWriter struct{}
 
 func (devNullWriter) Write(p []byte) (int, error) { return len(p), nil }
+
+// slowChain wraps stubChain with a configurable per-apply delay so we
+// can build up queue depth in tests.
+type slowChain struct {
+	*stubChain
+	delay time.Duration
+}
+
+func (s *slowChain) ApplyBlock(raw []byte, n uint32, opts chain.ApplyOptions, st *chain.Stats) (interface{}, error) {
+	if s.delay > 0 {
+		time.Sleep(s.delay)
+	}
+	return s.stubChain.ApplyBlock(raw, n, opts, st)
+}
+
+// TestApplyQueueBackPressure verifies that crossing the high-water
+// mark sets inhibitFetching, and draining below low-water clears it.
+func TestApplyQueueBackPressure(t *testing.T) {
+	chn := &slowChain{
+		stubChain: newStubChain(),
+		delay:     20 * time.Millisecond,
+	}
+	cfg := Config{
+		INVInterval:            time.Hour, // disable INV loop noise
+		IdleINVRounds:          1,
+		Logger:                 devNullWriter{},
+		FetchBatch:             10,
+		MaxBlocksPerInv:        50,
+		MaxTxPerInv:            10,
+		ApplyQueueSize:         16,
+		ApplyQueueHighWaterPct: 75, // 12
+		ApplyQueueLowWaterPct:  25, // 4
+	}
+	d := newWithChain(cfg, chn)
+	d.Start()
+	defer d.Stop()
+
+	// Enqueue 16 blocks fast; the slow chain stub will hold the
+	// applier so the queue fills.
+	for n := uint32(1); n <= 16; n++ {
+		raw := make([]byte, 8)
+		raw[0] = byte(n >> 24)
+		raw[1] = byte(n >> 16)
+		raw[2] = byte(n >> 8)
+		raw[3] = byte(n)
+		select {
+		case d.applyQ <- applyJob{blockNum: n, rawBlock: raw, id: makeStubID(n)}:
+			d.onEnqueue()
+		default:
+			// queue full mid-loop is fine for this test
+		}
+	}
+
+	// Wait for inhibit to flip on (depth >= 12).
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && !d.FetchInhibited() {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !d.FetchInhibited() {
+		t.Fatalf("expected FetchInhibited=true, depth=%d hi=%d", d.QueueDepth(), d.applyQHighWater)
+	}
+
+	// Wait for inhibit to flip back off as the slowChain drains.
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && d.FetchInhibited() {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if d.FetchInhibited() {
+		t.Fatalf("expected FetchInhibited=false after drain, depth=%d lo=%d",
+			d.QueueDepth(), d.applyQLowWater)
+	}
+
+	// Sanity: chain head should have advanced.
+	if h, _ := chn.HeadBlock(); h < 10 {
+		t.Errorf("chain head=%d, expected at least 10 after drain", h)
+	}
+}
+
+// TestSendFetchItemsHonorsInhibit verifies sendFetchItems is a no-op
+// while inhibitFetching is set and increments the counter.
+func TestSendFetchItemsHonorsInhibit(t *testing.T) {
+	chn := newStubChain()
+	cfg := Config{
+		INVInterval:            time.Hour,
+		IdleINVRounds:          1,
+		Logger:                 devNullWriter{},
+		FetchBatch:             10,
+		MaxBlocksPerInv:        50,
+		MaxTxPerInv:            10,
+		ApplyQueueSize:         16,
+		ApplyQueueHighWaterPct: 75,
+		ApplyQueueLowWaterPct:  25,
+	}
+	d := newWithChain(cfg, chn)
+	// Don't Start — we just want to exercise sendFetchItems statically.
+	d.inhibitFetching.Store(true)
+
+	before := d.inhibitedFetches.Load()
+	// nil peer is fine because peerStateFor returns nil and the early
+	// inhibit check returns before any peer.Send call.
+	d.sendFetchItems(nil, 1, []proto.ItemHash{proto.ItemHash(makeStubID(99))})
+	after := d.inhibitedFetches.Load()
+	if after-before != 1 {
+		t.Fatalf("inhibitedFetches: before=%d after=%d, want +1", before, after)
+	}
+}

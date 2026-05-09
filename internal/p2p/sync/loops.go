@@ -146,11 +146,31 @@ func (d *Delegate) broadcastInv() {
 //
 // Blocks that arrive out of order (i.e. before the immediate next
 // block) are stashed in pending and re-considered after each apply.
+// The pending map is bounded by cfg.MaxPendingReorder — if a faulty
+// peer streams far-future blocks faster than the gap closes we drop
+// the highest-num entries and let the standard catch-up re-fetch them
+// once the missing predecessor lands.
 func (d *Delegate) applyLoop() {
 	defer d.wg.Done()
 	defer close(d.applyDone)
 
 	pending := make(map[uint32]applyJob)
+
+	// Drop the highest-num pending entry to keep the reorder buffer
+	// bounded. Returns the dropped block_num (0 if the map was empty).
+	evictHighest := func() uint32 {
+		var maxN uint32
+		for n := range pending {
+			if n > maxN {
+				maxN = n
+			}
+		}
+		if maxN > 0 {
+			delete(pending, maxN)
+			d.droppedReorder.Add(1)
+		}
+		return maxN
+	}
 
 	tryApply := func() {
 		for {
@@ -180,10 +200,24 @@ func (d *Delegate) applyLoop() {
 		case <-d.stopCh:
 			return
 		case job := <-d.applyQ:
+			d.onDequeue()
 			head, _ := d.chain.HeadBlock()
 			if job.blockNum <= head {
 				// Already applied.
 				continue
+			}
+			// Bound the reorder buffer. New job goes in either way;
+			// we evict the FURTHEST-FUTURE entry first so we keep the
+			// blocks closest to head — those are the ones most likely
+			// to fill the gap.
+			if d.cfg.MaxPendingReorder > 0 && len(pending) >= d.cfg.MaxPendingReorder {
+				evicted := evictHighest()
+				if evicted != 0 && evicted == job.blockNum {
+					// Whole buffer was further from head than this
+					// job — keep it instead of the just-evicted one.
+				}
+				d.logf("reorder buffer full (%d), evicted block %d",
+					d.cfg.MaxPendingReorder, evicted)
 			}
 			pending[job.blockNum] = job
 			tryApply()

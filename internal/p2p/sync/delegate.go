@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"hived-go/internal/chain"
@@ -40,6 +41,33 @@ const (
 	// changes (a new block applies or a peer reports a new head).
 	// Avoids steady-state INV spam on a quiet chain.
 	DefaultIdleINVRounds = 6
+
+	// DefaultApplyQueueSize bounds the inbound block channel feeding the
+	// single applyLoop. Mainnet blocks are ≤ ~64 KiB on the wire so a
+	// 4096-deep queue caps worst-case in-flight memory at ~256 MiB even
+	// during a multi-peer fan-out storm. Combined with the high-water
+	// back-pressure below it should never get close to that on the happy
+	// path; it's the upper guardrail.
+	DefaultApplyQueueSize = 4096
+
+	// DefaultApplyQueueHighWaterPct — when the apply queue passes this
+	// fraction of capacity we tell every peer to STOP sending us blocks
+	// (we stop issuing fetch_items). Mirrors hived's
+	// _inhibit_fetching_sync_blocks_until per-peer hysteresis.
+	DefaultApplyQueueHighWaterPct = 75
+
+	// DefaultApplyQueueLowWaterPct — once the queue drains below this
+	// fraction we resume issuing fetch_items. The gap between high and
+	// low forms a hysteresis band so we don't oscillate every block.
+	DefaultApplyQueueLowWaterPct = 25
+
+	// DefaultMaxPendingReorder caps the in-applyLoop reorder buffer (the
+	// `pending` map keyed by block_num). If we get more than this many
+	// out-of-order future blocks before the missing predecessor arrives
+	// we drop the highest-num entries — those will be re-fetched via INV
+	// once the gap closes. Without this guardrail an adversarial peer
+	// streaming far-future block IDs could OOM us.
+	DefaultMaxPendingReorder = 1024
 )
 
 // Chain is the slice of *chain.Database the sync layer needs. Allows
@@ -85,6 +113,20 @@ type Config struct {
 	// IdleINVRounds caps consecutive rounds of "nothing to advertise" before
 	// we sleep until something changes. 0 = never sleep.
 	IdleINVRounds int
+	// ApplyQueueSize is the buffer depth of the inbound applyQ channel.
+	// 0 → DefaultApplyQueueSize.
+	ApplyQueueSize int
+	// ApplyQueueHighWaterPct triggers per-peer back-pressure (we stop
+	// issuing fetch_items) when the queue passes this fraction full.
+	// 0 → DefaultApplyQueueHighWaterPct.
+	ApplyQueueHighWaterPct int
+	// ApplyQueueLowWaterPct lifts back-pressure once the queue drains
+	// back under this fraction. Must be < high-water for hysteresis.
+	// 0 → DefaultApplyQueueLowWaterPct.
+	ApplyQueueLowWaterPct int
+	// MaxPendingReorder caps the in-applyLoop reorder buffer.
+	// 0 → DefaultMaxPendingReorder.
+	MaxPendingReorder int
 	// Logger receives one-line status messages. nil → os.Stderr.
 	Logger io.Writer
 }
@@ -104,6 +146,26 @@ func (c *Config) defaults() {
 	}
 	if c.IdleINVRounds == 0 {
 		c.IdleINVRounds = DefaultIdleINVRounds
+	}
+	if c.ApplyQueueSize == 0 {
+		c.ApplyQueueSize = DefaultApplyQueueSize
+	}
+	if c.ApplyQueueHighWaterPct == 0 {
+		c.ApplyQueueHighWaterPct = DefaultApplyQueueHighWaterPct
+	}
+	if c.ApplyQueueLowWaterPct == 0 {
+		c.ApplyQueueLowWaterPct = DefaultApplyQueueLowWaterPct
+	}
+	if c.ApplyQueueLowWaterPct >= c.ApplyQueueHighWaterPct {
+		// Defensive: callers might set high without low. Fall back to a
+		// 50% gap so we still have hysteresis.
+		c.ApplyQueueLowWaterPct = c.ApplyQueueHighWaterPct / 2
+		if c.ApplyQueueLowWaterPct < 1 {
+			c.ApplyQueueLowWaterPct = 1
+		}
+	}
+	if c.MaxPendingReorder == 0 {
+		c.MaxPendingReorder = DefaultMaxPendingReorder
 	}
 	if c.Logger == nil {
 		c.Logger = os.Stderr
@@ -127,6 +189,21 @@ type Delegate struct {
 	applyQ    chan applyJob
 	applyDone chan struct{}
 
+	// applyQLen is an atomic mirror of len(applyQ) maintained by the
+	// enqueue/dequeue paths. Letting handler goroutines poll a uint32
+	// is much cheaper than racing on the channel; it's used by the
+	// back-pressure check in sendFetchItems / handleInv.
+	applyQLen atomic.Int32
+	// inhibitFetching is set when applyQLen >= high-water and cleared
+	// when it drops below low-water. While set, sendFetchItems is a
+	// no-op. Toggle is performed by the applyLoop on each dequeue and
+	// by handleBlock on each enqueue.
+	inhibitFetching atomic.Bool
+	// applyQHighWater / applyQLowWater are the absolute slot counts
+	// derived from cfg percentages, computed once at construction.
+	applyQHighWater int32
+	applyQLowWater  int32
+
 	// idleRounds counts consecutive INV broadcasts that produced no
 	// outgoing items and got no fresh items from peers. Resets on any
 	// activity. Once it crosses cfg.IdleINVRounds we stop the periodic
@@ -134,6 +211,12 @@ type Delegate struct {
 	idleMu       sync.Mutex
 	idleRounds   int
 	activityCh   chan struct{}
+
+	// dropCounters track soft load-shedding events; exposed for
+	// observability + tests.
+	droppedQueueFull atomic.Uint64
+	droppedReorder   atomic.Uint64
+	inhibitedFetches atomic.Uint64
 
 	stopCh chan struct{}
 	wg     sync.WaitGroup
@@ -177,14 +260,28 @@ func New(cfg Config, db *chain.Database) *Delegate {
 
 // newWithChain is the test-friendly constructor.
 func newWithChain(cfg Config, c Chain) *Delegate {
+	cap := cfg.ApplyQueueSize
+	if cap <= 0 {
+		cap = DefaultApplyQueueSize
+	}
+	hi := int32(cap) * int32(cfg.ApplyQueueHighWaterPct) / 100
+	lo := int32(cap) * int32(cfg.ApplyQueueLowWaterPct) / 100
+	if hi <= 0 {
+		hi = int32(cap)
+	}
+	if lo < 0 {
+		lo = 0
+	}
 	d := &Delegate{
-		cfg:        cfg,
-		chain:      c,
-		peers:      make(map[*node.Peer]*peerState, 16),
-		applyQ:     make(chan applyJob, 256),
-		applyDone:  make(chan struct{}),
-		activityCh: make(chan struct{}, 1),
-		stopCh:     make(chan struct{}),
+		cfg:             cfg,
+		chain:           c,
+		peers:           make(map[*node.Peer]*peerState, 16),
+		applyQ:          make(chan applyJob, cap),
+		applyDone:       make(chan struct{}),
+		activityCh:      make(chan struct{}, 1),
+		stopCh:          make(chan struct{}),
+		applyQHighWater: hi,
+		applyQLowWater:  lo,
 	}
 	return d
 }
@@ -225,4 +322,63 @@ func (d *Delegate) logf(format string, args ...interface{}) {
 		return
 	}
 	fmt.Fprintf(d.cfg.Logger, "p2p/sync: "+format+"\n", args...)
+}
+
+// onEnqueue updates the atomic queue length + arms the inhibit flag if
+// we crossed the high-water mark. Called once per successful enqueue
+// in handleBlock.
+func (d *Delegate) onEnqueue() {
+	n := d.applyQLen.Add(1)
+	if n >= d.applyQHighWater && !d.inhibitFetching.Load() {
+		if d.inhibitFetching.CompareAndSwap(false, true) {
+			d.logf("apply queue at %d/%d (>= high-water %d) — inhibiting fetches",
+				n, cap(d.applyQ), d.applyQHighWater)
+		}
+	}
+}
+
+// onDequeue mirrors onEnqueue from the applyLoop. Lifts the inhibit
+// flag once we drain back below the low-water mark.
+func (d *Delegate) onDequeue() {
+	n := d.applyQLen.Add(-1)
+	if n <= d.applyQLowWater && d.inhibitFetching.Load() {
+		if d.inhibitFetching.CompareAndSwap(true, false) {
+			d.logf("apply queue at %d/%d (<= low-water %d) — resuming fetches",
+				n, cap(d.applyQ), d.applyQLowWater)
+			// Wake the INV loop so we re-broadcast our (advanced) head
+			// and resume the catch-up promptly.
+			d.poke()
+		}
+	}
+}
+
+// FetchInhibited reports whether sendFetchItems is currently
+// back-pressured. Exported for tests + observability.
+func (d *Delegate) FetchInhibited() bool { return d.inhibitFetching.Load() }
+
+// QueueDepth returns the current applyQ depth (atomic, lock-free).
+func (d *Delegate) QueueDepth() int { return int(d.applyQLen.Load()) }
+
+// QueueCapacity returns the configured applyQ slot count.
+func (d *Delegate) QueueCapacity() int { return cap(d.applyQ) }
+
+// Stats returns a snapshot of the cumulative load-shedding counters.
+type Stats struct {
+	QueueDepth       int
+	QueueCapacity    int
+	FetchInhibited   bool
+	DroppedQueueFull uint64
+	DroppedReorder   uint64
+	InhibitedFetches uint64
+}
+
+func (d *Delegate) Stats() Stats {
+	return Stats{
+		QueueDepth:       d.QueueDepth(),
+		QueueCapacity:    d.QueueCapacity(),
+		FetchInhibited:   d.FetchInhibited(),
+		DroppedQueueFull: d.droppedQueueFull.Load(),
+		DroppedReorder:   d.droppedReorder.Load(),
+		InhibitedFetches: d.inhibitedFetches.Load(),
+	}
 }
