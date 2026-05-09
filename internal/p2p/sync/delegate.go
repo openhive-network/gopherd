@@ -189,6 +189,35 @@ type Config struct {
 	// syscall overhead dominated). Tests that grep the per-block line
 	// can opt back in.
 	LogEveryBlock bool
+
+	// AdaptiveFetchBatch toggles per-peer FetchBatch sizing in
+	// handleBlockchainItemIDsInventory. With it ON (default true via
+	// Config.defaults), each fetch chunk is sized to the peer's recent
+	// blocks/second so fast peers get big batches and slow peers stay
+	// small. With it OFF, every peer uses cfg.FetchBatch — useful for
+	// regression bisects.
+	AdaptiveFetchBatch bool
+	// adaptiveFetchBatchSet tracks whether the caller explicitly set
+	// AdaptiveFetchBatch. Without this, defaults() can't tell "false
+	// because zero-value" apart from "false because caller wants it
+	// off"; we pin the default to ON unless the caller said otherwise.
+	adaptiveFetchBatchSet bool
+
+	// LogAdaptiveBatch, when true, emits one trace line per per-peer
+	// FetchBatch decision ("peer X batch=N rate=Y bps"). Useful for
+	// tuning + as the visible signal in catch-up logs that adaptive
+	// sizing is engaged. Off by default — high-rate runs would spam
+	// hundreds of lines per second.
+	LogAdaptiveBatch bool
+}
+
+// EnableAdaptiveFetchBatch is a setter for AdaptiveFetchBatch that
+// also flips adaptiveFetchBatchSet so defaults() doesn't override the
+// caller's choice. Use this when you want to explicitly DISABLE
+// adaptive sizing (the default is ON).
+func (c *Config) EnableAdaptiveFetchBatch(on bool) {
+	c.AdaptiveFetchBatch = on
+	c.adaptiveFetchBatchSet = true
 }
 
 func (c *Config) defaults() {
@@ -238,6 +267,11 @@ func (c *Config) defaults() {
 	}
 	if c.Logger == nil {
 		c.Logger = os.Stderr
+	}
+	// Default adaptive FetchBatch ON unless the caller explicitly
+	// disabled it via EnableAdaptiveFetchBatch(false).
+	if !c.adaptiveFetchBatchSet {
+		c.AdaptiveFetchBatch = true
 	}
 }
 
@@ -325,14 +359,114 @@ type peerState struct {
 	// peerHeadNum is the last head_block_num we observed from this
 	// peer (via blockchain_item_ids_inventory or block arrivals).
 	peerHeadNum uint32
+
+	// blocksReceived counts blocks delivered by THIS peer (regardless
+	// of whether the block ultimately applied or was a duplicate).
+	// Atomic so handleBlock can bump it without taking st.mu — avoids
+	// contending with broadcastInv / handleInv on the hot path.
+	blocksReceived atomic.Uint64
+	// rateWindowStart is the wall-clock nanos of the last rate sample.
+	// adaptiveBatchSize() reads it and rolls a new window every
+	// rateWindow ns; the resulting blocks/second feeds the per-peer
+	// FetchBatch sizing in handleBlockchainItemIDsInventory.
+	rateWindowStart   atomic.Int64
+	rateWindowBlocks  atomic.Uint64
+	// lastRate is the most-recent blocks/second sample (rounded down to
+	// uint32). Recomputed once per rateWindow; FetchBatch sizing reads
+	// it lock-free. Initialized to 0; the adaptive sizer treats 0 as
+	// "no sample yet, use baseline batch".
+	lastRate atomic.Uint32
 }
 
 func newPeerState() *peerState {
-	return &peerState{
+	st := &peerState{
 		known:       make(map[block.ID]struct{}, 256),
 		outstanding: make(map[block.ID]struct{}, 64),
 	}
+	st.rateWindowStart.Store(time.Now().UnixNano())
+	return st
 }
+
+// rateWindow is how often we snapshot per-peer block-receive rate. Short
+// enough that a slow peer's bad streak shows up in its next batch sizing
+// (~30s mirrors the alpha2 spec hint). Long enough that a single
+// unlucky-RTT round doesn't flap the size.
+const rateWindow = 30 * time.Second
+
+// minAdaptiveBatch / maxAdaptiveBatch bracket per-peer FetchBatch sizing.
+// We keep maxAdaptive below MaxOutstandingPerPeer so a single round
+// never blows past the per-peer outstanding cap.
+const (
+	minAdaptiveBatch = 50
+	maxAdaptiveBatch = 5000
+)
+
+// recordBlock bumps both lifetime and current-window counters. Cheap:
+// two atomic adds on the hot per-peer receive path. Caller is
+// handleBlock; called once per received block_message.
+func (st *peerState) recordBlock() {
+	st.blocksReceived.Add(1)
+	st.rateWindowBlocks.Add(1)
+}
+
+// adaptiveBatchSize returns a per-peer FetchBatch size scaled to the
+// peer's recent blocks/second. A peer that's been delivering 1500 bps
+// gets a 5000-batch chunk so we keep its pipeline full; a peer dribbling
+// 50 bps is capped at the floor so we don't waste 5000 slots on it.
+//
+// Sampling is pull-based: the function rolls the rate window only when
+// it's older than rateWindow. This means we only do the wall-clock read
+// + division once per ~30s per peer per call site, rather than every
+// time recordBlock fires. The trade is a slightly stale rate reading on
+// the next FetchBatch decision (max one window stale) — fine, since
+// FetchBatch decisions only happen on inventory-reply boundaries.
+//
+// baseline is the global cfg.FetchBatch — used as the floor when we
+// don't yet have any per-peer rate sample.
+func (st *peerState) adaptiveBatchSize(baseline int) int {
+	now := time.Now().UnixNano()
+	start := st.rateWindowStart.Load()
+	elapsed := now - start
+	if elapsed >= int64(rateWindow) {
+		// Roll the window: snapshot the count, recompute lastRate, reset.
+		blocks := st.rateWindowBlocks.Swap(0)
+		st.rateWindowStart.Store(now)
+		secs := float64(elapsed) / float64(time.Second)
+		var bps uint32
+		if secs > 0 {
+			bps = uint32(float64(blocks) / secs)
+		}
+		st.lastRate.Store(bps)
+	}
+	rate := st.lastRate.Load()
+	if rate == 0 {
+		// First window or peer has gone silent — use the baseline batch
+		// (cfg.FetchBatch) so the very first round still ramps quickly.
+		if baseline < minAdaptiveBatch {
+			return minAdaptiveBatch
+		}
+		if baseline > maxAdaptiveBatch {
+			return maxAdaptiveBatch
+		}
+		return baseline
+	}
+	// Scale: aim for ~3 seconds of work per batch. A peer at 1000 bps
+	// gets a 3000-block batch; at 200 bps → 600; at 2000+ bps → capped
+	// at maxAdaptiveBatch so a single round never overruns the per-peer
+	// outstanding budget.
+	size := int(rate) * 3
+	if size < minAdaptiveBatch {
+		size = minAdaptiveBatch
+	}
+	if size > maxAdaptiveBatch {
+		size = maxAdaptiveBatch
+	}
+	return size
+}
+
+// LastRate returns the most-recent blocks/second sample for this peer.
+// Exported for observability + tests.
+func (st *peerState) LastRate() uint32 { return st.lastRate.Load() }
 
 // applyJob is one inbound block waiting for the applier goroutine.
 type applyJob struct {

@@ -293,9 +293,25 @@ func (d *Delegate) handleBlockchainItemIDsInventory(p *node.Peer, body []byte) {
 		d.outstandingThrottled.Add(1)
 	}
 
-	// Issue fetch_items in cfg.FetchBatch-sized chunks.
-	for i := 0; i < len(missing); i += d.cfg.FetchBatch {
-		end := i + d.cfg.FetchBatch
+	// Issue fetch_items in adaptively-sized chunks. Fast peers
+	// (high recent blocks/sec) get bigger batches so we keep their
+	// pipeline full; slow peers stay small so a single 5000-block
+	// round to a slow peer doesn't stall the catch-up. The size is
+	// recomputed once per round based on a 30s sliding rate window.
+	batch := st.adaptiveBatchSize(d.cfg.FetchBatch)
+	if d.cfg.AdaptiveFetchBatch && d.cfg.LogAdaptiveBatch {
+		// Cheap trace for offline tuning (off by default).
+		d.logf("peer %s batch=%d (rate=%d bps, missing=%d)",
+			p.Conn().RemoteAddr(), batch, st.LastRate(), len(missing))
+	}
+	if !d.cfg.AdaptiveFetchBatch {
+		batch = d.cfg.FetchBatch
+	}
+	if batch <= 0 {
+		batch = d.cfg.FetchBatch
+	}
+	for i := 0; i < len(missing); i += batch {
+		end := i + batch
 		if end > len(missing) {
 			end = len(missing)
 		}
@@ -434,6 +450,9 @@ func (d *Delegate) handleBlock(p *node.Peer, body []byte) {
 		if wasOut {
 			d.outstandingTotal.Add(-1)
 		}
+		// Atomic — outside st.mu — so per-peer rate accounting doesn't
+		// contend with broadcastInv's known-map iteration.
+		st.recordBlock()
 	}
 
 	// Skip duplicate-arrival recovery + apply work entirely. With the
