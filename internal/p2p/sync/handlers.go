@@ -436,6 +436,30 @@ func (d *Delegate) handleBlock(p *node.Peer, body []byte) {
 		}
 	}
 
+	// Skip duplicate-arrival recovery + apply work entirely. With the
+	// catch-up kicker firing fetch_blockchain_item_ids to all peers
+	// every second, the same block frequently arrives from 2-4 peers.
+	// A block we've already applied (head >= bid.num) or already cached
+	// (RecentBlockBytesByID hit) will get skipped by applyLoop anyway,
+	// but only AFTER we've spent ~2 ms on sig recovery on this
+	// goroutine. Drop early to claw that back.
+	//
+	// We use the lock-free atomic mirror d.headBlockHint instead of
+	// d.chain.HeadBlock() — the latter takes the chain applyMu.RLock
+	// and materializes a state.Session, which costs ~2ms per call and
+	// becomes a measurable serialization point on the hot per-peer
+	// receive path. The mirror is updated by applyLoop after each
+	// successful apply; it can lag by one block but that's harmless
+	// here (worst case we recover sig for a block applyLoop will
+	// discard one step later — same outcome as before this skip).
+	headHint := d.headBlockHint.Load()
+	if bn := bid.Num(); bn != 0 && uint32(bn) <= headHint {
+		return
+	}
+	if d.chain.RecentBlockBytesByID(bid) != nil {
+		return
+	}
+
 	// Pre-recover the witness signing key on THIS goroutine. handleBlock
 	// runs on the per-peer receive goroutine — with N peers we get N-way
 	// parallel sig recovery for free, and applyLoop never blocks on the
@@ -443,7 +467,11 @@ func (d *Delegate) handleBlock(p *node.Peer, body []byte) {
 	// the zero PublicKey on any parse / recovery error; in that case
 	// chain.ApplyBlock falls back to its own (failing) recovery path
 	// which generates the canonical error message.
-	signer := RecoverBlockSigner(msg.SignedBlockBytes)
+	//
+	// We pass the block ID so duplicate deliveries (the same block from
+	// multiple peers, common during catch-up where peers redundantly
+	// answer the same fetch_items) hit the cache and skip the recovery.
+	signer := recoverBlockSignerCached(msg.SignedBlockBytes, d.signerCache, bid)
 
 	job := applyJob{
 		blockNum:          bid.Num(),

@@ -219,7 +219,13 @@ func (d *Delegate) applyLoop() {
 
 	tryApply := func() {
 		for {
-			head, _ := d.chain.HeadBlock()
+			// Use the atomic hint when populated; the cold-start path
+			// (head=0) reads the chain canonically.
+			head := d.headBlockHint.Load()
+			if head == 0 {
+				h, _ := d.chain.HeadBlock()
+				head = h
+			}
 			next := head + 1
 			job, ok := pending[next]
 			if !ok {
@@ -237,6 +243,10 @@ func (d *Delegate) applyLoop() {
 				// if the chain is on a recoverable fork.
 				continue
 			}
+			// Update the head hint that handleBlock reads to early-skip
+			// duplicate deliveries. Slight lag (vs HeadBlock()) is OK —
+			// the worst case is one extra sig-recovery on a stale block.
+			d.headBlockHint.Store(job.blockNum)
 			// Per-block "applied block N" line was the dominant
 			// stderr-overhead source on a fast catch-up (15K writes/s on
 			// a 12K bps stream). The chain-level per-N-block / per-second
@@ -264,7 +274,11 @@ func (d *Delegate) applyLoop() {
 			return
 		case job := <-d.applyQ:
 			d.onDequeue()
-			head, _ := d.chain.HeadBlock()
+			head := d.headBlockHint.Load()
+			if head == 0 {
+				h, _ := d.chain.HeadBlock()
+				head = h
+			}
 			if job.blockNum <= head {
 				// Already applied.
 				continue

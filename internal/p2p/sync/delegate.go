@@ -294,6 +294,20 @@ type Delegate struct {
 	// item_not_available, or evict it on queue-full.
 	outstandingTotal atomic.Int32
 
+	// signerCache dedupes RecoverBlockSigner across peer-receive
+	// goroutines. During catch-up the same block frequently arrives
+	// from multiple peers; without the cache, every duplicate triggers
+	// a fresh secp256k1 recovery (the dominant CPU cost on the hot path).
+	signerCache *signerCache
+
+	// headBlockHint is an atomic mirror of d.chain.HeadBlock(), updated
+	// after each successful apply. handleBlock reads it lock-free to
+	// fast-skip duplicate deliveries; calling d.chain.HeadBlock() on
+	// every inbound block was costing ~2ms per call (acquires applyMu
+	// + materialises a state.Session) and serialising the per-peer
+	// receive goroutines. Lagging by one block is harmless on this path.
+	headBlockHint atomic.Uint32
+
 	stopCh chan struct{}
 	wg     sync.WaitGroup
 }
@@ -368,6 +382,7 @@ func newWithChain(cfg Config, c Chain) *Delegate {
 		stopCh:          make(chan struct{}),
 		applyQHighWater: hi,
 		applyQLowWater:  lo,
+		signerCache:     newSignerCache(),
 	}
 	return d
 }
