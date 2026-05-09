@@ -182,21 +182,30 @@ type memIter struct {
 	backend      *memBackend
 	tree         *btree.BTreeG[memItem]
 	it           btree.IterG[memItem]
+	itBucket     uint32 // bucket the current `it` is bound to
 	lower, upper string
 	valid        bool
 	hasIter      bool
 }
 
 func (m *memIter) SetBounds(lower, upper []byte) {
-	if m.hasIter {
-		m.it.Release()
-		m.hasIter = false
-	}
 	m.lower = string(lower)
 	m.upper = string(upper)
 	m.valid = false
-	if m.backend != nil {
-		m.tree = m.backend.trees[memTreeKey(lower)] // may be nil for empty table
+	if m.backend == nil {
+		m.tree = nil
+		return
+	}
+	bucket := memTreeKey(lower)
+	m.tree = m.backend.trees[bucket]
+	// If the bucket changed, drop the existing iter so First()
+	// allocates a fresh one bound to the new tree. Same-bucket reuse
+	// (the common case for hooks that range the same table on every
+	// block) lets Seek reuse the IterG's stack across calls instead
+	// of growing a fresh slice each time.
+	if m.hasIter && m.itBucket != bucket {
+		m.it.Release()
+		m.hasIter = false
 	}
 }
 
@@ -205,11 +214,15 @@ func (m *memIter) First() bool {
 		m.valid = false
 		return false
 	}
-	if m.hasIter {
-		m.it.Release()
+	bucket := memTreeKey([]byte(m.lower))
+	if !m.hasIter || m.itBucket != bucket {
+		if m.hasIter {
+			m.it.Release()
+		}
+		m.it = m.tree.Iter()
+		m.hasIter = true
+		m.itBucket = bucket
 	}
-	m.it = m.tree.Iter()
-	m.hasIter = true
 	if !m.it.Seek(memItem{key: m.lower}) {
 		m.valid = false
 		return false
