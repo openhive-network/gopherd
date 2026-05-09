@@ -25,8 +25,19 @@ package proto
 
 // CoreProtocolVersion is the value hived sends in hello_message's
 // core_protocol_version field. It mirrors GRAPHENE_NET_PROTOCOL_VERSION,
-// defined as 106 in libraries/net/include/graphene/net/config.hpp.
-const CoreProtocolVersion uint32 = 106
+// defined as 107 in libraries/net/include/graphene/net/config.hpp.
+//
+// The bump from 106 → 107 unlocks two peer-side behaviors:
+//
+//	GRAPHENE_NET_PROTOCOL_COMPRESSED_BLOCKS_VERSION (107) — peers will send
+//	  us compressed_block_message during sync IF we also advertise a
+//	  last_available_zstd_compression_dictionary_number in user_data.
+//	  We do — see internal/p2p/node/node.go::buildHelloPayload.
+//	GRAPHENE_NET_PROTOCOL_ADVERTISE_BLOCKS_BY_BLOCK_ID_VERSION (107) —
+//	  peers may advertise inventory by block_id rather than block-message
+//	  hash. Our handleInv accepts both via ItemTypeBlock /
+//	  ItemTypeBlockCompressed.
+const CoreProtocolVersion uint32 = 107
 
 // MessageType is the on-wire numeric tag used in the envelope's msg_type
 // field. Values match core_message_type_enum exactly; do NOT renumber.

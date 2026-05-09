@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"hived-go/internal/blocklog/zstd"
 	"hived-go/internal/chain"
 	"hived-go/internal/crypto"
 	"hived-go/internal/p2p/peerdb"
@@ -234,6 +235,15 @@ func (n *Node) buildHelloPayload(c *transport.Conn) ([]byte, error) {
 	ud.Set("graphene_git_revision_unix_timestamp", proto.NewVariantUint64(uint64(time.Now().Unix())))
 	ud.Set("platform", proto.NewVariantString(runtime.GOOS))
 	ud.Set("bitness", proto.NewVariantUint64(64))
+	// last_available_zstd_compression_dictionary_number tells the peer the
+	// highest dictionary number we can decompress with. Hived consults this
+	// when deciding whether to ship a block as compressed_block_message
+	// (libraries/net/peer_connection.cpp::send_block — only sends compressed
+	// if the peer advertised a dictionary number >= the block's chosen dict).
+	// We carry all dicts from internal/blocklog/zstd at build time.
+	if last, ok := zstd.LastAvailableDictNumber(); ok {
+		ud.Set("last_available_zstd_compression_dictionary_number", proto.NewVariantUint64(uint64(last)))
+	}
 
 	hello := proto.HelloMessage{
 		UserAgent:           n.cfg.UserAgent,
@@ -294,6 +304,9 @@ func (n *Node) buildLegacyHelloPayload(c *transport.Conn) ([]byte, error) {
 	ud.Set("graphene_git_revision_unix_timestamp", proto.NewVariantUint64(uint64(time.Now().Unix())))
 	ud.Set("platform", proto.NewVariantString(runtime.GOOS))
 	ud.Set("bitness", proto.NewVariantUint64(64))
+	if last, ok := zstd.LastAvailableDictNumber(); ok {
+		ud.Set("last_available_zstd_compression_dictionary_number", proto.NewVariantUint64(uint64(last)))
+	}
 
 	legacy := proto.LegacyHelloMessage{
 		UserAgent:           n.cfg.UserAgent,
