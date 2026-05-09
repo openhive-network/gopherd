@@ -234,7 +234,17 @@ func PutWitnessSchedule(s *state.Session, w *WitnessSchedule) {
 		s.RegisterPreCommit(func() {
 			s.SerScratch = AppendWitnessSchedule(s.SerScratch[:0], &cached.val)
 			s.Put(WitnessScheduleTable, state.PrimaryIndex, []byte{0}, s.SerScratch)
-			s.DatabaseAuxInvalidate(witnessScheduleAuxKey)
+			// Refresh the cross-Session parsed-object cache with the
+			// committed value. The next block's GetWitnessSchedule hits
+			// this cache instead of re-deserializing from backend
+			// (ReadWitnessSchedule was 721MB / 1M blocks before this
+			// fix). Safe to populate here — preCommit fires before the
+			// overlay is flushed but after the in-Session cache is the
+			// authoritative state, and on tx Restore the per-Session
+			// lazy entry is dropped via the preCommit truncation in
+			// Session.Restore (rolled-back PutWitnessSchedule callbacks
+			// no longer fire so this code never runs for them).
+			s.DatabaseAuxStore(witnessScheduleAuxKey, cached.val)
 		})
 	}
 }
