@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# scripts/testnet-up — bring up a local N-node ghive testnet.
+#
+# Usage:
+#   scripts/testnet-up [N]      # default N=5
+#
+# Steps:
+#   1. Build cmd/ghive + cmd/testnet-config (under -tags testnet) if
+#      the binaries are stale.
+#   2. Run cmd/testnet-config -N=N -out-dir=./testnet/ to (re)generate
+#      per-node config.ini directories. Existing data/ dirs are PRESERVED
+#      so re-running this script doesn't wipe state.
+#   3. Spawn one ghive process per node in the background, redirecting
+#      stdout/stderr to ./testnet/node-i/run.log. Writes PID files
+#      to ./testnet/node-i/ghive.pid for testnet-down to clean up.
+#
+# Exit code 0 = all nodes spawned. Non-zero = something failed before
+# the last spawn (already-spawned nodes are NOT auto-cleaned; run
+# scripts/testnet-down to tear them down).
+
+set -euo pipefail
+
+N=${1:-5}
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+OUT=${ROOT}/testnet
+BIN_GHIVE=${ROOT}/bin/ghive-testnet
+BIN_CFG=${ROOT}/bin/testnet-config
+
+mkdir -p "${ROOT}/bin"
+
+build_if_needed() {
+  local bin=$1
+  local pkg=$2
+  shift 2
+  if [[ ! -x "${bin}" ]] || \
+     [[ -n "$(find "${ROOT}" -newer "${bin}" -name '*.go' \
+                 -not -path '*/.worktrees/*' -not -path '*/testnet/*' \
+                 -print -quit 2>/dev/null)" ]]; then
+    echo "building ${bin}..."
+    (cd "${ROOT}" && go build "$@" -o "${bin}" "${pkg}")
+  fi
+}
+
+build_if_needed "${BIN_GHIVE}" ./cmd/ghive -tags testnet
+build_if_needed "${BIN_CFG}"   ./cmd/testnet-config
+
+echo "generating ${N}-node configs in ${OUT}..."
+"${BIN_CFG}" -N="${N}" -out-dir="${OUT}"
+
+# Spawn one ghive process per node.
+for i in $(seq 1 "${N}"); do
+  NODE_DIR="${OUT}/node-${i}"
+  PID_FILE="${NODE_DIR}/ghive.pid"
+  LOG_FILE="${NODE_DIR}/run.log"
+
+  if [[ -f "${PID_FILE}" ]]; then
+    OLD_PID=$(cat "${PID_FILE}")
+    if kill -0 "${OLD_PID}" 2>/dev/null; then
+      echo "node-${i} already running (pid ${OLD_PID}); skipping"
+      continue
+    fi
+    rm -f "${PID_FILE}"
+  fi
+
+  cd "${NODE_DIR}"
+  nohup "${BIN_GHIVE}" --config=config.ini >>"${LOG_FILE}" 2>&1 &
+  echo $! > "${PID_FILE}"
+  cd "${ROOT}"
+  echo "node-${i}: pid $(cat "${PID_FILE}"), log ${LOG_FILE}"
+done
+
+echo
+echo "testnet-up complete. Inspect with: scripts/testnet-status"
+echo "Tear down with:                   scripts/testnet-down"

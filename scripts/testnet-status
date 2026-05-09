@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# scripts/testnet-status — print per-node liveness for the local testnet.
+#
+# For each ./testnet/node-*/ghive.pid:
+#   - pid + alive/dead status
+#   - p2p-endpoint from the node's config.ini
+#   - last 3 lines of run.log (proxy for "what is the daemon doing")
+#
+# Real RPC head_block / peer count probing lands once cmd/ghive ships
+# the JSON-RPC plugin (P2 work).
+
+set -euo pipefail
+
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+OUT=${ROOT}/testnet
+
+if [[ ! -d "${OUT}" ]]; then
+  echo "no testnet/ directory — run scripts/testnet-up first"
+  exit 1
+fi
+
+shopt -s nullglob
+NODES=("${OUT}"/node-*/)
+if [[ "${#NODES[@]}" -eq 0 ]]; then
+  echo "no node-* directories under ${OUT}"
+  exit 1
+fi
+
+printf '%-12s %-8s %-22s %s\n' "NODE" "PID" "P2P" "STATUS"
+printf '%-12s %-8s %-22s %s\n' "----" "---" "---" "------"
+for ND in "${NODES[@]}"; do
+  NODE=$(basename "${ND}")
+  CFG="${ND}config.ini"
+  PID_FILE="${ND}ghive.pid"
+  P2P=$(grep -E '^p2p-endpoint' "${CFG}" 2>/dev/null | sed -E 's/.*=\s*//' || echo "?")
+
+  if [[ ! -f "${PID_FILE}" ]]; then
+    printf '%-12s %-8s %-22s %s\n' "${NODE}" "-" "${P2P}" "(not started)"
+    continue
+  fi
+  PID=$(cat "${PID_FILE}")
+  if kill -0 "${PID}" 2>/dev/null; then
+    STATUS="alive"
+  else
+    STATUS="dead (stale pid file)"
+  fi
+  printf '%-12s %-8s %-22s %s\n' "${NODE}" "${PID}" "${P2P}" "${STATUS}"
+done
+
+echo
+for ND in "${NODES[@]}"; do
+  LOG="${ND}run.log"
+  NODE=$(basename "${ND}")
+  if [[ -s "${LOG}" ]]; then
+    echo "--- ${NODE} run.log (tail -3) ---"
+    tail -n 3 "${LOG}"
+  fi
+done

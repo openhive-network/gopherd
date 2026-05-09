@@ -3,6 +3,7 @@
 /build/
 /ghive
 /ghive-tools
+/testnet-config
 
 # Go cache
 *.test
@@ -28,6 +29,9 @@ data/
 /config.ini
 /snapshots/
 /.worktrees/
+# Multi-node testnet trees emitted by cmd/testnet-config; per-node
+# data/ subdirs hold runtime state and must NOT be committed.
+/testnet/
 
 # block_log fixtures sit in the repo root for now; do NOT commit them
 /block_log
