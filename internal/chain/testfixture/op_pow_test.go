@@ -3,6 +3,7 @@ package testfixture
 import (
 	"testing"
 
+	"hived-go/internal/crypto"
 	"hived-go/internal/protocol/op"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
@@ -128,6 +129,56 @@ func TestPowApplyEmptyWorkerRejected(t *testing.T) {
 	err := f.ApplyOp(op.Pow{WorkerAccount: ""})
 	if err == nil {
 		t.Fatal("pow with empty worker should fail")
+	}
+}
+
+// TestPowCreatesAccountAuthority verifies pow_apply creates an
+// account_authority_object with owner=active=posting set to a 1-of-1
+// authority over work.worker (mirrors hive_evaluator.cpp:424-430).
+// Without this, live-sync's verify_authority cannot satisfy any tx
+// signed by the mined account (block 25,502 admin transfer regression).
+func TestPowCreatesAccountAuthority(t *testing.T) {
+	f := New(t)
+	f.GenerateBlock()
+
+	pw := op.Pow{
+		WorkerAccount: "miner_aa",
+		Props:         validPowProps(),
+	}
+	// Synthesize a deterministic worker key from a known 32-byte seed
+	// so we can assert the recovered authority's KeyAuth matches.
+	var seed [32]byte
+	for i := range seed {
+		seed[i] = byte(i + 1)
+	}
+	priv, err := crypto.PrivateKeyFromBytes(seed[:])
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	pw.Work.Worker = priv.PublicKey()
+	if err := f.ApplyOp(pw); err != nil {
+		t.Fatalf("pow apply: %v", err)
+	}
+
+	aa, err := objects.GetAccountAuthority(state.NewSession(f.State), "miner_aa")
+	if err != nil {
+		t.Fatalf("expected account_authority for miner_aa: %v", err)
+	}
+	if aa.Active.WeightThreshold != 1 ||
+		len(aa.Active.KeyAuths) != 1 ||
+		aa.Active.KeyAuths[0].Key != pw.Work.Worker ||
+		aa.Active.KeyAuths[0].Weight != 1 {
+		t.Errorf("active authority mismatch: %+v", aa.Active)
+	}
+	if aa.Owner.WeightThreshold != 1 ||
+		len(aa.Owner.KeyAuths) != 1 ||
+		aa.Owner.KeyAuths[0].Key != pw.Work.Worker {
+		t.Errorf("owner authority mismatch: %+v", aa.Owner)
+	}
+	if aa.Posting.WeightThreshold != 1 ||
+		len(aa.Posting.KeyAuths) != 1 ||
+		aa.Posting.KeyAuths[0].Key != pw.Work.Worker {
+		t.Errorf("posting authority mismatch: %+v", aa.Posting)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"hived-go/internal/crypto"
+	"hived-go/internal/protocol/auth"
 	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/op"
 	"hived-go/internal/state"
@@ -295,6 +296,32 @@ func ensureMinerAccountForPow(ctx *Context, worker string, payReward bool, props
 			VotingManaCurrent:    10000,
 			VotingManaLastUpdate: ctx.HeadBlockTime,
 			Mined:                true,
+		})
+		// Mirror C++ pow_apply (hive_evaluator.cpp:424-430) +
+		// pow2_evaluator (hive_evaluator.cpp:561-567): when a new
+		// account is created via PoW, an account_authority_object
+		// must be created alongside it. pow1's signing_key is
+		// work.worker; pow2's is *new_owner_key. The same key fills
+		// owner = active = posting with weight 1 / threshold 1.
+		// Without this, live-sync's verify_authority cannot resolve
+		// the active authority for any tx signed by a PoW-mined
+		// account (e.g. block 25,502 admin transfer).
+		key := signingKey
+		objects.PutAccountAuthority(ctx.DB, &objects.AccountAuthority{
+			Account: worker,
+			Owner: auth.Authority{
+				WeightThreshold: 1,
+				KeyAuths:        []auth.KeyAuth{{Key: key, Weight: 1}},
+			},
+			Active: auth.Authority{
+				WeightThreshold: 1,
+				KeyAuths:        []auth.KeyAuth{{Key: key, Weight: 1}},
+			},
+			Posting: auth.Authority{
+				WeightThreshold: 1,
+				KeyAuths:        []auth.KeyAuth{{Key: key, Weight: 1}},
+			},
+			LastOwnerUpdate: ctx.HeadBlockTime,
 		})
 	}
 	// Register the worker as a witness if missing — hived's pow_apply
