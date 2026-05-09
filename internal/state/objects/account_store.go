@@ -36,6 +36,13 @@ import (
 type AccountStore struct {
 	primary map[string]*Account
 	undoLog []accountUndo
+
+	// freeAccount is a freelist of *Account slots reclaimed at
+	// CommitPoint / RestoreToPoint when the prev pointers in undo
+	// entries become unreachable. Put pulls from here before
+	// allocating a fresh struct, eliminating the per-Put heap
+	// allocation that ranked third in the alloc profile.
+	freeAccount []*Account
 }
 
 type accountUndo struct {
@@ -72,7 +79,8 @@ func newAccountStore() *AccountStore {
 func (s *AccountStore) SnapshotPoint() int { return len(s.undoLog) }
 
 // RestoreToPoint replays the undo log in reverse from the back until
-// the log length equals `snap`.
+// the log length equals `snap`. Reclaims displaced *Account slots
+// into freeAccount for reuse by Put.
 func (s *AccountStore) RestoreToPoint(snap int) {
 	if snap < 0 {
 		snap = 0
@@ -82,6 +90,9 @@ func (s *AccountStore) RestoreToPoint(snap int) {
 	}
 	for i := len(s.undoLog) - 1; i >= snap; i-- {
 		e := s.undoLog[i]
+		if cur, ok := s.primary[e.name]; ok && cur != nil && cur != e.prev {
+			s.freeAccount = append(s.freeAccount, cur)
+		}
 		if e.prev != nil {
 			s.primary[e.name] = e.prev
 		} else {
@@ -92,9 +103,23 @@ func (s *AccountStore) RestoreToPoint(snap int) {
 }
 
 // CommitPoint releases accumulated undo entries — called from
-// Session.Commit. After this point the prior images can no longer be
-// restored.
-func (s *AccountStore) CommitPoint() { s.undoLog = s.undoLog[:0] }
+// Session.Commit. Every prev pointer in the undo log becomes
+// unreachable; reclaim into freeAccount for reuse.
+func (s *AccountStore) CommitPoint() {
+	for i := range s.undoLog {
+		e := &s.undoLog[i]
+		if e.prev != nil {
+			if cur, ok := s.primary[e.name]; !ok || cur != e.prev {
+				s.freeAccount = append(s.freeAccount, e.prev)
+			}
+		}
+		e.prev = nil
+	}
+	s.undoLog = s.undoLog[:0]
+	if cap(s.freeAccount) > 4096 && len(s.freeAccount) > 4096 {
+		s.freeAccount = s.freeAccount[:4096]
+	}
+}
 
 // Has reports whether `name` has an account row.
 func (s *AccountStore) Has(name auth.AccountName) bool {
@@ -119,12 +144,23 @@ func (s *AccountStore) Get(name auth.AccountName) (Account, bool) {
 // later RestoreToPoint can reinstate it; that means the Account
 // pointed to by the prior slot must NOT be mutated externally — it
 // becomes the canonical "before image". Use Put again to update.
+//
+// Allocation: pulls from freeAccount when available, otherwise
+// allocates a fresh struct. Refills happen at CommitPoint /
+// RestoreToPoint.
 func (s *AccountStore) Put(a *Account) {
 	name := string(a.Name)
 	prev := s.primary[name]
 	s.undoLog = append(s.undoLog, accountUndo{name: name, prev: prev})
-	cp := *a
-	s.primary[name] = &cp
+	var cp *Account
+	if n := len(s.freeAccount); n > 0 {
+		cp = s.freeAccount[n-1]
+		s.freeAccount = s.freeAccount[:n-1]
+	} else {
+		cp = new(Account)
+	}
+	*cp = *a
+	s.primary[name] = cp
 }
 
 // Delete removes the account row for `name`. Captures the prior
