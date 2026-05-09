@@ -663,10 +663,18 @@ func payCreateHbd(s *state.Session, a *objects.Account, blockTime uint32, hiveAm
 	// hbd_print_rate is recomputed each block by update_virtual_supply.
 	// Pre-HF14 it stays at 10000 (100% — entire HIVE portion converts
 	// to HBD). Post-HF14 it ramps down once HBD's share of virtual
-	// supply rises past hbd_start_percent. We re-read DGPO here to pick
-	// up the latest value.
+	// supply rises past hbd_start_percent, eventually reaching 0
+	// (0% to HBD, all liquid HIVE) when percent_hbd ≥ hbd_stop_percent.
+	// We re-read DGPO here to pick up the latest value.
+	//
+	// IMPORTANT: 0 is a valid value (means 0% to HBD, all to HIVE).
+	// The earlier `dgpo.HBDPrintRate > 0` guard was wrong — it treated
+	// 0 as "uninitialized" and fell back to the genesis default of
+	// 10000, sending 100% to HBD precisely when hived was sending 100%
+	// to HIVE. Cumulative effect on cryptos through 6,198,475: -35,850
+	// sat-HIVE balance / +6,681 sat-HBD balance.
 	hbdPrintRate := int64(10000)
-	if dgpo, derr := objects.GetDGPO(s); derr == nil && dgpo.HBDPrintRate > 0 {
+	if dgpo, derr := objects.GetDGPO(s); derr == nil {
 		hbdPrintRate = int64(dgpo.HBDPrintRate)
 	}
 	toHbdHive := hiveAmount * hbdPrintRate / 10000
