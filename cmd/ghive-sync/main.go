@@ -191,6 +191,12 @@ type flags struct {
 	// block_log writer is independent of state Commit batching, so the
 	// canonical bytes for any unpersisted block are always on disk.
 	commitBatch int
+	// commitBatchFsync controls whether the per-batch Commit fsyncs.
+	// True = durable (one fsync per commit-batch blocks); false =
+	// kernel-buffered (matches the legacy per-block NoSync behaviour
+	// for max throughput, with the data-loss window expanding from
+	// "since last block" to "since last batch").
+	commitBatchFsync bool
 }
 
 func parseFlags() flags {
@@ -211,7 +217,8 @@ func parseFlags() flags {
 	flag.StringVar(&f.memProfile, "memprofile", "", "write runtime/pprof heap profile to this path at shutdown")
 	flag.BoolVar(&f.noVerifyMerkle, "no-verify-merkle", false, "skip the per-block merkle-root recomputation (faster; only safe with --verify-against)")
 	flag.IntVar(&f.cacheMB, "cache-mb", 1024, "pebble block-cache size in MB (default 1024; was 256 hard-coded). Larger = fewer disk reads on hot rows.")
-	flag.IntVar(&f.commitBatch, "commit-batch", 100, "blocks per pebble fsync. 1 = legacy per-block durability; >1 batches commits and replays from DGPO head on restart against the local block_log.")
+	flag.IntVar(&f.commitBatch, "commit-batch", 100, "blocks per pebble Apply. 1 = per-block (legacy); >1 batches commits and replays from DGPO head on restart against the local block_log.")
+	flag.BoolVar(&f.commitBatchFsync, "commit-batch-fsync", true, "fsync each batch boundary (default true = one fsync per commit-batch blocks vs the legacy per-block NoSync behaviour)")
 	flag.Parse()
 	f.targetBlock = uint32(target)
 	f.maxBlocks = uint32(max)
@@ -322,7 +329,7 @@ func newApp(cfg flags) (*app, error) {
 	// fsync cost behind a single batch fsync. Mem backend is already
 	// volatile so batching adds no value (fsync is a no-op on memBackend).
 	if cfg.commitBatch > 1 && cfg.backend != "mem" {
-		cdb.SetCommitBatch(uint32(cfg.commitBatch), true)
+		cdb.SetCommitBatch(uint32(cfg.commitBatch), cfg.commitBatchFsync)
 	}
 
 	blockchainDir := filepath.Join(cfg.dataDir, "blockchain")
