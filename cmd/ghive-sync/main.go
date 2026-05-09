@@ -133,12 +133,25 @@ func parseFlags() flags {
 	flag.StringVar(&f.extraSeeds, "extra-seed", "", "additional seed (host:port); pass --extra-seed multiple times to add more")
 	flag.BoolVar(&f.disableMainSeeds, "no-default-seeds", false, "skip the compiled-in mainnet seeds; only --extra-seed peers will be dialed")
 	flag.BoolVar(&f.compressBlocks, "compress-blocks", false, "zstd-compress each block in the local block_log (matches hived's on-disk format byte-for-byte)")
-	flag.StringVar(&f.backend, "backend", "pebble", "state backend: pebble (persistent) or mem (volatile, ~3-5x faster)")
+	flag.StringVar(&f.backend, "backend", "", "state backend: pebble (persistent) or mem (volatile, ~3-5x faster); default = pebble unless --verify-against is set, in which case mem (since the run is throwaway anyway)")
 	flag.StringVar(&f.cpuProfile, "cpuprofile", "", "write runtime/pprof CPU profile to this path")
 	flag.BoolVar(&f.noVerifyMerkle, "no-verify-merkle", false, "skip the per-block merkle-root recomputation (faster; only safe with --verify-against)")
 	flag.Parse()
 	f.targetBlock = uint32(target)
 	f.maxBlocks = uint32(max)
+	// Default the state backend based on whether the caller is doing a
+	// verify-against run. Verify-against runs throw away state on
+	// completion (the only output that matters is the byte-for-byte
+	// block_log diff against the reference), so the persistent pebble
+	// backend's per-block fsync is wasted; mem is ~3-5x faster.
+	// Persistent runs (no --verify-against) keep pebble for crash safety.
+	if f.backend == "" {
+		if f.verifyAgainst != "" {
+			f.backend = "mem"
+		} else {
+			f.backend = "pebble"
+		}
+	}
 	return f
 }
 
