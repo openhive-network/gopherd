@@ -76,8 +76,18 @@ func (d *Delegate) OnBlockReceived(p *node.Peer, body []byte) {
 }
 
 // OnTransactionReceived satisfies the node.Delegate typed hook for txs.
-// Sync currently only consumes blocks (the witness mempool handles txs
-// via gossip's path); this is a no-op here.
+// We currently run no mempool, so a peer-pushed transaction body has
+// nowhere to go — silently consume it.
+//
+// Tx INV gossip (item_ids_inventory_message with ItemTypeTrx) is already
+// short-circuited in handleInv: the hashes are remembered in st.known
+// so we never queue them onto a fetch_items request, and we never receive
+// the bodies in the first place. This handler runs only when a peer
+// pushes the body unsolicited (rare on legacy hived's broadcast path).
+//
+// When a real mempool lands, this is the entry point: parse the tx,
+// validate against current head state, and either store + relay-broadcast
+// or drop with a reason.
 func (d *Delegate) OnTransactionReceived(p *node.Peer, body []byte) {}
 
 // OnAddressesReceived satisfies the node.Delegate typed hook for the

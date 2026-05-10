@@ -502,6 +502,27 @@ func (p *Peer) run(ctx context.Context, delegate Delegate) {
 			if p.State() == StateActive && delegate != nil {
 				delegate.OnTransactionReceived(p, body)
 			}
+		case proto.ClosingConnectionMessageType:
+			// Hived peers send this just before they hang up so the
+			// receiving side can log a reason instead of seeing a bare
+			// EOF on the socket. Decode + log + close cleanly.
+			var cc proto.ClosingConnectionMessage
+			var err error
+			if dErr := cc.Unmarshal(body); dErr == nil {
+				if cc.ClosingDueToError {
+					err = fmt.Errorf("peer closing connection due to error: %s", cc.ReasonForClosing)
+				} else {
+					err = fmt.Errorf("peer closing connection: %s", cc.ReasonForClosing)
+				}
+			} else {
+				err = fmt.Errorf("peer closing connection (%d-byte reason; decode err=%v)", len(body), dErr)
+			}
+			p.tracef("CLOSING: %v", err)
+			p.close(err)
+			if delegate != nil {
+				delegate.OnPeerDisconnected(p, err)
+			}
+			return
 		default:
 			if p.State() == StateActive {
 				if delegate != nil {
