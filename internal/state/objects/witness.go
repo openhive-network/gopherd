@@ -472,14 +472,33 @@ func adjustWitnessVoteWith(w *Witness, delta int64, hf hardfork.Set, currentVT16
 	// delta_pos = OLD votes * (current_vt - virtual_last_update).
 	// virtual_position += delta_pos — wraps mod 2^128 (C++ uint128_t
 	// native overflow; Uint128.Add wraps the same way).
+	//
+	// w.TotalVotesVests can be negative (matching C++ safe<int64>; see
+	// applyWitnessVoteDelta — pre-HF2 unvote+revote nets correctly only
+	// without a clamp). When negative, C++ promotes int64 → uint128 via
+	// SIGN-EXTENSION (uint128(int64): hi = -(l<0), lo = l), so
+	//   delta_pos = (sign_ext_votes) * dt  ≡  -|votes| * dt  (mod 2^128).
+	// Naive Go `dt.Mul64(uint64(int64))` only sign-extends to 64 bits, so
+	// the high half of the would-be sign extension (= dt * 2^64) leaks
+	// into virtual_position and immediately blows it past LAP_LENGTH
+	// (2^64-1). After that, (LAP - virtual_position) underflows to ~2^128
+	// and VST = currentVT + ~2^128/votes ≈ 5e22 (constant LAP2/votes),
+	// pinning the witness at the END of by_schedule_time so it's never
+	// re-picked as timeshare — root of the iter5/iter17 cascade tail
+	// observed at blocks 906,012–1,041,516 (steem-id never picked, fall-
+	// back picks like neonminer drive newVT 6× hived's CVT growth rate).
+	// Compute |votes| × dt, then add or subtract by sign — equivalent
+	// mod 2^128 to C++'s sign-extended multiplication.
 	if currentVT.Cmp(virtualLastUpdate) > 0 {
 		dt := currentVT.Sub(virtualLastUpdate)
-		// w.TotalVotesVests can be negative (matching C++ safe<int64>);
-		// uint64(int64) is a reinterpret cast (2's complement), so the
-		// subsequent Mul64 wraps mod 2^64 the same way C++'s int64*uint128
-		// promotion does mod 2^128.
-		dp := dt.Mul64(uint64(w.TotalVotesVests))
-		virtualPosition = virtualPosition.Add(dp) // wraps mod 2^128
+		votes := w.TotalVotesVests
+		if votes >= 0 {
+			dp := dt.Mul64(uint64(votes))
+			virtualPosition = virtualPosition.Add(dp)
+		} else {
+			dp := dt.Mul64(uint64(-votes))
+			virtualPosition = virtualPosition.Sub(dp)
+		}
 	}
 	w.VirtualLastUpdate = currentVT.PackBE16()
 

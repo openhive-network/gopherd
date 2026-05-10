@@ -93,9 +93,13 @@ func main() {
 				fmt.Printf("%s: NOT FOUND (%v)\n", name, err)
 				continue
 			}
-			fmt.Printf("%s: pow_worker=%d votes=%d schedule=%v vst=%x rate=%d/%d last_update=%d\n",
-				name, w.PowWorker, w.TotalVotesVests, w.Schedule, w.VirtualScheduledTime[:8],
-				w.HBDExchangeRate.Base.Amount, w.HBDExchangeRate.Quote.Amount, w.LastHBDExchangeUpdate)
+			fmt.Printf("%s: pow_worker=%d votes=%d schedule=%v rate=%d/%d created=%d last_confirmed=%d total_missed=%d\n",
+				name, w.PowWorker, w.TotalVotesVests, w.Schedule,
+				w.HBDExchangeRate.Base.Amount, w.HBDExchangeRate.Quote.Amount,
+				w.Created, w.LastConfirmedBlockNum, w.TotalMissedBlocks)
+			fmt.Printf("  vst                 =%x\n", w.VirtualScheduledTime)
+			fmt.Printf("  virtual_last_update =%x\n", w.VirtualLastUpdate)
+			fmt.Printf("  virtual_position    =%x\n", w.VirtualPosition)
 		}
 	case "feed":
 		fh, err := objects.GetFeedHistory(s)
