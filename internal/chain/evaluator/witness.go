@@ -407,11 +407,22 @@ func (accountWitnessVoteEvaluator) Apply(ctx *Context, o op.Operation) error {
 		if !had {
 			return fmt.Errorf("%w: %q -> %q", ErrNotVotedForWitness, wv.Account, wv.Witness)
 		}
-		objects.DeleteWitnessVote(ctx.DB, wv.Account, wv.Witness)
+		// Order matches hive_evaluator.cpp:1406-1419: do the
+		// witness-side delta FIRST, then decrement witnesses_voted_for,
+		// then remove the witness_vote row LAST. The HF2-era branch of
+		// applyWitnessVoteDelta calls adjust_proxied_witness_votes,
+		// which walks every witness_vote row the voter holds — if we
+		// removed THIS row first, the walk skips this witness and the
+		// -delta never lands on it. Concrete repro: at block 934,695
+		// steemit unvoted bue; deleting first dropped the 2.6e17
+		// decrement so bue's votes stayed inflated by steemit's full
+		// vest, flipping the schedule shuffle for ~17K rounds until
+		// the cascade healed at block 986,075.
+		applyWitnessVoteDelta(ctx, &voter, &w, -effectiveVests)
 		if voter.WitnessesVotedFor > 0 {
 			voter.WitnessesVotedFor--
 		}
-		applyWitnessVoteDelta(ctx, &voter, &w, -effectiveVests)
+		objects.DeleteWitnessVote(ctx.DB, wv.Account, wv.Witness)
 	}
 	objects.PutAccount(ctx.DB, &voter)
 	objects.PutWitness(ctx.DB, &w)
