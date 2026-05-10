@@ -43,9 +43,15 @@ func validateBlock(s *state.Session, hdr *block.SignedHeader, rawBlock []byte, h
 		}
 	}
 
-	// 2) Block size.
+	// 2) Block size — HF12-gated. Mirrors hived database.cpp:4134-4137:
+	//    if (has_hardfork(HF12)) FC_ASSERT(block_size <= gprops.maximum_block_size).
+	//    Pre-HF12 (block 3,533,567 mainnet) hived emits a warning when the
+	//    block falls under HIVE_MIN_BLOCK_SIZE but does NOT enforce the upper
+	//    cap. Real mainnet has 200KB+ blocks pre-HF12 (e.g., 1,798,604 =
+	//    228,926 bytes) when median_props.maximum_block_size = 131,072 — the
+	//    sync stalls if we apply the cap here.
 	ws, wsErr := objects.GetWitnessSchedule(s)
-	if wsErr == nil && ws.MedianMaximumBlockSize > 0 {
+	if wsErr == nil && hf.Has(hardfork.HF12) && ws.MedianMaximumBlockSize > 0 {
 		if uint32(len(rawBlock)) > ws.MedianMaximumBlockSize {
 			return fmt.Errorf("validate_block %d: block size %d > max %d",
 				blockNum, len(rawBlock), ws.MedianMaximumBlockSize)
