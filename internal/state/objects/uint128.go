@@ -93,6 +93,44 @@ func (a Uint128) Quo64(b uint64) Uint128 {
 	return Uint128{Hi: quoHi, Lo: quoLo}
 }
 
+// Quo returns a / b. Panics on b == 0. Implements binary long division.
+// Used by adjust_witness_vote when the divisor (votes+1) needs C++-style
+// sign-extended uint128 semantics (negative int64 → uint128(max, ...) → huge
+// divisor → ~0 quotient), which Quo64 cannot represent.
+func (a Uint128) Quo(b Uint128) Uint128 {
+	if b.Hi == 0 && b.Lo == 0 {
+		panic("Uint128.Quo: divide by zero")
+	}
+	// Fast path: divisor fits in 64 bits.
+	if b.Hi == 0 {
+		return a.Quo64(b.Lo)
+	}
+	// Long division: shift divisor up until it exceeds dividend, then
+	// shift down subtracting where possible.
+	if a.Cmp(b) < 0 {
+		return Uint128{}
+	}
+	// Find shift n such that (b << n) <= a < (b << (n+1)).
+	d := b
+	n := 0
+	for d.Cmp(a) <= 0 && d.Hi&(1<<63) == 0 {
+		d = Uint128{Hi: d.Hi<<1 | d.Lo>>63, Lo: d.Lo << 1}
+		n++
+	}
+	q := Uint128{}
+	for ; n >= 0; n-- {
+		if a.Cmp(d) >= 0 {
+			a = a.Sub(d)
+			q = Uint128{Hi: q.Hi<<1 | q.Lo>>63, Lo: q.Lo<<1 | 1}
+		} else {
+			q = Uint128{Hi: q.Hi<<1 | q.Lo>>63, Lo: q.Lo << 1}
+		}
+		// Shift d right by 1.
+		d = Uint128{Hi: d.Hi >> 1, Lo: d.Lo>>1 | d.Hi<<63}
+	}
+	return q
+}
+
 // Mod128 returns a mod m. The chain only uses m = 2^128 (free, since we
 // already wrap) and m = LAP_LENGTH2 = 2^128 - 1. The 2^128 case is a
 // no-op — return a unchanged. Other moduli aren't used.

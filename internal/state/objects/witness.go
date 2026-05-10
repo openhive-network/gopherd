@@ -522,8 +522,21 @@ func adjustWitnessVoteWith(w *Witness, delta int64, hf hardfork.Set, currentVT16
 	// it wraps to a huge value, the divide gives a huge advance, then
 	// VST overflows past current_vt and the HF4+ clamp catches it.
 	advance := lap.Sub(virtualPosition) // wraps if vp > lap
-	// votes+1 is at most int64.max+1 which fits in uint64.
-	advance = advance.Quo64(uint64(w.TotalVotesVests + 1))
+	// (votes+1) needs C++-style sign-extension to uint128: positive →
+	// uint128(0, lo); negative → uint128(max, lo). Naive `uint64(int64)`
+	// only sign-extends to 64 bits, so a negative votes+1 yields a much
+	// smaller divisor than C++'s, inflating the advance during the
+	// transient negative-votes window of pre-HF2 unvote+revote.
+	votesPlus1 := w.TotalVotesVests + 1
+	var divisor Uint128
+	if votesPlus1 >= 0 {
+		divisor = Uint128{Hi: 0, Lo: uint64(votesPlus1)}
+	} else {
+		// Sign-extend: hi = -1 (all bits set), lo = 2's-complement of
+		// the int64 reinterpreted as uint64.
+		divisor = Uint128{Hi: ^uint64(0), Lo: uint64(votesPlus1)}
+	}
+	advance = advance.Quo(divisor)
 	newVST := currentVT.Add(advance) // wraps mod 2^128
 	// HF4+: if VST < current_vt (mod-128 overflow), clamp to uint128 max.
 	if hf.Has(hardfork.HF4) {
