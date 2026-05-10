@@ -7,6 +7,7 @@ import (
 	"hived-go/internal/protocol/auth"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
+	snap "hived-go/internal/state/snapshot"
 )
 
 // getws is a small inspector for Go state snapshots.
@@ -21,7 +22,17 @@ func main() {
 		os.Exit(2)
 	}
 	db := state.OpenMem()
-	if _, err := db.LoadSnapshot(os.Args[1]); err != nil {
+	if info, err := os.Stat(os.Args[1]); err == nil && info.IsDir() {
+		boot := state.NewSession(db)
+		objects.EnsureWitnessStore(boot)
+		objects.EnsureWitnessVoteStore(boot)
+		objects.EnsureAccountStore(boot)
+		objects.EnsureCommentStore(boot)
+		objects.EnsureCommentVoteStore(boot)
+		if _, err := snap.Load(db, os.Args[1]); err != nil {
+			panic(err)
+		}
+	} else if _, err := db.LoadSnapshot(os.Args[1]); err != nil {
 		panic(err)
 	}
 	s := state.NewSession(db)
@@ -35,9 +46,11 @@ func main() {
 		if err != nil {
 			panic(err)
 		}
-		fmt.Printf("num_scheduled=%d max_voted=%d max_miner=%d max_runner=%d num_pow_witnesses=%d total_pow=%d head=%d\n",
+		fmt.Printf("num_scheduled=%d max_voted=%d max_miner=%d max_runner=%d num_pow_witnesses=%d total_pow=%d head=%d current_aslot=%d current_witness=%q\n",
 			ws.NumScheduledWitnesses, ws.MaxVotedWitnesses, ws.MaxMinerWitnesses, ws.MaxRunnerWitnesses,
-			dgpo.NumPowWitnesses, dgpo.TotalPow, dgpo.HeadBlockNumber)
+			dgpo.NumPowWitnesses, dgpo.TotalPow, dgpo.HeadBlockNumber, dgpo.CurrentAslot, dgpo.CurrentWitness)
+		fmt.Printf("current_virtual_time=%x next_shuffle_block=%d witness_pay_norm=%d\n",
+			ws.CurrentVirtualTime, ws.NextShuffleBlockNum, ws.WitnessPayNormalizationFactor)
 		fmt.Printf("virtual_supply=%d current_supply=%d hbd_supply=%d vesting_shares=%d vesting_fund_hive=%d reward_fund_hive=%d\n",
 			dgpo.VirtualSupply, dgpo.CurrentSupply, dgpo.CurrentHBDSupply,
 			dgpo.TotalVestingShares, dgpo.TotalVestingFundHive, dgpo.TotalRewardFundHive)
