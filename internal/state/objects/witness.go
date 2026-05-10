@@ -489,16 +489,29 @@ func adjustWitnessVoteWith(w *Witness, delta int64, hf hardfork.Set, currentVT16
 	// back picks like neonminer drive newVT 6× hived's CVT growth rate).
 	// Compute |votes| × dt, then add or subtract by sign — equivalent
 	// mod 2^128 to C++'s sign-extended multiplication.
-	if currentVT.Cmp(virtualLastUpdate) > 0 {
-		dt := currentVT.Sub(virtualLastUpdate)
-		votes := w.TotalVotesVests
-		if votes >= 0 {
-			dp := dt.Mul64(uint64(votes))
-			virtualPosition = virtualPosition.Add(dp)
-		} else {
-			dp := dt.Mul64(uint64(-votes))
-			virtualPosition = virtualPosition.Sub(dp)
-		}
+	// No `currentVT > VLU` guard: C++ does plain uint128 subtraction
+	// even when current_virtual_time < virtual_last_update — which DOES
+	// happen when update_witness_schedule_4's timeshare pick advances
+	// new_virtual_time to a picked witness's OLD VST that's smaller
+	// than the chain-wide CVT was a moment ago. In that case dt
+	// underflows to ~2^128, delta_pos = votes × wrapped_dt mod 2^128
+	// is a near-2^128 (i.e. effectively negative-mod-2^128) value, and
+	// vp += delta_pos wraps to a value just below LAP_LENGTH2. The
+	// next VST formula then gives a small (LAP - vp) → small advance
+	// → small VST. Concrete repro: at block 959,112 bytemaster unvoted
+	// adm; hived's CVT had regressed by 273 since adm's last touch, so
+	// hived's vp ended at 2^128 - 6.67e16 and adm.VST stabilized at
+	// 6.67e16 (well below CVT, so adm becomes a near-front timeshare
+	// candidate). Our guard skipped the wrap, leaving vp=0 and VST≈CVT,
+	// flipping the by_VST ordering for the next 20K rounds.
+	dt := currentVT.Sub(virtualLastUpdate) // wraps if VLU > CVT
+	votes := w.TotalVotesVests
+	if votes >= 0 {
+		dp := dt.Mul64(uint64(votes))
+		virtualPosition = virtualPosition.Add(dp)
+	} else {
+		dp := dt.Mul64(uint64(-votes))
+		virtualPosition = virtualPosition.Sub(dp)
 	}
 	w.VirtualLastUpdate = currentVT.PackBE16()
 
