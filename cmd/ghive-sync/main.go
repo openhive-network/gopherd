@@ -50,6 +50,7 @@ import (
 	"hived-go/internal/state"
 	"hived-go/internal/state/genesis"
 	"hived-go/internal/state/objects"
+	snap "hived-go/internal/state/snapshot"
 )
 
 // peekPersistedHead reads the DGPO row from the state backend without
@@ -148,6 +149,11 @@ type flags struct {
 	targetBlock      uint32
 	verifyAgainst    string
 	sourceBlockLog   string
+	// loadSnapshot warm-starts the state from a directory snapshot
+	// (block-N/ produced by ghive-tools replay --snapshot-every /
+	// --save-dir-snapshot-at) BEFORE dialing peers. Use to skip the
+	// from-genesis catch-up when iterating on a bug at a known block.
+	loadSnapshot     string
 	maxBlocks        uint32
 	showSeeds        bool
 	listenEndpoint   string
@@ -203,6 +209,7 @@ func parseFlags() flags {
 	flag.UintVar(&target, "target-block", 0, "stop sync after applying this block number (0 = unlimited)")
 	flag.StringVar(&f.verifyAgainst, "verify-against", "", "path to a reference block_log; assert each applied block's bytes match")
 	flag.StringVar(&f.sourceBlockLog, "source-block-log", "", "self-replay mode: read blocks from this block_log instead of P2P")
+	flag.StringVar(&f.loadSnapshot, "load-snapshot", "", "warm-start from a directory snapshot (block-N/) before dialing peers; skips genesis catch-up")
 	flag.UintVar(&max, "max-blocks", 0, "in self-replay mode, stop after this many blocks (0 = the source's head)")
 	flag.BoolVar(&f.showSeeds, "show-seeds", false, "print the compiled-in mainnet seed list and exit")
 	flag.StringVar(&f.listenEndpoint, "p2p-endpoint", "", "local listen address (host:port); empty = outbound-only")
@@ -315,9 +322,32 @@ func newApp(cfg flags) (*app, error) {
 	// After wipe, peek is always 0 — but keep the call so the recovery
 	// path also works for callers that wire it differently.
 	persistedHead := peekPersistedHead(stateDB)
-	if err := genesis.Apply(stateDB); err != nil {
-		// Apply tolerates an already-bootstrapped dir.
-		_ = err
+	// --load-snapshot warm-starts state from a directory snapshot (the
+	// dir form produced by ghive-tools replay --snapshot-every).
+	// Registers all typed subsystems first so the loader's subsystem
+	// set matches the producing process. Skips genesis.Apply because
+	// the snapshot already carries the bootstrapped state.
+	loadedFromSnapshot := false
+	if cfg.loadSnapshot != "" {
+		boot := state.NewSession(stateDB)
+		objects.EnsureWitnessStore(boot)
+		objects.EnsureWitnessVoteStore(boot)
+		objects.EnsureAccountStore(boot)
+		objects.EnsureCommentStore(boot)
+		objects.EnsureCommentVoteStore(boot)
+		man, err := snap.Load(stateDB, cfg.loadSnapshot)
+		if err != nil {
+			stateDB.Close()
+			return nil, fmt.Errorf("load-snapshot %s: %w", cfg.loadSnapshot, err)
+		}
+		fmt.Fprintf(os.Stderr, "ghive-sync: loaded snapshot at block %d from %s\n", man.BlockNum, cfg.loadSnapshot)
+		loadedFromSnapshot = true
+	}
+	if !loadedFromSnapshot {
+		if err := genesis.Apply(stateDB); err != nil {
+			// Apply tolerates an already-bootstrapped dir.
+			_ = err
+		}
 	}
 	cdb := chain.New(stateDB)
 	// Enable the recent-block cache so afterApply can pull each freshly-

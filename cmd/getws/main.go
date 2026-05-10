@@ -77,6 +77,14 @@ func main() {
 			fmt.Printf("%s: balance=%d hbd=%d vesting=%d savings=%d savings_hbd=%d reward_hbd=%d\n",
 				name, a.Balance, a.HBDBalance, a.VestingShares,
 				a.SavingsBalance, a.SavingsHBDBalance, a.RewardHBD)
+			if aa, err := objects.GetAccountAuthority(s, auth.AccountName(name)); err == nil {
+				fmt.Printf("  authority: owner=%d-keys/threshold=%d active=%d-keys/threshold=%d posting=%d-keys/threshold=%d\n",
+					len(aa.Owner.KeyAuths), aa.Owner.WeightThreshold,
+					len(aa.Active.KeyAuths), aa.Active.WeightThreshold,
+					len(aa.Posting.KeyAuths), aa.Posting.WeightThreshold)
+			} else {
+				fmt.Printf("  authority: MISSING (%v)\n", err)
+			}
 		}
 	case "witness":
 		for _, name := range os.Args[3:] {
