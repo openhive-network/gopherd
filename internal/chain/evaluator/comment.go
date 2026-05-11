@@ -444,14 +444,6 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 	if !ok {
 		return fmt.Errorf("voteEvaluator: unexpected op type %T", o)
 	}
-	voterRef, ok := objects.GetAccountRef(ctx.DB, v.Voter)
-	if !ok {
-		return fmt.Errorf("%w: voter=%q", ErrAccountNotFound, v.Voter)
-	}
-	if !voterRef.CanVote() {
-		return fmt.Errorf("vote: %q has declined voting rights", v.Voter)
-	}
-
 	c, err := objects.GetComment(ctx.DB, v.Author, v.Permlink)
 	if err != nil {
 		if err == state.ErrNotFound {
@@ -527,7 +519,13 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 	// votes before depletion.
 	voter, verr := objects.GetAccount(ctx.DB, v.Voter)
 	if verr != nil {
+		if verr == state.ErrNotFound {
+			return fmt.Errorf("%w: voter=%q", ErrAccountNotFound, v.Voter)
+		}
 		return verr
+	}
+	if !voter.CanVote() {
+		return fmt.Errorf("vote: %q has declined voting rights", v.Voter)
 	}
 	const (
 		hivePercent              int64 = 10000

@@ -323,8 +323,11 @@ func (s *WitnessStore) Mutate(owner auth.AccountName, fn func(*Witness)) bool {
 			owner: name, hadPrev: true, slot: cur, snap: *cur,
 		})
 	}
+	preVotes, preVST, prePow, preCreated := cur.TotalVotesVests, cur.VirtualScheduledTime, cur.PowWorker, cur.Created
 	fn(cur)
-	s.markDirty(cur)
+	if cur.TotalVotesVests != preVotes || cur.VirtualScheduledTime != preVST || cur.PowWorker != prePow || cur.Created != preCreated {
+		s.markDirty(cur)
+	}
 	return true
 }
 
@@ -356,8 +359,19 @@ func (s *WitnessStore) Put(w *Witness) {
 				owner: name, hadPrev: true, slot: cur, snap: *cur,
 			})
 		}
+		// Skip markDirty when none of the secondary-index fields changed —
+		// many witness-update / feed_publish / running-version callers
+		// only touch HBDExchangeRate / RunningVersion / Schedule etc.,
+		// keeping votes/vst/pow/created stable. Skipping the dirty add
+		// removes the no-op flushSecondaries walk over that witness.
+		dirty := cur.TotalVotesVests != w.TotalVotesVests ||
+			cur.VirtualScheduledTime != w.VirtualScheduledTime ||
+			cur.PowWorker != w.PowWorker ||
+			cur.Created != w.Created
 		*cur = *w
-		s.markDirty(cur)
+		if dirty {
+			s.markDirty(cur)
+		}
 		return
 	}
 	// Insert path: pull from freelist or allocate fresh.
