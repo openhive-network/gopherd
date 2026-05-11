@@ -267,8 +267,9 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 
 	// Comprehensive per-rebuild full-state dump matching hived's
 	// placement (right after voted iter, before miner + timeshare passes).
-	if dumpPath := os.Getenv("GHIVEDIFF_DUMP_FILE"); dumpPath != "" {
-		dumpFullWitnessTSV(s, blockNum, ws, dumpPath)
+	// Use the cached env value to avoid the per-rebuild os.Getenv syscall.
+	if envGhivediffDumpFile != "" {
+		dumpFullWitnessTSV(s, blockNum, ws, envGhivediffDumpFile)
 	}
 	// Legacy block-list-gated dumps kept for compatibility.
 	if envGhivediffVsts != "" {
