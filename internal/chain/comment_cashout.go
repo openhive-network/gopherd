@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/bits"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 
@@ -126,7 +127,7 @@ func processCommentCashouts(s *state.Session, blockTime, blockNum uint32, hooks 
 		// HF17+: pay each due comment individually (matches
 		// database_comment.cpp:466-481).
 		for _, p := range *ready {
-			processOneCashout(s, blockTime, blockNum, p.cashoutTime, p.commentID, p.author, p.permlink, curationPct)
+			processOneCashout(s, blockTime, blockNum, p.cashoutTime, p.commentID, p.author, p.permlink, curationPct, hooks)
 		}
 		return
 	}
@@ -182,7 +183,7 @@ func processCommentCashouts(s *state.Session, blockTime, blockNum uint32, hooks 
 				continue
 			}
 			paid[key] = struct{}{}
-			processOneCashout(s, blockTime, blockNum, sib.cashoutTime, sib.id, sib.author, sib.permlink, curationPct)
+			processOneCashout(s, blockTime, blockNum, sib.cashoutTime, sib.id, sib.author, sib.permlink, curationPct, hooks)
 		}
 	}
 }
@@ -202,7 +203,7 @@ func processCommentCashouts(s *state.Session, blockTime, blockNum uint32, hooks 
 //
 // adjust_rshares2 then subtracts the comment's curve value from
 // total_reward_shares2 so the next comment's slice excludes this one.
-func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint32, commentID uint64, author, permlink string, curationPct int64) {
+func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint32, commentID uint64, author, permlink string, curationPct int64, hooks *blockHookScratch) {
 	objects.DeleteCommentCashoutSchedule(s, scheduledTime, commentID)
 
 	c, err := objects.GetComment(s, author, permlink)
@@ -448,7 +449,7 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 	// beneficiaries) but visible later.
 	curatorRemainder := int64(0)
 	if curatorPool > 0 {
-		curatorRemainder = distributeCuratorPool(s, c.Author, c.Permlink, curatorPool)
+		curatorRemainder = distributeCuratorPool(s, c.Author, c.Permlink, curatorPool, hooks)
 	}
 	hf := hardfork.SetForBlock(blockNum)
 	if !hf.Has(hardfork.HF20) && curatorRemainder > 0 {
@@ -749,7 +750,7 @@ func convertHiveToHBD(hiveAmount int64, p asset.Price) int64 {
 // If the comment has total_vote_weight == 0 (no upvotes), the entire
 // pool stays unclaimed and folds back to the author (handled by the
 // caller).
-func distributeCuratorPool(s *state.Session, author, permlink string, pool int64) int64 {
+func distributeCuratorPool(s *state.Session, author, permlink string, pool int64, hooks *blockHookScratch) int64 {
 	// Read-only access: only inspecting c.TotalVoteWeight to gate +
 	// derive the denominator for the curator-share math.
 	c, ok := objects.GetCommentRef(s, author, permlink)
@@ -761,12 +762,12 @@ func distributeCuratorPool(s *state.Session, author, permlink string, pool int64
 	}
 	totalW := c.TotalVoteWeight
 
-	type pay struct {
-		voter  string
-		weight uint64
-		share  int64
-	}
-	var pays []pay
+	// Reuse the per-block hook scratch list across cashouts; the
+	// alternative was a heap-escaping `var pays []pay` per call. Each
+	// cashout's distributeCuratorPool fires once and the scratch is
+	// reset before use, so no aliasing between adjacent cashouts.
+	hooks.curatorPays = hooks.curatorPays[:0]
+	pays := &hooks.curatorPays
 
 	_ = objects.RangeCommentVotesByComment(s, auth.AccountName(author), permlink,
 		func(cv *objects.CommentVote) (bool, error) {
@@ -788,7 +789,7 @@ func distributeCuratorPool(s *state.Session, author, permlink string, pool int64
 			if s64 <= 0 {
 				return true, nil
 			}
-			pays = append(pays, pay{voter: string(cv.Voter), weight: cv.CurationWeight, share: s64})
+			*pays = append(*pays, CuratorPay{Voter: string(cv.Voter), Weight: cv.CurationWeight, Share: s64})
 			return true, nil
 		})
 
@@ -796,12 +797,23 @@ func distributeCuratorPool(s *state.Session, author, permlink string, pool int64
 	// (weight DESC, voter ASC) — see database_comment.cpp:131-140. Each
 	// CreateVesting call mutates total_vesting_fund_hive/total_vesting_shares,
 	// so the order curators are paid in subtly affects the share-price
-	// each subsequent curator sees. Match the C++ order.
-	sort.Slice(pays, func(i, j int) bool {
-		if pays[i].weight != pays[j].weight {
-			return pays[i].weight > pays[j].weight
+	// each subsequent curator sees. Match the C++ order. slices.SortFunc
+	// replaces sort.Slice to drop the reflectlite-swapper alloc on this
+	// per-cashout hot path.
+	slices.SortFunc(*pays, func(a, b CuratorPay) int {
+		if a.Weight != b.Weight {
+			if a.Weight > b.Weight {
+				return -1
+			}
+			return 1
 		}
-		return pays[i].voter < pays[j].voter
+		if a.Voter < b.Voter {
+			return -1
+		}
+		if a.Voter > b.Voter {
+			return 1
+		}
+		return 0
 	})
 
 	paid := int64(0)
@@ -812,13 +824,13 @@ func distributeCuratorPool(s *state.Session, author, permlink string, pool int64
 	// database_comment.cpp:188 `create_vesting2(... has_hardfork(HF17_659) ...)`.
 	hf := hardfork.SetForBlock(dgpoNow.HeadBlockNumber)
 	toReward := hf.Has(hardfork.HF17)
-	for _, p := range pays {
-		if traceAccount(p.voter) || traceAccount(author) {
+	for _, p := range *pays {
+		if traceAccount(p.Voter) || traceAccount(author) {
 			ghiveDiff("GHIVEDIFF CASHOUT-CURATOR block=%d author=%s permlink=%s voter=%s weight=%d total_weight=%d pool=%d claim=%d\n",
-				dgpoNow.HeadBlockNumber, author, permlink, p.voter, p.weight, c.TotalVoteWeight, pool, p.share)
+				dgpoNow.HeadBlockNumber, author, permlink, p.Voter, p.Weight, c.TotalVoteWeight, pool, p.Share)
 		}
-		_, _ = CreateVesting_via_chain(s, p.voter, p.share, toReward)
-		paid += p.share
+		_, _ = CreateVesting_via_chain(s, p.Voter, p.Share, toReward)
+		paid += p.Share
 	}
 	if paid > pool {
 		return 0

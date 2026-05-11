@@ -24,8 +24,22 @@ type blockHookCashoutPending struct {
 	permlink    string
 }
 
+// CuratorPay is the per-curator share record used inside
+// distributeCuratorPool's sort+pay loop. Exported so the hook-scratch
+// slice can be shared across the cashout cascade — one cashout fires
+// distributeCuratorPool which allocates this list per call (and per
+// closure capture for RangeCommentVotesByComment). With ~500K
+// cashouts in the post-HF7 window, the per-call slice growth +
+// reflectlite-swapper sort were burning real CPU.
+type CuratorPay struct {
+	Voter  string
+	Weight uint64
+	Share  int64
+}
+
 type blockHookScratch struct {
 	conversionPending []blockHookConvertPending
 	withdrawalPending []blockHookWithdrawalPending
 	cashoutPending    []blockHookCashoutPending
+	curatorPays       []CuratorPay
 }
