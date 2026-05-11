@@ -79,6 +79,24 @@ type Database struct {
 	// (only updateProducerLastConfirmed mutates LCB), so consistency
 	// holds as long as we update cache and state together.
 	lcbCache map[string]uint32
+	// libConfirmedBuf is the per-block sort buffer used by
+	// updateLastIrreversibleBlock to assemble each scheduled witness's
+	// LCB before computing the 75% median. Reused across blocks (~21
+	// entries) to avoid 450 MB cumulative slice growth.
+	libConfirmedBuf []uint32
+	// hooks is the bag of reusable scratch slices the per-block hooks
+	// borrow at the top of each call and truncate to zero before reuse.
+	// Each hook owns a discrete slice — there's no inter-hook aliasing
+	// risk because the hooks fire sequentially.
+	hooks blockHookScratch
+	// txReader is a single fcraw.Reader reused across ApplyBlock calls
+	// to avoid the per-block alloc (4M blocks × ~30B = ~120 MB cum).
+	txReader fcraw.Reader
+	// schedScratch holds the per-round scratch buffers for
+	// updateWitnessSchedule4 (active, voteCands, powCandidates,
+	// visited, selectedVoted, selectedMiners). Each round (~21 blocks)
+	// re-uses them. Cuts ~450 MB cum.
+	schedScratch witnessScheduleScratch
 
 	// recent caches the FC-binary bytes of the last N successfully-applied
 	// blocks so the p2p sync layer can re-serve them to peers requesting
@@ -458,7 +476,8 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 		return objects.DynamicGlobalProperty{}, fmt.Errorf("apply_block %d header_extensions: %w", blockNum, err)
 	}
 
-	r := fcraw.NewReader(rawBlock[hdrLen:])
+	d.txReader.Reset(rawBlock[hdrLen:])
+	r := &d.txReader
 	txCount, err := r.ReadVarUint()
 	if err != nil {
 		return objects.DynamicGlobalProperty{}, fmt.Errorf("apply_block %d tx_count: %w", blockNum, err)
@@ -596,6 +615,14 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 			TrxID:      txID,
 			Expiration: txRes.SignedTx.Expiration,
 		})
+		// Release the tx savepoint so subsystem stores can stop logging
+		// undo entries we'll never use. Flips db.UndoEnabled to false
+		// when depth reaches 0, which is the common case once the last
+		// tx in this block succeeds — the per-block hooks that follow
+		// (processProducerReward → AdjustWitnessVotesForVoter,
+		// processCommentCashouts, schedule rebuild) then bypass the
+		// 700-byte Witness / 256-byte Account snap copies entirely.
+		session.DiscardSavepoint(txSnap)
 	}
 	if stats != nil {
 		stats.OpsSkipped += skippedThisBlock
@@ -686,7 +713,7 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 
 	clearExpiredOrders(session, hdr.Timestamp)
 	clearExpiredDelegations(session, hdr.Timestamp)
-	updateWitnessSchedule(session, blockNum)
+	updateWitnessSchedule(session, blockNum, &d.schedScratch)
 	updateMedianFeed(session, blockNum, hdr.Timestamp)
 	updateVirtualSupply(session, blockNum)
 	clearNullAccountBalance(session, blockNum)
@@ -774,9 +801,9 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 				fh.CurrentMedianHistory.Base.Amount, fh.CurrentMedianHistory.Quote.Amount)
 		}
 	}
-	processConversions(session, hdr.Timestamp)
-	processCommentCashouts(session, hdr.Timestamp, blockNum)
-	processVestingWithdrawals(session, hdr.Timestamp)
+	processConversions(session, hdr.Timestamp, &d.hooks)
+	processCommentCashouts(session, hdr.Timestamp, blockNum, &d.hooks)
+	processVestingWithdrawals(session, hdr.Timestamp, &d.hooks)
 	processSavingsWithdraws(session, hdr.Timestamp)
 	processSubsidizedAccounts(session, blockNum)
 	payLiquidityReward(session, blockNum, hdr.Timestamp)

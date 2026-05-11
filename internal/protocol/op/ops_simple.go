@@ -27,7 +27,7 @@ func (o Vote) AppendFCBody(dst []byte) []byte {
 }
 
 func readVote(r *fcraw.Reader) (Operation, error) {
-	var o Vote
+	o := new(Vote)
 	var err error
 	if o.Voter, err = r.ReadString(); err != nil {
 		return nil, err

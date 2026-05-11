@@ -1,6 +1,7 @@
 package objects
 
 import (
+	"encoding/binary"
 	"math/big"
 	"math/bits"
 )
@@ -143,35 +144,31 @@ func (a Uint128) Mod128() Uint128 { return a }
 // IsZero reports whether a is zero.
 func (a Uint128) IsZero() bool { return a.Hi == 0 && a.Lo == 0 }
 
-// PackBE16 returns the 16-byte big-endian encoding.
+// PackBE16 returns the 16-byte big-endian encoding. Uses
+// encoding/binary.BigEndian which the compiler intrinsifies to a
+// single bswap+movq on amd64/arm64.
 func (a Uint128) PackBE16() [16]byte {
 	var out [16]byte
-	out[0] = byte(a.Hi >> 56)
-	out[1] = byte(a.Hi >> 48)
-	out[2] = byte(a.Hi >> 40)
-	out[3] = byte(a.Hi >> 32)
-	out[4] = byte(a.Hi >> 24)
-	out[5] = byte(a.Hi >> 16)
-	out[6] = byte(a.Hi >> 8)
-	out[7] = byte(a.Hi)
-	out[8] = byte(a.Lo >> 56)
-	out[9] = byte(a.Lo >> 48)
-	out[10] = byte(a.Lo >> 40)
-	out[11] = byte(a.Lo >> 32)
-	out[12] = byte(a.Lo >> 24)
-	out[13] = byte(a.Lo >> 16)
-	out[14] = byte(a.Lo >> 8)
-	out[15] = byte(a.Lo)
+	binary.BigEndian.PutUint64(out[0:8], a.Hi)
+	binary.BigEndian.PutUint64(out[8:16], a.Lo)
 	return out
+}
+
+// PackBE16Into writes the 16-byte big-endian encoding into `out`,
+// avoiding the by-value return copy. Hot-path uses (witness virtual-time
+// updates) call this 3× per witness × ~30 witnesses per producer-reward
+// block.
+func (a Uint128) PackBE16Into(out *[16]byte) {
+	binary.BigEndian.PutUint64(out[0:8], a.Hi)
+	binary.BigEndian.PutUint64(out[8:16], a.Lo)
 }
 
 // UnpackUint128BE decodes 16 BE bytes.
 func UnpackUint128BE(b [16]byte) Uint128 {
-	hi := uint64(b[0])<<56 | uint64(b[1])<<48 | uint64(b[2])<<40 | uint64(b[3])<<32 |
-		uint64(b[4])<<24 | uint64(b[5])<<16 | uint64(b[6])<<8 | uint64(b[7])
-	lo := uint64(b[8])<<56 | uint64(b[9])<<48 | uint64(b[10])<<40 | uint64(b[11])<<32 |
-		uint64(b[12])<<24 | uint64(b[13])<<16 | uint64(b[14])<<8 | uint64(b[15])
-	return Uint128{Hi: hi, Lo: lo}
+	return Uint128{
+		Hi: binary.BigEndian.Uint64(b[0:8]),
+		Lo: binary.BigEndian.Uint64(b[8:16]),
+	}
 }
 
 // Uint128Max is 2^128 - 1, the LAP_LENGTH2 / lap128Max sentinel used by

@@ -1,16 +1,20 @@
 package chain
 
 import (
+	"encoding/binary"
 	"fmt"
 	"math/big"
 	"os"
 	"sort"
 
+	"hived-go/internal/math128"
 	"hived-go/internal/protocol/auth"
 	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
 )
+
+func bigEndianUint64(b []byte) uint64 { return binary.BigEndian.Uint64(b) }
 
 // HIVE_HARDFORK_REQUIRED_WITNESSES — the number of scheduled witnesses
 // that must run a given version (or vote a given hardfork) for it to
@@ -39,7 +43,53 @@ func initMinerName(_ uint32) string { return "initminer" }
 //
 // Both algorithms then xorshift-shuffle the active set, recompute
 // median witness props, and update next_shuffle_block_num.
-func updateWitnessSchedule(s *state.Session, blockNum uint32) {
+// witnessScheduleScratch is the per-Database scratch buffer for
+// updateWitnessSchedule4's per-round work. ApplyBlock holds applyMu,
+// so reuse across rounds is single-threaded and safe.
+type witnessScheduleScratch struct {
+	active          []schedPicked
+	voteCands       []auth.AccountName
+	powCandidates   []schedPowEntry
+	visited         []schedProcessed
+	selectedVoted   map[string]bool
+	selectedMiners  map[string]bool
+	miners          []schedPicked // helper used during sort/version-tally
+}
+
+type schedPicked struct {
+	owner auth.AccountName
+	kind  objects.WitnessScheduleType
+}
+
+type schedPowEntry struct {
+	owner auth.AccountName
+	pow   uint64
+}
+
+type schedProcessed struct {
+	owner auth.AccountName
+	vst   [16]byte
+}
+
+func (s *witnessScheduleScratch) reset() {
+	s.active = s.active[:0]
+	s.voteCands = s.voteCands[:0]
+	s.powCandidates = s.powCandidates[:0]
+	s.visited = s.visited[:0]
+	if s.selectedVoted == nil {
+		s.selectedVoted = make(map[string]bool, 32)
+	} else {
+		clear(s.selectedVoted)
+	}
+	if s.selectedMiners == nil {
+		s.selectedMiners = make(map[string]bool, 8)
+	} else {
+		clear(s.selectedMiners)
+	}
+	s.miners = s.miners[:0]
+}
+
+func updateWitnessSchedule(s *state.Session, blockNum uint32, scratch *witnessScheduleScratch) {
 	dgpo, err := objects.GetDGPO(s)
 	if err != nil {
 		return
@@ -72,9 +122,16 @@ func updateWitnessSchedule(s *state.Session, blockNum uint32) {
 		newProd := auth.AccountName(dgpo.CurrentWitness)
 		if len(ws.RecentBlockProducers) == 0 ||
 			ws.RecentBlockProducers[len(ws.RecentBlockProducers)-1] != newProd {
-			ws.RecentBlockProducers = append(ws.RecentBlockProducers, newProd)
-			if len(ws.RecentBlockProducers) > int(objects.MaxWitnesses) {
-				ws.RecentBlockProducers = ws.RecentBlockProducers[len(ws.RecentBlockProducers)-int(objects.MaxWitnesses):]
+			maxWit := int(objects.MaxWitnesses)
+			if len(ws.RecentBlockProducers) < maxWit {
+				ws.RecentBlockProducers = append(ws.RecentBlockProducers, newProd)
+			} else {
+				// In-place shift left + append. Reuses the backing array
+				// (cap=MaxWitnesses) — the re-slice path that previously
+				// did `ws[len-MaxWitnesses:]` left len=cap, so the next
+				// append always heap-allocated a new array. ~120 MB cum.
+				copy(ws.RecentBlockProducers, ws.RecentBlockProducers[1:])
+				ws.RecentBlockProducers[maxWit-1] = newProd
 			}
 		}
 	}
@@ -140,7 +197,8 @@ func updateWitnessSchedule(s *state.Session, blockNum uint32) {
 	}
 
 	if hf.Has(hardfork.HF4) {
-		updateWitnessSchedule4(s, &ws, &dgpo, blockNum, hf)
+		scratch.reset()
+		updateWitnessSchedule4(s, &ws, &dgpo, blockNum, hf, scratch)
 	} else {
 		updateWitnessSchedulePreHF4(s, &ws, &dgpo, blockNum, hf)
 	}
@@ -162,14 +220,12 @@ func updateWitnessSchedule(s *state.Session, blockNum uint32) {
 // has its VST advanced by LAP_LENGTH2 / (votes+1). On overflow the
 // chain-wide current_virtual_time and every witness's VST are reset to
 // 0 via reset_virtual_schedule_time.
-func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo *objects.DynamicGlobalProperty, blockNum uint32, hf hardfork.Set) {
+func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo *objects.DynamicGlobalProperty, blockNum uint32, hf hardfork.Set, scratch *witnessScheduleScratch) {
 	zero33 := [33]byte{}
 
-	type picked struct {
-		owner auth.AccountName
-		kind  objects.WitnessScheduleType
-	}
-	var active []picked
+	active := scratch.active
+	selectedVoted := scratch.selectedVoted
+	voteCands := scratch.voteCands
 
 	// 1) Top max_voted by votes (skipping disabled witnesses post-HF14).
 	//    Two-pass: collect candidates from the by-vote index, then mutate
@@ -184,8 +240,6 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 	//    lower-ranked enabled witnesses if any of the top-21 are
 	//    disabled, leaking votes out of the active set.
 	wstore := objects.EnsureWitnessStore(s)
-	selectedVoted := make(map[string]bool)
-	var voteCands []auth.AccountName
 	{
 		selected := 0
 		_ = wstore.RangeByVote(func(w *objects.Witness) (bool, error) {
@@ -206,7 +260,7 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 			continue
 		}
 		selectedVoted[string(w.Owner)] = true
-		active = append(active, picked{owner: w.Owner, kind: objects.WitnessScheduleElected})
+		active = append(active, schedPicked{owner: w.Owner, kind: objects.WitnessScheduleElected})
 		w.Schedule = objects.WitnessScheduleElected
 		objects.PutWitness(s, &w)
 	}
@@ -229,12 +283,8 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 	//    Pre-HF13 only — post-HF13 num_pow_witnesses is 0 and the
 	//    max_miner_witnesses count is 0 for HF17+ anyway.
 	//    Two-pass: collect candidates first, then mutate.
-	selectedMiners := make(map[string]bool)
-	type powEntry struct {
-		owner auth.AccountName
-		pow   uint64
-	}
-	var powCandidates []powEntry
+	selectedMiners := scratch.selectedMiners
+	powCandidates := scratch.powCandidates
 	_ = wstore.RangeByPow(func(w *objects.Witness) (bool, error) {
 		// Stop once we've harvested enough candidates to fill all
 		// max_miner slots — matches C++'s mitr advance loop, which
@@ -246,7 +296,7 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 			return true, nil
 		}
 		owner := w.Owner
-		powCandidates = append(powCandidates, powEntry{owner: owner, pow: w.PowWorker})
+		powCandidates = append(powCandidates, schedPowEntry{owner: owner, pow: w.PowWorker})
 		if !selectedVoted[string(owner)] {
 			if !(hf.Has(hardfork.HF14) && w.BlockSigningKey == zero33) {
 				selectedMiners[string(owner)] = true
@@ -268,7 +318,7 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 			continue
 		}
 		if selectedMiners[string(p.owner)] {
-			active = append(active, picked{owner: w.Owner, kind: objects.WitnessScheduleMiner})
+			active = append(active, schedPicked{owner: w.Owner, kind: objects.WitnessScheduleMiner})
 			w.Schedule = objects.WitnessScheduleMiner
 		}
 		if w.PowWorker != 0 {
@@ -294,11 +344,7 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 	//    On overflow, reset_virtual_schedule_time fires globally.
 	currentVT := uint128FromBytes(ws.CurrentVirtualTime)
 	newVT := new(big.Int).Set(currentVT)
-	type processed struct {
-		owner auth.AccountName
-		vst   [16]byte
-	}
-	var visited []processed
+	visited := scratch.visited
 	wantedTotal := int(ws.MaxVotedWitnesses) + int(ws.MaxMinerWitnesses) + int(ws.MaxRunnerWitnesses)
 	if wantedTotal == 0 || wantedTotal > int(objects.MaxWitnesses) {
 		wantedTotal = int(objects.MaxWitnesses)
@@ -319,7 +365,7 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 			return false, nil
 		}
 		owner := w.Owner
-		visited = append(visited, processed{owner: owner, vst: w.VirtualScheduledTime})
+		visited = append(visited, schedProcessed{owner: owner, vst: w.VirtualScheduledTime})
 		if !selectedVoted[string(owner)] && !selectedMiners[string(owner)] &&
 			!(hf.Has(hardfork.HF14) && w.BlockSigningKey == zero33) {
 			tsPicked++
@@ -341,7 +387,7 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 		if !(hf.Has(hardfork.HF14) && w.BlockSigningKey == zero33) &&
 			!selectedVoted[string(p.owner)] && !selectedMiners[string(p.owner)] {
 			if len(active) < wantedTotal {
-				active = append(active, picked{owner: w.Owner, kind: objects.WitnessScheduleTimeshare})
+				active = append(active, schedPicked{owner: w.Owner, kind: objects.WitnessScheduleTimeshare})
 				w.Schedule = objects.WitnessScheduleTimeshare
 				objects.PutWitness(s, &w)
 			}
@@ -354,26 +400,42 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 	// virtual_position=0, virtual_last_update=new_virtual_time, and
 	// virtual_scheduled_time=new_virtual_time + LAP/(votes+1). This is
 	// THE source of subsequent timeshare ordering.
+	//
+	// Hot inner loop: math128.U128 replaces a math/big triple-alloc per
+	// witness (big.NewInt(votes+1), big.Int.Quo, big.Int.Add). lap2 here
+	// is the constant 2^128-1; advance = lap2/(votes+1) fits in U128;
+	// newVST = newVT + advance, with overflow tracked via AddOverflow's
+	// carry bit (mirrors the bit-128 check the math/big path used).
 	resetVT := false
-	lap2 := hiveVirtualScheduleLapLength2()
+	newVTBytes := uint128ToBytes(newVT)
+	newVTU := math128.U128{
+		Hi: bigEndianUint64(newVTBytes[0:8]),
+		Lo: bigEndianUint64(newVTBytes[8:16]),
+	}
+	lap2U := math128.U128{Hi: ^uint64(0), Lo: ^uint64(0)}
 	for _, p := range visited {
 		w, err := objects.GetWitness(s, p.owner)
 		if err != nil {
 			continue
 		}
-		votesPlus1 := big.NewInt(w.TotalVotesVests + 1)
-		if votesPlus1.Sign() <= 0 {
-			votesPlus1 = big.NewInt(1)
+		vp1 := uint64(w.TotalVotesVests + 1)
+		if w.TotalVotesVests+1 <= 0 {
+			vp1 = 1
 		}
-		advance := new(big.Int).Quo(lap2, votesPlus1)
-		newVST := new(big.Int).Add(newVT, advance)
-		if newVST.Cmp(newVT) < 0 || newVST.BitLen() > 128 {
+		advance := lap2U.DivU64(vp1)
+		newVSTU, carry := newVTU.AddOverflow(advance)
+		if carry != 0 {
 			resetVT = true
 			break
 		}
 		w.VirtualPosition = [16]byte{}
-		w.VirtualLastUpdate = uint128ToBytes(newVT)
-		w.VirtualScheduledTime = uint128ToBytes(newVST)
+		w.VirtualLastUpdate = newVTBytes
+		w.VirtualScheduledTime = [16]byte{
+			byte(newVSTU.Hi >> 56), byte(newVSTU.Hi >> 48), byte(newVSTU.Hi >> 40), byte(newVSTU.Hi >> 32),
+			byte(newVSTU.Hi >> 24), byte(newVSTU.Hi >> 16), byte(newVSTU.Hi >> 8), byte(newVSTU.Hi),
+			byte(newVSTU.Lo >> 56), byte(newVSTU.Lo >> 48), byte(newVSTU.Lo >> 40), byte(newVSTU.Lo >> 32),
+			byte(newVSTU.Lo >> 24), byte(newVSTU.Lo >> 16), byte(newVSTU.Lo >> 8), byte(newVSTU.Lo),
+		}
 		objects.PutWitness(s, &w)
 	}
 	if resetVT {
@@ -530,6 +592,13 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 	if ws.MedianHBDInterestRate > 0 {
 		dgpo.HBDInterestRate = ws.MedianHBDInterestRate
 	}
+
+	// Persist grown capacities back into the scratch — next round
+	// resets to len=0 but keeps cap.
+	scratch.active = active
+	scratch.voteCands = voteCands
+	scratch.powCandidates = powCandidates
+	scratch.visited = visited
 }
 
 // updateWitnessSchedulePreHF4 ports the legacy update_witness_schedule

@@ -133,6 +133,39 @@ func (b *memBackend) rawIter(lower, upper []byte) (Iter, error) {
 	return mi, nil
 }
 
+// rawScan walks the per-bucket btree in ascending order via Ascend.
+// Zero allocation — the callback is invoked directly by the btree
+// without materializing an IterG[T] frame. Used by Session.Range's
+// no-overlay fast path.
+func (b *memBackend) rawScan(lower, upper []byte, fn func(key, value []byte) (bool, error)) error {
+	bucket := memTreeKey(lower)
+	t, ok := b.trees[bucket]
+	if !ok {
+		return nil
+	}
+	upperStr := string(upper)
+	lowerItem := memItem{key: string(lower)}
+	var stop error
+	t.Ascend(lowerItem, func(it memItem) bool {
+		if it.key >= upperStr {
+			return false
+		}
+		// Alias the underlying string bytes as []byte (read-only) so
+		// callers can decode without copy. mirrors memIter.Key().
+		var keyBytes []byte
+		if len(it.key) > 0 {
+			keyBytes = unsafe.Slice(unsafe.StringData(it.key), len(it.key))
+		}
+		cont, err := fn(keyBytes, it.value)
+		if err != nil {
+			stop = err
+			return false
+		}
+		return cont
+	})
+	return stop
+}
+
 func (b *memBackend) commit(overlay map[string]overlayEntry, _ bool) error {
 	for k, e := range overlay {
 		bucket := memTreeKeyFromString(k)
@@ -179,18 +212,33 @@ type memIter struct {
 	// the second range scan the wrong tree because Session pools the
 	// iterator across calls (iter.SetBounds rebinds bounds but not
 	// the underlying tree).
-	backend      *memBackend
-	tree         *btree.BTreeG[memItem]
-	it           btree.IterG[memItem]
-	itBucket     uint32 // bucket the current `it` is bound to
-	lower, upper string
-	valid        bool
-	hasIter      bool
+	backend  *memBackend
+	tree     *btree.BTreeG[memItem]
+	it       btree.IterG[memItem]
+	itBucket uint32 // bucket the current `it` is bound to
+	// lowerBuf/upperBuf reuse one backing array across SetBounds calls;
+	// lowerStr/upperStr alias into that buf via unsafe to avoid the
+	// per-call `string(b)` copy. Safe because callers never read the
+	// returned strings after the next SetBounds.
+	lowerBuf, upperBuf []byte
+	lowerStr, upperStr string
+	valid              bool
+	hasIter            bool
 }
 
 func (m *memIter) SetBounds(lower, upper []byte) {
-	m.lower = string(lower)
-	m.upper = string(upper)
+	m.lowerBuf = append(m.lowerBuf[:0], lower...)
+	m.upperBuf = append(m.upperBuf[:0], upper...)
+	if len(m.lowerBuf) == 0 {
+		m.lowerStr = ""
+	} else {
+		m.lowerStr = unsafe.String(&m.lowerBuf[0], len(m.lowerBuf))
+	}
+	if len(m.upperBuf) == 0 {
+		m.upperStr = ""
+	} else {
+		m.upperStr = unsafe.String(&m.upperBuf[0], len(m.upperBuf))
+	}
 	m.valid = false
 	if m.backend == nil {
 		m.tree = nil
@@ -214,7 +262,7 @@ func (m *memIter) First() bool {
 		m.valid = false
 		return false
 	}
-	bucket := memTreeKey([]byte(m.lower))
+	bucket := memTreeKey(m.lowerBuf)
 	if !m.hasIter || m.itBucket != bucket {
 		if m.hasIter {
 			m.it.Release()
@@ -223,11 +271,11 @@ func (m *memIter) First() bool {
 		m.hasIter = true
 		m.itBucket = bucket
 	}
-	if !m.it.Seek(memItem{key: m.lower}) {
+	if !m.it.Seek(memItem{key: m.lowerStr}) {
 		m.valid = false
 		return false
 	}
-	m.valid = m.it.Item().key < m.upper
+	m.valid = m.it.Item().key < m.upperStr
 	return m.valid
 }
 
@@ -241,7 +289,7 @@ func (m *memIter) Next() bool {
 		m.valid = false
 		return false
 	}
-	m.valid = m.it.Item().key < m.upper
+	m.valid = m.it.Item().key < m.upperStr
 	return m.valid
 }
 

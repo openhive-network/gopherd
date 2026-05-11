@@ -49,20 +49,18 @@ func ReadBlockSummary(src []byte) (BlockSummary, error) {
 }
 
 // PutBlockSummary stores the block id for ring slot `(block_num & 0xffff)`.
-// Per-block apply hook calls this after the block is fully applied so the
-// next block's transactions can validate TaPOS against it.
+// Routes through the typed BlockSummaryStore — a flat ring array, no K/V.
 func PutBlockSummary(s *state.Session, blockNum uint32, blockID [20]byte) {
-	b := BlockSummary{BlockID: blockID}
-	s.Put(BlockSummaryTable, state.PrimaryIndex, blockSummaryKey(blockNum), AppendBlockSummary(nil, &b))
+	EnsureBlockSummaryStore(s).Put(blockNum, blockID)
 }
 
 // GetBlockSummary fetches the ring entry for `(block_num & 0xffff)`.
 // Returns ErrNotFound if the slot has not been populated yet (early
 // chain — before block 0x10000 fills the ring).
 func GetBlockSummary(s *state.Session, blockNum uint32) (BlockSummary, error) {
-	v, err := s.Get(BlockSummaryTable, state.PrimaryIndex, blockSummaryKey(blockNum))
-	if err != nil {
-		return BlockSummary{}, err
+	id, ok := EnsureBlockSummaryStore(s).Get(blockNum)
+	if !ok {
+		return BlockSummary{}, state.ErrNotFound
 	}
-	return ReadBlockSummary(v)
+	return BlockSummary{BlockID: id}, nil
 }

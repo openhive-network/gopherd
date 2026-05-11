@@ -4,19 +4,16 @@
 package reward
 
 import (
-	"math/big"
+	"math/bits"
+
+	"hived-go/internal/math128"
 )
 
-// ContentConstantHF0 — the `s` constant used by the quadratic reward
+// ContentConstantHF0Val — the `s` constant used by the quadratic reward
 // curve. From libraries/protocol/include/hive/protocol/config.hpp:
 //
 //	#define HIVE_CONTENT_CONSTANT_HF0  (uint128_t(2000000000000ll))
-//
-// Pre-HF17 hived's only curve is `quadratic` with this constant; after
-// HF17 the curve is configurable per reward_fund. We use the pre-HF17
-// curve unconditionally for now (the chain section currently under
-// test is well below HF17 at block 10,629,455).
-var ContentConstantHF0 = big.NewInt(2_000_000_000_000)
+const ContentConstantHF0Val uint64 = 2_000_000_000_000
 
 // EvaluateRewardCurveQuadratic computes the C++ `quadratic` curve from
 // libraries/chain/util/reward.cpp:34:
@@ -24,57 +21,40 @@ var ContentConstantHF0 = big.NewInt(2_000_000_000_000)
 //	result = (rshares + content_constant)² - content_constant²
 //	       = rshares² + 2·rshares·content_constant
 //
-// rshares can be up to ~1e15 in practice, so rshares² overflows int64
-// and the curve value definitely overflows uint64. We use math/big.Int.
-func EvaluateRewardCurveQuadratic(rshares int64) *big.Int {
+// rshares can be up to ~1e15 in practice; rshares² needs uint128. We
+// return a U128 directly. Negative rshares clamps to 0 to match the
+// math/big path's `Sign() <= 0 ⇒ new(big.Int)`.
+//
+// Native math/bits replaces a math/big triple-alloc per call (was
+// 634 MB cum / 4M-block run via adjustRewardShares2).
+func EvaluateRewardCurveQuadratic(rshares int64) math128.U128 {
 	if rshares <= 0 {
-		return new(big.Int)
+		return math128.U128{}
 	}
-	r := big.NewInt(rshares)
-	rPlusS := new(big.Int).Add(r, ContentConstantHF0)
-	out := new(big.Int).Mul(rPlusS, rPlusS)
-	cc2 := new(big.Int).Mul(ContentConstantHF0, ContentConstantHF0)
-	out.Sub(out, cc2)
-	return out
+	return curveQuadratic(uint64(rshares), ContentConstantHF0Val)
+}
+
+// curveQuadratic computes r² + 2·r·s as U128. Both factors fit in
+// uint128 for any valid (r, s) on Hive — r is bounded by int64 (≤ 2^63),
+// s is the content constant (~2^41) so r² ≤ 2^126 and 2·r·s ≤ 2^105.
+func curveQuadratic(r, s uint64) math128.U128 {
+	r2 := math128.Mul64Wide(r, r)
+	// 2·r·s. r ≤ 2^63 ensures 2·r doesn't overflow uint64.
+	rs := math128.Mul64Wide(r, s).Lsh1()
+	return r2.Add(rs)
 }
 
 // Uint128FromBytes deserializes the 16-byte big-endian uint128 stored
 // in DGPO.TotalRewardShares2.
-func Uint128FromBytes(b [16]byte) *big.Int {
-	out := new(big.Int)
-	out.SetBytes(b[:])
-	return out
+func Uint128FromBytes(b [16]byte) math128.U128 {
+	return math128.FromBytes16(b)
 }
 
-// Uint128ToBytes serializes v as a 16-byte big-endian uint128, taking
-// the value modulo 2^128. Negative inputs wrap (mirrors C++'s
-// fc::uint128_t arithmetic which is unsigned and wraps mod 2^128 —
-// notably how `total_reward_shares2 -= old; total_reward_shares2 += new`
-// at database.cpp:1673-1674 silently absorbs transient underflows).
-func Uint128ToBytes(v *big.Int) [16]byte {
-	var out [16]byte
-	if v.Sign() == 0 {
-		return out
-	}
-	w := new(big.Int).And(v, uint128Mask)
-	if v.Sign() < 0 {
-		// Big.Int's And on negatives uses two's-complement; convert
-		// by adding 2^128 until non-negative within 128 bits.
-		w = new(big.Int).Mod(v, modulus128)
-	}
-	src := w.Bytes()
-	if len(src) > 16 {
-		src = src[len(src)-16:]
-	}
-	copy(out[16-len(src):], src)
-	return out
+// Uint128ToBytes serializes v as a 16-byte big-endian uint128. Native
+// U128 wraps mod 2^128 by construction, matching C++ fc::uint128_t.
+func Uint128ToBytes(v math128.U128) [16]byte {
+	return v.ToBytes16()
 }
 
-// uint128Mask = 2^128 - 1; modulus128 = 2^128. Pre-computed once.
-var (
-	uint128Mask = func() *big.Int {
-		m := new(big.Int).Lsh(big.NewInt(1), 128)
-		return m.Sub(m, big.NewInt(1))
-	}()
-	modulus128 = new(big.Int).Lsh(big.NewInt(1), 128)
-)
+// silence unused import when math/bits isn't otherwise referenced.
+var _ = bits.LeadingZeros64

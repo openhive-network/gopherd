@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"unsafe"
 )
 
 var (
@@ -30,7 +31,9 @@ type Reader struct {
 // by ReadBytesAlias / ReadStringAlias.
 func NewReader(src []byte) *Reader { return &Reader{src: src} }
 
-// Reset rewinds the Reader to a new source.
+// Reset rewinds the Reader to a new source. Used by hot paths
+// (per-block ApplyBlock) that want to reuse a single *Reader across
+// blocks instead of fcraw.NewReader-ing one each time.
 func (r *Reader) Reset(src []byte) { r.src = src; r.pos = 0 }
 
 // Pos returns the current byte offset.
@@ -210,6 +213,31 @@ func (r *Reader) ReadBytesAlias() ([]byte, error) {
 		return nil, err
 	}
 	out := r.src[r.pos : r.pos+n : r.pos+n]
+	r.pos += n
+	return out, nil
+}
+
+// ReadStringAlias reads a length-prefixed UTF-8 string and returns a
+// string aliased into the source buffer (zero-copy). The returned
+// string is only valid while the Reader's underlying byte slice
+// remains unmodified — typically that means "until the next block
+// payload is decompressed into the same scratch buffer." For long
+// strings the caller doesn't need to retain past the apply-block
+// phase (op.Comment.Body, op.Comment.JSONMetadata, op.Comment.Title)
+// this avoids the 1 GB cum allocation the ReadString path generates.
+//
+// Unsafe: the returned string aliases mutable memory. Do NOT pass to
+// any code that may persist the string past the next BlockReuse call.
+func (r *Reader) ReadStringAlias() (string, error) {
+	n, err := r.readLengthPrefix()
+	if err != nil {
+		return "", err
+	}
+	if n == 0 {
+		r.pos += n
+		return "", nil
+	}
+	out := unsafe.String(unsafe.SliceData(r.src[r.pos:r.pos+n]), n)
 	r.pos += n
 	return out, nil
 }

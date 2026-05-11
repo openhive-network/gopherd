@@ -2,7 +2,8 @@ package evaluator
 
 import (
 	"fmt"
-	"math/big"
+	"math"
+	"math/bits"
 	"os"
 	"strings"
 
@@ -84,12 +85,22 @@ func createVestingImpl(s *state.Session, accountName string, hiveSatoshi int64, 
 	if dgpo.TotalVestingFundHive == 0 || dgpo.TotalVestingShares == 0 {
 		vestsAmount = hiveSatoshi * 1000
 	} else {
-		prod := new(big.Int).Mul(big.NewInt(hiveSatoshi), big.NewInt(dgpo.TotalVestingShares))
-		prod.Quo(prod, big.NewInt(dgpo.TotalVestingFundHive))
-		if !prod.IsInt64() {
+		// vests = hive * total_vesting_shares / total_vesting_fund_hive.
+		// Both inputs are non-negative int64. Product fits in uint128;
+		// quotient back to int64 (mirrors the old IsInt64 saturation).
+		// Native uint128 replaces a math/big triple-alloc that fired on
+		// every CreateVesting call (~1.78 GB cum / 4M-block run).
+		hi, lo := bits.Mul64(uint64(hiveSatoshi), uint64(dgpo.TotalVestingShares))
+		d := uint64(dgpo.TotalVestingFundHive)
+		if hi >= d {
 			vestsAmount = 0
 		} else {
-			vestsAmount = prod.Int64()
+			q, _ := bits.Div64(hi, lo, d)
+			if q > math.MaxInt64 {
+				vestsAmount = 0
+			} else {
+				vestsAmount = int64(q)
+			}
 		}
 	}
 
@@ -114,13 +125,12 @@ func createVestingImpl(s *state.Session, accountName string, hiveSatoshi int64, 
 	}
 
 	// C++ create_vesting2 calls adjust_proxied_witness_votes when
-	// !to_reward_balance. Re-fetch the account to pick up any prior
-	// proxy/vote state changes from the same operation, then propagate.
+	// !to_reward_balance. `a` already holds the post-mutation state
+	// (PutAccount copied our changes into the slot above) so we don't
+	// need to re-fetch — saves one AccountStore.Get per CreateVesting,
+	// the hottest AccountStore.Get caller.
 	if adjustVotes && !toReward && vestsAmount != 0 {
-		fresh, gerr := objects.GetAccount(s, accountName)
-		if gerr == nil {
-			objects.AdjustProxiedWitnessVotes(s, &fresh, vestsAmount)
-		}
+		objects.AdjustProxiedWitnessVotes(s, &a, vestsAmount)
 	}
 	return vestsAmount, nil
 }

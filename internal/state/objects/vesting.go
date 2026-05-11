@@ -47,15 +47,15 @@ func VestingWithdrawalScheduleKey(nextWithdrawal uint32, account auth.AccountNam
 }
 
 // PutVestingWithdrawalSchedule registers (nextWithdrawal, account) in the
-// schedule index.
+// schedule index. Now routed through the typed store.
 func PutVestingWithdrawalSchedule(s *state.Session, nextWithdrawal uint32, account auth.AccountName) {
-	s.Put(VestingWithdrawalScheduleTable, state.PrimaryIndex, VestingWithdrawalScheduleKey(nextWithdrawal, account), nil)
+	EnsureVestingWithdrawalScheduleStore(s).Put(nextWithdrawal, account)
 }
 
 // DeleteVestingWithdrawalSchedule removes (nextWithdrawal, account) from the
 // schedule index.
 func DeleteVestingWithdrawalSchedule(s *state.Session, nextWithdrawal uint32, account auth.AccountName) {
-	s.Delete(VestingWithdrawalScheduleTable, state.PrimaryIndex, VestingWithdrawalScheduleKey(nextWithdrawal, account))
+	EnsureVestingWithdrawalScheduleStore(s).Delete(nextWithdrawal, account)
 }
 
 func vestingDelegationKey(delegator, delegatee auth.AccountName) []byte {

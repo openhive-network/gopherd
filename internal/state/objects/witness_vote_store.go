@@ -20,9 +20,21 @@ import (
 // before-image bool) so RestoreToPoint can roll back op-failure tx
 // snapshots in lock-step with the K/V overlay.
 type WitnessVoteStore struct {
-	// votes[account] is the set of witnesses `account` votes for.
-	// Empty/missing entry == no votes.
-	votes map[string]map[string]struct{}
+	db *state.Database
+	// votes[account] maps each witness `account` votes for to the
+	// cached *Witness pointer. Nil pointer = pointer not yet resolved
+	// (lazy fallback). Caching avoids a WitnessStore.primary map
+	// lookup per witness in the hot AdjustWitnessVotesForVoter loop
+	// (30 witnesses × every CreateVesting × every block past HF7).
+	//
+	// Pointer stability: witnesses are immortal in mainnet — Put never
+	// reuses a slot for a different account name, and there is no
+	// Delete API on WitnessStore. The only stale-pointer risk is an
+	// Insert-undo that frees the slot back to the freelist; the
+	// rolled-back tx's voted-for-newly-created-witness combination
+	// rolls back the vote-edge too, so the stale pointer never
+	// surfaces in steady state.
+	votes map[string]map[string]*Witness
 
 	undoLog []witnessVoteUndo
 }
@@ -47,7 +59,8 @@ func EnsureWitnessVoteStore(s *state.Session) *WitnessVoteStore {
 		}
 	}
 	vs := &WitnessVoteStore{
-		votes:   make(map[string]map[string]struct{}, 256),
+		db:      db,
+		votes:   make(map[string]map[string]*Witness, 256),
 		undoLog: make([]witnessVoteUndo, 0, 32),
 	}
 	db.RegisterSubsystem(witnessVoteStoreSubsystemKey, vs, vs)
@@ -68,10 +81,10 @@ func (s *WitnessVoteStore) RestoreToPoint(snap int) {
 		set, ok := s.votes[e.account]
 		if e.before {
 			if !ok {
-				set = make(map[string]struct{}, 4)
+				set = make(map[string]*Witness, 4)
 				s.votes[e.account] = set
 			}
-			set[e.witness] = struct{}{}
+			set[e.witness] = nil // pointer rebound lazily on next read
 		} else if ok {
 			delete(set, e.witness)
 			if len(set) == 0 {
@@ -90,12 +103,16 @@ func (s *WitnessVoteStore) Put(account, witness auth.AccountName) {
 	a, w := string(account), string(witness)
 	set, ok := s.votes[a]
 	if !ok {
-		set = make(map[string]struct{}, 4)
+		set = make(map[string]*Witness, 4)
 		s.votes[a] = set
 	}
-	_, exists := set[w]
-	s.undoLog = append(s.undoLog, witnessVoteUndo{account: a, witness: w, before: exists})
-	set[w] = struct{}{}
+	if s.db.UndoEnabled {
+		_, exists := set[w]
+		s.undoLog = append(s.undoLog, witnessVoteUndo{account: a, witness: w, before: exists})
+	}
+	if _, exists := set[w]; !exists {
+		set[w] = nil // pointer resolved lazily on first read
+	}
 }
 
 // Has reports whether account currently votes for witness.
@@ -113,11 +130,15 @@ func (s *WitnessVoteStore) Delete(account, witness auth.AccountName) {
 	a, w := string(account), string(witness)
 	set, ok := s.votes[a]
 	if !ok {
-		s.undoLog = append(s.undoLog, witnessVoteUndo{account: a, witness: w, before: false})
+		if s.db.UndoEnabled {
+			s.undoLog = append(s.undoLog, witnessVoteUndo{account: a, witness: w, before: false})
+		}
 		return
 	}
 	_, exists := set[w]
-	s.undoLog = append(s.undoLog, witnessVoteUndo{account: a, witness: w, before: exists})
+	if s.db.UndoEnabled {
+		s.undoLog = append(s.undoLog, witnessVoteUndo{account: a, witness: w, before: exists})
+	}
 	if exists {
 		delete(set, w)
 		if len(set) == 0 {
@@ -130,7 +151,8 @@ func (s *WitnessVoteStore) Delete(account, witness auth.AccountName) {
 // arbitrary (map-iteration) order. Returns a fresh slice; safe for
 // callers to retain. Use VotesForSorted when byte-order iteration is
 // required (rarely — only paths that need to match the legacy K/V
-// Range ordering deterministically).
+// Range ordering deterministically). Prefer VotesForEach when only
+// iteration (not retention) is needed — that path is alloc-free.
 func (s *WitnessVoteStore) VotesFor(account auth.AccountName) []auth.AccountName {
 	set, ok := s.votes[string(account)]
 	if !ok || len(set) == 0 {
@@ -141,6 +163,58 @@ func (s *WitnessVoteStore) VotesFor(account auth.AccountName) []auth.AccountName
 		out = append(out, auth.AccountName(w))
 	}
 	return out
+}
+
+// VotesForEach calls fn for each witness `account` currently votes
+// for, in arbitrary order. Returning false from fn stops the walk.
+// Zero allocation per call — used by the hot AdjustWitnessVotesForVoter
+// path (fires from every CreateVesting / vote-delta adjustment, 30+
+// witnesses each, 1.17 GB cum allocs on a 4M-block run with the
+// alloc-returning VotesFor path).
+//
+// IMPORTANT: callers MUST NOT mutate the underlying vote set during
+// iteration. The hot path is read-only; for paths that need to mutate,
+// snapshot via VotesFor / VotesForSorted first.
+func (s *WitnessVoteStore) VotesForEach(account auth.AccountName, fn func(witness auth.AccountName) bool) {
+	set, ok := s.votes[string(account)]
+	if !ok {
+		return
+	}
+	for w := range set {
+		if !fn(auth.AccountName(w)) {
+			return
+		}
+	}
+}
+
+// VotesForEachWitness is VotesForEach but resolves each witness to its
+// *Witness slot pointer (lazily caching the resolution). Skips a
+// WitnessStore.primary map lookup per iteration when the cache is
+// warm — that lookup is the hottest entry in mapaccess2_faststr on
+// long replays.
+func (s *WitnessVoteStore) VotesForEachWitness(account auth.AccountName, wstore *WitnessStore, fn func(witness auth.AccountName, w *Witness) bool) {
+	set, ok := s.votes[string(account)]
+	if !ok {
+		return
+	}
+	for name, w := range set {
+		if w == nil {
+			cur, hit := wstore.primary[name]
+			if !hit {
+				continue
+			}
+			w = cur
+			set[name] = w
+		}
+		if !fn(auth.AccountName(name), w) {
+			return
+		}
+	}
+}
+
+// VotesForCount returns how many witnesses `account` votes for.
+func (s *WitnessVoteStore) VotesForCount(account auth.AccountName) int {
+	return len(s.votes[string(account)])
 }
 
 // VotesForSorted is VotesFor with deterministic ascending owner order.
@@ -249,7 +323,7 @@ func (s *WitnessVoteStore) UnmarshalSnapshot(r io.Reader) error {
 		return fmt.Errorf("witness_vote_store: unsupported version %d", ver)
 	}
 	numVoters := binary.LittleEndian.Uint32(hdr[4:8])
-	s.votes = make(map[string]map[string]struct{}, numVoters)
+	s.votes = make(map[string]map[string]*Witness, numVoters)
 	s.undoLog = s.undoLog[:0]
 	for i := uint32(0); i < numVoters; i++ {
 		nameLen, err := binary.ReadUvarint(br)
@@ -264,7 +338,7 @@ func (s *WitnessVoteStore) UnmarshalSnapshot(r io.Reader) error {
 		if err != nil {
 			return fmt.Errorf("witness_vote_store: read num_w[%d]: %w", i, err)
 		}
-		set := make(map[string]struct{}, numW)
+		set := make(map[string]*Witness, numW)
 		for j := uint64(0); j < numW; j++ {
 			wlen, err := binary.ReadUvarint(br)
 			if err != nil {
@@ -274,7 +348,7 @@ func (s *WitnessVoteStore) UnmarshalSnapshot(r io.Reader) error {
 			if _, err := io.ReadFull(br, wbuf); err != nil {
 				return fmt.Errorf("witness_vote_store: read w[%d/%d]: %w", i, j, err)
 			}
-			set[string(wbuf)] = struct{}{}
+			set[string(wbuf)] = nil // resolved lazily on first read
 		}
 		s.votes[string(name)] = set
 	}

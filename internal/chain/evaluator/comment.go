@@ -3,8 +3,10 @@ package evaluator
 import (
 	"errors"
 	"fmt"
-	"math/big"
+	"math"
+	"math/bits"
 
+	"hived-go/internal/math128"
 	"hived-go/internal/protocol/auth"
 	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/op"
@@ -438,7 +440,7 @@ func (commentOptionsEvaluator) Apply(ctx *Context, o op.Operation) error {
 type voteEvaluator struct{}
 
 func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
-	v, ok := o.(op.Vote)
+	v, ok := o.(*op.Vote)
 	if !ok {
 		return fmt.Errorf("voteEvaluator: unexpected op type %T", o)
 	}
@@ -583,11 +585,18 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 	if effectiveVesting < 0 {
 		effectiveVesting = 0
 	}
-	absRsharesBig := new(big.Int).Mul(big.NewInt(effectiveVesting), big.NewInt(usedPower))
-	absRsharesBig.Quo(absRsharesBig, big.NewInt(hivePercent))
+	// abs_rshares = effective_vesting * used_power / hive_percent.
+	// effective_vesting ≤ ~2^50 (whale-scale VESTS); used_power and
+	// hive_percent each ≤ 10000 here. Product up to 2^64 — overflows
+	// int64 but fits in uint128. Native math/bits replaces a math/big
+	// triple-alloc on every vote (the largest math/big caller).
+	hi, lo := bits.Mul64(uint64(effectiveVesting), uint64(usedPower))
+	q, _ := bits.Div64(hi, lo, uint64(hivePercent))
 	var absRshares int64
-	if absRsharesBig.IsInt64() {
-		absRshares = absRsharesBig.Int64()
+	if q <= uint64(math.MaxInt64) {
+		absRshares = int64(q)
+	} else {
+		absRshares = math.MaxInt64
 	}
 	// Pre-HF14 (libraries/chain/hive_evaluator_social.cpp:365): tiny
 	// votes that round to 0 rshares get bumped to 1, so they don't
@@ -719,35 +728,60 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 		oldVoteRshares := c.VoteRshares
 		newVoteRshares := oldVoteRshares + uint64(rshares)
 		if c.Created < hf6ReverseAuctionTimeCubed {
-			rshares3 := new(big.Int).SetInt64(rshares)
-			postAbs := c.AbsRshares + absRshares
-			total2 := big.NewInt(postAbs)
+			// rshares > 0 already gated above (curationEligible).
+			rsharesU := uint64(rshares)
+			postAbs := uint64(c.AbsRshares + absRshares)
 			if !ctx.Hardforks.Has(hardfork.HF1) {
-				m := big.NewInt(1_000_000)
-				rshares3.Mul(rshares3, m)
-				total2.Mul(total2, m)
-			}
-			cube := new(big.Int).Mul(rshares3, rshares3)
-			cube.Mul(cube, rshares3)
-			total2.Mul(total2, total2)
-			if total2.Sign() > 0 {
-				cube.Quo(cube, total2)
-				if cube.IsUint64() {
-					voteCurationWeight = cube.Uint64()
+				// Pre-HF1 (block < 328750): cube = (rshares*1M)^3 and
+				// total2 = (postAbs*1M)^2, so the formula reduces to
+				// rshares^3 * 1_000_000 / postAbs^2. Uses math128 / U256-
+				// via-two-step to stay alloc-free in a path that fires
+				// only on votes targeting comments created before block
+				// 328k. Math: result = (r3 * 1M) / t2, where r3=rshares^3
+				// (U192) and t2=postAbs^2 (U128). To keep within U192:
+				// compute q1=r3/t2 (U64) and rem=r3 mod t2 (U128), then
+				// add (q1*1M)+(rem*1M/t2).
+				r2 := math128.Mul64Wide(rsharesU, rsharesU)
+				r3 := math128.Mul64x128(rsharesU, r2)
+				t2 := math128.Mul64Wide(postAbs, postAbs)
+				if t2.IsZero() {
+					voteCurationWeight = 0
 				} else {
-					voteCurationWeight = ^uint64(0)
+					q1, rem := r3.QuoRem(t2)
+					// q1 * 1M
+					qHi1, qLo1 := bits.Mul64(q1, 1_000_000)
+					if qHi1 != 0 {
+						voteCurationWeight = ^uint64(0)
+					} else {
+						// (rem * 1M) / t2: rem<t2≤2^128, *1M fits in U192.
+						r1m := math128.Mul64x128(1_000_000, rem)
+						q2, _ := r1m.QuoRem(t2)
+						lo, c := bits.Add64(qLo1, q2, 0)
+						if c != 0 {
+							voteCurationWeight = ^uint64(0)
+						} else {
+							voteCurationWeight = lo
+						}
+					}
+				}
+			} else {
+				// HF1+ pre-HF6: cube = rshares^3, total2 = postAbs^2,
+				// result = cube / total2. U192 / U128 → uint64 saturated.
+				r2 := math128.Mul64Wide(rsharesU, rsharesU)
+				r3 := math128.Mul64x128(rsharesU, r2)
+				t2 := math128.Mul64Wide(postAbs, postAbs)
+				if t2.IsZero() {
+					voteCurationWeight = 0
+				} else {
+					q, _ := r3.QuoRem(t2)
+					voteCurationWeight = q
 				}
 			}
 		} else {
 			oldW := curationWeightCurve(ctx, &c, oldVoteRshares)
 			newW := curationWeightCurve(ctx, &c, newVoteRshares)
-			if newW.Cmp(oldW) > 0 {
-				delta := new(big.Int).Sub(newW, oldW)
-				if delta.IsUint64() {
-					voteCurationWeight = delta.Uint64()
-				} else {
-					voteCurationWeight = ^uint64(0)
-				}
+			if newW > oldW {
+				voteCurationWeight = newW - oldW
 			}
 		}
 		maxVoteWeight = voteCurationWeight
@@ -776,13 +810,12 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 			if elapsed > reverseAuction {
 				elapsed = reverseAuction
 			}
-			scaled := new(big.Int).Mul(
-				new(big.Int).SetUint64(voteCurationWeight),
-				big.NewInt(int64(elapsed)))
-			scaled.Quo(scaled, big.NewInt(int64(reverseAuction)))
-			if scaled.IsUint64() {
-				voteCurationWeight = scaled.Uint64()
-			}
+			// (voteCurationWeight * elapsed) / reverseAuction.
+			// Numerator fits in 96 bits (uint64 * uint32); use uint128
+			// math to avoid big.Int allocs on every vote.
+			hi, lo := bits.Mul64(voteCurationWeight, uint64(elapsed))
+			q, _ := bits.Div64(hi, lo, uint64(reverseAuction))
+			voteCurationWeight = q
 		}
 		c.VoteRshares = newVoteRshares
 	}
@@ -943,12 +976,20 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 			}
 			var avgCashoutSec uint64
 			if newRootAbsRshares > 0 {
-				num := new(big.Int).Mul(big.NewInt(int64(curCashout)), new(big.Int).SetUint64(oldRootAbsRshares))
-				num.Add(num, new(big.Int).Mul(big.NewInt(int64(newCashoutTimeSec)), big.NewInt(absRshares)))
-				num.Quo(num, new(big.Int).SetUint64(newRootAbsRshares))
-				if num.IsUint64() {
-					avgCashoutSec = num.Uint64()
+				// num = curCashout * oldRootAbsRshares + newCashoutTimeSec * absRshares.
+				// Each product fits in U128 (uint32×uint64); their sum fits
+				// in U128 with one carry bit headroom. Divide by uint64
+				// (newRootAbsRshares) to land in uint64 range — matches the
+				// prior math/big.IsUint64() check.
+				t1 := math128.Mul64Wide(curCashout, oldRootAbsRshares)
+				t2 := math128.Mul64Wide(uint64(newCashoutTimeSec), uint64(absRshares))
+				numU := t1.Add(t2)
+				if numU.Hi < newRootAbsRshares {
+					q, _ := bits.Div64(numU.Hi, numU.Lo, newRootAbsRshares)
+					avgCashoutSec = q
 				}
+				// numU.Hi >= newRootAbsRshares ⇒ true quotient > uint64 max,
+				// leave avgCashoutSec=0 (matches old !IsUint64 branch).
 			} else {
 				avgCashoutSec = uint64(newCashoutTimeSec)
 			}
@@ -986,63 +1027,108 @@ rootDone:
 // (default bounded_curation, HF21 → linear at HF25).
 //
 // Mirrors hive_evaluator_social.cpp:519-539 + util/reward.cpp.
-func curationWeightCurve(ctx *Context, c *objects.Comment, voteRshares uint64) *big.Int {
+//
+// All curves are uint64-bounded for realistic on-chain rshares (max
+// magnitude ~2^50). The intermediate products may need uint128 (handled
+// via math/bits.Mul64 + div128) but no result exceeds uint64. Native
+// uint128 math replaces the previous math/big implementation (3+ heap
+// allocs per call — 1.25 GB cum on a 4M-block run).
+func curationWeightCurve(ctx *Context, c *objects.Comment, voteRshares uint64) uint64 {
 	if voteRshares == 0 {
-		return new(big.Int)
+		return 0
 	}
-	r := new(big.Int).SetUint64(voteRshares)
 
 	// Pick the curve. HF17+ uses the reward_fund's curve (bounded_curation
 	// by default, square_root pre-HF19_1052, linear post-HF21).
 	if ctx.Hardforks.Has(hardfork.HF17) {
 		fund, err := objects.GetRewardFund(ctx.DB, objects.PostRewardFundName)
 		if err == nil {
-			cc := fund.ContentConstant
-			if cc <= 0 {
-				cc = 2_000_000_000_000
+			s := uint64(fund.ContentConstant)
+			if fund.ContentConstant <= 0 {
+				s = 2_000_000_000_000
 			}
-			s := big.NewInt(cc)
 			switch fund.CurationRewardCurve {
 			case objects.CurveLinear:
-				return r
+				return voteRshares
 			case objects.CurveSquareRoot:
-				return new(big.Int).Sqrt(r)
+				return isqrt64(voteRshares)
 			case objects.CurveConvergentLinear:
 				// C++ reward.cpp:63 — ((r+s)² - s²) / (r + 4s).
-				rPlusS := new(big.Int).Add(r, s)
-				num := new(big.Int).Mul(rPlusS, rPlusS)
-				s2 := new(big.Int).Mul(s, s)
-				num.Sub(num, s2)
-				fourS := new(big.Int).Lsh(s, 2)
-				den := new(big.Int).Add(r, fourS)
-				return new(big.Int).Quo(num, den)
+				return curveConvergentLinear(voteRshares, s)
 			case objects.CurveConvergentSquareRoot:
 				// C++ reward.cpp:69 — rshares / sqrt(rshares + 2s).
-				twoS := new(big.Int).Lsh(s, 1)
-				den := new(big.Int).Sqrt(new(big.Int).Add(r, twoS))
-				if den.Sign() == 0 {
-					return new(big.Int)
+				den := isqrt64(voteRshares + 2*s)
+				if den == 0 {
+					return 0
 				}
-				return new(big.Int).Quo(r, den)
+				return voteRshares / den
 			default:
-				// bounded_curation: (low64(rshares) << 64) / (2s + rshares).
-				// Go holds rshares in int64 so low64==value for nonneg.
-				twoS := new(big.Int).Lsh(s, 1)
-				num := new(big.Int).Lsh(r, 64)
-				den := new(big.Int).Add(twoS, r)
-				return new(big.Int).Quo(num, den)
+				// bounded_curation: (rshares << 64) / (2s + rshares).
+				// Numerator is rshares << 64 (128-bit). Use bits.Div64.
+				return divU128byU64(voteRshares /*hi*/, 0 /*lo*/, 2*s+voteRshares)
 			}
 		}
 	}
 
 	// Pre-HF17: W(R) = uint64_max × R / (2s + R), with 2s = 2 ×
 	// HIVE_CONTENT_CONSTANT_HF0.
-	const contentConstantHF0 int64 = 2_000_000_000_000
-	twoS := new(big.Int).SetInt64(2 * contentConstantHF0)
-	uint64Max := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 64), big.NewInt(1))
-	num := new(big.Int).Mul(uint64Max, r)
-	den := new(big.Int).Add(twoS, r)
-	return new(big.Int).Quo(num, den)
+	const contentConstantHF0 uint64 = 2_000_000_000_000
+	hi, lo := bits.Mul64(^uint64(0), voteRshares)
+	den := 2*contentConstantHF0 + voteRshares
+	q, _ := bits.Div64(hi, lo, den)
+	return q
+}
+
+// curveConvergentLinear computes ((r+s)² - s²) / (r + 4s) using native
+// uint128 arithmetic. Intermediate (r+s)² can be up to 2^128 for the
+// extreme rshares range we care about (r ≤ 2^50, s ≈ 2^41 → r+s ≤ 2^51,
+// (r+s)² ≤ 2^102 — comfortably within uint128). Result is uint64.
+func curveConvergentLinear(r, s uint64) uint64 {
+	rps := r + s
+	// hi:lo = (r+s)² - s²
+	hi, lo := bits.Mul64(rps, rps)
+	sh, sl := bits.Mul64(s, s)
+	// Subtract sh:sl from hi:lo.
+	lo, borrow := bits.Sub64(lo, sl, 0)
+	hi, _ = bits.Sub64(hi, sh, borrow)
+	den := r + 4*s
+	if den == 0 {
+		return 0
+	}
+	q, _ := bits.Div64(hi, lo, den)
+	return q
+}
+
+// divU128byU64 returns (hi:lo) / d. Returns 0 when d == 0 to mirror
+// the pre-existing math/big path that returned an empty big.Int on
+// divide-by-zero (caller handles a zero result).
+func divU128byU64(hi, lo, d uint64) uint64 {
+	if d == 0 || hi >= d {
+		// Overflow or div-by-zero. The old math/big path silently
+		// produced an unbounded value; we cap at uint64_max for safety.
+		// In practice this never fires because hi < d holds for all
+		// well-formed curve inputs.
+		return ^uint64(0)
+	}
+	q, _ := bits.Div64(hi, lo, d)
+	return q
+}
+
+// isqrt64 returns the integer square root of n. Equivalent to
+// big.Int{n}.Sqrt(). Uses Newton's method on uint64.
+func isqrt64(n uint64) uint64 {
+	if n == 0 {
+		return 0
+	}
+	// Initial guess: 2^(ceil(log2(n))/2)
+	x := uint64(1) << (uint(bits.Len64(n)+1) / 2)
+	for {
+		y := (x + n/x) / 2
+		if y >= x {
+			return x
+		}
+		x = y
+	}
 }
 
 // adjustRewardShares2 mirrors hived's database::adjust_rshares2: shift
@@ -1056,13 +1142,12 @@ func adjustRewardShares2(s *state.Session, oldNetRshares, newNetRshares int64) {
 	// Mirror C++ database.cpp:1673-1674 — uint128 modular subtraction +
 	// addition, NO clamp. A transient negative is part of normal
 	// operation when an old curve outran the running total temporarily;
-	// Uint128ToBytes wraps mod 2^128 to match C++ fc::uint128_t.
+	// U128 wraps mod 2^128 by construction.
 	if fund, err := objects.GetRewardFund(s, objects.PostRewardFundName); err == nil {
 		total := reward.Uint128FromBytes(fund.RecentClaims)
 		oldCurve := evaluateCurveForFund(oldNetRshares, &fund)
 		newCurve := evaluateCurveForFund(newNetRshares, &fund)
-		total.Sub(total, oldCurve)
-		total.Add(total, newCurve)
+		total = total.Sub(oldCurve).Add(newCurve)
 		fund.RecentClaims = reward.Uint128ToBytes(total)
 		objects.PutRewardFund(s, &fund)
 		return
@@ -1074,8 +1159,7 @@ func adjustRewardShares2(s *state.Session, oldNetRshares, newNetRshares int64) {
 	total := reward.Uint128FromBytes(dgpo.TotalRewardShares2)
 	oldCurve := reward.EvaluateRewardCurveQuadratic(oldNetRshares)
 	newCurve := reward.EvaluateRewardCurveQuadratic(newNetRshares)
-	total.Sub(total, oldCurve)
-	total.Add(total, newCurve)
+	total = total.Sub(oldCurve).Add(newCurve)
 	dgpo.TotalRewardShares2 = reward.Uint128ToBytes(total)
 	objects.PutDGPO(s, &dgpo)
 }
@@ -1083,50 +1167,80 @@ func adjustRewardShares2(s *state.Session, oldNetRshares, newNetRshares int64) {
 // evaluateCurveForFund applies the reward_fund's author_reward_curve
 // to rshares, using its content_constant. Mirrors the curve dispatch
 // in libraries/chain/util/reward.cpp::evaluate_reward_curve.
-func evaluateCurveForFund(rshares int64, f *objects.RewardFund) *big.Int {
+//
+// Returns a U128. All five curve variants produce values that fit in
+// uint128 for the rshares range Hive ever sees (rshares ≤ 2^63, content
+// constant ~2^41 → (r+s)² ≤ 2^128 with room to spare).
+func evaluateCurveForFund(rshares int64, f *objects.RewardFund) math128.U128 {
 	if rshares <= 0 {
-		return new(big.Int)
+		return math128.U128{}
 	}
-	r := big.NewInt(rshares)
-	s := big.NewInt(f.ContentConstant)
-	if s.Sign() <= 0 {
-		s = big.NewInt(2_000_000_000_000)
+	r := uint64(rshares)
+	s := uint64(f.ContentConstant)
+	if f.ContentConstant <= 0 {
+		s = 2_000_000_000_000
 	}
 	switch f.AuthorRewardCurve {
 	case objects.CurveLinear:
-		return new(big.Int).Set(r)
+		return math128.U128{Lo: r}
 	case objects.CurveSquareRoot:
-		return new(big.Int).Sqrt(r)
+		return math128.U128{Lo: isqrt64(r)}
 	case objects.CurveBoundedCurve:
-		// (low64(rshares) << 64) / (2s + rshares).
-		twoS := new(big.Int).Lsh(s, 1)
-		num := new(big.Int).Lsh(r, 64)
-		den := new(big.Int).Add(twoS, r)
-		return new(big.Int).Quo(num, den)
+		// (rshares << 64) / (2s + rshares). Numerator is 128-bit (Hi=r, Lo=0);
+		// denominator fits in uint64 since 2s ≈ 2^42 and rshares ≤ 2^63.
+		q, _ := bits.Div64(r /*hi*/, 0 /*lo*/, 2*s+r)
+		return math128.U128{Lo: q}
 	case objects.CurveConvergentLinear:
-		// C++ reward.cpp:63 — ((r+s)² - s²) / (r + 4s).
-		rPlusS := new(big.Int).Add(r, s)
-		num := new(big.Int).Mul(rPlusS, rPlusS)
-		s2 := new(big.Int).Mul(s, s)
-		num.Sub(num, s2)
-		fourS := new(big.Int).Lsh(s, 2)
-		den := new(big.Int).Add(r, fourS)
-		return new(big.Int).Quo(num, den)
-	case objects.CurveConvergentSquareRoot:
-		// C++ reward.cpp:69 — rshares / sqrt(rshares + 2s).
-		twoS := new(big.Int).Lsh(s, 1)
-		den := new(big.Int).Sqrt(new(big.Int).Add(r, twoS))
-		if den.Sign() == 0 {
-			return new(big.Int)
+		// ((r+s)² - s²) / (r + 4s). Numerator fits in U128 (computed by
+		// curveQuadraticGeneric). Denominator fits in uint64.
+		num := curveQuadraticGeneric(r, s)
+		den := r + 4*s
+		if den == 0 {
+			return math128.U128{}
 		}
-		return new(big.Int).Quo(r, den)
+		// num / den where num is U128, den is uint64 — and quotient must
+		// fit in U128 (it does: result is bounded by r).
+		return u128DivU64(num, den)
+	case objects.CurveConvergentSquareRoot:
+		// rshares / sqrt(rshares + 2s).
+		den := isqrt64(r + 2*s)
+		if den == 0 {
+			return math128.U128{}
+		}
+		return math128.U128{Lo: r / den}
 	default:
-		rPlusS := new(big.Int).Add(r, s)
-		out := new(big.Int).Mul(rPlusS, rPlusS)
-		s2 := new(big.Int).Mul(s, s)
-		out.Sub(out, s2)
-		return out
+		// quadratic — same as reward.EvaluateRewardCurveQuadratic but with
+		// fund-specific content constant.
+		return curveQuadraticGeneric(r, s)
 	}
+}
+
+// curveQuadraticGeneric computes (r+s)² - s² = r² + 2·r·s as a U128.
+// Inputs r, s are uint64; r ≤ 2^63 (caller's responsibility).
+func curveQuadraticGeneric(r, s uint64) math128.U128 {
+	r2hi, r2lo := bits.Mul64(r, r)
+	// 2·r·s — handle r > 2^62 by computing r·s then shifting left by 1.
+	rshi, rslo := bits.Mul64(r, s)
+	// shift left by 1
+	rshi2 := (rshi << 1) | (rslo >> 63)
+	rslo2 := rslo << 1
+	// sum
+	lo, c := bits.Add64(r2lo, rslo2, 0)
+	hi, _ := bits.Add64(r2hi, rshi2, c)
+	return math128.U128{Hi: hi, Lo: lo}
+}
+
+// u128DivU64 returns ⌊n / d⌋ as U128. d must be non-zero; quotient
+// must fit in U128 (i.e., n.Hi < d * 2^64 ⇒ trivially true when d > 0).
+func u128DivU64(n math128.U128, d uint64) math128.U128 {
+	if n.Hi < d {
+		q, _ := bits.Div64(n.Hi, n.Lo, d)
+		return math128.U128{Lo: q}
+	}
+	// Quotient may exceed uint64. Two-step long division.
+	qhi, rhi := bits.Div64(0, n.Hi, d)
+	qlo, _ := bits.Div64(rhi, n.Lo, d)
+	return math128.U128{Hi: qhi, Lo: qlo}
 }
 
 func init() {

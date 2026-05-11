@@ -98,6 +98,12 @@ type Session struct {
 	// always — was measurably slower on a clean 3.0M→3.5M run.
 	undoLog       []sessionUndoEntry
 	snapshotDepth int
+	// overlayItrCache holds a reusable IterG for the overlayKeys btree.
+	// Re-Seeked on each Range call; reuses the IterG.stack slice across
+	// blocks to avoid the per-call ~95-byte alloc that contributed ~378
+	// MB cum on a 4M-block run.
+	overlayItrCache    btree.IterG[string]
+	overlayItrCacheHas bool
 }
 
 // sessionUndoEntry captures the overlay state for one key BEFORE a
@@ -204,7 +210,14 @@ type overlayEntry struct {
 }
 
 // NewSession returns a fresh in-memory session over db.
+//
+// Sets db.UndoEnabled = true so that mutations made directly on this
+// Session (without an explicit Snapshot) are still rolled back by
+// Session.Undo. apply_block flips it to false after each successful tx
+// via DiscardSavepoint to skip the per-Mutate snapshot copy on the
+// per-block hook phase (processProducerReward, schedule rebuild, cashout).
 func NewSession(db *Database) *Session {
+	db.UndoEnabled = true
 	return &Session{
 		db:          db,
 		overlay:     make(map[string]overlayEntry, 64),
@@ -371,15 +384,17 @@ func (s *Session) SoftCommit() {
 		fn()
 	}
 	s.preCommit = s.preCommit[:0]
-	if s.iter != nil {
-		s.iter.Close()
-		s.iter = nil
-	}
+	// Keep s.iter alive across blocks — the memIter holds only a
+	// reusable bounds buffer and a per-bucket IterG slot that SetBounds
+	// rebinds on next use. Closing + nilling here allocated a fresh
+	// *memIter on every block's first Range call (~840 MB cum over a
+	// 4M-block replay).
 	// Drop per-block subsystem undo points; the in-memory primary state
 	// remains authoritative for the next block. Equivalent to what
 	// Commit does but without flushing the K/V overlay to the backend.
 	s.undoLog = s.undoLog[:0]
 	s.snapshotDepth = 0
+	s.db.UndoEnabled = false
 	s.mistrustDBAux = false
 	s.snapshotGen = 0
 	s.db.commitAll()
@@ -396,10 +411,11 @@ func (s *Session) Commit(sync bool) error {
 		fn()
 	}
 	s.preCommit = s.preCommit[:0]
-	if s.iter != nil {
-		s.iter.Close()
-		s.iter = nil
-	}
+	// Keep s.iter alive across blocks — the memIter holds only a
+	// reusable bounds buffer and a per-bucket IterG slot that SetBounds
+	// rebinds on next use. Closing + nilling here allocated a fresh
+	// *memIter on every block's first Range call (~840 MB cum over a
+	// 4M-block replay).
 	if len(s.overlay) == 0 {
 		clear(s.readCache)
 		clear(s.Aux)
@@ -407,6 +423,7 @@ func (s *Session) Commit(sync bool) error {
 		s.dirtyKeys = s.dirtyKeys[:0]
 		s.undoLog = s.undoLog[:0]
 		s.snapshotDepth = 0
+		s.db.UndoEnabled = false
 		s.mistrustDBAux = false
 		s.snapshotGen = 0
 		s.db.commitAll()
@@ -422,6 +439,7 @@ func (s *Session) Commit(sync bool) error {
 	s.dirtyKeys = s.dirtyKeys[:0]
 	s.undoLog = s.undoLog[:0]
 	s.snapshotDepth = 0
+	s.db.UndoEnabled = false
 	s.mistrustDBAux = false
 	s.snapshotGen = 0
 	s.db.commitAll()
@@ -430,10 +448,11 @@ func (s *Session) Commit(sync bool) error {
 
 // Undo discards the overlay without writing to Pebble.
 func (s *Session) Undo() {
-	if s.iter != nil {
-		s.iter.Close()
-		s.iter = nil
-	}
+	// Keep s.iter alive across blocks — the memIter holds only a
+	// reusable bounds buffer and a per-bucket IterG slot that SetBounds
+	// rebinds on next use. Closing + nilling here allocated a fresh
+	// *memIter on every block's first Range call (~840 MB cum over a
+	// 4M-block replay).
 	clear(s.overlay)
 	clear(s.readCache)
 	clear(s.Aux)
@@ -442,6 +461,7 @@ func (s *Session) Undo() {
 	s.dirtyKeys = s.dirtyKeys[:0]
 	s.undoLog = s.undoLog[:0]
 	s.snapshotDepth = 0
+	s.db.UndoEnabled = false
 	s.mistrustDBAux = false
 	s.snapshotGen = 0
 	s.db.undoAll()
@@ -488,7 +508,8 @@ type Savepoint struct {
 // does not decrement depth.
 func (s *Session) Snapshot() Savepoint {
 	s.snapshotDepth++
-	subPts := s.db.snapshotAll(make([]int, 0, len(s.db.subsystems)))
+	s.db.UndoEnabled = true
+	subPts := s.db.snapshotAll(s.db.borrowSubPoints())
 	// Bump snapshotGen so any subsequent Put cannot reuse-in-place a
 	// value buffer aliased by this Savepoint's overlay copy.
 	s.snapshotGen++
@@ -498,6 +519,26 @@ func (s *Session) Snapshot() Savepoint {
 		preCommitLen:    len(s.preCommit),
 		subsystemPoints: subPts,
 	}
+}
+
+// DiscardSavepoint releases the savepoint without restoring. Use this
+// on the tx-success path — when the outermost savepoint is discarded
+// (depth drops to 0), the Session truncates its undoLog so subsequent
+// Put/Delete operations stop appending undo entries we'll never use.
+// Subsystem undo logs are left intact — they're released only at the
+// block-end Session.Commit, mirroring the pre-existing behavior so
+// the post-tx per-block hooks can still revert subsystem state if a
+// later operation fails. (Calling commitAll here turned out to be
+// significantly slower than the savings — see profile 15.)
+func (s *Session) DiscardSavepoint(sp Savepoint) {
+	if s.snapshotDepth > 0 {
+		s.snapshotDepth--
+	}
+	if s.snapshotDepth == 0 {
+		s.undoLog = s.undoLog[:0]
+		s.db.UndoEnabled = false
+	}
+	s.db.releaseSubPoints(sp.subsystemPoints)
 }
 
 // Restore reverts the overlay to the state captured by sp. Any
@@ -539,6 +580,9 @@ func (s *Session) Restore(sp Savepoint) {
 	if s.snapshotDepth > 0 {
 		s.snapshotDepth--
 	}
+	if s.snapshotDepth == 0 {
+		s.db.UndoEnabled = false
+	}
 	// Invalidate the dgpo Aux cache: PutDGPO writes the overlay
 	// directly so Restore reverted the actual state, but the parsed
 	// dgpo cached in s.Aux still holds the failed-tx's value. Clearing
@@ -552,6 +596,7 @@ func (s *Session) Restore(sp Savepoint) {
 		delete(s.Aux, "dgpo")
 	}
 	s.db.restoreAll(sp.subsystemPoints)
+	s.db.releaseSubPoints(sp.subsystemPoints)
 }
 
 // Range iterates entries in [table, index] whose body bytes start with
@@ -611,28 +656,34 @@ func (s *Session) Range(table TableID, index IndexID, prefix []byte, fn func(bod
 	// (stack-bound iterStackItemG slice) and dominated Range alloc
 	// pressure (364MB / 1M blocks).
 	hasOverlay := s.overlayKeys.Len() > 0
-	if !hasOverlay {
-		// Backend-only fast path: no overlay merge. Inlined emit to
-		// keep the closure off the heap when fn never strays into the
-		// merge path.
-		iter.First()
-		for iter.Valid() {
-			k := iter.Key()
-			v, err := iter.ValueAndErr()
-			if err != nil {
-				return err
-			}
+	// Even when the overlay has entries globally, the QUERIED range
+	// often has none. Probe via the cached IterG seek (O(log N), no
+	// alloc once the cache is warm) and fall through to the fast path
+	// when there's nothing for us in [lower, upper). Cuts the slow-path
+	// emission rate dramatically — most per-block hooks Range tables
+	// untouched by transactions.
+	overlayValid := false
+	if hasOverlay {
+		if !s.overlayItrCacheHas {
+			s.overlayItrCache = s.overlayKeys.Iter()
+			s.overlayItrCacheHas = true
+		}
+		overlayValid = s.overlayItrCache.Seek(string(lower)) && s.overlayItrCache.Item() < upperStr
+	}
+	if !overlayValid {
+		// Backend-only fast path. Use the callback-driven rawScan
+		// rather than rawIter — memBackend's rawScan walks the btree
+		// without allocating an iterator stack frame (Iter() returned
+		// IterG[T] by value but its internal slice header escaped
+		// to the heap for each bucket switch, ~830 MB / 4M blocks).
+		return s.db.rawScan(lower, upper, func(k, v []byte) (bool, error) {
 			body := k[keyPrefixLen:]
 			ok, ferr := fn(body, v)
 			if ferr != nil {
-				return ferr
+				return false, ferr
 			}
-			if !ok {
-				return nil
-			}
-			iter.Next()
-		}
-		return iter.Error()
+			return ok, nil
+		})
 	}
 	emit := func(body, value []byte) error {
 		ok, err := fn(body, value)
@@ -644,11 +695,8 @@ func (s *Session) Range(table TableID, index IndexID, prefix []byte, fn func(bod
 		}
 		return nil
 	}
-	overlayItr := s.overlayKeys.Iter()
-	overlayValid := overlayItr.Seek(string(lower)) && overlayItr.Item() < upperStr
 	iter.First()
-	rangeErr := s.rangeMerge(iter, &overlayItr, &overlayValid, upperStr, emit)
-	overlayItr.Release()
+	rangeErr := s.rangeMerge(iter, &s.overlayItrCache, &overlayValid, upperStr, emit)
 	return rangeErr
 }
 

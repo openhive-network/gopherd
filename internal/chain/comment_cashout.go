@@ -2,11 +2,12 @@ package chain
 
 import (
 	"fmt"
-	"math/big"
+	"math/bits"
 	"os"
 	"sort"
 	"strings"
 
+	"hived-go/internal/math128"
 	"hived-go/internal/protocol/asset"
 	"hived-go/internal/protocol/auth"
 	"hived-go/internal/protocol/hardfork"
@@ -92,51 +93,39 @@ func curationPercentForBlock(blockNum uint32) int64 {
 // pre-HF7 backlog of 24h-due comments accumulate. At HF7 the queue
 // drains in one cascade ("the first cashout will be 2+ months of
 // rewards" — the C++ comment).
-func processCommentCashouts(s *state.Session, blockTime, blockNum uint32) {
+func processCommentCashouts(s *state.Session, blockTime, blockNum uint32, hooks *blockHookScratch) {
 	if !hardfork.SetForBlock(blockNum).Has(hardfork.HF7) {
 		return
 	}
-	type pending struct {
-		cashoutTime uint32
-		commentID   uint64
-		author      string
-		permlink    string
+	store := objects.EnsureCommentCashoutScheduleStore(s)
+	// Skip the entire hook when the earliest queued cashout is still
+	// in the future — most blocks land here.
+	if earliest, has := store.EarliestDue(); !has || earliest > blockTime {
+		return
 	}
-	var ready []pending
 
-	// Schedule keys are (cashout_time_BE, comment_id_BE). Iteration order
-	// matches C++'s composite_key<cashout_time, comment_id>: smallest time
-	// first, then smallest id (insertion order) within the same time. The
-	// (author, permlink) pair sits in the entry's value.
-	_ = s.Range(objects.CommentCashoutScheduleTable, state.PrimaryIndex, nil,
-		func(key, val []byte) (bool, error) {
-			if len(key) < 4+8 {
-				return true, nil
-			}
-			t := uint32(key[0])<<24 | uint32(key[1])<<16 | uint32(key[2])<<8 | uint32(key[3])
-			if t > blockTime {
-				return false, nil
-			}
-			id := uint64(0)
-			for i := 0; i < 8; i++ {
-				id = (id << 8) | uint64(key[4+i])
-			}
-			author, permlink := objects.DecodeCommentCashoutScheduleValue(val)
-			ready = append(ready, pending{
-				cashoutTime: t,
-				commentID:   id,
-				author:      string(author),
-				permlink:    permlink,
-			})
-			return true, nil
+	hooks.cashoutPending = hooks.cashoutPending[:0]
+	ready := &hooks.cashoutPending
+
+	// Iteration order matches C++'s composite_key<cashout_time,
+	// comment_id>: smallest time first, then smallest id (insertion
+	// order) within the same time.
+	store.RangeDueBefore(blockTime, func(t uint32, id uint64, author auth.AccountName, permlink string) bool {
+		*ready = append(*ready, blockHookCashoutPending{
+			cashoutTime: t,
+			commentID:   id,
+			author:      string(author),
+			permlink:    permlink,
 		})
+		return true
+	})
 
 	curationPct := curationPercentForBlock(blockNum)
 	hf := hardfork.SetForBlock(blockNum)
 	if hf.Has(hardfork.HF17) {
 		// HF17+: pay each due comment individually (matches
 		// database_comment.cpp:466-481).
-		for _, p := range ready {
+		for _, p := range *ready {
 			processOneCashout(s, blockTime, blockNum, p.cashoutTime, p.commentID, p.author, p.permlink, curationPct)
 		}
 		return
@@ -147,8 +136,8 @@ func processCommentCashouts(s *state.Session, blockTime, blockNum uint32) {
 	// comment under that root_id together. Already-paid comments are
 	// skipped via a per-call dedup set, so we never double-pay even
 	// when multiple replies in the same thread land in `ready`.
-	paid := make(map[string]struct{}, len(ready))
-	for _, p := range ready {
+	paid := make(map[string]struct{}, len(*ready))
+	for _, p := range *ready {
 		c, cerr := objects.GetComment(s, p.author, p.permlink)
 		if cerr != nil {
 			continue
@@ -315,62 +304,49 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 	if fundBalance <= 0 {
 		return
 	}
-	if shares2.Sign() <= 0 {
+	if shares2.IsZero() {
 		return
 	}
 
 	// curve(net_rshares) — uses fund's content_constant + curve when the
 	// reward_fund is in play; otherwise the legacy quadratic with
 	// HIVE_CONTENT_CONSTANT_HF0.
-	var commentCurve *big.Int
+	var commentCurve math128.U128
 	if usingFund {
-		commentCurve = evaluateRewardCurve(c.NetRshares, fund.AuthorRewardCurve, fund.ContentConstant)
+		commentCurve = evaluateRewardCurveU128(c.NetRshares, fund.AuthorRewardCurve, fund.ContentConstant)
 	} else {
 		commentCurve = reward.EvaluateRewardCurveQuadratic(c.NetRshares)
 	}
-	if commentCurve.Sign() <= 0 {
+	if commentCurve.IsZero() {
 		return
 	}
 
 	// reward_weight haircut (HF12-HF17 ROOT posts only). Mirrors
 	// libraries/chain/util/reward.cpp:18: `claim = (claim × reward_weight)
-	// / HIVE_100_PERCENT`. The weighted claim drives `payout`, but the
-	// unweighted curve still drives the `shares2` subtraction below
-	// (C++ database_comment.cpp:380 calls adjust_rshares2 with the raw
-	// curve). RewardWeight==0 means the field hasn't been set
+	// / HIVE_100_PERCENT`. RewardWeight==0 means the field hasn't been set
 	// (legacy/replies/post-HF17) — treat as HIVE_100_PERCENT (no haircut).
 	weightedCurve := commentCurve
 	if c.RewardWeight != 0 && c.RewardWeight < 10000 {
-		weightedCurve = new(big.Int).Mul(commentCurve, big.NewInt(int64(c.RewardWeight)))
-		weightedCurve.Quo(weightedCurve, big.NewInt(10000))
+		// (commentCurve × reward_weight) / 10000. Result fits in U128
+		// (it's strictly ≤ commentCurve). Both prod and result are U128
+		// for any rshares; use the U192/uint64 → U128 helper to handle
+		// the wider intermediate.
+		prod := math128.Mul64x128(uint64(c.RewardWeight), commentCurve)
+		weightedCurve = u192DivU64ToU128(prod, 10000)
 	}
 
 	// payout = fundBalance × weightedCurve / shares2.
-	payoutBig := new(big.Int).Mul(big.NewInt(fundBalance), weightedCurve)
-	payoutBig.Quo(payoutBig, shares2)
-	if !payoutBig.IsInt64() {
-		payoutBig.SetInt64(int64(^uint64(0) >> 1))
+	// fundBalance fits in uint64, weightedCurve in U128 → product in U192.
+	// shares2 is U128, quotient fits in uint64 (bounded by fundBalance).
+	prodFB := math128.Mul64x128(uint64(fundBalance), weightedCurve)
+	qClaim, _ := prodFB.QuoRem(shares2)
+	if qClaim > uint64(1<<63-1) {
+		qClaim = 1<<63 - 1
 	}
-	claimed := payoutBig.Int64()
+	claimed := int64(qClaim)
 	if traceAccount(author) || (envGhivediffAll != "" && blockNum >= 2888500 && blockNum <= 2910000) {
-		hi := uint64(0)
-		lo := uint64(0)
-		if shares2.IsUint64() {
-			lo = shares2.Uint64()
-		} else {
-			b := shares2.Bytes()
-			pad := make([]byte, 16)
-			if len(b) > 16 {
-				b = b[len(b)-16:]
-			}
-			copy(pad[16-len(b):], b)
-			for i := 0; i < 8; i++ {
-				hi = hi<<8 | uint64(pad[i])
-				lo = lo<<8 | uint64(pad[i+8])
-			}
-		}
 		ghiveDiff("GHIVEDIFF CASHOUT-CALC block=%d author=%s permlink=%s id=%d cashoutTime=%d rshares=%d fundBalance=%d shares2_hi=%d shares2_lo=%d claimed_pre_clip=%d\n",
-			blockNum, author, permlink, c.ID, scheduledTime, c.NetRshares, fundBalance, hi, lo, claimed)
+			blockNum, author, permlink, c.ID, scheduledTime, c.NetRshares, fundBalance, shares2.Hi, shares2.Lo, claimed)
 	}
 	// MaxAcceptedPayout is denominated in HBD (HBD_asset in C++); to clip
 	// against `claimed` (HIVE-sat), convert via the median feed.
@@ -408,7 +384,7 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 	// snapshot is decremented analogously.
 	// Mirror C++ database.cpp:1673-1674 — uint128 wraps mod 2^128 on
 	// transient underflow. Uint128ToBytes performs the mod, no clamp.
-	shares2.Sub(shares2, commentCurve)
+	shares2 = shares2.Sub(commentCurve)
 	if usingFund {
 		fund.RecentClaims = reward.Uint128ToBytes(shares2)
 	} else {
@@ -573,68 +549,108 @@ func deleteCommentVotes(s *state.Session, author, permlink string) {
 	objects.DeleteAllCommentVotesForComment(s, auth.AccountName(author), permlink)
 }
 
-// evaluateRewardCurveBoundedCuration mirrors C++ reward.cpp:50-52
-// `bounded_curation`: (low64(rshares) << 64) / (rshares + 2s).
-// Used when a reward_fund.curve == bounded_curation. In Go we hold
-// rshares in int64, so low64(rshares) == rshares for nonnegative
-// values, and the left-shift simply scales numerator by 2^64.
-func evaluateRewardCurveBoundedCuration(r, s *big.Int) *big.Int {
-	twoS := new(big.Int).Lsh(s, 1)
-	num := new(big.Int).Lsh(r, 64)
-	den := new(big.Int).Add(twoS, r)
-	return new(big.Int).Quo(num, den)
-}
-
-// evaluateRewardCurve dispatches between the curve types selectable
+// evaluateRewardCurveU128 dispatches between the curve types selectable
 // for a reward_fund_object. Mirrors libraries/chain/util/reward.cpp:
 //
 //	quadratic:   (rshares + s)² - s²
-//	bounded:     same as quadratic with content_constant baked in
+//	bounded:     (rshares << 64) / (2s + rshares)
 //	linear:      rshares
 //	square_root: floor(sqrt(rshares))
-//	convergent_*: rshares² / (s + rshares); rshares / (s + rshares)
-func evaluateRewardCurve(rshares int64, curve objects.CurveID, contentConstant int64) *big.Int {
+//	convergent_linear:        ((r+s)² - s²) / (r + 4s)
+//	convergent_square_root:   r / sqrt(r + 2s)
+//
+// Native U128/U192 math replaces the previous math/big triple-alloc-
+// per-call implementation that produced 1.5 GB of nat.make across a
+// 4M-block run.
+func evaluateRewardCurveU128(rshares int64, curve objects.CurveID, contentConstant int64) math128.U128 {
 	if rshares <= 0 {
-		return new(big.Int)
+		return math128.U128{}
 	}
-	r := big.NewInt(rshares)
-	s := big.NewInt(contentConstant)
-	if s.Sign() <= 0 {
-		s = big.NewInt(2_000_000_000_000) // HIVE_CONTENT_CONSTANT_HF0
+	r := uint64(rshares)
+	s := uint64(contentConstant)
+	if contentConstant <= 0 {
+		s = 2_000_000_000_000
 	}
 	switch curve {
 	case objects.CurveLinear:
-		return new(big.Int).Set(r)
+		return math128.U128{Lo: r}
 	case objects.CurveSquareRoot:
-		out := new(big.Int).Sqrt(r)
-		return out
+		return math128.U128{Lo: chainISqrt64(r)}
 	case objects.CurveBoundedCurve:
-		return evaluateRewardCurveBoundedCuration(r, s)
+		// (rshares << 64) / (2s + rshares).
+		q, _ := bits.Div64(r /*hi*/, 0 /*lo*/, 2*s+r)
+		return math128.U128{Lo: q}
 	case objects.CurveConvergentLinear:
-		// C++ reward.cpp:63 — ((r+s)² - s²) / (r + 4s).
-		// Algebraically equivalent to r(r+2s)/(r+4s).
-		rPlusS := new(big.Int).Add(r, s)
-		num := new(big.Int).Mul(rPlusS, rPlusS)
-		s2 := new(big.Int).Mul(s, s)
-		num.Sub(num, s2)
-		fourS := new(big.Int).Lsh(s, 2)
-		den := new(big.Int).Add(r, fourS)
-		return new(big.Int).Quo(num, den)
-	case objects.CurveConvergentSquareRoot:
-		// C++ reward.cpp:69 — rshares / sqrt(rshares + 2s).
-		twoS := new(big.Int).Lsh(s, 1)
-		den := new(big.Int).Sqrt(new(big.Int).Add(r, twoS))
-		if den.Sign() == 0 {
-			return new(big.Int)
+		num := chainCurveQuadratic(r, s)
+		den := r + 4*s
+		if den == 0 {
+			return math128.U128{}
 		}
-		return new(big.Int).Quo(r, den)
+		return chainU128DivU64(num, den)
+	case objects.CurveConvergentSquareRoot:
+		den := chainISqrt64(r + 2*s)
+		if den == 0 {
+			return math128.U128{}
+		}
+		return math128.U128{Lo: r / den}
 	default:
-		// quadratic: (r+s)² - s²
-		rPlusS := new(big.Int).Add(r, s)
-		out := new(big.Int).Mul(rPlusS, rPlusS)
-		s2 := new(big.Int).Mul(s, s)
-		out.Sub(out, s2)
-		return out
+		return chainCurveQuadratic(r, s)
+	}
+}
+
+// chainCurveQuadratic computes r² + 2·r·s as U128 (uint64 inputs).
+func chainCurveQuadratic(r, s uint64) math128.U128 {
+	r2hi, r2lo := bits.Mul64(r, r)
+	rshi, rslo := bits.Mul64(r, s)
+	rshi2 := (rshi << 1) | (rslo >> 63)
+	rslo2 := rslo << 1
+	lo, c := bits.Add64(r2lo, rslo2, 0)
+	hi, _ := bits.Add64(r2hi, rshi2, c)
+	return math128.U128{Hi: hi, Lo: lo}
+}
+
+// chainU128DivU64 returns U128 ⌊n / d⌋ when d is a uint64.
+func chainU128DivU64(n math128.U128, d uint64) math128.U128 {
+	if n.Hi < d {
+		q, _ := bits.Div64(n.Hi, n.Lo, d)
+		return math128.U128{Lo: q}
+	}
+	qhi, rhi := bits.Div64(0, n.Hi, d)
+	qlo, _ := bits.Div64(rhi, n.Lo, d)
+	return math128.U128{Hi: qhi, Lo: qlo}
+}
+
+// u192DivU64ToU128 returns U128 ⌊n/d⌋ when n is U192, d is uint64,
+// and the true quotient is known to fit in U128. Long-divides word by
+// word; saturates to ^U128 if the actual quotient overflows U128.
+func u192DivU64ToU128(n math128.U192, d uint64) math128.U128 {
+	if d == 0 {
+		return math128.U128{}
+	}
+	// Step 1: q_top = n.Hi / d, r1 = n.Hi mod d. If q_top != 0 the
+	// quotient overflows U128 — saturate.
+	qtop := n.Hi / d
+	r1 := n.Hi - qtop*d
+	if qtop != 0 {
+		return math128.U128{Hi: ^uint64(0), Lo: ^uint64(0)}
+	}
+	qmid, r2 := bits.Div64(r1, n.Mid, d)
+	qlo, _ := bits.Div64(r2, n.Lo, d)
+	return math128.U128{Hi: qmid, Lo: qlo}
+}
+
+// chainISqrt64 returns ⌊sqrt(n)⌋ via Newton's method on uint64.
+func chainISqrt64(n uint64) uint64 {
+	if n == 0 {
+		return 0
+	}
+	x := uint64(1) << (uint(bits.Len64(n)+1) / 2)
+	for {
+		y := (x + n/x) / 2
+		if y >= x {
+			return x
+		}
+		x = y
 	}
 }
 
@@ -739,8 +755,7 @@ func distributeCuratorPool(s *state.Session, author, permlink string, pool int64
 	if c.TotalVoteWeight == 0 || pool <= 0 {
 		return pool
 	}
-	totalW := new(big.Int).SetUint64(c.TotalVoteWeight)
-	poolBig := big.NewInt(pool)
+	totalW := c.TotalVoteWeight
 
 	type pay struct {
 		voter  string
@@ -754,13 +769,18 @@ func distributeCuratorPool(s *state.Session, author, permlink string, pool int64
 			if cv.CurationWeight == 0 {
 				return true, nil
 			}
-			w := new(big.Int).SetUint64(cv.CurationWeight)
-			share := new(big.Int).Mul(poolBig, w)
-			share.Quo(share, totalW)
-			if !share.IsInt64() {
+			// share = pool × curation_weight / total_vote_weight.
+			// Product up to uint64 × uint64 = uint128; divide by uint64.
+			hi, lo := bits.Mul64(uint64(pool), cv.CurationWeight)
+			if hi >= totalW {
+				// Quotient overflows uint64 — skip.
 				return true, nil
 			}
-			s64 := share.Int64()
+			q, _ := bits.Div64(hi, lo, totalW)
+			if q > uint64(1<<63-1) {
+				return true, nil
+			}
+			s64 := int64(q)
 			if s64 <= 0 {
 				return true, nil
 			}

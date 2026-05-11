@@ -35,10 +35,32 @@ func (o Comment) AppendFCBody(dst []byte) []byte {
 func readComment(r *fcraw.Reader) (Operation, error) {
 	var o Comment
 	var err error
-	for _, dst := range []*string{&o.ParentAuthor, &o.ParentPermlink, &o.Author, &o.Permlink, &o.Title, &o.Body, &o.JSONMetadata} {
-		if *dst, err = r.ReadString(); err != nil {
-			return nil, err
-		}
+	if o.ParentAuthor, err = r.ReadString(); err != nil {
+		return nil, err
+	}
+	if o.ParentPermlink, err = r.ReadString(); err != nil {
+		return nil, err
+	}
+	if o.Author, err = r.ReadString(); err != nil {
+		return nil, err
+	}
+	if o.Permlink, err = r.ReadString(); err != nil {
+		return nil, err
+	}
+	// Title / Body / JSONMetadata are never inspected by chain logic and
+	// never survive into the typed CommentStore (it doesn't carry these
+	// fields). ReadStringAlias gives a zero-copy string into the source
+	// buffer — safe because the parsed op is fully consumed inside the
+	// block's evaluator.Apply, before the next BlockReuse reuses the
+	// buffer.
+	if o.Title, err = r.ReadStringAlias(); err != nil {
+		return nil, err
+	}
+	if o.Body, err = r.ReadStringAlias(); err != nil {
+		return nil, err
+	}
+	if o.JSONMetadata, err = r.ReadStringAlias(); err != nil {
+		return nil, err
 	}
 	return o, nil
 }

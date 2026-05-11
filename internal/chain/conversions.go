@@ -1,9 +1,10 @@
 package chain
 
 import (
-	"math/big"
+	"math/bits"
 
 	"hived-go/internal/protocol/asset"
+	"hived-go/internal/protocol/auth"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
 )
@@ -20,7 +21,13 @@ import (
 // (current_median_history.amount == 0); that's the case before the
 // chain has accumulated HIVE_MIN_FEEDS valid feeds (~block 933,600 in
 // real Hive history).
-func processConversions(s *state.Session, blockTime uint32) {
+func processConversions(s *state.Session, blockTime uint32, hooks *blockHookScratch) {
+	store := objects.EnsureConvertRequestStore(s)
+	// Short-circuit when the earliest pending conversion is in the
+	// future — the common case (almost every block has nothing due).
+	if earliest, has := store.EarliestDue(); !has || earliest > blockTime {
+		return
+	}
 	fh, err := objects.GetFeedHistory(s)
 	if err != nil {
 		return // no feeds yet
@@ -29,35 +36,15 @@ func processConversions(s *state.Session, blockTime uint32) {
 		return
 	}
 
-	type pending struct {
-		conversion uint32
-		owner      string
-		requestID  uint32
-	}
-	var ready []pending
+	hooks.conversionPending = hooks.conversionPending[:0]
+	ready := &hooks.conversionPending
+	store.RangeDueBefore(blockTime, func(c objects.ConvertRequest) bool {
+		*ready = append(*ready, blockHookConvertPending{conversion: c.Conversion, owner: string(c.Owner), requestID: c.RequestID})
+		return true
+	})
 
-	_ = s.Range(objects.ConvertRequestTable, objects.ConvertRequestByDateIndex, nil,
-		func(body, _ []byte) (bool, error) {
-			if len(body) < 4+state.AccountNameKeyLen+4 {
-				return true, nil
-			}
-			c := uint32(body[0])<<24 | uint32(body[1])<<16 | uint32(body[2])<<8 | uint32(body[3])
-			if c > blockTime {
-				return false, nil
-			}
-			ownerBytes := body[4 : 4+state.AccountNameKeyLen]
-			n := state.AccountNameKeyLen
-			for n > 0 && ownerBytes[n-1] == 0 {
-				n--
-			}
-			off := 4 + state.AccountNameKeyLen
-			rid := uint32(body[off])<<24 | uint32(body[off+1])<<16 | uint32(body[off+2])<<8 | uint32(body[off+3])
-			ready = append(ready, pending{conversion: c, owner: string(ownerBytes[:n]), requestID: rid})
-			return true, nil
-		})
-
-	for _, p := range ready {
-		req, gerr := objects.GetConvertRequest(s, p.owner, p.requestID)
+	for _, p := range *ready {
+		req, gerr := objects.GetConvertRequest(s, auth.AccountName(p.owner), p.requestID)
 		if gerr != nil {
 			continue
 		}
@@ -127,13 +114,42 @@ func mulDiv(a, b, c int64) int64 {
 	if -half < a && a < half && -half < b && b < half {
 		return a * b / c
 	}
-	prod := new(big.Int).Mul(big.NewInt(a), big.NewInt(b))
-	prod.Quo(prod, big.NewInt(c))
-	if !prod.IsInt64() {
-		if prod.Sign() < 0 {
+	// Native uint128 path replaces a math/big triple-alloc on every
+	// HBD↔HIVE conversion (process_conversions fires every block).
+	// Inputs are non-negative int64 amounts in practice — sign-extend
+	// path mirrors the math/big saturation for completeness.
+	neg := false
+	au, bu := uint64(a), uint64(b)
+	if a < 0 {
+		neg = !neg
+		au = uint64(-a)
+	}
+	if b < 0 {
+		neg = !neg
+		bu = uint64(-b)
+	}
+	cu := uint64(c)
+	if c < 0 {
+		neg = !neg
+		cu = uint64(-c)
+	}
+	hi, lo := bits.Mul64(au, bu)
+	if hi >= cu {
+		if neg {
 			return -(1 << 62)
 		}
 		return 1<<63 - 1
 	}
-	return prod.Int64()
+	q, _ := bits.Div64(hi, lo, cu)
+	if q > 1<<63-1 {
+		if neg {
+			return -(1 << 62)
+		}
+		return 1<<63 - 1
+	}
+	r := int64(q)
+	if neg {
+		return -r
+	}
+	return r
 }

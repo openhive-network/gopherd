@@ -3,7 +3,8 @@ package evaluator
 import (
 	"errors"
 	"fmt"
-	"math/big"
+	"math"
+	"math/bits"
 
 	"hived-go/internal/protocol/asset"
 	"hived-go/internal/protocol/hardfork"
@@ -14,8 +15,8 @@ import (
 
 // convertHiveToHBDByMedian mirrors C++ asset_symbol::operator*(price)
 // for HIVE×median → HBD. base = HBD, quote = HIVE (post-HF20 normalized).
-// Pre-HF20 the orientation can be reversed; we handle both. Uses big.Int
-// to avoid int64 overflow on the multiply.
+// Pre-HF20 the orientation can be reversed; we handle both. Native
+// uint128 math replaces a math/big triple-alloc per call.
 func convertHiveToHBDByMedian(hiveAmount int64, p asset.Price) int64 {
 	if p.Base.Amount <= 0 || p.Quote.Amount <= 0 {
 		return 0
@@ -29,9 +30,16 @@ func convertHiveToHBDByMedian(hiveAmount int64, p asset.Price) int64 {
 	default:
 		return 0
 	}
-	out := new(big.Int).Mul(big.NewInt(hiveAmount), big.NewInt(num))
-	out.Quo(out, big.NewInt(den))
-	return out.Int64()
+	hi, lo := bits.Mul64(uint64(hiveAmount), uint64(num))
+	d := uint64(den)
+	if hi >= d {
+		return math.MaxInt64
+	}
+	q, _ := bits.Div64(hi, lo, d)
+	if q > math.MaxInt64 {
+		return math.MaxInt64
+	}
+	return int64(q)
 }
 
 // isTreasuryAccount reports whether name is the canonical DHF treasury

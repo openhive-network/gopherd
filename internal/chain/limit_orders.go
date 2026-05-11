@@ -21,75 +21,29 @@ import (
 // hived's by_expiration index excludes them too via fc::time_point_sec
 // max-value sentinel.
 func clearExpiredOrders(s *state.Session, blockTime uint32) {
-	// Skip the Pebble Range entirely when our cached "earliest pending
-	// expiration" hint says nothing is due yet. The hint is maintained
-	// by PutLimitOrder (insertions) and refreshed at the bottom of this
-	// function (after a scan). When unset, we always scan.
-	if hint, ok := s.GetExpHint(objects.LimitOrderTable, objects.LimitOrderByExpirationIndex); ok && hint > blockTime {
-		return
-	}
-
 	type pending struct {
-		expiration uint32
-		owner      string
-		orderID    uint32
+		owner   string
+		orderID uint32
 	}
 	var ready []pending
-	var nextExp uint32
 
-	_ = s.Range(objects.LimitOrderTable, objects.LimitOrderByExpirationIndex, nil,
-		func(body, _ []byte) (bool, error) {
-			if len(body) < 4+state.AccountNameKeyLen+4 {
-				return true, nil
-			}
-			if envGhivediff != "" && len(body) >= 24 {
-				owner := string(body[4 : 4+state.AccountNameKeyLen])
-				if owner[:3] == "jsc" {
-					fmt.Fprintf(os.Stderr, "GHIVEDIFF SCAN bodylen=%d hex=%x\n", len(body), body)
-				}
-			}
-			exp := uint32(body[0])<<24 | uint32(body[1])<<16 | uint32(body[2])<<8 | uint32(body[3])
-			// expiration == 0 is "never expires"; skip it. (hived models
-			// time_point_sec maximum but the truncated wire form lands as 0
-			// for some op encodings. Either way it shouldn't auto-cancel.)
-			if exp == 0 {
-				return true, nil
-			}
-			// hived's clear_expired_orders cancels orders with
-			// `expiration < now` (strictly less; database_market.cpp:384).
-			// Stop at the first order whose expiration is at or past the
-			// current block time.
-			if exp >= blockTime {
-				nextExp = exp
-				return false, nil
-			}
-			ownerBytes := body[4 : 4+state.AccountNameKeyLen]
-			n := state.AccountNameKeyLen
-			for n > 0 && ownerBytes[n-1] == 0 {
-				n--
-			}
-			off := 4 + state.AccountNameKeyLen
-			orderID := uint32(body[off])<<24 | uint32(body[off+1])<<16 | uint32(body[off+2])<<8 | uint32(body[off+3])
-			ready = append(ready, pending{
-				expiration: exp,
-				owner:      string(ownerBytes[:n]),
-				orderID:    orderID,
-			})
+	store := objects.EnsureLimitOrderStore(s)
+	_ = store.RangeByExpiration(func(lo *objects.LimitOrder) (bool, error) {
+		// expiration == 0 is "never expires"; skip it.
+		if lo.Expiration == 0 {
 			return true, nil
-		})
+		}
+		// hived cancels orders with `expiration < now` (strictly less).
+		if lo.Expiration >= blockTime {
+			return false, nil
+		}
+		ready = append(ready, pending{owner: string(lo.Owner), orderID: lo.OrderID})
+		return true, nil
+	})
 
 	for _, p := range ready {
 		cancelExpiredOrder(s, p.owner, p.orderID, blockTime)
 	}
-
-	// Refresh the hint with the first non-expired entry's time. When
-	// the scan found nothing future, store a sentinel so the next
-	// block skips the scan entirely; NudgeExpHint on insert correctly
-	// lowers it.
-	if nextExp == 0 {
-		nextExp = ^uint32(0)
-	}
-	s.SetExpHint(objects.LimitOrderTable, objects.LimitOrderByExpirationIndex, nextExp)
 }
 
 // cancelExpiredOrder refunds the order's for_sale amount to the seller

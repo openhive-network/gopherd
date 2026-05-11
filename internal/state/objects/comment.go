@@ -211,18 +211,15 @@ func DecodeCommentCashoutScheduleValue(body []byte) (auth.AccountName, string) {
 }
 
 // PutCommentCashoutSchedule registers (cashoutTime, commentID, author,
-// permlink) in the schedule index.
+// permlink) in the schedule index. Routes through the typed store.
 func PutCommentCashoutSchedule(s *state.Session, cashoutTime uint32, commentID uint64, author auth.AccountName, permlink string) {
-	s.Put(CommentCashoutScheduleTable, state.PrimaryIndex,
-		CommentCashoutScheduleKey(cashoutTime, commentID),
-		commentCashoutScheduleValue(author, permlink))
+	EnsureCommentCashoutScheduleStore(s).Put(cashoutTime, commentID, author, permlink)
 }
 
 // DeleteCommentCashoutSchedule removes a (cashoutTime, commentID)
-// schedule entry.
+// schedule entry. Routes through the typed store.
 func DeleteCommentCashoutSchedule(s *state.Session, cashoutTime uint32, commentID uint64) {
-	s.Delete(CommentCashoutScheduleTable, state.PrimaryIndex,
-		CommentCashoutScheduleKey(cashoutTime, commentID))
+	EnsureCommentCashoutScheduleStore(s).Delete(cashoutTime, commentID)
 }
 
 // commentKey encodes (author, permlink) as a fixed-width 16-byte author
@@ -478,6 +475,7 @@ func commentVoteKey(voter, author auth.AccountName, permlink string) []byte {
 	out := state.AppendAccountName(nil, voter)
 	return append(out, commentKey(author, permlink)...)
 }
+
 
 // AppendCommentVote serializes cv.
 func AppendCommentVote(dst []byte, cv *CommentVote) []byte {

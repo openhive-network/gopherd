@@ -3,6 +3,7 @@ package chain
 import (
 	"math/big"
 
+	"hived-go/internal/protocol/auth"
 	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
@@ -57,35 +58,24 @@ func vestsToHive(vests int64, dgpo *objects.DynamicGlobalProperty) int64 {
 // The full hived flow also generates a fill_vesting_withdraw virtual op
 // (for history) and applies HF20+ RC mana regeneration / HF24+ delayed
 // voting tracking; those land with the corresponding subsystems.
-func processVestingWithdrawals(s *state.Session, blockTime uint32) {
-	type pending struct {
-		nextWithdrawal uint32
-		account        string
+func processVestingWithdrawals(s *state.Session, blockTime uint32, hooks *blockHookScratch) {
+	store := objects.EnsureVestingWithdrawalScheduleStore(s)
+	// Short-circuit when the earliest scheduled withdrawal is in the
+	// future. Killed the per-block Session.Range cost (~250 bytes/block,
+	// ~1 GB cum) for the typical empty-queue case.
+	if earliest, has := store.EarliestDue(); !has || earliest > blockTime {
+		return
 	}
-	var ready []pending
-
+	hooks.withdrawalPending = hooks.withdrawalPending[:0]
+	ready := &hooks.withdrawalPending
 	// Snapshot ready entries first to avoid invalidating the iterator
 	// while we mutate the same table.
-	_ = s.Range(objects.VestingWithdrawalScheduleTable, state.PrimaryIndex, nil,
-		func(body, _ []byte) (bool, error) {
-			if len(body) < 4+state.AccountNameKeyLen {
-				return true, nil
-			}
-			t := uint32(body[0])<<24 | uint32(body[1])<<16 | uint32(body[2])<<8 | uint32(body[3])
-			if t > blockTime {
-				return false, nil
-			}
-			name := body[4 : 4+state.AccountNameKeyLen]
-			// Strip trailing NULs (account_name is NUL-padded to 16 bytes).
-			n := state.AccountNameKeyLen
-			for n > 0 && name[n-1] == 0 {
-				n--
-			}
-			ready = append(ready, pending{nextWithdrawal: t, account: string(name[:n])})
-			return true, nil
-		})
+	store.RangeDueBefore(blockTime, func(t uint32, account auth.AccountName) bool {
+		*ready = append(*ready, blockHookWithdrawalPending{nextWithdrawal: t, account: string(account)})
+		return true
+	})
 
-	for _, p := range ready {
+	for _, p := range *ready {
 		processOneWithdrawal(s, p.account, p.nextWithdrawal)
 	}
 }

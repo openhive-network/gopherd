@@ -30,9 +30,9 @@ func TestVoteRoundTrip(t *testing.T) {
 	if got.OpTag() != TagVote {
 		t.Fatalf("tag = %d, want %d", got.OpTag(), TagVote)
 	}
-	v2 := got.(Vote)
-	if v2 != v {
-		t.Fatalf("round-trip:\n got %+v\nwant %+v", v2, v)
+	v2 := got.(*Vote)
+	if *v2 != v {
+		t.Fatalf("round-trip:\n got %+v\nwant %+v", *v2, v)
 	}
 	wire2 := AppendOperation(nil, v2)
 	if !bytes.Equal(wire, wire2) {

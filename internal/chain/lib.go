@@ -1,8 +1,6 @@
 package chain
 
 import (
-	"sort"
-
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
 )
@@ -34,7 +32,7 @@ func (d *Database) updateLastIrreversibleBlock(s *state.Session) {
 		return
 	}
 
-	confirmed := make([]uint32, 0, ws.NumScheduledWitnesses)
+	d.libConfirmedBuf = d.libConfirmedBuf[:0]
 	for i := uint8(0); i < ws.NumScheduledWitnesses; i++ {
 		if int(i) >= len(ws.CurrentShuffledWitnesses) {
 			break
@@ -44,7 +42,7 @@ func (d *Database) updateLastIrreversibleBlock(s *state.Session) {
 		// updateProducerLastConfirmed is the only writer of LCB, so the
 		// cache stays consistent without invalidation hooks elsewhere.
 		if lcb, ok := d.lcbCache[string(name)]; ok {
-			confirmed = append(confirmed, lcb)
+			d.libConfirmedBuf = append(d.libConfirmedBuf, lcb)
 			continue
 		}
 		w, err := objects.GetWitness(s, name)
@@ -52,17 +50,27 @@ func (d *Database) updateLastIrreversibleBlock(s *state.Session) {
 			continue
 		}
 		d.lcbCache[string(name)] = w.LastConfirmedBlockNum
-		confirmed = append(confirmed, w.LastConfirmedBlockNum)
+		d.libConfirmedBuf = append(d.libConfirmedBuf, w.LastConfirmedBlockNum)
 	}
+	confirmed := d.libConfirmedBuf
 	if len(confirmed) == 0 {
 		return
 	}
 
 	// offset = ((100% - 75%) * N) / 100% — that's the index whose value
 	// is the smallest such that >=75% of witnesses have confirmed at or
-	// above it (after sorting ascending).
+	// above it (after sorting ascending). N≤21, so insertion sort is
+	// strictly faster than sort.Slice (which heap-escapes the closure
+	// + reflectlite.Swapper allocates 159 MB cum across the run).
 	offset := int((hundredPercentBP - irreversibleThresholdBP) * uint32(len(confirmed)) / hundredPercentBP)
-	sort.Slice(confirmed, func(i, j int) bool { return confirmed[i] < confirmed[j] })
+	for i := 1; i < len(confirmed); i++ {
+		x := confirmed[i]
+		j := i
+		for ; j > 0 && confirmed[j-1] > x; j-- {
+			confirmed[j] = confirmed[j-1]
+		}
+		confirmed[j] = x
+	}
 	if offset >= len(confirmed) {
 		offset = len(confirmed) - 1
 	}

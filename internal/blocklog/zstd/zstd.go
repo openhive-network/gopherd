@@ -119,11 +119,18 @@ func getDecompressedDict(num uint8) ([]byte, error) {
 type Decompressor struct {
 	mu       sync.Mutex
 	decoders map[uint8]*zstd.Decoder
+	// framedPool reuses the re-framed (magic + DictID-patched header +
+	// payload) scratch buffer across Decompress calls. Each replay does
+	// ~one decompress per block; without the pool reframe allocates a
+	// fresh slice every call (1.07 GB cum on a 4M-block run).
+	framedPool sync.Pool
 }
 
 // NewDecompressor returns a fresh Decompressor.
 func NewDecompressor() *Decompressor {
-	return &Decompressor{decoders: map[uint8]*zstd.Decoder{}}
+	d := &Decompressor{decoders: map[uint8]*zstd.Decoder{}}
+	d.framedPool.New = func() any { b := make([]byte, 0, 8192); return &b }
+	return d
 }
 
 // Close releases all decoder resources.
@@ -173,6 +180,55 @@ func fakeDictID(dictNum uint8) uint32 { return fakeDictIDBase | uint32(dictNum) 
 //
 // Hived's blocks always have DictionaryID size 0 (FHD bits 0–1 == 00), so
 // we splice 4 bytes of dictID after WD/before FCS and set FHD bits 0–1 = 11.
+// reframeInto rebuilds payload as a complete zstd frame in dst (re-used
+// across calls when caller passes a pooled scratch buffer). Returns dst
+// extended with the framed bytes. Behavior mirrors reframe; the
+// indirection lets callers avoid the per-call alloc.
+func reframeInto(dst, payload []byte, dictNum uint8) ([]byte, error) {
+	dst = dst[:0]
+	if len(payload) < 1 {
+		return nil, errors.New("blocklog/zstd: empty compressed payload")
+	}
+	fhd := payload[0]
+	if fhd&0x03 != 0 {
+		dst = append(dst, magic[:]...)
+		dst = append(dst, payload...)
+		return dst, nil
+	}
+	singleSegment := (fhd >> 5) & 1
+	wdSize := 1
+	if singleSegment == 1 {
+		wdSize = 0
+	}
+	var fcsSize int
+	switch fhd >> 6 {
+	case 0:
+		if singleSegment == 1 {
+			fcsSize = 1
+		}
+	case 1:
+		fcsSize = 2
+	case 2:
+		fcsSize = 4
+	case 3:
+		fcsSize = 8
+	}
+	headerEnd := 1 + wdSize + fcsSize
+	if headerEnd > len(payload) {
+		return nil, fmt.Errorf("blocklog/zstd: frame header truncated (need %d, have %d)", headerEnd, len(payload))
+	}
+	dst = append(dst, magic[:]...)
+	newFHD := (fhd &^ 0x03) | 0x03
+	dst = append(dst, newFHD)
+	dst = append(dst, payload[1:1+wdSize]...)
+	var idBytes [4]byte
+	binary.LittleEndian.PutUint32(idBytes[:], fakeDictID(dictNum))
+	dst = append(dst, idBytes[:]...)
+	dst = append(dst, payload[1+wdSize:1+wdSize+fcsSize]...)
+	dst = append(dst, payload[1+wdSize+fcsSize:]...)
+	return dst, nil
+}
+
 func reframe(payload []byte, dictNum uint8) ([]byte, error) {
 	if len(payload) < 1 {
 		return nil, errors.New("blocklog/zstd: empty compressed payload")
@@ -232,11 +288,16 @@ func (d *Decompressor) Decompress(payload []byte, dictNum uint8, dst []byte) ([]
 	if err != nil {
 		return nil, err
 	}
-	framed, err := reframe(payload, dictNum)
+	bufPtr := d.framedPool.Get().(*[]byte)
+	framed, err := reframeInto(*bufPtr, payload, dictNum)
 	if err != nil {
+		*bufPtr = (*bufPtr)[:0]
+		d.framedPool.Put(bufPtr)
 		return nil, err
 	}
 	out, err := dec.DecodeAll(framed, dst)
+	*bufPtr = framed[:0]
+	d.framedPool.Put(bufPtr)
 	if err != nil {
 		return nil, fmt.Errorf("blocklog/zstd: decode block (dict %d, %d compressed bytes): %w", dictNum, len(payload), err)
 	}

@@ -211,8 +211,14 @@ func cmdReplay(args []string) int {
 		}
 	}
 
+	var rawScratch, outScratch []byte
 	for n := uint32(*startBlock); n <= end; n++ {
-		raw, err := bl.Block(n)
+		raw, newRaw, err := bl.BlockReuse(n, rawScratch, outScratch)
+		rawScratch = newRaw
+		// raw aliases outScratch (or a fresh alloc when block was bigger).
+		// Capture it as the next-iteration outScratch reuse buffer; the
+		// current iteration must not retain `raw` past the next loop step.
+		outScratch = raw
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "block %d read: %v\n", n, err)
 			errCount++

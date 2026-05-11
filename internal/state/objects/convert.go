@@ -69,28 +69,27 @@ func ReadConvertRequest(src []byte) (ConvertRequest, error) {
 }
 
 func PutConvertRequest(s *state.Session, c *ConvertRequest) {
-	s.Put(ConvertRequestTable, state.PrimaryIndex, convertRequestKey(c.Owner, c.RequestID), AppendConvertRequest(nil, c))
-	s.Put(ConvertRequestTable, ConvertRequestByDateIndex, convertRequestByDateKey(c.Conversion, c.Owner, c.RequestID), nil)
+	EnsureConvertRequestStore(s).Put(c)
 }
 
 func HasConvertRequest(s *state.Session, owner auth.AccountName, requestID uint32) (bool, error) {
-	return s.Has(ConvertRequestTable, state.PrimaryIndex, convertRequestKey(owner, requestID))
+	return EnsureConvertRequestStore(s).Has(owner, requestID), nil
 }
 
 // GetConvertRequest fetches a pending convert request.
 func GetConvertRequest(s *state.Session, owner auth.AccountName, requestID uint32) (ConvertRequest, error) {
-	v, err := s.Get(ConvertRequestTable, state.PrimaryIndex, convertRequestKey(owner, requestID))
-	if err != nil {
-		return ConvertRequest{}, err
+	c, ok := EnsureConvertRequestStore(s).Get(owner, requestID)
+	if !ok {
+		return ConvertRequest{}, state.ErrNotFound
 	}
-	return ReadConvertRequest(v)
+	return c, nil
 }
 
-// DeleteConvertRequestFull removes both the primary entry and the
-// by-conversion-date secondary entry.
+// DeleteConvertRequestFull removes the typed-store entry. Kept as the
+// "Full" name for backward compatibility with prior call sites that
+// expected the K/V two-row delete.
 func DeleteConvertRequestFull(s *state.Session, c *ConvertRequest) {
-	s.Delete(ConvertRequestTable, state.PrimaryIndex, convertRequestKey(c.Owner, c.RequestID))
-	s.Delete(ConvertRequestTable, ConvertRequestByDateIndex, convertRequestByDateKey(c.Conversion, c.Owner, c.RequestID))
+	EnsureConvertRequestStore(s).Delete(c.Owner, c.RequestID)
 }
 
 // CollateralizedConvert (HF26+) — separate table since the semantics differ

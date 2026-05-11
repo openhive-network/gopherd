@@ -194,51 +194,86 @@ func (r *Reader) Head() uint32 { return r.headBlock }
 // Block reads the raw FC-binary bytes for blockNum. Compressed blocks are
 // transparently decompressed. Returned slice is owned by the caller.
 func (r *Reader) Block(blockNum uint32) ([]byte, error) {
+	out, _, err := r.blockInto(blockNum, nil, nil)
+	return out, err
+}
+
+// BlockReuse is the allocation-light variant of Block: callers pass in
+// two scratch buffers (rawScratch for the on-disk compressed bytes,
+// outScratch for the decompressed payload) and get back the decoded
+// block plus updated scratches. Both returned slices alias the scratches
+// and are ONLY valid until the next BlockReuse call on the same Reader.
+//
+// Callers must NOT retain `out` past the next BlockReuse — the same
+// buffer will be overwritten.
+//
+// Used by the replay loop to drive ~5 GB of per-block allocation pressure
+// to zero on the hot path (each call previously did make+decompress-alloc).
+func (r *Reader) BlockReuse(blockNum uint32, rawScratch, outScratch []byte) (out, newRaw []byte, err error) {
+	return r.blockInto(blockNum, rawScratch, outScratch)
+}
+
+func (r *Reader) blockInto(blockNum uint32, rawScratch, outScratch []byte) ([]byte, []byte, error) {
 	if blockNum == 0 || blockNum > r.headBlock {
-		return nil, fmt.Errorf("blocklog: block %d out of range [1, %d]", blockNum, r.headBlock)
+		return nil, rawScratch, fmt.Errorf("blocklog: block %d out of range [1, %d]", blockNum, r.headBlock)
 	}
 	p := r.partFor(blockNum)
 	if p == nil {
-		return nil, fmt.Errorf("blocklog: no part covers block %d", blockNum)
+		return nil, rawScratch, fmt.Errorf("blocklog: no part covers block %d", blockNum)
 	}
 
 	relIdx := blockNum - p.first
 	packed, err := p.lookupTrailer(relIdx)
 	if err != nil {
-		return nil, fmt.Errorf("blocklog: lookup block %d: %w", blockNum, err)
+		return nil, rawScratch, fmt.Errorf("blocklog: lookup block %d: %w", blockNum, err)
 	}
 	off, attr := decodeTrailer(packed)
 
 	endOff, err := p.endOffset(relIdx)
 	if err != nil {
-		return nil, fmt.Errorf("blocklog: end offset for block %d: %w", blockNum, err)
+		return nil, rawScratch, fmt.Errorf("blocklog: end offset for block %d: %w", blockNum, err)
 	}
 	if endOff < off {
-		return nil, fmt.Errorf("blocklog: corrupt offsets for block %d (start %d > end %d)", blockNum, off, endOff)
+		return nil, rawScratch, fmt.Errorf("blocklog: corrupt offsets for block %d (start %d > end %d)", blockNum, off, endOff)
 	}
 
-	raw := make([]byte, endOff-off)
+	size := int(endOff - off)
+	var raw []byte
+	if cap(rawScratch) >= size {
+		raw = rawScratch[:size]
+	} else {
+		raw = make([]byte, size)
+	}
 	if _, err := p.main.ReadAt(raw, int64(off)); err != nil {
-		return nil, fmt.Errorf("blocklog: read block %d: %w", blockNum, err)
+		return nil, raw, fmt.Errorf("blocklog: read block %d: %w", blockNum, err)
 	}
 
 	if !attr.Compressed {
-		return raw, nil
-	}
-	if !attr.HasDictNum {
-		// Compressed without an explicit dictionary number — uncommon in mainnet
-		// but supported by the format. Try the no-dict decoder.
-		out, err := r.decompressor.DecompressNoDict(raw, nil)
-		if err != nil {
-			return nil, fmt.Errorf("blocklog: decompress block %d (no dict): %w", blockNum, err)
+		// Uncompressed block: we have to return owned bytes. Avoid handing
+		// back the rawScratch since callers may overwrite it on the next
+		// call's read; copy into outScratch when it fits.
+		if cap(outScratch) >= size {
+			out := outScratch[:size]
+			copy(out, raw)
+			return out, raw, nil
 		}
-		return out, nil
+		out := make([]byte, size)
+		copy(out, raw)
+		return out, raw, nil
 	}
-	out, err := r.decompressor.Decompress(raw, attr.DictionaryNum, nil)
+	dst := outScratch[:0]
+	if !attr.HasDictNum {
+		out, err := r.decompressor.DecompressNoDict(raw, dst)
+		if err != nil {
+			return nil, raw, fmt.Errorf("blocklog: decompress block %d (no dict): %w", blockNum, err)
+		}
+		return out, raw, nil
+	}
+	out, err := r.decompressor.Decompress(raw, attr.DictionaryNum, dst)
 	if err != nil {
-		return nil, fmt.Errorf("blocklog: decompress block %d (dict %d): %w", blockNum, attr.DictionaryNum, err)
+		return nil, raw, fmt.Errorf("blocklog: decompress block %d (dict %d): %w", blockNum, attr.DictionaryNum, err)
 	}
-	return out, nil
+	return out, raw, nil
 }
 
 // RawBlockBytes returns the on-disk bytes for blockNum WITHOUT decompressing

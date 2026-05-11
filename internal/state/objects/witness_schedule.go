@@ -213,70 +213,27 @@ type witnessScheduleLazy struct {
 	dirty bool
 }
 
-// PutWitnessSchedule updates the per-Session lazy cache. Serialization
-// to the overlay is deferred to commit time via a pre-commit hook;
-// hooks that re-Put a structurally-identical schedule (the early-return
-// path in update_witness_schedule) only mutate the cache and the
-// schedule isn't re-encoded at all if no other Put fires.
+// PutWitnessSchedule writes via the typed WitnessScheduleStore. No
+// K/V Put — the previous serialize+overlay path was the second-largest
+// Session.Put alloc source (~1.84 GB / 4M blocks for once-per-block
+// schedule updates). Snapshot/Restore handled by the subsystem hooks.
 func PutWitnessSchedule(s *state.Session, w *WitnessSchedule) {
-	if s.Aux == nil {
-		s.Aux = make(map[string]any, 4)
-	}
-	cached, ok := s.Aux[witnessScheduleLazyKey].(*witnessScheduleLazy)
-	if !ok {
-		cached = &witnessScheduleLazy{val: *w}
-		s.Aux[witnessScheduleLazyKey] = cached
-	} else {
-		cached.val = *w
-	}
-	if !cached.dirty {
-		cached.dirty = true
-		s.RegisterPreCommit(func() {
-			s.SerScratch = AppendWitnessSchedule(s.SerScratch[:0], &cached.val)
-			s.Put(WitnessScheduleTable, state.PrimaryIndex, []byte{0}, s.SerScratch)
-			// Refresh the cross-Session parsed-object cache with the
-			// committed value. The next block's GetWitnessSchedule hits
-			// this cache instead of re-deserializing from backend
-			// (ReadWitnessSchedule was 721MB / 1M blocks before this
-			// fix). Safe to populate here — preCommit fires before the
-			// overlay is flushed but after the in-Session cache is the
-			// authoritative state, and on tx Restore the per-Session
-			// lazy entry is dropped via the preCommit truncation in
-			// Session.Restore (rolled-back PutWitnessSchedule callbacks
-			// no longer fire so this code never runs for them).
-			s.DatabaseAuxStore(witnessScheduleAuxKey, cached.val)
-			// Reset dirty so the NEXT block's first PutWitnessSchedule
-			// re-registers this hook. Required for batched-commit mode:
-			// SoftCommit clears s.preCommit at end of every block, so
-			// without this reset the per-Session lazy cache survives
-			// (good — Aux is preserved across SoftCommit) but no new
-			// hook ever registers, the lazy struct's writes never
-			// reach the overlay or DatabaseAux, and the next batch
-			// commit flushes a stale schedule. Witness schedule
-			// rebuilds happen every 21 blocks, so the bug surfaced as
-			// "schedule frozen at initminer" on the second rebuild.
-			cached.dirty = false
-		})
-	}
+	EnsureWitnessScheduleStore(s).Put(w)
 }
 
-// GetWitnessSchedule fetches the singleton. Within a block the per-
-// Session lazy cache returns the in-progress mutated struct; across
-// blocks the cross-Session Aux cache returns the parsed struct loaded
-// from the backend.
+// GetWitnessSchedule fetches the singleton.
 func GetWitnessSchedule(s *state.Session) (WitnessSchedule, error) {
-	if s.Aux != nil {
-		if lazy, ok := s.Aux[witnessScheduleLazyKey].(*witnessScheduleLazy); ok {
-			return lazy.val, nil
-		}
+	w, ok := EnsureWitnessScheduleStore(s).Get()
+	if !ok {
+		return WitnessSchedule{}, state.ErrNotFound
 	}
-	if !s.HasOverlayWrite(WitnessScheduleTable, state.PrimaryIndex) {
-		if cached, ok := s.DatabaseAux(witnessScheduleAuxKey); ok {
-			if w, ok := cached.(WitnessSchedule); ok {
-				return w, nil
-			}
-		}
-	}
+	return w, nil
+}
+
+// _unused_GetWitnessScheduleKV is kept as a placeholder for the prior
+// implementation so the comment-cache invariants doc below still
+// references something meaningful.
+func _unused_GetWitnessScheduleKV(s *state.Session) (WitnessSchedule, error) {
 	v, err := s.Get(WitnessScheduleTable, state.PrimaryIndex, []byte{0})
 	if err != nil {
 		return WitnessSchedule{}, err

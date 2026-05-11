@@ -34,6 +34,9 @@ import (
 // one used in consensus-critical paths). Cross-account scans (e.g.
 // removeExpiredGovernanceVotes) walk RangePrimary in name order.
 type AccountStore struct {
+	// db is consulted only for db.UndoEnabled in Put/Delete to decide
+	// whether to capture an undo snapshot.
+	db      *state.Database
 	primary map[string]*Account
 	undoLog []accountUndo
 
@@ -47,7 +50,13 @@ type AccountStore struct {
 
 type accountUndo struct {
 	name string
-	prev *Account // nil = the row didn't exist before this Put
+	// op encodes how Restore inverts the mutation:
+	//   0 = insert       → Restore: delete primary[name], freelist slot
+	//   1 = overwrite    → Restore: *slot = snap (slot stays in primary)
+	//   2 = delete       → Restore: primary[name] = slot, *slot = snap
+	op   uint8
+	slot *Account
+	snap Account
 }
 
 const accountStoreSubsystemKey = "account_store"
@@ -64,6 +73,7 @@ func EnsureAccountStore(s *state.Session) *AccountStore {
 		}
 	}
 	as := newAccountStore()
+	as.db = db
 	db.RegisterSubsystem(accountStoreSubsystemKey, as, as)
 	return as
 }
@@ -78,9 +88,13 @@ func newAccountStore() *AccountStore {
 // SnapshotPoint returns the current undo-log length.
 func (s *AccountStore) SnapshotPoint() int { return len(s.undoLog) }
 
-// RestoreToPoint replays the undo log in reverse from the back until
-// the log length equals `snap`. Reclaims displaced *Account slots
-// into freeAccount for reuse by Put.
+// RestoreToPoint replays the undo log in reverse, restoring the store
+// to the state captured at `snap`.
+//
+// Mutation/overwrite undo (hadPrev=true): copy snap back over
+// *primary[name] — preserves pointer identity.
+// Insert undo (hadPrev=false): delete the row and return its slot to
+// the freelist.
 func (s *AccountStore) RestoreToPoint(snap int) {
 	if snap < 0 {
 		snap = 0
@@ -89,31 +103,37 @@ func (s *AccountStore) RestoreToPoint(snap int) {
 		return
 	}
 	for i := len(s.undoLog) - 1; i >= snap; i-- {
-		e := s.undoLog[i]
-		if cur, ok := s.primary[e.name]; ok && cur != nil && cur != e.prev {
-			s.freeAccount = append(s.freeAccount, cur)
+		e := &s.undoLog[i]
+		switch e.op {
+		case 0: // undo insert
+			if cur, ok := s.primary[e.name]; ok {
+				s.freeAccount = append(s.freeAccount, cur)
+				delete(s.primary, e.name)
+			}
+		case 1: // undo overwrite
+			if cur, ok := s.primary[e.name]; ok {
+				*cur = e.snap
+			}
+		case 2: // undo delete
+			*e.slot = e.snap
+			s.primary[e.name] = e.slot
 		}
-		if e.prev != nil {
-			s.primary[e.name] = e.prev
-		} else {
-			delete(s.primary, e.name)
-		}
+		e.slot = nil
 	}
 	s.undoLog = s.undoLog[:snap]
 }
 
-// CommitPoint releases accumulated undo entries — called from
-// Session.Commit. Every prev pointer in the undo log becomes
-// unreachable; reclaim into freeAccount for reuse.
+// CommitPoint releases accumulated undo entries. For Delete undos
+// (op=2) the slot becomes unreachable now that the deletion is
+// permanent — recycle. For Insert/Overwrite undos the slot stays in
+// primary; nothing to free.
 func (s *AccountStore) CommitPoint() {
 	for i := range s.undoLog {
 		e := &s.undoLog[i]
-		if e.prev != nil {
-			if cur, ok := s.primary[e.name]; !ok || cur != e.prev {
-				s.freeAccount = append(s.freeAccount, e.prev)
-			}
+		if e.op == 2 && e.slot != nil {
+			s.freeAccount = append(s.freeAccount, e.slot)
 		}
-		e.prev = nil
+		e.slot = nil
 	}
 	s.undoLog = s.undoLog[:0]
 	if cap(s.freeAccount) > 4096 && len(s.freeAccount) > 4096 {
@@ -138,20 +158,22 @@ func (s *AccountStore) Get(name auth.AccountName) (Account, bool) {
 	return *a, true
 }
 
-// Put inserts or replaces the account keyed by a.Name. The caller's
-// `a` is copied — subsequent caller mutations don't affect the store.
-// The previous pointer (if any) is captured in the undo log so a
-// later RestoreToPoint can reinstate it; that means the Account
-// pointed to by the prior slot must NOT be mutated externally — it
-// becomes the canonical "before image". Use Put again to update.
-//
-// Allocation: pulls from freeAccount when available, otherwise
-// allocates a fresh struct. Refills happen at CommitPoint /
-// RestoreToPoint.
+// Put inserts or replaces the account keyed by a.Name. For an
+// overwrite, mutates the existing slot in place — preserves pointer
+// identity and avoids the per-Put alloc + double struct-copy of the
+// prior pointer-replacing implementation. For an insert, pulls a slot
+// from freeAccount or allocates fresh.
 func (s *AccountStore) Put(a *Account) {
 	name := string(a.Name)
-	prev := s.primary[name]
-	s.undoLog = append(s.undoLog, accountUndo{name: name, prev: prev})
+	if cur, ok := s.primary[name]; ok {
+		if s.db.UndoEnabled {
+			s.undoLog = append(s.undoLog, accountUndo{
+				name: name, op: 1, slot: cur, snap: *cur,
+			})
+		}
+		*cur = *a
+		return
+	}
 	var cp *Account
 	if n := len(s.freeAccount); n > 0 {
 		cp = s.freeAccount[n-1]
@@ -161,17 +183,28 @@ func (s *AccountStore) Put(a *Account) {
 	}
 	*cp = *a
 	s.primary[name] = cp
+	if s.db.UndoEnabled {
+		s.undoLog = append(s.undoLog, accountUndo{name: name, op: 0, slot: cp})
+	}
 }
 
-// Delete removes the account row for `name`. Captures the prior
-// pointer in the undo log.
+// Delete removes the account row for `name`. Captures the slot+snap
+// so Restore reinstates the row.
 func (s *AccountStore) Delete(name auth.AccountName) {
 	n := string(name)
-	prev, ok := s.primary[n]
+	cur, ok := s.primary[n]
 	if !ok {
 		return
 	}
-	s.undoLog = append(s.undoLog, accountUndo{name: n, prev: prev})
+	if s.db.UndoEnabled {
+		s.undoLog = append(s.undoLog, accountUndo{
+			name: n, op: 2, slot: cur, snap: *cur,
+		})
+	} else {
+		// Caller invoked Delete outside any savepoint — slot is no
+		// longer reachable, return it to the freelist immediately.
+		s.freeAccount = append(s.freeAccount, cur)
+	}
 	delete(s.primary, n)
 }
 

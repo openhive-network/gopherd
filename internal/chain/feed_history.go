@@ -2,7 +2,7 @@ package chain
 
 import (
 	"fmt"
-	"math/big"
+	"math/bits"
 	"os"
 	"sort"
 	"strings"
@@ -428,7 +428,14 @@ func priceLess(a, b asset.Price) bool {
 	if a.Base.Symbol.Num != b.Base.Symbol.Num {
 		return a.Base.Symbol.Num < b.Base.Symbol.Num
 	}
-	amult := new(big.Int).Mul(big.NewInt(a.Base.Amount), big.NewInt(b.Quote.Amount))
-	bmult := new(big.Int).Mul(big.NewInt(b.Base.Amount), big.NewInt(a.Quote.Amount))
-	return amult.Cmp(bmult) < 0
+	// a < b  ⇔  a.base × b.quote  <  b.base × a.quote. Use uint128 native
+	// math/bits — replaces the math/big triple-alloc that fired on every
+	// median-feed sort (call site fires for every witness's published
+	// feed on every 100-block median update, ~260 MB cum / 4M blocks).
+	aHi, aLo := bits.Mul64(uint64(a.Base.Amount), uint64(b.Quote.Amount))
+	bHi, bLo := bits.Mul64(uint64(b.Base.Amount), uint64(a.Quote.Amount))
+	if aHi != bHi {
+		return aHi < bHi
+	}
+	return aLo < bLo
 }

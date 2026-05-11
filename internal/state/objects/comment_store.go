@@ -28,20 +28,52 @@ import (
 //     the SAME pointer as primary[its-own-key].
 //   - undoLog captures pre-mutation state so RestoreToPoint reverts
 //     atomically to a savepoint.
+// commentPK is the struct key used by CommentStore's maps. Go hashes
+// the contents of both strings natively, eliminating the per-lookup
+// commentMapKey alloc that previously dominated cashout-heavy blocks
+// (~2.4 GB / 4M-block run).
+type commentPK struct {
+	author   string // auth.AccountName underlying string
+	permlink string
+}
+
+func newCommentPK(author auth.AccountName, permlink string) commentPK {
+	return commentPK{author: string(author), permlink: permlink}
+}
+
 type CommentStore struct {
-	primary map[string]*Comment
-	byRoot  map[string][]*Comment
+	// db is consulted only for db.UndoEnabled in Put/Delete to decide
+	// whether to capture an undo snapshot.
+	db      *state.Database
+	primary map[commentPK]*Comment
+	byRoot  map[commentPK][]*Comment
 	undoLog []commentUndo
+	// freeComment is a freelist of *Comment slots reclaimed at
+	// CommitPoint / RestoreToPoint when the prev pointers in undo
+	// entries become unreachable. Put pulls from here before allocating
+	// a fresh struct, eliminating the per-Put heap allocation that
+	// dominated the cashout-heavy alloc profile (~2 GB / 4M blocks).
+	freeComment []*Comment
 }
 
 type commentUndo struct {
-	key        string   // primary key
-	prev       *Comment // nil = the row didn't exist before this mutation
-	cur        *Comment // pointer that was added to byRoot[curInRoot] in the
+	key  commentPK // primary key
+	prev *Comment  // nil = the row didn't exist before this mutation
+	cur  *Comment  // pointer that was added to byRoot[curInRoot] in the
 	// post-mutation state; identity-equal removal is O(N) but
 	// avoids the per-comparison commentKey allocation.
-	prevInRoot string // root_key of `prev` (for restoring to byRoot)
-	curInRoot  string // root_key of the post-mutation row (for removing from byRoot)
+	prevInRoot    commentPK // root_key of `prev` (for restoring to byRoot)
+	curInRoot     commentPK // root_key of the post-mutation row (for removing from byRoot)
+	prevInRootHad bool      // distinguishes zero-value from absent
+	curInRootHad  bool      // distinguishes zero-value from absent
+	// inPlaceMutate=true means Put kept the slot pointer (no swap) and
+	// stamped the new value over the prev. Restore reverts via
+	// `*slot = snap`. Used when prev exists + rootKey unchanged — most
+	// vote-triggered PutComments. Replaces the freelist-pop + 256-byte
+	// struct copy + map assign + byRoot in-place swap with a single
+	// `*prev = *c`.
+	inPlaceMutate bool
+	snap          Comment // pre-mutation value when inPlaceMutate=true
 }
 
 const commentStoreSubsystemKey = "comment_store"
@@ -56,15 +88,17 @@ func EnsureCommentStore(s *state.Session) *CommentStore {
 		}
 	}
 	cs := newCommentStore()
+	cs.db = db
 	db.RegisterSubsystem(commentStoreSubsystemKey, cs, cs)
 	return cs
 }
 
 func newCommentStore() *CommentStore {
 	return &CommentStore{
-		primary: make(map[string]*Comment, 4096),
-		byRoot:  make(map[string][]*Comment, 1024),
-		undoLog: make([]commentUndo, 0, 64),
+		primary:     make(map[commentPK]*Comment, 4096),
+		byRoot:      make(map[commentPK][]*Comment, 1024),
+		undoLog:     make([]commentUndo, 0, 64),
+		freeComment: make([]*Comment, 0, 256),
 	}
 }
 
@@ -79,14 +113,29 @@ func (s *CommentStore) RestoreToPoint(snap int) {
 	}
 	for i := len(s.undoLog) - 1; i >= snap; i-- {
 		e := s.undoLog[i]
+		if e.inPlaceMutate {
+			// Fast path undo: same slot, stamp the snap back.
+			if cur, ok := s.primary[e.key]; ok {
+				*cur = e.snap
+			}
+			continue
+		}
 		// Reverse the byRoot membership change first.
-		if e.curInRoot != "" && e.cur != nil {
+		if e.curInRootHad && e.cur != nil {
 			// Mutation added e.cur with cur root — remove it.
 			s.byRootRemove(e.curInRoot, e.cur)
+			// The displaced *Comment becomes unreachable once it's
+			// out of primary AND byRoot — recycle into freelist.
+			if cur, ok := s.primary[e.key]; ok && cur == e.cur && e.prev != e.cur {
+				// primary still points to e.cur → it gets overwritten below
+				s.freeComment = append(s.freeComment, e.cur)
+			} else if !ok {
+				s.freeComment = append(s.freeComment, e.cur)
+			}
 		}
 		if e.prev != nil {
 			s.primary[e.key] = e.prev
-			if e.prevInRoot != "" {
+			if e.prevInRootHad {
 				// Restore prev into byRoot (if not already there).
 				s.byRoot[e.prevInRoot] = append(s.byRoot[e.prevInRoot], e.prev)
 			}
@@ -97,17 +146,35 @@ func (s *CommentStore) RestoreToPoint(snap int) {
 	s.undoLog = s.undoLog[:snap]
 }
 
-func (s *CommentStore) CommitPoint() { s.undoLog = s.undoLog[:0] }
+// CommitPoint releases accumulated undo entries — called from
+// Session.Commit. Every prev pointer in the undo log becomes
+// unreachable (it was displaced by a Put or removed by a Delete);
+// reclaim into freeComment for reuse.
+func (s *CommentStore) CommitPoint() {
+	for i := range s.undoLog {
+		e := &s.undoLog[i]
+		if e.prev != nil {
+			// `prev` is reachable only via this undo entry now — recycle.
+			s.freeComment = append(s.freeComment, e.prev)
+			e.prev = nil
+		}
+		e.cur = nil
+	}
+	s.undoLog = s.undoLog[:0]
+	if cap(s.freeComment) > 4096 && len(s.freeComment) > 4096 {
+		s.freeComment = s.freeComment[:4096]
+	}
+}
 
 // rootKeyOf returns the byRoot map key for a comment's RootAuthor/Permlink.
-func (s *CommentStore) rootKeyOf(c *Comment) string {
+func (s *CommentStore) rootKeyOf(c *Comment) commentPK {
 	rootAuthor := c.RootAuthor
 	rootPermlink := c.RootPermlink
 	if rootAuthor == "" {
 		rootAuthor = c.Author
 		rootPermlink = c.Permlink
 	}
-	return string(commentKey(rootAuthor, rootPermlink))
+	return newCommentPK(rootAuthor, rootPermlink)
 }
 
 // byRootRemove drops the comment whose pointer matches `target` from
@@ -116,7 +183,7 @@ func (s *CommentStore) rootKeyOf(c *Comment) string {
 // integer compare rather than per-iteration commentKey() allocation
 // + string compare. byRoot stores the SAME pointer that primary[]
 // stores for each comment, so identity is the correct predicate.
-func (s *CommentStore) byRootRemove(rootKey string, target *Comment) {
+func (s *CommentStore) byRootRemove(rootKey commentPK, target *Comment) {
 	list := s.byRoot[rootKey]
 	for i, c := range list {
 		if c == target {
@@ -135,13 +202,13 @@ func (s *CommentStore) byRootRemove(rootKey string, target *Comment) {
 
 // Has reports whether (author, permlink) has a comment row.
 func (s *CommentStore) Has(author auth.AccountName, permlink string) bool {
-	_, ok := s.primary[string(commentKey(author, permlink))]
+	_, ok := s.primary[newCommentPK(author, permlink)]
 	return ok
 }
 
 // Get returns a value-copy of the comment for (author, permlink).
 func (s *CommentStore) Get(author auth.AccountName, permlink string) (Comment, bool) {
-	c, ok := s.primary[string(commentKey(author, permlink))]
+	c, ok := s.primary[newCommentPK(author, permlink)]
 	if !ok {
 		return Comment{}, false
 	}
@@ -150,38 +217,98 @@ func (s *CommentStore) Get(author auth.AccountName, permlink string) (Comment, b
 
 // Put inserts or replaces. Updates byRoot membership: removes prev from
 // its old root list (if root changed), adds new to its current root list.
+//
+// Allocation: pulls a *Comment slot from the freelist when available
+// (refilled at CommitPoint / RestoreToPoint); otherwise allocates fresh.
 func (s *CommentStore) Put(c *Comment) {
 	if c.RootAuthor == "" {
 		c.RootAuthor = c.Author
 		c.RootPermlink = c.Permlink
 	}
-	key := string(commentKey(c.Author, c.Permlink))
+	key := newCommentPK(c.Author, c.Permlink)
 	prev := s.primary[key]
 
-	cp := *c
-	curRoot := s.rootKeyOf(&cp)
-	prevRoot := ""
+	// Fast path: modify-in-place when prev exists AND rootKey didn't
+	// change. Skips the freelist pop, the *cp = *c struct copy, the
+	// byRoot in-place pointer swap, and the primary map assign. The
+	// path captures a snap for undo when UndoEnabled — Restore replays
+	// `*slot = snap` (same shape as WitnessStore in-place mutate).
+	// This covers vote-triggered PutComments (rootKey is fixed at
+	// create-time and votes only mutate per-comment fields).
+	if prev != nil {
+		curRoot := s.rootKeyOf(c)
+		prevRoot := s.rootKeyOf(prev)
+		if curRoot == prevRoot {
+			if s.db.UndoEnabled {
+				s.undoLog = append(s.undoLog, commentUndo{
+					key:           newCommentPK(c.Author, c.Permlink),
+					inPlaceMutate: true,
+					snap:          *prev,
+				})
+			}
+			*prev = *c
+			return
+		}
+	}
+
+	var cp *Comment
+	if n := len(s.freeComment); n > 0 {
+		cp = s.freeComment[n-1]
+		s.freeComment = s.freeComment[:n-1]
+	} else {
+		cp = new(Comment)
+	}
+	*cp = *c
+	curRoot := s.rootKeyOf(cp)
+	var prevRoot commentPK
+	prevHad := false
 	if prev != nil {
 		prevRoot = s.rootKeyOf(prev)
-		// Remove the OLD pointer from byRoot[prevRoot] so we can re-add
-		// the new pointer cleanly.
-		s.byRootRemove(prevRoot, prev)
+		prevHad = true
+		if prevRoot == curRoot {
+			// In-thread overwrite (the common case for vote-triggered
+			// PutComment): swap the pointer in byRoot[curRoot] in place
+			// — saves the byRoot map mutation + the append's slice
+			// growth check, and reduces the O(N) scan to a single pass
+			// instead of one for Remove and another for Append+grow.
+			list := s.byRoot[curRoot]
+			for i := range list {
+				if list[i] == prev {
+					list[i] = cp
+					break
+				}
+			}
+		} else {
+			// Cross-thread move (rare): traditional Remove + Add.
+			s.byRootRemove(prevRoot, prev)
+			s.byRoot[curRoot] = append(s.byRoot[curRoot], cp)
+		}
+	} else {
+		s.byRoot[curRoot] = append(s.byRoot[curRoot], cp)
 	}
-	s.byRoot[curRoot] = append(s.byRoot[curRoot], &cp)
-	s.primary[key] = &cp
+	s.primary[key] = cp
 
-	s.undoLog = append(s.undoLog, commentUndo{
-		key:        key,
-		prev:       prev,
-		cur:        &cp,
-		prevInRoot: prevRoot,
-		curInRoot:  curRoot,
-	})
+	if s.db.UndoEnabled {
+		s.undoLog = append(s.undoLog, commentUndo{
+			key:           key,
+			prev:          prev,
+			cur:           cp,
+			prevInRoot:    prevRoot,
+			curInRoot:     curRoot,
+			prevInRootHad: prevHad,
+			curInRootHad:  true,
+		})
+	} else if prev != nil {
+		// Without undo, the displaced prev pointer is unreachable —
+		// recycle it immediately into the freelist (Save the alloc that
+		// CommitPoint would otherwise do).
+		s.freeComment = append(s.freeComment, prev)
+	}
 }
 
 // Delete removes (author, permlink). Captures undo state.
 func (s *CommentStore) Delete(author auth.AccountName, permlink string) {
-	key := string(commentKey(author, permlink))
+	key := newCommentPK(author, permlink)
 	prev, ok := s.primary[key]
 	if !ok {
 		return
@@ -189,13 +316,18 @@ func (s *CommentStore) Delete(author auth.AccountName, permlink string) {
 	prevRoot := s.rootKeyOf(prev)
 	s.byRootRemove(prevRoot, prev)
 	delete(s.primary, key)
-	s.undoLog = append(s.undoLog, commentUndo{
-		key:        key,
-		prev:       prev,
-		cur:        nil,
-		prevInRoot: prevRoot,
-		curInRoot:  "",
-	})
+	if s.db.UndoEnabled {
+		s.undoLog = append(s.undoLog, commentUndo{
+			key:           key,
+			prev:          prev,
+			cur:           nil,
+			prevInRoot:    prevRoot,
+			prevInRootHad: true,
+		})
+	} else {
+		// No undo needed — slot is unreachable, recycle.
+		s.freeComment = append(s.freeComment, prev)
+	}
 }
 
 // RangeByRoot iterates every comment in the discussion rooted at
@@ -203,17 +335,20 @@ func (s *CommentStore) Delete(author auth.AccountName, permlink string) {
 // runs) — sorting happens once at iter time, which is amortized over
 // per-comment work in the cashout. Returning false from fn stops.
 func (s *CommentStore) RangeByRoot(rootAuthor auth.AccountName, rootPermlink string, fn func(c *Comment) (bool, error)) error {
-	rootKey := string(commentKey(rootAuthor, rootPermlink))
+	rootKey := newCommentPK(rootAuthor, rootPermlink)
 	list := s.byRoot[rootKey]
 	if len(list) == 0 {
 		return nil
 	}
-	// Sort by primary key (= alphabetical (author, permlink)) so iteration
-	// order matches the K/V backend's by-root prefix scan.
+	// Sort by (author, permlink) so iteration order matches the K/V
+	// backend's by-root prefix scan.
 	sorted := append([]*Comment(nil), list...)
 	sort.Slice(sorted, func(i, j int) bool {
-		return string(commentKey(sorted[i].Author, sorted[i].Permlink)) <
-			string(commentKey(sorted[j].Author, sorted[j].Permlink))
+		ai, aj := string(sorted[i].Author), string(sorted[j].Author)
+		if ai != aj {
+			return ai < aj
+		}
+		return sorted[i].Permlink < sorted[j].Permlink
 	})
 	for _, c := range sorted {
 		ok, err := fn(c)
@@ -230,11 +365,16 @@ func (s *CommentStore) RangeByRoot(rootAuthor auth.AccountName, rootPermlink str
 // RangePrimary iterates every comment in name-ascending order. Used by
 // HF12 cashout-fix and similar full-table sweeps.
 func (s *CommentStore) RangePrimary(fn func(c *Comment) (bool, error)) error {
-	keys := make([]string, 0, len(s.primary))
+	keys := make([]commentPK, 0, len(s.primary))
 	for k := range s.primary {
 		keys = append(keys, k)
 	}
-	sort.Strings(keys)
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].author != keys[j].author {
+			return keys[i].author < keys[j].author
+		}
+		return keys[i].permlink < keys[j].permlink
+	})
 	for _, k := range keys {
 		ok, err := fn(s.primary[k])
 		if err != nil {
@@ -254,10 +394,14 @@ var commentStoreSnapshotMagic = [4]byte{'C', 'M', 'N', 'T'}
 
 const commentStoreSnapshotVersion uint32 = 1
 
-// MarshalSnapshot serializes the primary comment map to w. Format mirrors
-// witness_store: magic | version | count | (varuint(key)|key|varuint(rec)|AppendComment(rec))*
-// Keys are the raw bytes returned by commentKey(author, permlink), emitted
-// in ascending order. byRoot is rebuilt on UnmarshalSnapshot.
+// MarshalSnapshot serializes the primary comment map to w. The
+// (author, permlink) pair is the implicit primary key — we don't need
+// to write a separate key because the record itself carries them.
+// Format:
+//
+//	magic | version | count | (varuint(rec) | AppendComment(rec))*
+//
+// Entries emitted in (author, permlink) ascending order.
 func (s *CommentStore) MarshalSnapshot(w io.Writer) error {
 	if _, err := w.Write(commentStoreSnapshotMagic[:]); err != nil {
 		return err
@@ -268,26 +412,24 @@ func (s *CommentStore) MarshalSnapshot(w io.Writer) error {
 	if _, err := w.Write(hdr[:]); err != nil {
 		return err
 	}
-	keys := make([]string, 0, len(s.primary))
+	keys := make([]commentPK, 0, len(s.primary))
 	for k := range s.primary {
 		keys = append(keys, k)
 	}
-	sort.Strings(keys)
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].author != keys[j].author {
+			return keys[i].author < keys[j].author
+		}
+		return keys[i].permlink < keys[j].permlink
+	})
 	var (
 		varBuf [binary.MaxVarintLen64]byte
 		recBuf []byte
 	)
 	for _, k := range keys {
 		cp := s.primary[k]
-		n := binary.PutUvarint(varBuf[:], uint64(len(k)))
-		if _, err := w.Write(varBuf[:n]); err != nil {
-			return err
-		}
-		if _, err := io.WriteString(w, k); err != nil {
-			return err
-		}
 		recBuf = AppendComment(recBuf[:0], cp)
-		n = binary.PutUvarint(varBuf[:], uint64(len(recBuf)))
+		n := binary.PutUvarint(varBuf[:], uint64(len(recBuf)))
 		if _, err := w.Write(varBuf[:n]); err != nil {
 			return err
 		}
@@ -318,18 +460,10 @@ func (s *CommentStore) UnmarshalSnapshot(r io.Reader) error {
 		return fmt.Errorf("comment_store: unsupported version %d", ver)
 	}
 	count := binary.LittleEndian.Uint32(hdr[4:8])
-	s.primary = make(map[string]*Comment, count)
-	s.byRoot = make(map[string][]*Comment, count/8+1)
+	s.primary = make(map[commentPK]*Comment, count)
+	s.byRoot = make(map[commentPK][]*Comment, count/8+1)
 	s.undoLog = s.undoLog[:0]
 	for i := uint32(0); i < count; i++ {
-		keyLen, err := binary.ReadUvarint(br)
-		if err != nil {
-			return fmt.Errorf("comment_store: read key len[%d]: %w", i, err)
-		}
-		keyBuf := make([]byte, keyLen)
-		if _, err := io.ReadFull(br, keyBuf); err != nil {
-			return fmt.Errorf("comment_store: read key[%d]: %w", i, err)
-		}
 		recLen, err := binary.ReadUvarint(br)
 		if err != nil {
 			return fmt.Errorf("comment_store: read rec len[%d]: %w", i, err)
@@ -343,7 +477,8 @@ func (s *CommentStore) UnmarshalSnapshot(r io.Reader) error {
 			return fmt.Errorf("comment_store: decode rec[%d]: %w", i, err)
 		}
 		cp := c
-		s.primary[string(keyBuf)] = &cp
+		key := newCommentPK(cp.Author, cp.Permlink)
+		s.primary[key] = &cp
 		// Rebuild byRoot.
 		rootKey := s.rootKeyOf(&cp)
 		s.byRoot[rootKey] = append(s.byRoot[rootKey], &cp)

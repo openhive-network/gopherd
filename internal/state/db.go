@@ -32,6 +32,19 @@ type Database struct {
 	// cycle. Lookup is cold (once per Session, then cached on the
 	// caller side), so map overhead doesn't matter.
 	subsystemReg map[string]any
+	// UndoEnabled is the chain-wide flag toggled by Session.Snapshot
+	// (true) and Session.DiscardSavepoint (false when depth reaches 0).
+	// Subsystem stores (WitnessStore, AccountStore, …) consult it on
+	// every Mutate/Put to decide whether to append an undo entry — the
+	// per-block hooks (processProducerReward, cashout, schedule rebuild)
+	// run with depth=0 and no rollback path, so the snap copy on every
+	// Mutate is dead weight there. Default false; Snapshot enables.
+	UndoEnabled bool
+	// subPointsPool is a per-Database freelist of pre-allocated subsystem-
+	// point capture slices (len(subsystems) capacity each). Session.Snapshot
+	// borrows one per tx; DiscardSavepoint/Restore returns it. Eliminates the
+	// per-tx make([]int, 0, 10) that contributed ~300 MB to a 4M-block run.
+	subPointsPool [][]int
 }
 
 // SnapshotSubsystem is implemented by typed in-memory state containers
@@ -108,6 +121,25 @@ func (d *Database) snapshotAll(out []int) []int {
 		out = append(out, s.SnapshotPoint())
 	}
 	return out
+}
+
+// borrowSubPoints returns a slice from the pool with cap ≥ len(subsystems).
+// Caller must releaseSubPoints when done.
+func (d *Database) borrowSubPoints() []int {
+	if n := len(d.subPointsPool); n > 0 {
+		buf := d.subPointsPool[n-1]
+		d.subPointsPool = d.subPointsPool[:n-1]
+		return buf[:0]
+	}
+	return make([]int, 0, len(d.subsystems))
+}
+
+// releaseSubPoints returns a slice to the pool.
+func (d *Database) releaseSubPoints(buf []int) {
+	if buf == nil || cap(buf) < len(d.subsystems) {
+		return
+	}
+	d.subPointsPool = append(d.subPointsPool, buf[:0])
 }
 
 // restoreAll rolls every subsystem back to the captured points.
@@ -225,6 +257,13 @@ func (d *Database) rawHas(physicalKey []byte) (bool, error) {
 // backend.
 func (d *Database) rawIter(lower, upper []byte) (Iter, error) {
 	return d.backend.rawIter(lower, upper)
+}
+
+// rawScan invokes fn for every backend entry in [lower, upper) without
+// materializing an iterator object. Used by Session.Range's no-overlay
+// fast path.
+func (d *Database) rawScan(lower, upper []byte, fn func(key, value []byte) (bool, error)) error {
+	return d.backend.rawScan(lower, upper, fn)
 }
 
 // rawCommit applies the overlay to the backend atomically.

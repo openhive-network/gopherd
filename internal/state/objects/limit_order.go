@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"math/big"
+	"math/bits"
 
 	"hived-go/internal/fcraw"
 	"hived-go/internal/protocol/auth"
@@ -108,34 +108,41 @@ func limitOrderByPriceKey(baseSym uint32, quoteSym uint32, baseAmount, quoteAmou
 // floor((base / quote) × 10^18), with each byte bit-flipped so byte-wise
 // lex order is the inverse of numeric order — the largest price sorts
 // first, matching hived's `composite_key_compare< std::greater<price>,
-// std::less<id> >`. Uses math/big for the 128-bit math; this is called
-// once per insert/delete on the secondary index, never in tight loops.
+// std::less<id> >`. Native uint128 math via math/bits; called from both
+// the K/V index helpers and the typed LimitOrderStore on every
+// insert/delete.
 func encodePriceDescending(base, quote int64) []byte {
 	out := make([]byte, 16)
+	encodePriceDescendingInto(out, base, quote)
+	return out
+}
+
+func encodePriceDescendingInto(out []byte, base, quote int64) {
 	if base <= 0 || quote <= 0 {
-		// Degenerate price — sort to the end (invert of zero is all 0xff).
 		for i := range out {
 			out[i] = 0xff
 		}
-		return out
+		return
 	}
-	num := new(big.Int).Mul(big.NewInt(base), big.NewInt(hivePriceFixedScale))
-	num.Quo(num, big.NewInt(quote))
-	src := num.Bytes()
-	if len(src) > 16 {
-		// Saturate at uint128_max if the truncation would overflow —
-		// happens only if base × 10^18 / quote > 2^128, which requires
-		// extreme amount mismatches we don't expect in practice.
-		for i := range out {
-			out[i] = 0
-		}
+	// num = base × 10^18, fits in uint128 since base ≤ 2^63 and
+	// 10^18 < 2^60.
+	const scale uint64 = hivePriceFixedScale
+	hi, lo := bits.Mul64(uint64(base), scale)
+	d := uint64(quote)
+	var qHi, qLo uint64
+	if hi >= d {
+		// Quotient occupies >64 bits.
+		var rem uint64
+		qHi, rem = bits.Div64(0, hi, d)
+		qLo, _ = bits.Div64(rem, lo, d)
 	} else {
-		copy(out[16-len(src):], src)
+		qLo, _ = bits.Div64(hi, lo, d)
 	}
+	binary.BigEndian.PutUint64(out[0:8], qHi)
+	binary.BigEndian.PutUint64(out[8:16], qLo)
 	for i := range out {
 		out[i] ^= 0xff
 	}
-	return out
 }
 
 // limitOrderKey is owner(16 bytes) || orderID(4 bytes BE).
@@ -213,48 +220,37 @@ func ReadLimitOrder(src []byte) (LimitOrder, error) {
 	return lo, nil
 }
 
-// PutLimitOrder stores lo and updates both secondary indices
-// (by-expiration for the per-block expirer, by-price for the matching
-// engine). The price components are immutable, so the by-price index
-// row stays valid across partial fills.
+// PutLimitOrder stores lo via the typed LimitOrderStore — no K/V Puts.
+// Price and expiration are immutable post-creation; partial fills only
+// touch ForSaleAmount, so the secondary indexes never need to rewrite.
 func PutLimitOrder(s *state.Session, lo *LimitOrder) {
-	s.Put(LimitOrderTable, state.PrimaryIndex, limitOrderKey(lo.Owner, lo.OrderID), AppendLimitOrder(nil, lo))
-	s.Put(LimitOrderTable, LimitOrderByExpirationIndex, limitOrderByExpirationKey(lo.Expiration, lo.Owner, lo.OrderID), nil)
-	s.Put(LimitOrderTable, LimitOrderByPriceIndex,
-		limitOrderByPriceKey(lo.ForSaleSymbol, lo.MinReceiveSym, lo.SellPriceBaseAmount, lo.MinReceiveAmt, lo.ID, lo.Owner, lo.OrderID), nil)
-	if lo.Expiration != 0 {
-		s.NudgeExpHint(LimitOrderTable, LimitOrderByExpirationIndex, lo.Expiration)
-	}
+	EnsureLimitOrderStore(s).Put(lo)
 }
 
 // GetLimitOrder fetches the order (owner, orderID).
 func GetLimitOrder(s *state.Session, owner auth.AccountName, orderID uint32) (LimitOrder, error) {
-	v, err := s.Get(LimitOrderTable, state.PrimaryIndex, limitOrderKey(owner, orderID))
-	if err != nil {
-		return LimitOrder{}, err
+	lo, ok := EnsureLimitOrderStore(s).Get(owner, orderID)
+	if !ok {
+		return LimitOrder{}, state.ErrNotFound
 	}
-	return ReadLimitOrder(v)
+	return lo, nil
 }
 
 // HasLimitOrder reports whether the order exists.
 func HasLimitOrder(s *state.Session, owner auth.AccountName, orderID uint32) (bool, error) {
-	return s.Has(LimitOrderTable, state.PrimaryIndex, limitOrderKey(owner, orderID))
+	return EnsureLimitOrderStore(s).Has(owner, orderID), nil
 }
 
-// DeleteLimitOrder removes the order. Caller must already know the
-// expiration to also clear the secondary entry — most call sites have
-// the order in hand and use DeleteLimitOrderFull.
+// DeleteLimitOrder removes the order from all indexes. DeleteLimitOrderFull
+// is the older API surface and remains an alias for compatibility.
 func DeleteLimitOrder(s *state.Session, owner auth.AccountName, orderID uint32) {
-	s.Delete(LimitOrderTable, state.PrimaryIndex, limitOrderKey(owner, orderID))
+	EnsureLimitOrderStore(s).Delete(owner, orderID)
 }
 
-// DeleteLimitOrderFull deletes the primary entry plus both secondary
-// index entries (by-expiration + by-price) in one shot.
+// DeleteLimitOrderFull is equivalent to DeleteLimitOrder; the typed
+// store always cleans up all indexes in one shot.
 func DeleteLimitOrderFull(s *state.Session, lo *LimitOrder) {
-	s.Delete(LimitOrderTable, state.PrimaryIndex, limitOrderKey(lo.Owner, lo.OrderID))
-	s.Delete(LimitOrderTable, LimitOrderByExpirationIndex, limitOrderByExpirationKey(lo.Expiration, lo.Owner, lo.OrderID))
-	s.Delete(LimitOrderTable, LimitOrderByPriceIndex,
-		limitOrderByPriceKey(lo.ForSaleSymbol, lo.MinReceiveSym, lo.SellPriceBaseAmount, lo.MinReceiveAmt, lo.ID, lo.Owner, lo.OrderID))
+	EnsureLimitOrderStore(s).Delete(lo.Owner, lo.OrderID)
 }
 
 // silence unused-import on encoding/binary (kept available for future

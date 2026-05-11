@@ -11,6 +11,17 @@ type backend interface {
 	rawGet(physicalKey []byte) ([]byte, error)
 	rawHas(physicalKey []byte) (bool, error)
 	rawIter(lower, upper []byte) (Iter, error)
+	// rawScan walks [lower, upper) in ascending key order, calling fn
+	// for each entry. Returning false stops the scan. fn returning an
+	// error stops the scan and the error is returned.
+	//
+	// This is an alloc-free alternative to rawIter for callers that
+	// don't need to interleave with another iterator — memBackend's
+	// implementation uses tree.Ascend (callback-driven) which never
+	// allocates an iterator stack frame, whereas rawIter allocates a
+	// btree.IterG[T] each time the bucket changes (~830 MB / 4M
+	// blocks under the Session.Range no-overlay fast path).
+	rawScan(lower, upper []byte, fn func(key, value []byte) (bool, error)) error
 	commit(overlay map[string]overlayEntry, sync bool) error
 	commitDirty(overlay map[string]overlayEntry, dirtyKeys []string, sync bool) error
 	// rangeAll calls fn(key, value) for every committed row in the

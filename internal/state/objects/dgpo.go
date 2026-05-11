@@ -345,69 +345,22 @@ func ReadDGPO(src []byte) (DynamicGlobalProperty, error) {
 	return p, nil
 }
 
-const dgpoAuxKey = "dgpo"
 
-// dgpoLazy holds the per-block parsed DGPO and a dirty flag. PutDGPO
-// mutates the cached struct in place and registers a single
-// pre-commit callback that serializes the final state once at the end
-// of the block — instead of re-serializing on every Put within the
-// block (the typical block has 5+ DGPO mutations: tx-end, schedule
-// update, fund processing, virtual supply, etc.).
-type dgpoLazy struct {
-	val   DynamicGlobalProperty
-	dirty bool
-}
-
-// PutDGPO updates the per-Session DGPO cache. The actual serialized
-// write is deferred to commit time via a pre-commit hook registered
-// on the first PutDGPO of the block.
+// PutDGPO writes the singleton via the typed DGPOStore. No K/V Put —
+// the previous serialize+overlay path was the largest residual
+// Session.Put alloc source (~1.7 GB / 4M blocks for ~5 PutDGPO calls
+// per block). Restore-on-tx-failure is handled by the subsystem's
+// Snapshot/Restore machinery (DGPOStore.RestoreToPoint).
 func PutDGPO(s *state.Session, p *DynamicGlobalProperty) {
-	// Direct write: serialize and put now. The previous lazy mechanism
-	// cached the parsed struct in s.Aux and registered a single
-	// pre-commit callback; on tx rollback the overlay reverted but the
-	// Aux cache + pre-commit hook persisted, so the hook re-fired at
-	// commit and serialized the FAILED tx's mutations into the overlay
-	// — leaking dgpo state across rolled-back txs (caught at block
-	// 5,148,657: gxt-1080-sc-0027 pow2 op rejected by hived's
-	// pow_worker assert; Go's dgpo.NumPowWitnesses ended up +1 vs the
-	// actual count of pow_worker > 0 witnesses). Direct write keeps
-	// the overlay authoritative so session.Restore reverts cleanly.
-	s.SerScratch = AppendDGPO(s.SerScratch[:0], p)
-	s.Put(DynamicGlobalPropertyTable, state.PrimaryIndex, dgpoSingletonKey, s.SerScratch)
-	if s.Aux == nil {
-		s.Aux = make(map[string]any, 4)
-	}
-	cached, ok := s.Aux[dgpoAuxKey].(*dgpoLazy)
-	if !ok {
-		cached = &dgpoLazy{val: *p}
-		s.Aux[dgpoAuxKey] = cached
-	} else {
-		cached.val = *p
-	}
+	EnsureDGPOStore(s).Put(p)
 }
 
-// GetDGPO fetches the singleton dynamic_global_property_object. The
-// parsed struct is cached per Session so repeated callers within one
-// block don't re-deserialize the row, and PutDGPO mutates the cached
-// struct in place rather than re-encoding on every write.
+// GetDGPO fetches the singleton.
 func GetDGPO(s *state.Session) (DynamicGlobalProperty, error) {
-	if s.Aux != nil {
-		if cached, ok := s.Aux[dgpoAuxKey].(*dgpoLazy); ok {
-			return cached.val, nil
-		}
+	p, ok := EnsureDGPOStore(s).Get()
+	if !ok {
+		return DynamicGlobalProperty{}, state.ErrNotFound
 	}
-	v, err := s.Get(DynamicGlobalPropertyTable, state.PrimaryIndex, dgpoSingletonKey)
-	if err != nil {
-		return DynamicGlobalProperty{}, err
-	}
-	p, err := ReadDGPO(v)
-	if err != nil {
-		return DynamicGlobalProperty{}, err
-	}
-	if s.Aux == nil {
-		s.Aux = make(map[string]any, 4)
-	}
-	s.Aux[dgpoAuxKey] = &dgpoLazy{val: p}
 	return p, nil
 }
 

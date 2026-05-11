@@ -398,8 +398,8 @@ func AdjustWitnessVotesForVoter(s *state.Session, account auth.AccountName, delt
 	if delta == 0 {
 		return
 	}
-	votes := EnsureWitnessVoteStore(s).VotesFor(account)
-	if len(votes) == 0 {
+	wvs := EnsureWitnessVoteStore(s)
+	if wvs.VotesForCount(account) == 0 {
 		return
 	}
 	dgpo, _ := GetDGPO(s)
@@ -412,21 +412,26 @@ func AdjustWitnessVotesForVoter(s *state.Session, account auth.AccountName, delt
 	ws, wsErr := GetWitnessSchedule(s)
 	wstore := EnsureWitnessStore(s)
 	currentVT := ws.CurrentVirtualTime
-	for _, witnessName := range votes {
-		// Use Mutate to skip the 256-byte Witness copy on Get + Put.
-		// Hot path — fires 30+ times per producer-reward block.
-		wstore.Mutate(witnessName, func(w *Witness) {
-			if wsErr == nil {
-				adjustWitnessVoteWith(w, delta, hf, currentVT)
-			} else {
-				// Fall back to the public path (no schedule yet).
-				// No negative clamp — C++ allows w.votes to go negative
-				// (`safe<int64_t>` only guards overflow). See
-				// applyWitnessVoteDelta.
-				w.TotalVotesVests += delta
-			}
-		})
-	}
+	// VotesForEachWitness pre-resolves the *Witness pointer from the
+	// vote cache so the inner loop skips one map lookup per witness
+	// (30+ per call × every CreateVesting × every block past HF7).
+	wvs.VotesForEachWitness(account, wstore, func(witnessName auth.AccountName, w *Witness) bool {
+		// Snap capture for tx-rollback safety + dirty-mark, then in-
+		// place mutate. Same semantics as wstore.Mutate but the
+		// caller already has *Witness.
+		if wstore.db.UndoEnabled {
+			wstore.undoLog = append(wstore.undoLog, witnessUndo{
+				owner: string(witnessName), hadPrev: true, slot: w, snap: *w,
+			})
+		}
+		if wsErr == nil {
+			adjustWitnessVoteWith(w, delta, hf, currentVT)
+		} else {
+			w.TotalVotesVests += delta
+		}
+		wstore.markDirty(w)
+		return true
+	})
 }
 
 // AdjustWitnessVote mirrors C++ database::adjust_witness_vote
@@ -513,14 +518,14 @@ func adjustWitnessVoteWith(w *Witness, delta int64, hf hardfork.Set, currentVT16
 		dp := dt.Mul64(uint64(-votes))
 		virtualPosition = virtualPosition.Sub(dp)
 	}
-	w.VirtualLastUpdate = currentVT.PackBE16()
+	currentVT.PackBE16Into(&w.VirtualLastUpdate)
 
 	// No negative clamp — C++'s adjust_witness_vote (database_witness.cpp:79)
 	// only asserts `w.votes <= total_vesting_shares` (upper bound). Allowing
 	// negatives is required so unvote+revote at pre-HF2 nets correctly
 	// instead of inflating the witness's vote total by the voter's full vest.
 	w.TotalVotesVests += delta
-	w.VirtualPosition = virtualPosition.PackBE16()
+	virtualPosition.PackBE16Into(&w.VirtualPosition)
 
 	// Lap length: HF2+ uses LAP_LENGTH2 (2^128-1); pre-HF2 uses
 	// LAP_LENGTH (2^64-1).
@@ -557,7 +562,7 @@ func adjustWitnessVoteWith(w *Witness, delta int64, hf hardfork.Set, currentVT16
 			newVST = Uint128Max
 		}
 	}
-	w.VirtualScheduledTime = newVST.PackBE16()
+	newVST.PackBE16Into(&w.VirtualScheduledTime)
 }
 
 // packBig128 returns the 16-byte big-endian uint128 representation of v.

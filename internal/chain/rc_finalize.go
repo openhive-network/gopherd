@@ -59,10 +59,14 @@ func rcSetPoolParams(s *state.Session, blockNum uint32, blockTime uint32) {
 // HF20 activates since the table is empty). The cost-recompute math is
 // driven by witness-voted dynamic_params, which are HF20+ only.
 func rcFinalizeBlock(s *state.Session, blockNum, blockTime uint32) {
-	rcHandleExpiredDelegations(s, blockTime)
 	if !hardfork.SetForBlock(blockNum).Has(hardfork.HF20) {
+		// Pre-HF20: the RC delegation expiration table is structurally
+		// empty (delegate_rc lands HF20+) so the per-block expiration
+		// sweep can't fire. Skip entirely to kill the ~210 MB cum spent
+		// in the empty Range path.
 		return
 	}
+	rcHandleExpiredDelegations(s, blockTime)
 	rcSetPoolParams(s, blockNum, blockTime)
 }
 

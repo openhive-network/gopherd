@@ -529,7 +529,7 @@ func rebuildCommentRshares(s *state.Session, magnitude int64) {
 		// withdraw_vesting at block 2,897,769.
 		objects.PutComment(s, &c)
 		if c.NetRshares > 0 {
-			total.Add(total, reward.EvaluateRewardCurveQuadratic(c.NetRshares))
+			total = total.Add(reward.EvaluateRewardCurveQuadratic(c.NetRshares))
 		}
 	}
 	if dgpoErr == nil {

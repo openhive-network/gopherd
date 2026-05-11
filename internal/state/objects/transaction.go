@@ -62,23 +62,20 @@ func ReadTransactionRecord(src []byte) (TransactionRecord, error) {
 
 // PutTransactionRecord inserts (trx_id, expiration) into the dedup
 // window. Caller is responsible for checking HasTransaction first if
-// duplicates should be rejected.
+// duplicates should be rejected. Routes through the typed
+// TransactionStore (in-memory map + by-exp btree) — no K/V overlay.
 func PutTransactionRecord(s *state.Session, r *TransactionRecord) {
-	s.Put(TransactionTable, state.PrimaryIndex, transactionKey(r.TrxID), AppendTransactionRecord(nil, r))
-	s.Put(TransactionTable, TransactionByExpirationIndex,
-		transactionByExpirationKey(r.Expiration, r.TrxID), nil)
+	EnsureTransactionStore(s).Put(r.TrxID, r.Expiration)
 }
 
 // HasTransaction reports whether trx_id is already in the window.
 func HasTransaction(s *state.Session, trxID [20]byte) (bool, error) {
-	return s.Has(TransactionTable, state.PrimaryIndex, transactionKey(trxID))
+	return EnsureTransactionStore(s).Has(trxID), nil
 }
 
 // DeleteTransactionRecord removes both index entries.
 func DeleteTransactionRecord(s *state.Session, r *TransactionRecord) {
-	s.Delete(TransactionTable, state.PrimaryIndex, transactionKey(r.TrxID))
-	s.Delete(TransactionTable, TransactionByExpirationIndex,
-		transactionByExpirationKey(r.Expiration, r.TrxID))
+	EnsureTransactionStore(s).Delete(r.TrxID)
 }
 
 // PruneExpiredTransactions drops every dedup-window entry whose
@@ -86,27 +83,5 @@ func DeleteTransactionRecord(s *state.Session, r *TransactionRecord) {
 // (database.cpp::clear_expired_transactions). Bounds the working set
 // to the rolling window (typically 1 hour).
 func PruneExpiredTransactions(s *state.Session, now uint32) {
-	type pair struct {
-		exp   uint32
-		trxID [20]byte
-	}
-	var expired []pair
-	_ = s.Range(TransactionTable, TransactionByExpirationIndex, nil,
-		func(body, _ []byte) (bool, error) {
-			if len(body) < 4+20 {
-				return true, nil
-			}
-			exp := uint32(body[0])<<24 | uint32(body[1])<<16 |
-				uint32(body[2])<<8 | uint32(body[3])
-			if exp > now {
-				return false, nil // ordered ASC; first non-expired stops the scan
-			}
-			var trxID [20]byte
-			copy(trxID[:], body[4:24])
-			expired = append(expired, pair{exp: exp, trxID: trxID})
-			return true, nil
-		})
-	for _, p := range expired {
-		DeleteTransactionRecord(s, &TransactionRecord{TrxID: p.trxID, Expiration: p.exp})
-	}
+	EnsureTransactionStore(s).PruneExpired(now)
 }

@@ -68,6 +68,31 @@ func (b *pebbleBackend) rawIter(lower, upper []byte) (Iter, error) {
 	return &pebbleIter{it: it}, nil
 }
 
+// rawScan delegates to rawIter for pebble — there's no callback-driven
+// fast path. memBackend overrides this with a btree Ascend for the
+// alloc-free hot path.
+func (b *pebbleBackend) rawScan(lower, upper []byte, fn func(key, value []byte) (bool, error)) error {
+	it, err := b.db.NewIter(&pebble.IterOptions{LowerBound: lower, UpperBound: upper})
+	if err != nil {
+		return err
+	}
+	defer it.Close()
+	for it.First(); it.Valid(); it.Next() {
+		v, err := it.ValueAndErr()
+		if err != nil {
+			return err
+		}
+		cont, ferr := fn(it.Key(), v)
+		if ferr != nil {
+			return ferr
+		}
+		if !cont {
+			return nil
+		}
+	}
+	return it.Error()
+}
+
 func (b *pebbleBackend) commitDirty(overlay map[string]overlayEntry, dirtyKeys []string, sync bool) error {
 	if len(dirtyKeys) == 0 {
 		return nil

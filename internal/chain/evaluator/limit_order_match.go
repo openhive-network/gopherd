@@ -2,12 +2,12 @@ package evaluator
 
 import (
 	"fmt"
-	"math/big"
+	"math/bits"
 	"os"
 
 	"hived-go/internal/protocol/asset"
+	"hived-go/internal/protocol/auth"
 	"hived-go/internal/protocol/hardfork"
-	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
 )
 
@@ -33,44 +33,35 @@ const liquidityRewardMinAgePostHF10 uint32 = 30 * 60
 // Returns true iff the new order was fully filled (and therefore
 // removed from state); false if any portion remained on the book.
 func applyOrder(ctx *Context, newOrder *objects.LimitOrder) bool {
-	// Snapshot opposite-side candidates from the by_price index.
-	// hived's by_price is sorted DESCENDING — encoded into our key as
-	// bit-flipped uint128 — so iterating the prefix [base=quoteSym,
-	// quote=baseSym] forward already gives us best-price-first.
-	prefix := state.AppendUint32BE(nil, newOrder.MinReceiveSym) // candidate's base = new's quote
-	prefix = state.AppendUint32BE(prefix, newOrder.ForSaleSymbol) // candidate's quote = new's base
-
+	// Iterate the opposite-side by_price index in DESC-price order via
+	// the typed LimitOrderStore. The previous K/V Range path captured
+	// every candidate's (owner, orderID) up front into a slice — 2.2 GB
+	// of cum alloc on a 4M-block run. The typed-store version iterates
+	// in-memory btrees with zero per-call alloc and breaks as soon as
+	// priceCovers() rejects.
+	store := objects.EnsureLimitOrderStore(ctx.DB)
+	base := newOrder.MinReceiveSym   // candidate's base = new's quote
+	quote := newOrder.ForSaleSymbol  // candidate's quote = new's base
 	type candidate struct {
-		owner   string
+		owner   auth.AccountName
 		orderID uint32
 	}
-	var queue []candidate
-	_ = ctx.DB.Range(objects.LimitOrderTable, objects.LimitOrderByPriceIndex, prefix,
-		func(body, _ []byte) (bool, error) {
-			// body layout:
-			//   [base_sym:4][quote_sym:4][price_inv:16][id:8]
-			//   [owner:16][orderid:4]
-			const off = 4 + 4 + 16 + 8
-			if len(body) < off+state.AccountNameKeyLen+4 {
-				return true, nil
-			}
-			ownerBytes := body[off : off+state.AccountNameKeyLen]
-			n := state.AccountNameKeyLen
-			for n > 0 && ownerBytes[n-1] == 0 {
-				n--
-			}
-			oid := uint32(body[off+state.AccountNameKeyLen])<<24 |
-				uint32(body[off+state.AccountNameKeyLen+1])<<16 |
-				uint32(body[off+state.AccountNameKeyLen+2])<<8 |
-				uint32(body[off+state.AccountNameKeyLen+3])
-			queue = append(queue, candidate{owner: string(ownerBytes[:n]), orderID: oid})
-			return true, nil
-		})
+	// We must snapshot the candidate list before mutating, because
+	// matchOrders may rewrite the by_price btree (partial fill +
+	// possible delete-and-reinsert in some edge cases). hived's
+	// match loop walks a frozen iterator for the same reason. Stack-
+	// growable slice avoids the per-candidate alloc we used to incur
+	// from the closure capturing `candidate` on each Range step.
+	queue := candidateBuf[:0]
+	_ = store.RangeByPrice(base, quote, func(lo *objects.LimitOrder) (bool, error) {
+		queue = append(queue, candidate{owner: lo.Owner, orderID: lo.OrderID})
+		return true, nil
+	})
+	candidateBuf = queue
 
-	// max_price = ~new.sell_price = (newMinReceive, quote_sym) /
-	//                              (newForSaleOriginal, base_sym).
-	// An old order is matchable iff its sell_price >= max_price. We
-	// compute that gate via cross-multiply on uint128.
+	// max_price = ~new.sell_price. An old order is matchable iff its
+	// sell_price >= max_price. We compute that gate via cross-multiply
+	// on uint128 (priceCovers).
 	for _, c := range queue {
 		old, err := objects.GetLimitOrder(ctx.DB, c.owner, c.orderID)
 		if err != nil {
@@ -93,6 +84,14 @@ func applyOrder(ctx *Context, newOrder *objects.LimitOrder) bool {
 	return false
 }
 
+// candidateBuf is a package-scoped reusable slice for the matching
+// candidate list. applyOrder is called serially from a single
+// goroutine in the replay/apply path — no need for sync.Pool.
+var candidateBuf []struct {
+	owner   auth.AccountName
+	orderID uint32
+}
+
 // priceCovers reports whether old.sell_price >= ~new.sell_price, i.e.
 // the candidate's price is still good enough for the new order.
 //
@@ -102,10 +101,18 @@ func applyOrder(ctx *Context, newOrder *objects.LimitOrder) bool {
 // (Because ~new.sell_price has base/quote swapped, the cross-mul of
 // `a >= b` becomes `a.base*b.quote_after_swap >= a.quote*b.base_after_swap`,
 // which simplifies to the form above.)
+//
+// Implementation: native uint128 compare replaces the previous math/big
+// pair-alloc — 2 GB cum across a 4M-block run (called once per matching
+// candidate). All four inputs are non-negative int64 (asset amounts);
+// bits.Mul64 yields the 128-bit product without overflow.
 func priceCovers(old, newOrder *objects.LimitOrder) bool {
-	a := mulBig(old.SellPriceBaseAmount, newOrder.SellPriceBaseAmount)
-	b := mulBig(old.MinReceiveAmt, newOrder.MinReceiveAmt)
-	return a.Cmp(b) >= 0
+	aHi, aLo := bits.Mul64(uint64(old.SellPriceBaseAmount), uint64(newOrder.SellPriceBaseAmount))
+	bHi, bLo := bits.Mul64(uint64(old.MinReceiveAmt), uint64(newOrder.MinReceiveAmt))
+	if aHi != bHi {
+		return aHi >= bHi
+	}
+	return aLo >= bLo
 }
 
 // matchOrders mirrors database::match in database_market.cpp:248.
@@ -341,11 +348,12 @@ func fillLimitOrder(ctx *Context, order *objects.LimitOrder, pays, receives int6
 	return false
 }
 
-// mulDiv returns a × b / c using math/big to avoid int64 overflow when
-// the product exceeds 2^63. Result is truncated to int64 (caller is
-// responsible for checking that the true result fits, which is always
-// the case in the matching path: the match formulas are bounded by
-// the smaller of the two for-sale amounts).
+// mulDiv returns a × b / c using uint128 native math to avoid int64
+// overflow when the product exceeds 2^63. Result is truncated to int64
+// (caller is responsible for checking that the true result fits, which
+// is always the case in the matching path: the match formulas are
+// bounded by the smaller of the two for-sale amounts). Inputs must be
+// non-negative; negative inputs cause undefined results.
 func mulDiv(a, b, c int64) int64 {
 	if c == 0 {
 		return 0
@@ -354,20 +362,15 @@ func mulDiv(a, b, c int64) int64 {
 	if -(1<<31) < a && a < (1<<31) && -(1<<31) < b && b < (1<<31) {
 		return a * b / c
 	}
-	prod := new(big.Int).Mul(big.NewInt(a), big.NewInt(b))
-	prod.Quo(prod, big.NewInt(c))
-	if !prod.IsInt64() {
+	hi, lo := bits.Mul64(uint64(a), uint64(b))
+	d := uint64(c)
+	if hi >= d {
 		// Saturate; this should never trigger for well-formed orders.
-		if prod.Sign() > 0 {
-			return 1<<63 - 1
-		}
-		return -(1 << 62)
+		return 1<<63 - 1
 	}
-	return prod.Int64()
-}
-
-// mulBig returns a × b as a math/big.Int — used by priceCovers when
-// comparing two prices via cross-multiplication without precision loss.
-func mulBig(a, b int64) *big.Int {
-	return new(big.Int).Mul(big.NewInt(a), big.NewInt(b))
+	q, _ := bits.Div64(hi, lo, d)
+	if q > 1<<63-1 {
+		return 1<<63 - 1
+	}
+	return int64(q)
 }

@@ -30,19 +30,40 @@ import (
 //     by ClearWitnessVotesForAccount-style sweeps to find a voter's
 //     full vote set).
 //   - undoLog captures pre-mutation state for snapshot rollback.
+// commentVotePK is the struct primary key for the CommentVote store —
+// Go hashes the three string fields natively, avoiding the per-lookup
+// commentVoteMapKey string-concat allocation.
+type commentVotePK struct {
+	voter    string
+	author   string
+	permlink string
+}
+
+func newCommentVotePK(voter, author auth.AccountName, permlink string) commentVotePK {
+	return commentVotePK{
+		voter:    string(voter),
+		author:   string(author),
+		permlink: permlink,
+	}
+}
+
 type CommentVoteStore struct {
-	primary   map[string]*CommentVote
-	byComment map[string][]*CommentVote
+	db        *state.Database
+	primary   map[commentVotePK]*CommentVote
+	byComment map[commentPK][]*CommentVote
 	undoLog   []commentVoteUndo
+	// freeCV recycles *CommentVote slots that became unreachable after
+	// CommitPoint/RestoreToPoint. Put pulls from here before allocating
+	// a fresh struct, eliminating the per-Put heap allocation.
+	freeCV []*CommentVote
 }
 
 type commentVoteUndo struct {
-	key  string       // primary key
-	prev *CommentVote // nil = the row didn't exist before this mutation
-	cur  *CommentVote // post-mutation pointer (nil = mutation was a Delete)
-	// commentKey of the (author, permlink) — we need this even when prev
-	// is nil since we have to know which byComment slice to undo from.
-	commentKey string
+	key  commentVotePK // primary key
+	prev *CommentVote  // nil = the row didn't exist before this mutation
+	cur  *CommentVote  // post-mutation pointer (nil = mutation was a Delete)
+	// commentKey identifies the (author, permlink) slice in byComment.
+	commentKey commentPK
 }
 
 const commentVoteStoreSubsystemKey = "comment_vote_store"
@@ -56,15 +77,17 @@ func EnsureCommentVoteStore(s *state.Session) *CommentVoteStore {
 		}
 	}
 	cs := newCommentVoteStore()
+	cs.db = db
 	db.RegisterSubsystem(commentVoteStoreSubsystemKey, cs, cs)
 	return cs
 }
 
 func newCommentVoteStore() *CommentVoteStore {
 	return &CommentVoteStore{
-		primary:   make(map[string]*CommentVote, 8192),
-		byComment: make(map[string][]*CommentVote, 1024),
+		primary:   make(map[commentVotePK]*CommentVote, 8192),
+		byComment: make(map[commentPK][]*CommentVote, 1024),
 		undoLog:   make([]commentVoteUndo, 0, 64),
+		freeCV:    make([]*CommentVote, 0, 512),
 	}
 }
 
@@ -106,13 +129,32 @@ func (s *CommentVoteStore) RestoreToPoint(snap int) {
 	s.undoLog = s.undoLog[:snap]
 }
 
-func (s *CommentVoteStore) CommitPoint() { s.undoLog = s.undoLog[:0] }
+// CommitPoint releases accumulated undo entries — every prev/cur slot
+// that became unreachable is recycled into freeCV for reuse by Put.
+func (s *CommentVoteStore) CommitPoint() {
+	for i := range s.undoLog {
+		e := &s.undoLog[i]
+		// `prev` is unreachable when the row was overwritten (cur != prev)
+		// or deleted (cur == nil). `cur` is unreachable on Delete (cur == nil)
+		// — but in that case we have nothing to recycle. The post-Put
+		// `cur` pointer remains in primary, NOT recyclable yet.
+		if e.prev != nil && e.prev != e.cur {
+			s.freeCV = append(s.freeCV, e.prev)
+		}
+		e.prev = nil
+		e.cur = nil
+	}
+	s.undoLog = s.undoLog[:0]
+	if cap(s.freeCV) > 8192 && len(s.freeCV) > 8192 {
+		s.freeCV = s.freeCV[:8192]
+	}
+}
 
 // byCommentRemove drops the entry whose pointer matches `target` from
 // byComment[commentKey]. Pointer-identity matching avoids the per-loop
 // commentVoteKey() allocation that the previous string-equality form
 // performed (~2GB of needless allocations across a 1M-block window).
-func (s *CommentVoteStore) byCommentRemove(commentKey string, target *CommentVote) {
+func (s *CommentVoteStore) byCommentRemove(commentKey commentPK, target *CommentVote) {
 	list := s.byComment[commentKey]
 	for i, cv := range list {
 		if cv == target {
@@ -130,13 +172,13 @@ func (s *CommentVoteStore) byCommentRemove(commentKey string, target *CommentVot
 
 // Has reports whether (voter, author, permlink) has a vote row.
 func (s *CommentVoteStore) Has(voter, author auth.AccountName, permlink string) bool {
-	_, ok := s.primary[string(commentVoteKey(voter, author, permlink))]
+	_, ok := s.primary[newCommentVotePK(voter, author, permlink)]
 	return ok
 }
 
 // Get returns a value-copy of the vote.
 func (s *CommentVoteStore) Get(voter, author auth.AccountName, permlink string) (CommentVote, bool) {
-	cv, ok := s.primary[string(commentVoteKey(voter, author, permlink))]
+	cv, ok := s.primary[newCommentVotePK(voter, author, permlink)]
 	if !ok {
 		return CommentVote{}, false
 	}
@@ -144,15 +186,37 @@ func (s *CommentVoteStore) Get(voter, author auth.AccountName, permlink string) 
 }
 
 // Put inserts or replaces a vote. Maintains byComment membership.
+//
+// Allocation: pulls a *CommentVote slot from the freelist when available
+// (refilled at CommitPoint); otherwise allocates fresh.
 func (s *CommentVoteStore) Put(cv *CommentVote) {
-	key := string(commentVoteKey(cv.Voter, cv.Author, cv.Permlink))
-	cKey := string(commentKey(cv.Author, cv.Permlink))
+	key := newCommentVotePK(cv.Voter, cv.Author, cv.Permlink)
 	prev := s.primary[key]
 
-	cp := *cv
+	// Fast path: modify-in-place when there's no outstanding savepoint
+	// + the row already exists. Skips the freelist pop, the byComment
+	// swap-scan, and the primary map assign. Pointer identity is
+	// preserved so byComment[cKey] continues to reference the same slot.
+	// Hot path: voteEvaluator's per-vote PutCommentVote in per-block hook
+	// context where UndoEnabled=false.
+	if prev != nil && !s.db.UndoEnabled {
+		*prev = *cv
+		return
+	}
+
+	cKey := newCommentPK(cv.Author, cv.Permlink)
+
+	var cp *CommentVote
+	if n := len(s.freeCV); n > 0 {
+		cp = s.freeCV[n-1]
+		s.freeCV = s.freeCV[:n-1]
+	} else {
+		cp = new(CommentVote)
+	}
+	*cp = *cv
 	if prev == nil {
 		// New entry — append to byComment slice.
-		s.byComment[cKey] = append(s.byComment[cKey], &cp)
+		s.byComment[cKey] = append(s.byComment[cKey], cp)
 	} else {
 		// Modification — find the prev pointer in the slice and
 		// swap to the new one. The new pointer carries the new state
@@ -160,44 +224,50 @@ func (s *CommentVoteStore) Put(cv *CommentVote) {
 		list := s.byComment[cKey]
 		for i, p := range list {
 			if p == prev {
-				list[i] = &cp
+				list[i] = cp
 				break
 			}
 		}
 	}
-	s.primary[key] = &cp
+	s.primary[key] = cp
 
-	s.undoLog = append(s.undoLog, commentVoteUndo{
-		key:        key,
-		prev:       prev,
-		cur:        &cp,
-		commentKey: cKey,
-	})
+	if s.db.UndoEnabled {
+		s.undoLog = append(s.undoLog, commentVoteUndo{
+			key:        key,
+			prev:       prev,
+			cur:        cp,
+			commentKey: cKey,
+		})
+	}
 }
 
 // Delete removes (voter, author, permlink). Captures undo state.
 func (s *CommentVoteStore) Delete(voter, author auth.AccountName, permlink string) {
-	key := string(commentVoteKey(voter, author, permlink))
+	key := newCommentVotePK(voter, author, permlink)
 	prev, ok := s.primary[key]
 	if !ok {
 		return
 	}
-	cKey := string(commentKey(author, permlink))
+	cKey := newCommentPK(author, permlink)
 	s.byCommentRemove(cKey, prev)
 	delete(s.primary, key)
-	s.undoLog = append(s.undoLog, commentVoteUndo{
-		key:        key,
-		prev:       prev,
-		cur:        nil,
-		commentKey: cKey,
-	})
+	if s.db.UndoEnabled {
+		s.undoLog = append(s.undoLog, commentVoteUndo{
+			key:        key,
+			prev:       prev,
+			cur:        nil,
+			commentKey: cKey,
+		})
+	} else {
+		s.freeCV = append(s.freeCV, prev)
+	}
 }
 
 // RangeByComment iterates every vote on (author, permlink). Order is
 // not specified — callers that need a sort do it themselves. Returning
 // false from fn stops.
 func (s *CommentVoteStore) RangeByComment(author auth.AccountName, permlink string, fn func(cv *CommentVote) (bool, error)) error {
-	cKey := string(commentKey(author, permlink))
+	cKey := newCommentPK(author, permlink)
 	list := s.byComment[cKey]
 	for _, cv := range list {
 		ok, err := fn(cv)
@@ -215,25 +285,29 @@ func (s *CommentVoteStore) RangeByComment(author auth.AccountName, permlink stri
 // by the cashout cleanup path. More efficient than RangeByComment +
 // per-vote Delete since we can drop the slice in one shot.
 func (s *CommentVoteStore) DeleteAllForComment(author auth.AccountName, permlink string) {
-	cKey := string(commentKey(author, permlink))
+	cKey := newCommentPK(author, permlink)
 	list := s.byComment[cKey]
 	for _, cv := range list {
-		key := string(commentVoteKey(cv.Voter, cv.Author, cv.Permlink))
+		key := newCommentVotePK(cv.Voter, cv.Author, cv.Permlink)
 		prev := s.primary[key]
 		delete(s.primary, key)
-		s.undoLog = append(s.undoLog, commentVoteUndo{
-			key:        key,
-			prev:       prev,
-			cur:        nil,
-			commentKey: cKey,
-		})
+		if s.db.UndoEnabled {
+			s.undoLog = append(s.undoLog, commentVoteUndo{
+				key:        key,
+				prev:       prev,
+				cur:        nil,
+				commentKey: cKey,
+			})
+		} else if prev != nil {
+			s.freeCV = append(s.freeCV, prev)
+		}
 	}
 	delete(s.byComment, cKey)
 }
 
 // CountForComment returns the number of votes on (author, permlink).
 func (s *CommentVoteStore) CountForComment(author auth.AccountName, permlink string) int {
-	return len(s.byComment[string(commentKey(author, permlink))])
+	return len(s.byComment[newCommentPK(author, permlink)])
 }
 
 var commentVoteStoreSnapshotMagic = [4]byte{'C', 'V', 'O', 'T'}
@@ -254,26 +328,27 @@ func (s *CommentVoteStore) MarshalSnapshot(w io.Writer) error {
 	if _, err := w.Write(hdr[:]); err != nil {
 		return err
 	}
-	keys := make([]string, 0, len(s.primary))
+	keys := make([]commentVotePK, 0, len(s.primary))
 	for k := range s.primary {
 		keys = append(keys, k)
 	}
-	sort.Strings(keys)
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].voter != keys[j].voter {
+			return keys[i].voter < keys[j].voter
+		}
+		if keys[i].author != keys[j].author {
+			return keys[i].author < keys[j].author
+		}
+		return keys[i].permlink < keys[j].permlink
+	})
 	var (
 		varBuf [binary.MaxVarintLen64]byte
 		recBuf []byte
 	)
 	for _, k := range keys {
 		cv := s.primary[k]
-		n := binary.PutUvarint(varBuf[:], uint64(len(k)))
-		if _, err := w.Write(varBuf[:n]); err != nil {
-			return err
-		}
-		if _, err := io.WriteString(w, k); err != nil {
-			return err
-		}
 		recBuf = AppendCommentVote(recBuf[:0], cv)
-		n = binary.PutUvarint(varBuf[:], uint64(len(recBuf)))
+		n := binary.PutUvarint(varBuf[:], uint64(len(recBuf)))
 		if _, err := w.Write(varBuf[:n]); err != nil {
 			return err
 		}
@@ -304,18 +379,10 @@ func (s *CommentVoteStore) UnmarshalSnapshot(r io.Reader) error {
 		return fmt.Errorf("comment_vote_store: unsupported version %d", ver)
 	}
 	count := binary.LittleEndian.Uint32(hdr[4:8])
-	s.primary = make(map[string]*CommentVote, count)
-	s.byComment = make(map[string][]*CommentVote, count/8+1)
+	s.primary = make(map[commentVotePK]*CommentVote, count)
+	s.byComment = make(map[commentPK][]*CommentVote, count/8+1)
 	s.undoLog = s.undoLog[:0]
 	for i := uint32(0); i < count; i++ {
-		keyLen, err := binary.ReadUvarint(br)
-		if err != nil {
-			return fmt.Errorf("comment_vote_store: read key len[%d]: %w", i, err)
-		}
-		keyBuf := make([]byte, keyLen)
-		if _, err := io.ReadFull(br, keyBuf); err != nil {
-			return fmt.Errorf("comment_vote_store: read key[%d]: %w", i, err)
-		}
 		recLen, err := binary.ReadUvarint(br)
 		if err != nil {
 			return fmt.Errorf("comment_vote_store: read rec len[%d]: %w", i, err)
@@ -329,9 +396,10 @@ func (s *CommentVoteStore) UnmarshalSnapshot(r io.Reader) error {
 			return fmt.Errorf("comment_vote_store: decode rec[%d]: %w", i, err)
 		}
 		cp := cv
-		s.primary[string(keyBuf)] = &cp
+		key := newCommentVotePK(cv.Voter, cv.Author, cv.Permlink)
+		s.primary[key] = &cp
 		// Rebuild byComment.
-		cKey := string(commentKey(cv.Author, cv.Permlink))
+		cKey := newCommentPK(cv.Author, cv.Permlink)
 		s.byComment[cKey] = append(s.byComment[cKey], &cp)
 	}
 	return nil

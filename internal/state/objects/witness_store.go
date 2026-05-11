@@ -1,6 +1,7 @@
 package objects
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -32,6 +33,10 @@ import (
 //     appends one entry capturing the prior pointer for that owner;
 //     RestoreToPoint walks in reverse and reinstates them.
 type WitnessStore struct {
+	// db is the backing Database; consulted only for db.UndoEnabled in
+	// Mutate / Put to decide whether to capture an undo snapshot.
+	db *state.Database
+
 	primary map[string]*Witness
 	byVote  *btree.BTreeG[witnessSecKey]
 	byVST   *btree.BTreeG[witnessSecKey]
@@ -59,8 +64,13 @@ type WitnessStore struct {
 	// are 5%+ of CPU, while iter-via-slice is essentially free.
 	// Both are kept in sync: an owner enters via dirtyMark, exits
 	// only via clearDirty (called by flushSecondaries).
-	dirty      map[string]struct{}
-	dirtyOrder []string
+	// dirty / dirtyOrder are keyed by *Witness (the stable slot pointer
+	// preserved across in-place Mutate). Pointer-keyed maps hash a
+	// single uint64 — kills the string-hash cost markDirty paid on
+	// every witness-vote propagation (1.07 GB of map ops at 4M / 12% of
+	// mapaccess2_faststr CPU).
+	dirty      map[*Witness]struct{}
+	dirtyOrder []*Witness
 
 	// freeWitness is a freelist of *Witness slots reclaimed at
 	// CommitPoint / RestoreToPoint. Put pulls from here before
@@ -97,17 +107,29 @@ type witnessSecondaryKey struct {
 	created uint32
 }
 
-// witnessSecKey is the secondary-index sort key. `sort` holds the
-// pre-encoded sort prefix (8 bytes for votes/pow, 16 for VST) so the
-// btree's Less is a pair of cheap string compares.
+// witnessSecKey is the secondary-index sort key. `sort` is a fixed
+// 20-byte buffer that fits all three index encodings (8 bytes for vote,
+// 12 for pow, 20 for VST+created). Using a fixed array instead of a
+// string eliminates the `string(buf[:])` heap allocation that fired on
+// every flushSecondaries Delete/Set call — ~500 MB cum across the 4M-
+// block run. Shorter encodings zero-pad the trailing bytes; that's
+// consistent across the inserts and the lookup probes so ordering
+// stays correct.
 type witnessSecKey struct {
-	sort  string
+	sort  [20]byte
 	owner string
 }
 
 type witnessUndo struct {
 	owner string
-	prev  *Witness // nil = the row didn't exist before this Put
+	// hadPrev=false means the row was a fresh insert; Restore deletes it.
+	// hadPrev=true with snap captured means the row was overwritten or
+	// mutated in place; Restore copies snap back over *primary[owner].
+	hadPrev bool
+	// slot is the *Witness in primary at mutation time. For insert-undo
+	// (hadPrev=false) Restore frees this slot back to freeWitness.
+	slot *Witness
+	snap Witness // pre-mutation value when hadPrev=true; zero when !hadPrev
 }
 
 const witnessStoreSubsystemKey = "witness_store"
@@ -124,14 +146,16 @@ func EnsureWitnessStore(s *state.Session) *WitnessStore {
 		}
 	}
 	ws := newWitnessStore()
+	ws.db = db
 	db.RegisterSubsystem(witnessStoreSubsystemKey, ws, ws)
 	return ws
 }
 
 func newWitnessStore() *WitnessStore {
 	less := func(a, b witnessSecKey) bool {
-		if a.sort != b.sort {
-			return a.sort < b.sort
+		cmp := bytes.Compare(a.sort[:], b.sort[:])
+		if cmp != 0 {
+			return cmp < 0
 		}
 		return a.owner < b.owner
 	}
@@ -142,34 +166,33 @@ func newWitnessStore() *WitnessStore {
 		byPow:      btree.NewBTreeGOptions[witnessSecKey](less, btree.Options{Degree: 16, NoLocks: true}),
 		undoLog:    make([]witnessUndo, 0, 64),
 		flushed:    make(map[string]witnessSecondaryKey, 64),
-		dirty:      make(map[string]struct{}, 32),
-		dirtyOrder: make([]string, 0, 32),
+		dirty:      make(map[*Witness]struct{}, 32),
+		dirtyOrder: make([]*Witness, 0, 32),
 	}
 }
 
-// markDirty adds owner to the dirty set, deduping via the map and
-// appending to dirtyOrder iff this is a new entry.
-func (s *WitnessStore) markDirty(owner string) {
-	if _, ok := s.dirty[owner]; ok {
+// markDirty adds w to the dirty set, deduping via the pointer-keyed
+// map and appending to dirtyOrder iff this is a new entry.
+func (s *WitnessStore) markDirty(w *Witness) {
+	if _, ok := s.dirty[w]; ok {
 		return
 	}
-	s.dirty[owner] = struct{}{}
-	s.dirtyOrder = append(s.dirtyOrder, owner)
+	s.dirty[w] = struct{}{}
+	s.dirtyOrder = append(s.dirtyOrder, w)
 }
 
 // SnapshotPoint returns the current undo-log length — passed to
 // RestoreToPoint to roll back any Puts made since.
 func (s *WitnessStore) SnapshotPoint() int { return len(s.undoLog) }
 
-// RestoreToPoint replays the undo log in reverse from the back until
-// the log length equals `snap`, returning the store to the state it
-// was in at the moment SnapshotPoint() returned `snap`. Reverted
-// owners are re-marked dirty so the next RangeBy* re-reconciles
-// secondary indexes against the restored primary state.
+// RestoreToPoint replays the undo log in reverse, restoring the store
+// to the state it was in at the moment SnapshotPoint() returned `snap`.
 //
-// On each restore step the now-unreferenced *Witness slot (the one
-// that had been the live primary but is being replaced by `e.prev`)
-// is appended to freeWitness for reuse by the next Put.
+// Mutation/overwrite undo (hadPrev=true): copy `snap` back over
+// *primary[owner] — preserves pointer identity so any held *Witness
+// references remain valid.
+// Insert undo (hadPrev=false): delete the row from primary and return
+// the slot to the freelist.
 func (s *WitnessStore) RestoreToPoint(snap int) {
 	if snap < 0 {
 		snap = 0
@@ -178,44 +201,43 @@ func (s *WitnessStore) RestoreToPoint(snap int) {
 		return
 	}
 	for i := len(s.undoLog) - 1; i >= snap; i-- {
-		e := s.undoLog[i]
-		// The current primary slot is the live struct; reclaim it
-		// before swapping in e.prev.
-		if cur, ok := s.primary[e.owner]; ok && cur != nil && cur != e.prev {
-			s.freeWitness = append(s.freeWitness, cur)
-		}
-		if e.prev != nil {
-			s.primary[e.owner] = e.prev
+		e := &s.undoLog[i]
+		if e.hadPrev {
+			if cur, ok := s.primary[e.owner]; ok {
+				*cur = e.snap
+				s.markDirty(cur)
+			}
 		} else {
-			delete(s.primary, e.owner)
+			if cur, ok := s.primary[e.owner]; ok {
+				s.freeWitness = append(s.freeWitness, cur)
+				delete(s.primary, e.owner)
+				// Slot was inserted by the rolled-back tx and is
+				// going away; if it was in the dirty set, drop it
+				// so flushSecondaries doesn't try to flush a primary-
+				// less pointer.
+				if _, wasDirty := s.dirty[cur]; wasDirty {
+					delete(s.dirty, cur)
+					// dirtyOrder isn't dedupd against this case —
+					// flushSecondaries needs to be tolerant of
+					// pointers without primary entries.
+				}
+			}
 		}
-		s.markDirty(e.owner)
+		e.slot = nil
 	}
 	s.undoLog = s.undoLog[:snap]
 }
 
 // CommitPoint releases accumulated undo entries — called from
-// Session.Commit. After this point the prior images can no longer be
-// restored, so every undo entry's `prev` *Witness becomes
-// unreachable; reclaim into freeWitness for reuse.
+// Session.Commit. Mutate/overwrite entries' snap is value-type, so
+// dropping the entry is enough. Insert entries are now permanent (the
+// slot stays in primary).
 func (s *WitnessStore) CommitPoint() {
 	for i := range s.undoLog {
-		e := &s.undoLog[i]
-		if e.prev != nil {
-			// Don't reclaim a prev that's still the live primary
-			// (no Put after the snapshot for that owner — prev
-			// equals current).
-			if cur, ok := s.primary[e.owner]; !ok || cur != e.prev {
-				s.freeWitness = append(s.freeWitness, e.prev)
-			}
-		}
-		e.prev = nil // help GC if pool overflows
+		s.undoLog[i].slot = nil
 	}
 	s.undoLog = s.undoLog[:0]
-	// Cap the freelist to keep idle memory bounded; any overflow
-	// falls to the GC. 1024 slots ≈ 256KB resident — enough to
-	// cover a 30-witness producer-reward block plus tx-snapshot
-	// churn without serializing on allocation.
+	// Cap the freelist to keep idle memory bounded.
 	if cap(s.freeWitness) > 1024 && len(s.freeWitness) > 1024 {
 		s.freeWitness = s.freeWitness[:1024]
 	}
@@ -238,37 +260,37 @@ func (s *WitnessStore) Get(owner auth.AccountName) (Witness, bool) {
 	return *w, true
 }
 
-// Mutate fetches the live *Witness for owner, calls fn to apply
-// in-place mutations, and rewires the undo + dirty bookkeeping
-// equivalent to a Get + Put pair — but without the 256-byte struct
-// copy on each side. Use this in the hot AdjustWitnessVotesForVoter
-// loop where 18% of mid-chain CPU was spent on (Get value-copy →
-// adjust → Put value-copy back).
+// Mutate fetches the live *Witness for owner and calls fn to apply
+// in-place mutations. Captures a value snapshot for undo; rolls back
+// by copying the snapshot back over the in-place pointer.
 //
-// fn receives a pointer to a FRESH *Witness (allocated/pooled) into
-// which the previous primary state has been copied; mutate it
-// freely. The previous pointer is captured in the undo log first so
-// RestoreToPoint reverts atomically.
+// Compared to Get+Put-style: this path performs ONE 700-byte struct
+// copy (into the undoLog snapshot) instead of TWO (Put copies the
+// caller's value into a fresh slot AND copies the pointer back).
+// AdjustWitnessVotesForVoter fires ~30 mutations per producer-reward
+// block, ~120M mutations / 4M-block run → halving the struct-copy
+// traffic saves ~40 GB of memmove.
 //
-// Returns false if owner has no row (and fn is not invoked).
+// Pointer identity is preserved: callers may keep *Witness aliases
+// across Mutate calls. Returns false if owner has no row.
 func (s *WitnessStore) Mutate(owner auth.AccountName, fn func(*Witness)) bool {
 	name := string(owner)
-	prev, ok := s.primary[name]
+	cur, ok := s.primary[name]
 	if !ok {
 		return false
 	}
-	s.undoLog = append(s.undoLog, witnessUndo{owner: name, prev: prev})
-	var cp *Witness
-	if n := len(s.freeWitness); n > 0 {
-		cp = s.freeWitness[n-1]
-		s.freeWitness = s.freeWitness[:n-1]
-	} else {
-		cp = new(Witness)
+	// Skip the 700-byte snap copy when no savepoint is outstanding.
+	// Per-block hooks (processProducerReward, schedule rebuild, cashout)
+	// run at depth=0 and never roll back; capturing a snapshot per
+	// witness mutation in that window was ~84 GB of memcpy across a
+	// 4M-block run.
+	if s.db.UndoEnabled {
+		s.undoLog = append(s.undoLog, witnessUndo{
+			owner: name, hadPrev: true, slot: cur, snap: *cur,
+		})
 	}
-	*cp = *prev
-	fn(cp)
-	s.primary[name] = cp
-	s.markDirty(name)
+	fn(cur)
+	s.markDirty(cur)
 	return true
 }
 
@@ -292,9 +314,19 @@ func (s *WitnessStore) Mutate(owner auth.AccountName, fn func(*Witness)) bool {
 // schedule-update loops.
 func (s *WitnessStore) Put(w *Witness) {
 	name := string(w.Owner)
-	prev := s.primary[name]
-	s.undoLog = append(s.undoLog, witnessUndo{owner: name, prev: prev})
-
+	if cur, ok := s.primary[name]; ok {
+		// Overwrite path: capture snap, mutate slot in place. Preserves
+		// pointer identity. Skip the snap when no savepoint is outstanding.
+		if s.db.UndoEnabled {
+			s.undoLog = append(s.undoLog, witnessUndo{
+				owner: name, hadPrev: true, slot: cur, snap: *cur,
+			})
+		}
+		*cur = *w
+		s.markDirty(cur)
+		return
+	}
+	// Insert path: pull from freelist or allocate fresh.
 	var cp *Witness
 	if n := len(s.freeWitness); n > 0 {
 		cp = s.freeWitness[n-1]
@@ -304,7 +336,12 @@ func (s *WitnessStore) Put(w *Witness) {
 	}
 	*cp = *w
 	s.primary[name] = cp
-	s.markDirty(name)
+	if s.db.UndoEnabled {
+		s.undoLog = append(s.undoLog, witnessUndo{
+			owner: name, hadPrev: false, slot: cp,
+		})
+	}
+	s.markDirty(cp)
 }
 
 // flushSecondaries reconciles the byVote/byVST/byPow btrees against
@@ -316,7 +353,13 @@ func (s *WitnessStore) flushSecondaries() {
 		return
 	}
 	hVote, hVST, hPow := &s.hintByVote, &s.hintByVST, &s.hintByPow
-	for _, owner := range s.dirtyOrder {
+	for _, w := range s.dirtyOrder {
+		// Skip stale entries that were dropped from the dirty set by
+		// an Insert-undo (pointer no longer in primary).
+		if _, stillDirty := s.dirty[w]; !stillDirty {
+			continue
+		}
+		owner := string(w.Owner)
 		cur := s.primary[owner]
 		old, hadOld := s.flushed[owner]
 		if cur == nil {
@@ -386,15 +429,18 @@ func virtualTimeIsZeroFlat(v [16]byte) bool {
 }
 
 // witnessByVoteSecKey encodes (votes_negated_be8, owner). votes_negated
-// puts higher-vote witnesses first under ascending byte order.
+// puts higher-vote witnesses first under ascending byte order. Remaining
+// bytes of the 20-byte sort buffer are zero (consistent across all
+// vote-index entries so byte ordering is unaffected).
 func witnessByVoteSecKey(votes int64, owner string) witnessSecKey {
 	v := uint64(votes)
 	if votes < 0 {
 		v = 0
 	}
-	var buf [8]byte
-	binary.BigEndian.PutUint64(buf[:], ^v)
-	return witnessSecKey{sort: string(buf[:]), owner: owner}
+	var k witnessSecKey
+	binary.BigEndian.PutUint64(k.sort[0:8], ^v)
+	k.owner = owner
+	return k
 }
 
 // witnessByVSTSecKey encodes (vst_be16, created_be4) — VST is already
@@ -403,20 +449,23 @@ func witnessByVoteSecKey(votes int64, owner string) witnessSecKey {
 // tie-break). Owner falls through as the secondary tiebreak only for
 // the (rare) two-witnesses-created-in-the-same-block case.
 func witnessByVSTSecKey(vst [16]byte, created uint32, owner string) witnessSecKey {
-	var buf [20]byte
-	copy(buf[:16], vst[:])
-	binary.BigEndian.PutUint32(buf[16:], created)
-	return witnessSecKey{sort: string(buf[:]), owner: owner}
+	var k witnessSecKey
+	copy(k.sort[:16], vst[:])
+	binary.BigEndian.PutUint32(k.sort[16:20], created)
+	k.owner = owner
+	return k
 }
 
 // witnessByPowSecKey encodes (pow_be8, created_be4) — pow_worker first
 // then creation block_time so ties break by witness_id (creation order),
 // mirroring hived's by_pow composite_key<pow_worker, witness_id>.
+// Trailing bytes of the 20-byte sort buffer are zero.
 func witnessByPowSecKey(pow uint64, created uint32, owner string) witnessSecKey {
-	var buf [12]byte
-	binary.BigEndian.PutUint64(buf[:8], pow)
-	binary.BigEndian.PutUint32(buf[8:], created)
-	return witnessSecKey{sort: string(buf[:]), owner: owner}
+	var k witnessSecKey
+	binary.BigEndian.PutUint64(k.sort[0:8], pow)
+	binary.BigEndian.PutUint32(k.sort[8:12], created)
+	k.owner = owner
+	return k
 }
 
 // RangePrimary calls fn for every witness in ascending owner order.
@@ -562,8 +611,8 @@ func (s *WitnessStore) UnmarshalSnapshot(r io.Reader) error {
 	s.byVST.Clear()
 	s.byPow.Clear()
 	s.flushed = make(map[string]witnessSecondaryKey, count)
-	s.dirty = make(map[string]struct{}, count)
-	s.dirtyOrder = make([]string, 0, count)
+	s.dirty = make(map[*Witness]struct{}, count)
+	s.dirtyOrder = make([]*Witness, 0, count)
 	s.undoLog = s.undoLog[:0]
 	for i := uint32(0); i < count; i++ {
 		nameLen, err := binary.ReadUvarint(br)
@@ -589,7 +638,7 @@ func (s *WitnessStore) UnmarshalSnapshot(r io.Reader) error {
 		cp := wit
 		owner := string(nameBuf)
 		s.primary[owner] = &cp
-		s.markDirty(owner)
+		s.markDirty(&cp)
 	}
 	return nil
 }
