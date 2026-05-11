@@ -45,8 +45,8 @@ func (d *Database) updateLastIrreversibleBlock(s *state.Session) {
 			d.libConfirmedBuf = append(d.libConfirmedBuf, lcb)
 			continue
 		}
-		w, err := objects.GetWitness(s, name)
-		if err != nil {
+		w, ok := objects.GetWitnessRef(s, name)
+		if !ok {
 			continue
 		}
 		d.lcbCache[string(name)] = w.LastConfirmedBlockNum
