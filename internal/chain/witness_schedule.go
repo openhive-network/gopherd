@@ -417,12 +417,12 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 	}
 	lap2U := math128.U128{Hi: ^uint64(0), Lo: ^uint64(0)}
 	for _, p := range visited {
-		w, err := objects.GetWitness(s, p.owner)
-		if err != nil {
+		wRef, ok := objects.GetWitnessRef(s, p.owner)
+		if !ok {
 			continue
 		}
-		vp1 := uint64(w.TotalVotesVests + 1)
-		if w.TotalVotesVests+1 <= 0 {
+		vp1 := uint64(wRef.TotalVotesVests + 1)
+		if wRef.TotalVotesVests+1 <= 0 {
 			vp1 = 1
 		}
 		advance := lap2U.DivU64(vp1)
@@ -431,15 +431,17 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 			resetVT = true
 			break
 		}
-		w.VirtualPosition = [16]byte{}
-		w.VirtualLastUpdate = newVTBytes
-		w.VirtualScheduledTime = [16]byte{
+		newVSTBytes := [16]byte{
 			byte(newVSTU.Hi >> 56), byte(newVSTU.Hi >> 48), byte(newVSTU.Hi >> 40), byte(newVSTU.Hi >> 32),
 			byte(newVSTU.Hi >> 24), byte(newVSTU.Hi >> 16), byte(newVSTU.Hi >> 8), byte(newVSTU.Hi),
 			byte(newVSTU.Lo >> 56), byte(newVSTU.Lo >> 48), byte(newVSTU.Lo >> 40), byte(newVSTU.Lo >> 32),
 			byte(newVSTU.Lo >> 24), byte(newVSTU.Lo >> 16), byte(newVSTU.Lo >> 8), byte(newVSTU.Lo),
 		}
-		objects.PutWitness(s, &w)
+		objects.MutateWitness(s, p.owner, func(w *objects.Witness) {
+			w.VirtualPosition = [16]byte{}
+			w.VirtualLastUpdate = newVTBytes
+			w.VirtualScheduledTime = newVSTBytes
+		})
 	}
 	if resetVT {
 		if envGhivediffReset != "" {
