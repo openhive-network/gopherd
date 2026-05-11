@@ -473,8 +473,8 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 		}
 		hfvCounts := make(map[hfvKey]uint32)
 		for _, p := range active {
-			w, err := objects.GetWitness(s, p.owner)
-			if err != nil {
+			w, ok := objects.GetWitnessRef(s, p.owner)
+			if !ok {
 				continue
 			}
 			found := false
