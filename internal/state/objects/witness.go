@@ -88,6 +88,12 @@ type Witness struct {
 	// collision and is astronomically rare. pow2 does NOT touch this
 	// field (C++ pow2_evaluator never writes last_work).
 	LastWork [32]byte
+	// dirtyEpoch is a transient (NOT serialized) tag the WitnessStore
+	// uses to dedup the per-round dirty queue. Equal to
+	// WitnessStore.dirtyEpoch ⇒ this Witness is already in dirtyOrder
+	// for the current round. Skipping a per-Mutate map.access on this
+	// hot path. See WitnessStore.markDirty / flushSecondaries.
+	dirtyEpoch uint32
 }
 
 // WitnessScheduleType mirrors witness_object::schedule_type:

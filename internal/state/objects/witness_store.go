@@ -69,8 +69,19 @@ type WitnessStore struct {
 	// single uint64 — kills the string-hash cost markDirty paid on
 	// every witness-vote propagation (1.07 GB of map ops at 4M / 12% of
 	// mapaccess2_faststr CPU).
-	dirty      map[*Witness]struct{}
+	// Dirty bookkeeping: dirtyOrder is the in-flush queue; dedup is
+	// done via a per-Witness epoch counter (Witness.dirtyEpoch ==
+	// s.dirtyEpoch ⇒ already in dirtyOrder for this round). On
+	// flushSecondaries, s.dirtyEpoch bumps so prior epoch values
+	// become "stale" without any mapclear pass.
+	//
+	// Replaces the prior pointer-keyed map (mapaccess2_fast64 +
+	// mapclear cost ~1.5s on the 4M run). Restore-undo path may
+	// re-introduce a stale dirtyEpoch (snap captures pre-mutation
+	// state including the field) — accepted, the duplicate
+	// dirtyOrder entry is idempotent for flushSecondaries.
 	dirtyOrder []*Witness
+	dirtyEpoch uint32
 
 	// freeWitness is a freelist of *Witness slots reclaimed at
 	// CommitPoint / RestoreToPoint. Put pulls from here before
@@ -173,18 +184,18 @@ func newWitnessStore() *WitnessStore {
 		byPow:      btree.NewBTreeGOptions[witnessSecKey](less, btree.Options{Degree: witnessIndexDegree, NoLocks: true}),
 		undoLog:    make([]witnessUndo, 0, 64),
 		flushed:    make(map[string]witnessSecondaryKey, 64),
-		dirty:      make(map[*Witness]struct{}, 32),
 		dirtyOrder: make([]*Witness, 0, 32),
+		dirtyEpoch: 1, // 0 reserved for "fresh slot, never marked"
 	}
 }
 
-// markDirty adds w to the dirty set, deduping via the pointer-keyed
-// map and appending to dirtyOrder iff this is a new entry.
+// markDirty adds w to the dirty set, deduping via Witness.dirtyEpoch
+// (matches current store epoch ⇒ already in dirtyOrder).
 func (s *WitnessStore) markDirty(w *Witness) {
-	if _, ok := s.dirty[w]; ok {
+	if w.dirtyEpoch == s.dirtyEpoch {
 		return
 	}
-	s.dirty[w] = struct{}{}
+	w.dirtyEpoch = s.dirtyEpoch
 	s.dirtyOrder = append(s.dirtyOrder, w)
 }
 
@@ -219,15 +230,14 @@ func (s *WitnessStore) RestoreToPoint(snap int) {
 				s.freeWitness = append(s.freeWitness, cur)
 				delete(s.primary, e.owner)
 				// Slot was inserted by the rolled-back tx and is
-				// going away; if it was in the dirty set, drop it
-				// so flushSecondaries doesn't try to flush a primary-
-				// less pointer.
-				if _, wasDirty := s.dirty[cur]; wasDirty {
-					delete(s.dirty, cur)
-					// dirtyOrder isn't dedupd against this case —
-					// flushSecondaries needs to be tolerant of
-					// pointers without primary entries.
-				}
+				// going away; dirtyOrder may still reference the
+				// pointer — flushSecondaries tolerates a missing
+				// primary entry (drops secondaries from flushed if
+				// any, no-ops otherwise). Clearing the witness's
+				// dirtyEpoch prevents a future re-mark from happening
+				// "for free" via the epoch match on the same slot
+				// when it's pulled from the freelist later.
+				cur.dirtyEpoch = 0
 			}
 		}
 		e.slot = nil
@@ -361,9 +371,14 @@ func (s *WitnessStore) flushSecondaries() {
 	}
 	hVote, hVST, hPow := &s.hintByVote, &s.hintByVST, &s.hintByPow
 	for _, w := range s.dirtyOrder {
-		// Skip stale entries that were dropped from the dirty set by
-		// an Insert-undo (pointer no longer in primary).
-		if _, stillDirty := s.dirty[w]; !stillDirty {
+		// Skip stale entries dropped by an Insert-undo
+		// (dirtyEpoch was cleared in RestoreToPoint to indicate
+		// "this pointer is no longer in primary; flush is a no-op").
+		// Note: dirtyEpoch may also legitimately differ from the
+		// current epoch if a snap-restore happened mid-round and
+		// left the field at a prior epoch — flush is still correct
+		// because we read the live state via s.primary[owner].
+		if w.dirtyEpoch != s.dirtyEpoch {
 			continue
 		}
 		owner := string(w.Owner)
@@ -422,7 +437,14 @@ func (s *WitnessStore) flushSecondaries() {
 		}
 		s.flushed[owner] = newK
 	}
-	clear(s.dirty)
+	// Bump epoch so all current dirtyEpoch tags become stale; truncate
+	// dirtyOrder. No mapclear pass needed. Reserve 0 as the "never
+	// marked" sentinel so freshly inserted Witnesses default to
+	// not-dirty even when allocated via new(Witness).
+	s.dirtyEpoch++
+	if s.dirtyEpoch == 0 {
+		s.dirtyEpoch = 1
+	}
 	s.dirtyOrder = s.dirtyOrder[:0]
 }
 
@@ -618,8 +640,8 @@ func (s *WitnessStore) UnmarshalSnapshot(r io.Reader) error {
 	s.byVST.Clear()
 	s.byPow.Clear()
 	s.flushed = make(map[string]witnessSecondaryKey, count)
-	s.dirty = make(map[*Witness]struct{}, count)
 	s.dirtyOrder = make([]*Witness, 0, count)
+	s.dirtyEpoch = 1
 	s.undoLog = s.undoLog[:0]
 	for i := uint32(0); i < count; i++ {
 		nameLen, err := binary.ReadUvarint(br)
