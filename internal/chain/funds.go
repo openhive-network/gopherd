@@ -1,6 +1,7 @@
 package chain
 
 import (
+	"hived-go/internal/protocol/auth"
 	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
@@ -177,10 +178,12 @@ func processProducerReward(s *state.Session, witnessName string, blockNum uint32
 		return
 	}
 	_ = hf
-	a, err := objects.GetAccount(s, witnessName)
-	if err != nil {
-		// Witness account hasn't been created yet — nothing to credit.
-		return
+	// Witness existence + VestingShares read — read-only, use Ref to
+	// skip the per-block Account value-copy (one of the higher-volume
+	// GetAccount paths since it fires every block).
+	witnessRef, ok := objects.GetAccountRef(s, auth.AccountName(witnessName))
+	if !ok {
+		return // Witness account hasn't been created yet — nothing to credit.
 	}
 	// hived: pay = max(virtual_supply × 7.5% / blocks_per_year, MIN).
 	// Until virtual_supply grows past ~140M HIVE the formula stays at the
@@ -207,7 +210,7 @@ func processProducerReward(s *state.Session, witnessName string, blockNum uint32
 	// races the GHIVEDIFF dump timing; instead processFunds owns the
 	// supply increment so the dump (between this and processFunds)
 	// observes pre-modify state matching C++.
-	asVests := blockNum >= startMinerVotingBlock || a.VestingShares == 0
+	asVests := blockNum >= startMinerVotingBlock || witnessRef.VestingShares == 0
 
 	if asVests {
 		// CreateVesting moves `pay` HIVE into the vesting fund, computes
@@ -216,9 +219,8 @@ func processProducerReward(s *state.Session, witnessName string, blockNum uint32
 			return
 		}
 	} else {
-		// Refresh `a` since CurrentSupply update might have happened in
-		// a different branch — but here we only need to mutate Balance.
-		a, err := objects.GetAccount(s, witnessName)
+		// Liquid-pay path: do the read-write via the regular Get/Put.
+		a, err := objects.GetAccount(s, auth.AccountName(witnessName))
 		if err != nil {
 			return
 		}
