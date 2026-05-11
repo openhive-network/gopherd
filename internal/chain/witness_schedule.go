@@ -344,8 +344,14 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 	//    Visited witnesses (whether picked or skipped) all get their
 	//    VST re-rolled to current_virtual_time + LAP_LENGTH2 / (votes+1).
 	//    On overflow, reset_virtual_schedule_time fires globally.
-	currentVT := uint128FromBytes(ws.CurrentVirtualTime)
-	newVT := new(big.Int).Set(currentVT)
+	// newVTU runs the new_virtual_time as a U128 throughout the
+	// post-HF4 path. Previously this used math/big (newVT, currentVT)
+	// which fired ~3 big.Int allocs per rebuild × 380K rebuilds in
+	// the 8M-block run, dominating math/big.nat.make's 446 MB cum.
+	newVTU := math128.U128{
+		Hi: bigEndianUint64(ws.CurrentVirtualTime[0:8]),
+		Lo: bigEndianUint64(ws.CurrentVirtualTime[8:16]),
+	}
 	visited := scratch.visited
 	wantedTotal := int(ws.MaxVotedWitnesses) + int(ws.MaxMinerWitnesses) + int(ws.MaxRunnerWitnesses)
 	if wantedTotal == 0 || wantedTotal > int(objects.MaxWitnesses) {
@@ -380,7 +386,10 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 	// equals the LAST visited's old VST. Mark eligible visits as
 	// timeshare. Mirrors C++ witness_schedule.cpp:243-260 exactly.
 	for _, p := range visited {
-		newVT.SetBytes(p.vst[:])
+		newVTU = math128.U128{
+			Hi: bigEndianUint64(p.vst[0:8]),
+			Lo: bigEndianUint64(p.vst[8:16]),
+		}
 		wRef, ok := objects.GetWitnessRef(s, p.owner)
 		if !ok {
 			continue
@@ -410,10 +419,11 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 	// newVST = newVT + advance, with overflow tracked via AddOverflow's
 	// carry bit (mirrors the bit-128 check the math/big path used).
 	resetVT := false
-	newVTBytes := uint128ToBytes(newVT)
-	newVTU := math128.U128{
-		Hi: bigEndianUint64(newVTBytes[0:8]),
-		Lo: bigEndianUint64(newVTBytes[8:16]),
+	newVTBytes := [16]byte{
+		byte(newVTU.Hi >> 56), byte(newVTU.Hi >> 48), byte(newVTU.Hi >> 40), byte(newVTU.Hi >> 32),
+		byte(newVTU.Hi >> 24), byte(newVTU.Hi >> 16), byte(newVTU.Hi >> 8), byte(newVTU.Hi),
+		byte(newVTU.Lo >> 56), byte(newVTU.Lo >> 48), byte(newVTU.Lo >> 40), byte(newVTU.Lo >> 32),
+		byte(newVTU.Lo >> 24), byte(newVTU.Lo >> 16), byte(newVTU.Lo >> 8), byte(newVTU.Lo),
 	}
 	lap2U := math128.U128{Hi: ^uint64(0), Lo: ^uint64(0)}
 	for _, p := range visited {
@@ -447,7 +457,7 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 		if envGhivediffReset != "" {
 			fmt.Fprintf(os.Stderr, "GHIVEDIFF RESET-VST block=%d\n", blockNum)
 		}
-		newVT.SetInt64(0)
+		newVTU = math128.U128{}
 		resetVirtualScheduleTime(s, ws)
 	}
 
@@ -588,7 +598,12 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 	ws.WitnessPayNormalizationFactor = ws.ElectedWeight*uint32(numElected) +
 		ws.MinerWeight*uint32(numMiner) +
 		ws.TimeshareWeight*uint32(numTimeshare)
-	ws.CurrentVirtualTime = uint128ToBytes(newVT)
+	ws.CurrentVirtualTime = [16]byte{
+		byte(newVTU.Hi >> 56), byte(newVTU.Hi >> 48), byte(newVTU.Hi >> 40), byte(newVTU.Hi >> 32),
+		byte(newVTU.Hi >> 24), byte(newVTU.Hi >> 16), byte(newVTU.Hi >> 8), byte(newVTU.Hi),
+		byte(newVTU.Lo >> 56), byte(newVTU.Lo >> 48), byte(newVTU.Lo >> 40), byte(newVTU.Lo >> 32),
+		byte(newVTU.Lo >> 24), byte(newVTU.Lo >> 16), byte(newVTU.Lo >> 8), byte(newVTU.Lo),
+	}
 	ws.NextShuffleBlockNum = blockNum + uint32(ws.NumScheduledWitnesses)
 	ws.MajorityVersion = majorityVersion
 
