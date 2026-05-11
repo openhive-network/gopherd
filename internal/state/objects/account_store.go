@@ -201,6 +201,29 @@ func (s *AccountStore) Put(a *Account) {
 	}
 }
 
+// Mutate fetches the live *Account for `name` and calls fn to apply
+// in-place mutations. Captures a value-snapshot for undo when
+// UndoEnabled; rolls back via *slot = snap.
+//
+// Returns false if the row doesn't exist. Saves the Account
+// value-copy that the regular Get+modify+Put pattern pays — for
+// the per-block hooks (UndoEnabled=false) the only cost is the
+// map lookup + the caller's mutation, with no snap capture.
+func (s *AccountStore) Mutate(name auth.AccountName, fn func(*Account)) bool {
+	n := string(name)
+	cur, ok := s.primary[n]
+	if !ok {
+		return false
+	}
+	if s.db.UndoEnabled {
+		s.undoLog = append(s.undoLog, accountUndo{
+			name: n, op: 1, slot: cur, snap: *cur,
+		})
+	}
+	fn(cur)
+	return true
+}
+
 // Delete removes the account row for `name`. Captures the slot+snap
 // so Restore reinstates the row.
 func (s *AccountStore) Delete(name auth.AccountName) {

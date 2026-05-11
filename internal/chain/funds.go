@@ -219,13 +219,11 @@ func processProducerReward(s *state.Session, witnessName string, blockNum uint32
 			return
 		}
 	} else {
-		// Liquid-pay path: do the read-write via the regular Get/Put.
-		a, err := objects.GetAccount(s, auth.AccountName(witnessName))
-		if err != nil {
-			return
-		}
-		a.Balance += pay
-		objects.PutAccount(s, &a)
+		// Liquid-pay path: in-place mutation via MutateAccount avoids
+		// the Account value-copy on Get + the copy-back on Put.
+		objects.MutateAccount(s, auth.AccountName(witnessName), func(a *objects.Account) {
+			a.Balance += pay
+		})
 	}
 }
 

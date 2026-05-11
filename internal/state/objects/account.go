@@ -515,6 +515,14 @@ func GetAccountRef(s *state.Session, name auth.AccountName) (*Account, bool) {
 	return EnsureAccountStore(s).GetRef(name)
 }
 
+// MutateAccount applies an in-place modification to the account slot
+// for `name` via AccountStore.Mutate. Returns false if the row
+// doesn't exist. Saves the Account value-copy on read + write that
+// the Get+modify+Put pattern pays.
+func MutateAccount(s *state.Session, name auth.AccountName, fn func(*Account)) bool {
+	return EnsureAccountStore(s).Mutate(name, fn)
+}
+
 // HasAccount reports whether an account named name exists.
 func HasAccount(s *state.Session, name auth.AccountName) (bool, error) {
 	return EnsureAccountStore(s).Has(name), nil
