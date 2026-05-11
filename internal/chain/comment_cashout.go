@@ -748,8 +748,10 @@ func convertHiveToHBD(hiveAmount int64, p asset.Price) int64 {
 // pool stays unclaimed and folds back to the author (handled by the
 // caller).
 func distributeCuratorPool(s *state.Session, author, permlink string, pool int64) int64 {
-	c, cerr := objects.GetComment(s, author, permlink)
-	if cerr != nil {
+	// Read-only access: only inspecting c.TotalVoteWeight to gate +
+	// derive the denominator for the curator-share math.
+	c, ok := objects.GetCommentRef(s, author, permlink)
+	if !ok {
 		return pool
 	}
 	if c.TotalVoteWeight == 0 || pool <= 0 {
