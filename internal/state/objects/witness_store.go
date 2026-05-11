@@ -159,11 +159,18 @@ func newWitnessStore() *WitnessStore {
 		}
 		return a.owner < b.owner
 	}
+	// Degree=64: the witness secondary indices peak around ~3K entries
+	// post-PoW era. At depth = log_64(3K) ≈ 1.85, every Set/Delete
+	// traverses 2 levels max — vs depth ~3 with the previous Degree=16.
+	// The flushSecondaries hot path does ~30 paired Delete+Set ops per
+	// round; cutting tree levels by 33% maps directly to CPU since
+	// each level is a cache miss + bounds-check + binary search.
+	const witnessIndexDegree = 64
 	return &WitnessStore{
 		primary:    make(map[string]*Witness, 1024),
-		byVote:     btree.NewBTreeGOptions[witnessSecKey](less, btree.Options{Degree: 16, NoLocks: true}),
-		byVST:      btree.NewBTreeGOptions[witnessSecKey](less, btree.Options{Degree: 16, NoLocks: true}),
-		byPow:      btree.NewBTreeGOptions[witnessSecKey](less, btree.Options{Degree: 16, NoLocks: true}),
+		byVote:     btree.NewBTreeGOptions[witnessSecKey](less, btree.Options{Degree: witnessIndexDegree, NoLocks: true}),
+		byVST:      btree.NewBTreeGOptions[witnessSecKey](less, btree.Options{Degree: witnessIndexDegree, NoLocks: true}),
+		byPow:      btree.NewBTreeGOptions[witnessSecKey](less, btree.Options{Degree: witnessIndexDegree, NoLocks: true}),
 		undoLog:    make([]witnessUndo, 0, 64),
 		flushed:    make(map[string]witnessSecondaryKey, 64),
 		dirty:      make(map[*Witness]struct{}, 32),
