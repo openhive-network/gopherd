@@ -138,8 +138,10 @@ func processCommentCashouts(s *state.Session, blockTime, blockNum uint32, hooks 
 	// when multiple replies in the same thread land in `ready`.
 	paid := make(map[string]struct{}, len(*ready))
 	for _, p := range *ready {
-		c, cerr := objects.GetComment(s, p.author, p.permlink)
-		if cerr != nil {
+		// Read-only: only inspect Root* fields to find the discussion
+		// root for this comment, then walk the by-root sibling list.
+		c, ok := objects.GetCommentRef(s, p.author, p.permlink)
+		if !ok {
 			continue
 		}
 		rootAuthor := c.RootAuthor
