@@ -39,6 +39,17 @@ func (r *Reader) Reset(src []byte) { r.src = src; r.pos = 0 }
 // Pos returns the current byte offset.
 func (r *Reader) Pos() int { return r.pos }
 
+// Skip advances the cursor by n bytes without reading. Used by the
+// trusted-replay path (SkipTransactionSignatures) to step over
+// signature blobs without allocating a slice for them.
+func (r *Reader) Skip(n int) error {
+	if r.pos+n > len(r.src) {
+		return ErrUnexpectedEOF
+	}
+	r.pos += n
+	return nil
+}
+
 // Remaining returns the number of unread bytes.
 func (r *Reader) Remaining() int { return len(r.src) - r.pos }
 

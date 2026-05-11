@@ -484,7 +484,13 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	}
 	var skippedThisBlock uint64
 	for i := uint32(0); i < txCount; i++ {
-		txRes, err := tx.ReadSignedTransaction(r)
+		var txRes tx.ReadResult
+		var err error
+		if opts.SkipTransactionSignatures {
+			txRes, err = tx.ReadSignedTransactionSkipSigs(r)
+		} else {
+			txRes, err = tx.ReadSignedTransaction(r)
+		}
 		if err != nil {
 			return objects.DynamicGlobalProperty{}, fmt.Errorf("apply_block %d tx %d parse: %w", blockNum, i, err)
 		}

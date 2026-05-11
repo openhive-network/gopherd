@@ -101,6 +101,18 @@ type ReadResult struct {
 // position, returning the structured form and the byte ranges hashed by the
 // digest / merkle-digest functions.
 func ReadSignedTransaction(r *fcraw.Reader) (ReadResult, error) {
+	return readSignedTransactionImpl(r, false)
+}
+
+// ReadSignedTransactionSkipSigs is the trusted-replay variant: parses the
+// body + advances past the signatures WITHOUT allocating
+// res.SignedTx.Signatures. Saves ~1.26 GB cumulative allocs across an 8M-
+// block replay (every tx allocs a [][65]byte slice; replay never reads it).
+func ReadSignedTransactionSkipSigs(r *fcraw.Reader) (ReadResult, error) {
+	return readSignedTransactionImpl(r, true)
+}
+
+func readSignedTransactionImpl(r *fcraw.Reader, skipSigs bool) (ReadResult, error) {
 	var res ReadResult
 	res.UnsignedStart = r.Pos()
 
@@ -116,10 +128,16 @@ func ReadSignedTransaction(r *fcraw.Reader) (ReadResult, error) {
 	if err != nil {
 		return res, fmt.Errorf("tx.signatures count: %w", err)
 	}
-	res.SignedTx.Signatures = make([][SignatureSize]byte, count)
-	for i := range res.SignedTx.Signatures {
-		if err := r.ReadInto(res.SignedTx.Signatures[i][:]); err != nil {
-			return res, fmt.Errorf("tx.signatures[%d]: %w", i, err)
+	if skipSigs {
+		if err := r.Skip(int(count) * SignatureSize); err != nil {
+			return res, fmt.Errorf("tx.signatures(skip): %w", err)
+		}
+	} else {
+		res.SignedTx.Signatures = make([][SignatureSize]byte, count)
+		for i := range res.SignedTx.Signatures {
+			if err := r.ReadInto(res.SignedTx.Signatures[i][:]); err != nil {
+				return res, fmt.Errorf("tx.signatures[%d]: %w", i, err)
+			}
 		}
 	}
 	res.SignedEnd = r.Pos()
