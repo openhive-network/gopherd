@@ -313,24 +313,26 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 	// Among visited, those flagged in selectedMiners get added to active
 	// + Schedule = miner.
 	for _, p := range powCandidates {
-		w, err := objects.GetWitness(s, p.owner)
-		if err != nil {
-			continue
+		picked := selectedMiners[string(p.owner)]
+		if picked {
+			active = append(active, schedPicked{owner: p.owner, kind: objects.WitnessScheduleMiner})
 		}
-		if selectedMiners[string(p.owner)] {
-			active = append(active, schedPicked{owner: w.Owner, kind: objects.WitnessScheduleMiner})
-			w.Schedule = objects.WitnessScheduleMiner
-		}
-		if w.PowWorker != 0 {
-			w.PowWorker = 0
-			if dgpo.NumPowWitnesses > 0 {
-				dgpo.NumPowWitnesses--
-				if envGhivediffPowbump != "" {
-					fmt.Fprintf(os.Stderr, "POWDRAIN block=%d num=%d witness=%s\n", blockNum, dgpo.NumPowWitnesses, w.Owner)
+		if !objects.MutateWitness(s, p.owner, func(w *objects.Witness) {
+			if picked {
+				w.Schedule = objects.WitnessScheduleMiner
+			}
+			if w.PowWorker != 0 {
+				w.PowWorker = 0
+				if dgpo.NumPowWitnesses > 0 {
+					dgpo.NumPowWitnesses--
+					if envGhivediffPowbump != "" {
+						fmt.Fprintf(os.Stderr, "POWDRAIN block=%d num=%d witness=%s\n", blockNum, dgpo.NumPowWitnesses, w.Owner)
+					}
 				}
 			}
+		}) {
+			continue
 		}
-		objects.PutWitness(s, &w)
 	}
 
 	// 3) Fill remaining slots from by_schedule_time (timeshare).
