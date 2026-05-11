@@ -56,7 +56,12 @@ type WitnessStore struct {
 	// hold entries keyed on flushed[owner]'s (votes, vst, pow). Owners
 	// in `dirty` may have primary[owner] values that differ from
 	// flushed[owner]; flushSecondaries reconciles them.
-	flushed map[string]witnessSecondaryKey
+	// flushed tracks, per *Witness slot, the (votes, vst, pow, created)
+	// the secondary btrees are currently keyed on. Used by flush to
+	// emit Delete on the OLD key + Set on the NEW key when fields
+	// differ. Pointer-keyed (fast64 hash) — saves a string(w.Owner)
+	// conversion per lookup vs the prior string key.
+	flushed map[*Witness]witnessSecondaryKey
 	// dirty is the set of owners whose secondary entries need
 	// reconciliation. Implemented as a map for O(1) dedup but with
 	// a backing slice (dirtyOrder) for cache-friendly iteration in
@@ -183,7 +188,7 @@ func newWitnessStore() *WitnessStore {
 		byVST:      btree.NewBTreeGOptions[witnessSecKey](less, btree.Options{Degree: witnessIndexDegree, NoLocks: true}),
 		byPow:      btree.NewBTreeGOptions[witnessSecKey](less, btree.Options{Degree: witnessIndexDegree, NoLocks: true}),
 		undoLog:    make([]witnessUndo, 0, 64),
-		flushed:    make(map[string]witnessSecondaryKey, 64),
+		flushed:    make(map[*Witness]witnessSecondaryKey, 64),
 		dirtyOrder: make([]*Witness, 0, 32),
 		dirtyEpoch: 1, // 0 reserved for "fresh slot, never marked"
 	}
@@ -383,7 +388,7 @@ func (s *WitnessStore) flushSecondaries() {
 		}
 		owner := string(w.Owner)
 		cur := s.primary[owner]
-		old, hadOld := s.flushed[owner]
+		old, hadOld := s.flushed[w]
 		if cur == nil {
 			// Witness was created and then deleted/undone; drop btree
 			// entries keyed on the old snapshot if any.
@@ -395,7 +400,7 @@ func (s *WitnessStore) flushSecondaries() {
 				if old.pow != 0 {
 					s.byPow.DeleteHint(witnessByPowSecKey(old.pow, old.created, owner), hPow)
 				}
-				delete(s.flushed, owner)
+				delete(s.flushed, w)
 			}
 			continue
 		}
@@ -435,7 +440,7 @@ func (s *WitnessStore) flushSecondaries() {
 				s.byPow.SetHint(witnessByPowSecKey(newK.pow, newK.created, owner), hPow)
 			}
 		}
-		s.flushed[owner] = newK
+		s.flushed[w] = newK
 	}
 	// Bump epoch so all current dirtyEpoch tags become stale; truncate
 	// dirtyOrder. No mapclear pass needed. Reserve 0 as the "never
@@ -639,7 +644,7 @@ func (s *WitnessStore) UnmarshalSnapshot(r io.Reader) error {
 	s.byVote.Clear()
 	s.byVST.Clear()
 	s.byPow.Clear()
-	s.flushed = make(map[string]witnessSecondaryKey, count)
+	s.flushed = make(map[*Witness]witnessSecondaryKey, count)
 	s.dirtyOrder = make([]*Witness, 0, count)
 	s.dirtyEpoch = 1
 	s.undoLog = s.undoLog[:0]
