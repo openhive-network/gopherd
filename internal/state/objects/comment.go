@@ -448,6 +448,22 @@ func GetComment(s *state.Session, author auth.AccountName, permlink string) (Com
 	return c, nil
 }
 
+// GetCommentRef returns a read-only pointer to the comment slot for
+// (author, permlink). Skips the ~256-byte Comment value-copy that
+// GetComment pays. Aliases internal storage — see CommentStore.GetRef
+// for the read-only contract.
+func GetCommentRef(s *state.Session, author auth.AccountName, permlink string) (*Comment, bool) {
+	return EnsureCommentStore(s).GetRef(author, permlink)
+}
+
+// MutateComment applies in-place modifications to the comment slot at
+// (author, permlink). See CommentStore.Mutate for the constraints
+// (must not change RootAuthor / RootPermlink). Returns false if the
+// comment doesn't exist.
+func MutateComment(s *state.Session, author auth.AccountName, permlink string, fn func(*Comment)) bool {
+	return EnsureCommentStore(s).Mutate(author, permlink, fn)
+}
+
 // HasComment reports comment existence.
 func HasComment(s *state.Session, author auth.AccountName, permlink string) (bool, error) {
 	return EnsureCommentStore(s).Has(author, permlink), nil

@@ -215,6 +215,45 @@ func (s *CommentStore) Get(author auth.AccountName, permlink string) (Comment, b
 	return *c, true
 }
 
+// GetRef returns a read-only pointer to the comment slot. Caller MUST
+// NOT mutate the returned struct (use Mutate or Put). Aliases internal
+// storage. Skips the ~256-byte Comment value-copy that Get pays.
+func (s *CommentStore) GetRef(author auth.AccountName, permlink string) (*Comment, bool) {
+	c, ok := s.primary[newCommentPK(author, permlink)]
+	return c, ok
+}
+
+// Mutate fetches the live *Comment for (author, permlink) and calls fn
+// to apply in-place mutations. Captures a value-snapshot for undo when
+// UndoEnabled; rolls back via *slot = snap.
+//
+// IMPORTANT: fn MUST NOT change c.RootAuthor / c.RootPermlink — the
+// byRoot index is keyed off the root and the in-place path here
+// deliberately skips byRoot bookkeeping. Vote-evaluator's per-vote
+// modifications (NetRshares, AbsRshares, VoteRshares, VoteCount,
+// CashoutTime, WasPaid, etc.) all leave the root unchanged so this
+// constraint is satisfied. For cross-thread reparenting use Put.
+//
+// Replaces the Get (256-byte value copy) + modify + Put (in-place
+// mutate via the same slot) pattern with a single in-place mutate +
+// optional snap. Returns false if the row doesn't exist.
+func (s *CommentStore) Mutate(author auth.AccountName, permlink string, fn func(*Comment)) bool {
+	key := newCommentPK(author, permlink)
+	cur, ok := s.primary[key]
+	if !ok {
+		return false
+	}
+	if s.db.UndoEnabled {
+		s.undoLog = append(s.undoLog, commentUndo{
+			key:           key,
+			inPlaceMutate: true,
+			snap:          *cur,
+		})
+	}
+	fn(cur)
+	return true
+}
+
 // Put inserts or replaces. Updates byRoot membership: removes prev from
 // its old root list (if root changed), adds new to its current root list.
 //
