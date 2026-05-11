@@ -15,14 +15,17 @@ func makeTouch(ops ...op.Operation) TouchSet {
 }
 
 func TestPlanBatches_AllDisjoint(t *testing.T) {
+	// AccountUpdate touches the account itself only (no FundsTouched,
+	// no CommentTouched, no Witnesses) — three different accounts are
+	// pairwise disjoint.
 	touch := []TouchSet{
-		makeTouch(op.AccountWitnessVote{Account: "a", Witness: "w1"}),
-		makeTouch(op.AccountWitnessVote{Account: "b", Witness: "w2"}),
-		makeTouch(op.AccountWitnessVote{Account: "c", Witness: "w3"}),
+		makeTouch(op.AccountUpdate{Account: "a"}),
+		makeTouch(op.AccountUpdate{Account: "b"}),
+		makeTouch(op.AccountUpdate{Account: "c"}),
 	}
 	colors, numBatches := PlanBatches(touch)
 	if numBatches != 1 {
-		t.Fatalf("3 disjoint witness votes should batch into 1; got %d batches", numBatches)
+		t.Fatalf("3 disjoint account updates should batch into 1; got %d batches", numBatches)
 	}
 	for i, c := range colors {
 		if c != 0 {
@@ -48,13 +51,14 @@ func TestPlanBatches_AllConflict(t *testing.T) {
 }
 
 func TestPlanBatches_MixedConflict(t *testing.T) {
-	// tx0, tx1, tx2 are independent witness votes.
-	// tx3 transfers from "a" — conflicts with tx0.
-	// tx4 transfers from "d" — independent of all others.
+	// tx0, tx1, tx2 are independent account updates.
+	// tx3 transfers from "a" — conflicts with tx0 + FundsTouched.
+	// tx4 transfers from "d" — independent of tx0..tx2 but FundsTouched
+	// makes it conflict with tx3.
 	touch := []TouchSet{
-		makeTouch(op.AccountWitnessVote{Account: "a", Witness: "w1"}),
-		makeTouch(op.AccountWitnessVote{Account: "b", Witness: "w2"}),
-		makeTouch(op.AccountWitnessVote{Account: "c", Witness: "w3"}),
+		makeTouch(op.AccountUpdate{Account: "a"}),
+		makeTouch(op.AccountUpdate{Account: "b"}),
+		makeTouch(op.AccountUpdate{Account: "c"}),
 		makeTouch(op.Transfer{From: "a", To: "x"}),
 		makeTouch(op.Transfer{From: "d", To: "y"}),
 	}

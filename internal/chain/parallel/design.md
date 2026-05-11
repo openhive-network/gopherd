@@ -142,7 +142,67 @@ Session-shadow so the snapshot/restore semantics don't race. This
 is where the threadsafe-stores design comes back: either separate
 Sessions or a Session that internally synchronizes per goroutine.
 
-### 4. Per-block hooks remain serial
+### 4. **Pessimistic touchset is unsound for ANY mainnet block**
+
+Validated empirically 2026-05-12: wiring even the conservative
+flag-based touchset (Account-set + Witness-set + CommentTouched +
+FundsTouched, with AccountWitnessVote/Proxy and all market ops
+opted into FundsTouched) into ApplyBlock as serial-but-batched
+caused state divergence starting around block 3.4M.
+
+Symptoms:
+- "insufficient balance: clayop has 4838724 HBD, needs 4838728"
+  (off by 4 sat — points at HBD interest accrual, which depends
+  on per-balance-change timing, not just final balance)
+- "limit_order_create: insufficient balance" + "limit_order_cancel
+  not found" cascading after the first divergence
+
+Root cause: there are indirect write paths I didn't capture:
+- HBD interest accrual fires on **every** balance change and
+  depends on the time since the previous balance-change of THIS
+  account. Reordering balance-touching txs within a block
+  produces slightly different interest payments → cumulative
+  drift.
+- Cashout schedule rescheduling reads root-comment state on
+  every vote — reordering votes across same-thread comments
+  changes the weighted-average cashout time.
+- DGPO's `NextCommentID` is allocated at comment-create time;
+  the assigned IDs depend on order even when the resulting state
+  looks equivalent (downstream code keyed by ID would diverge).
+
+**Conclusion:** A pessimistic flag-based touchset CANNOT be safe
+for mainnet. Even the strictest opt-in to FundsTouched lets
+non-conflicting flag classes (AccountUpdate vs Vote vs Transfer
+with disjoint accounts) commute in ways that break HBD interest
+accounting.
+
+The right path forward is one of:
+
+a) **Optimistic / speculative execution.** Run each tx against a
+   shadow state in parallel; record exact reads + writes; after
+   all txs finish, check whether any pair has read-write or
+   write-write conflicts; if conflicts found, serially re-apply
+   the offenders. This is what database OCC systems do. Requires
+   per-goroutine session-shadows and a deterministic conflict
+   detector. Conservative for correctness (false positives just
+   cause serial fallback, never wrong state).
+
+b) **Apply-and-trace touchset extraction.** Run each tx FIRST
+   against a tracing wrapper that records every read + write key
+   it actually touched. Use the trace as the touchset for the
+   NEXT block at the same heights. Doesn't help the FIRST run.
+
+c) **Per-account serialization with worker pools.** Drop the
+   "batches" concept. Maintain a queue per account; tx_i goes
+   into the queue of every account it touches; workers process
+   queues in lockstep. Requires hashable account-only conflicts
+   (no global resources like DGPO).
+
+The pessimistic flag-based design (this commit + e50ef03)
+remains a useful *primitive* for option (c) but NOT a sufficient
+foundation on its own for safe parallel apply.
+
+### 5. Per-block hooks remain serial
 
 `processProducerReward`, `processCommentCashouts`,
 `processConversions`, `processVestingWithdrawals`,

@@ -224,22 +224,42 @@ func Extract(t *TouchSet, o op.Operation) {
 	case op.WitnessSetProperties:
 		t.Witnesses.Add(v.Owner)
 	case op.AccountWitnessVote:
-		// Voter's proxy state + the witness's vote count.
+		// Voter's proxy state + the witness's vote count. The HF2 path
+		// of applyWitnessVoteDelta calls AdjustProxiedWitnessVotes
+		// which mutates EVERY witness the voter currently votes for —
+		// not visible from the op fields alone. Mark FundsTouched so
+		// AWV serializes with any other op that touches vest /
+		// witness-vote propagation state. Loses parallelism for AWV
+		// (~rare on mainnet) but keeps correctness sound.
 		t.Accounts.Add(v.Account)
 		t.Witnesses.Add(v.Witness)
+		t.FundsTouched = true
 	case op.AccountWitnessProxy:
+		// Setting/clearing proxy walks the proxy chain and adjusts
+		// every witness vested-vote total at each level. The full
+		// touch set is determined by current state — mark
+		// FundsTouched conservatively.
 		t.Accounts.Add(v.Account)
-		// Proxy walk hits witnesses transitively — mark conservatively.
 		t.Witnesses.Add(v.Proxy)
+		t.FundsTouched = true
 	case op.FeedPublish:
 		t.Witnesses.Add(v.Publisher)
 	// ---- market ----
+	// Limit-order ops share the order book — a create by Alice may
+	// match against Bob's existing sell-side order, mutating both
+	// accounts' balances. The shared book isn't captured by the
+	// (Owner, OrderID) op fields alone, so all market ops are
+	// FundsTouched (serialize with each other + with anything else
+	// that mutates DGPO / balances).
 	case op.LimitOrderCreate:
 		t.Accounts.Add(v.Owner)
+		t.FundsTouched = true
 	case op.LimitOrderCreate2:
 		t.Accounts.Add(v.Owner)
+		t.FundsTouched = true
 	case op.LimitOrderCancel:
 		t.Accounts.Add(v.Owner)
+		t.FundsTouched = true
 	// ---- escrow ----
 	case op.EscrowApprove:
 		t.Accounts.Add(v.From)

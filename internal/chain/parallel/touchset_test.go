@@ -77,14 +77,19 @@ func TestTouchSetConflict_VotesAlwaysConflict(t *testing.T) {
 	}
 }
 
-func TestTouchSetConflict_DisjointWitnessVotes(t *testing.T) {
+func TestTouchSetConflict_WitnessVotesAlwaysConflict(t *testing.T) {
+	// Conservative: AccountWitnessVote sets FundsTouched because the
+	// HF2 path walks every witness the voter currently votes for via
+	// AdjustProxiedWitnessVotes — that transitive write set isn't
+	// captured by the (Account, Witness) op fields alone. Two AWVs by
+	// different voters + different witnesses still conflict via the
+	// FundsTouched flag to keep parallel-apply ordering sound.
 	t1 := TouchSet{}
 	Extract(&t1, op.AccountWitnessVote{Account: "alice", Witness: "w1"})
 	t2 := TouchSet{}
 	Extract(&t2, op.AccountWitnessVote{Account: "bob", Witness: "w2"})
-	// Different voters + different witnesses — no overlap.
-	if t1.ConflictsWith(&t2) {
-		t.Fatalf("disjoint witness votes should NOT conflict")
+	if !t1.ConflictsWith(&t2) {
+		t.Fatalf("AccountWitnessVote should be FundsTouched-conservative")
 	}
 }
 
