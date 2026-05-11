@@ -444,14 +444,11 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 	if !ok {
 		return fmt.Errorf("voteEvaluator: unexpected op type %T", o)
 	}
-	voterCheck, err := objects.GetAccount(ctx.DB, v.Voter)
-	if err != nil {
-		if err == state.ErrNotFound {
-			return fmt.Errorf("%w: voter=%q", ErrAccountNotFound, v.Voter)
-		}
-		return err
+	voterRef, ok := objects.GetAccountRef(ctx.DB, v.Voter)
+	if !ok {
+		return fmt.Errorf("%w: voter=%q", ErrAccountNotFound, v.Voter)
 	}
-	if !voterCheck.CanVote() {
+	if !voterRef.CanVote() {
 		return fmt.Errorf("vote: %q has declined voting rights", v.Voter)
 	}
 

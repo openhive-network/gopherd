@@ -158,6 +158,19 @@ func (s *AccountStore) Get(name auth.AccountName) (Account, bool) {
 	return *a, true
 }
 
+// GetRef returns a read-only pointer to the slot for `name`. The
+// returned pointer aliases internal storage — callers MUST treat it
+// as read-only (use AccountStore.Mutate to modify) and MUST NOT
+// retain it past the next mutation that might delete the row.
+//
+// Saves the ~hundred-byte Account struct value copy that the regular
+// Get path pays per call. Use this on read-only paths where the
+// caller only inspects fields.
+func (s *AccountStore) GetRef(name auth.AccountName) (*Account, bool) {
+	a, ok := s.primary[string(name)]
+	return a, ok
+}
+
 // Put inserts or replaces the account keyed by a.Name. For an
 // overwrite, mutates the existing slot in place — preserves pointer
 // identity and avoids the per-Put alloc + double struct-copy of the

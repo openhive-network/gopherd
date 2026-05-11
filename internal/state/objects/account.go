@@ -504,6 +504,17 @@ func GetAccount(s *state.Session, name auth.AccountName) (Account, error) {
 	return a, nil
 }
 
+// GetAccountRef returns a *read-only* pointer to the account named
+// `name` (or nil if absent). Aliases internal storage — callers must
+// not mutate the returned struct and must not retain the pointer
+// past the next Delete-on-this-name (which is currently impossible
+// for accounts in mainnet, but the rule keeps future safety). Skips
+// the ~hundred-byte Account value-copy that GetAccount pays. Use on
+// read-only paths only.
+func GetAccountRef(s *state.Session, name auth.AccountName) (*Account, bool) {
+	return EnsureAccountStore(s).GetRef(name)
+}
+
 // HasAccount reports whether an account named name exists.
 func HasAccount(s *state.Session, name auth.AccountName) (bool, error) {
 	return EnsureAccountStore(s).Has(name), nil
