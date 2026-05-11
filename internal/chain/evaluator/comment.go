@@ -937,10 +937,9 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 		if ctx.Hardforks.Has(hardfork.HF12) && root.WasPaid && root.LastPayout > 0 {
 			const hiveSecondCashoutWindow uint32 = 60 * 60 * 24 * 30
 			newCashout := root.LastPayout + hiveSecondCashoutWindow
-			if oldRootCashout != 0 && oldRootCashout != newCashout {
-				objects.DeleteCommentCashoutSchedule(ctx.DB, oldRootCashout, root.ID)
-			}
 			root.CashoutTime = newCashout
+			// PutCommentCashoutSchedule handles the by-time rebind when
+			// commentID already exists — no separate Delete needed.
 			if newCashout != oldRootCashout {
 				objects.PutCommentCashoutSchedule(ctx.DB, newCashout, root.ID, root.Author, root.Permlink)
 			}
@@ -953,7 +952,6 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 			if root.MaxCashoutTime != 0 && oldRootCashout > root.MaxCashoutTime {
 				newCashout := root.MaxCashoutTime
 				if oldRootCashout != newCashout {
-					objects.DeleteCommentCashoutSchedule(ctx.DB, oldRootCashout, root.ID)
 					root.CashoutTime = newCashout
 					objects.PutCommentCashoutSchedule(ctx.DB, newCashout, root.ID, root.Author, root.Permlink)
 				}
@@ -994,11 +992,10 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 				avgCashoutSec = uint64(root.MaxCashoutTime)
 			}
 			newCashout := uint32(avgCashoutSec)
-			// Reschedule: drop old schedule entry, insert at new time.
-			if oldRootCashout != 0 && oldRootCashout != newCashout {
-				objects.DeleteCommentCashoutSchedule(ctx.DB, oldRootCashout, root.ID)
-			}
 			root.CashoutTime = newCashout
+			// PutCommentCashoutSchedule rebinds the by-time entry when
+			// commentID already exists (it tracks the prev cashoutTime
+			// in the value record). No separate Delete needed.
 			if newCashout != 0 && newCashout != oldRootCashout {
 				objects.PutCommentCashoutSchedule(ctx.DB, newCashout, root.ID, root.Author, root.Permlink)
 			}
