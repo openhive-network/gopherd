@@ -381,17 +381,18 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 	// timeshare. Mirrors C++ witness_schedule.cpp:243-260 exactly.
 	for _, p := range visited {
 		newVT.SetBytes(p.vst[:])
-		w, err := objects.GetWitness(s, p.owner)
-		if err != nil {
+		wRef, ok := objects.GetWitnessRef(s, p.owner)
+		if !ok {
 			continue
 		}
 		// Pick as timeshare if eligible.
-		if !(hf.Has(hardfork.HF14) && w.BlockSigningKey == zero33) &&
+		if !(hf.Has(hardfork.HF14) && wRef.BlockSigningKey == zero33) &&
 			!selectedVoted[string(p.owner)] && !selectedMiners[string(p.owner)] {
 			if len(active) < wantedTotal {
-				active = append(active, schedPicked{owner: w.Owner, kind: objects.WitnessScheduleTimeshare})
-				w.Schedule = objects.WitnessScheduleTimeshare
-				objects.PutWitness(s, &w)
+				active = append(active, schedPicked{owner: p.owner, kind: objects.WitnessScheduleTimeshare})
+				objects.MutateWitness(s, p.owner, func(w *objects.Witness) {
+					w.Schedule = objects.WitnessScheduleTimeshare
+				})
 			}
 		}
 	}
