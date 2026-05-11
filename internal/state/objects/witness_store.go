@@ -282,6 +282,18 @@ func (s *WitnessStore) Get(owner auth.AccountName) (Witness, bool) {
 	return *w, true
 }
 
+// GetRef returns a *read-only* pointer to the witness slot for owner.
+// Caller must NOT mutate the returned struct (use Mutate / Put), and
+// must NOT retain the pointer past the next mutation that might
+// reallocate the slot (currently impossible — witnesses are never
+// deleted in mainnet — but the discipline keeps future safety).
+// Skips the Witness value-copy that Get pays. Use on read-only
+// fast paths.
+func (s *WitnessStore) GetRef(owner auth.AccountName) (*Witness, bool) {
+	w, ok := s.primary[string(owner)]
+	return w, ok
+}
+
 // Mutate fetches the live *Witness for owner and calls fn to apply
 // in-place mutations. Captures a value snapshot for undo; rolls back
 // by copying the snapshot back over the in-place pointer.

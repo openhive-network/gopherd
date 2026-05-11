@@ -361,6 +361,14 @@ func GetWitness(s *state.Session, owner auth.AccountName) (Witness, error) {
 	return w, nil
 }
 
+// GetWitnessRef returns a read-only pointer to the witness slot for
+// owner. Skips the ~hundreds-of-bytes Witness value-copy that
+// GetWitness pays. Aliases internal storage — see WitnessStore.GetRef
+// docs for the read-only contract.
+func GetWitnessRef(s *state.Session, owner auth.AccountName) (*Witness, bool) {
+	return EnsureWitnessStore(s).GetRef(owner)
+}
+
 // HasWitness reports whether a witness owner exists.
 func HasWitness(s *state.Session, owner auth.AccountName) (bool, error) {
 	return EnsureWitnessStore(s).Has(owner), nil

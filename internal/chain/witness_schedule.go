@@ -828,32 +828,65 @@ func updateMedianWitnessProps(s *state.Session, ws *objects.WitnessSchedule) {
 	if len(ws.CurrentShuffledWitnesses) == 0 {
 		return
 	}
-	type props struct {
-		acf  int64
-		size uint32
-		rate uint16
+	// N ≤ HIVE_MAX_WITNESSES = 21. Use three parallel arrays sorted via
+	// insertion sort (fastest for N≤21 and avoids the reflectlite.Swapper
+	// alloc that sort.Slice triggered three times per call).
+	// GetWitnessRef returns a read-only pointer — skips three ~hundred-
+	// byte Witness value copies per witness.
+	var (
+		acf  [21]int64
+		size [21]uint32
+		rate [21]uint16
+	)
+	n := 0
+	limit := int(ws.NumScheduledWitnesses)
+	if limit > len(ws.CurrentShuffledWitnesses) {
+		limit = len(ws.CurrentShuffledWitnesses)
 	}
-	all := make([]props, 0, len(ws.CurrentShuffledWitnesses))
-	for i := uint8(0); i < ws.NumScheduledWitnesses && int(i) < len(ws.CurrentShuffledWitnesses); i++ {
-		w, err := objects.GetWitness(s, ws.CurrentShuffledWitnesses[i])
-		if err != nil {
+	if limit > 21 {
+		limit = 21
+	}
+	for i := 0; i < limit; i++ {
+		w, ok := objects.GetWitnessRef(s, ws.CurrentShuffledWitnesses[i])
+		if !ok {
 			continue
 		}
-		all = append(all, props{
-			acf:  w.AccountCreationFee,
-			size: w.MaximumBlockSize,
-			rate: w.HBDInterestRate,
-		})
+		acf[n] = w.AccountCreationFee
+		size[n] = w.MaximumBlockSize
+		rate[n] = w.HBDInterestRate
+		n++
 	}
-	if len(all) == 0 {
+	if n == 0 {
 		return
 	}
-	sort.Slice(all, func(i, j int) bool { return all[i].acf < all[j].acf })
-	ws.MedianAccountCreationFee = all[len(all)/2].acf
-	sort.Slice(all, func(i, j int) bool { return all[i].size < all[j].size })
-	ws.MedianMaximumBlockSize = all[len(all)/2].size
-	sort.Slice(all, func(i, j int) bool { return all[i].rate < all[j].rate })
-	ws.MedianHBDInterestRate = all[len(all)/2].rate
+	// Insertion sort each lane independently.
+	for i := 1; i < n; i++ {
+		x := acf[i]
+		j := i
+		for ; j > 0 && acf[j-1] > x; j-- {
+			acf[j] = acf[j-1]
+		}
+		acf[j] = x
+	}
+	for i := 1; i < n; i++ {
+		x := size[i]
+		j := i
+		for ; j > 0 && size[j-1] > x; j-- {
+			size[j] = size[j-1]
+		}
+		size[j] = x
+	}
+	for i := 1; i < n; i++ {
+		x := rate[i]
+		j := i
+		for ; j > 0 && rate[j-1] > x; j-- {
+			rate[j] = rate[j-1]
+		}
+		rate[j] = x
+	}
+	ws.MedianAccountCreationFee = acf[n/2]
+	ws.MedianMaximumBlockSize = size[n/2]
+	ws.MedianHBDInterestRate = rate[n/2]
 }
 
 // decodeBE64 reads 8 big-endian bytes as a uint64.
