@@ -11,22 +11,39 @@ import (
 	"hived-go/internal/state/objects"
 )
 
+// envGhivediff is the snapshot of GHIVEDIFF at process start. Cached
+// to avoid an os.Getenv syscall (~150ns) on the every-vest hot path —
+// fires from every CreateVesting call (cashout-cascade + producer
+// reward + delegations). Production replays leave GHIVEDIFF unset.
+var (
+	envGhivediff         = os.Getenv("GHIVEDIFF")
+	envGhivediffAllVest  = os.Getenv("GHIVEDIFF_ALL_VEST")
+	envGhivediffSimpleV  = envGhivediff != "" && (envGhivediff == "1" || (!strings.ContainsRune(envGhivediff, ',') && len(envGhivediff) <= 2))
+	envGhivediffNamesV   = splitTraceNames(envGhivediff)
+)
+
+func splitTraceNames(v string) []string {
+	if v == "" || v == "1" || !strings.ContainsRune(v, ',') {
+		return nil
+	}
+	return strings.Split(v, ",")
+}
+
 // vestTraceAccount mirrors chain.traceAccount for the evaluator package
 // (which can't import chain). Comma-separated account list in GHIVEDIFF
 // names the accounts to trace; "1" or unset → default set.
 func vestTraceAccount(name string) bool {
-	v := os.Getenv("GHIVEDIFF")
-	if v == "" {
+	if envGhivediff == "" {
 		return false
 	}
-	if v == "1" || (!strings.ContainsRune(v, ',') && len(v) <= 2) {
+	if envGhivediffSimpleV {
 		switch name {
 		case "hipster", "proskynneo", "abit", "pfunk":
 			return true
 		}
 		return false
 	}
-	for _, n := range strings.Split(v, ",") {
+	for _, n := range envGhivediffNamesV {
 		if n == name {
 			return true
 		}
@@ -118,7 +135,7 @@ func createVestingImpl(s *state.Session, accountName string, hiveSatoshi int64, 
 	dgpo.TotalVestingShares += vestsAmount
 	dgpo.TotalVestingFundHive += hiveSatoshi
 	objects.PutDGPO(s, &dgpo)
-	traceAll := os.Getenv("GHIVEDIFF_ALL_VEST") != ""
+	traceAll := envGhivediffAllVest != ""
 	if vestTraceAccount(accountName) || (traceAll && dgpo.HeadBlockNumber >= 2888500 && dgpo.HeadBlockNumber <= 2910000) {
 		fmt.Fprintf(os.Stderr, "GHIVEDIFF VEST-CREATE block=%d acct=%s liquid=%d new_vests=%d after_vests=%d fund_pre=%d shares_pre=%d toReward=%v\n",
 			dgpo.HeadBlockNumber, accountName, hiveSatoshi, vestsAmount, a.VestingShares, dgpo.TotalVestingFundHive-hiveSatoshi, dgpo.TotalVestingShares-vestsAmount, toReward)
