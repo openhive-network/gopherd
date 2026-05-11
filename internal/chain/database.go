@@ -17,6 +17,7 @@ import (
 	"hived-go/internal/protocol/block"
 	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/network"
+	"hived-go/internal/protocol/op"
 	"hived-go/internal/protocol/tx"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
@@ -478,6 +479,7 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 
 	d.txReader.Reset(rawBlock[hdrLen:])
 	r := &d.txReader
+	op.ResetVoteSlab(r)
 	txCount, err := r.ReadVarUint()
 	if err != nil {
 		return objects.DynamicGlobalProperty{}, fmt.Errorf("apply_block %d tx_count: %w", blockNum, err)

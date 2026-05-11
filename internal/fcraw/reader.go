@@ -24,6 +24,11 @@ var (
 type Reader struct {
 	src []byte
 	pos int
+	// Aux is an opaque per-Reader stash for upstream packages that
+	// can't otherwise plumb a context through ReadOperation. fcraw
+	// never reads or writes it; e.g. the op package uses it to hold
+	// a Vote slab pool keyed off this Reader.
+	Aux any
 }
 
 // NewReader wraps src for reading. The Reader holds src by reference; the

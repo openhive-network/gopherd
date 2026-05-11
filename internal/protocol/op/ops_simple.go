@@ -26,8 +26,55 @@ func (o Vote) AppendFCBody(dst []byte) []byte {
 	return binary.LittleEndian.AppendUint16(dst, uint16(o.Weight))
 }
 
+// voteSlab is a per-Reader scratch pool for *Vote slots, stashed in
+// fcraw.Reader.Aux. The replay/apply path consumes votes within the
+// op loop; once ApplyBlock has dispatched a block's ops the previous
+// block's votes are dead, so the slab can be reset (n=0) and the
+// backing storage reused.
+//
+// Within a block: handouts come from buf[n], with n monotonically
+// increasing. A grow appends a new entry and leaves prior pointers
+// valid (Go's append keeps old backing alive via the Operation
+// interface that referenced &buf[i] from earlier handouts).
+//
+// sync.Pool would also work but its atomic Get/Put cost exceeded
+// new(Vote)'s 80-byte alloc cost in a prior attempt (see
+// feedback memo). The non-atomic slab here is single-goroutine
+// under chain.applyMu.
+type voteSlab struct {
+	buf []Vote
+	n   int
+}
+
+// ResetVoteSlab resets the per-Reader Vote slab to n=0, reusing the
+// existing backing storage. Called by the block-apply loop before
+// parsing each block. Safe to call when Aux is unset or holds a
+// non-voteSlab type (no-op).
+func ResetVoteSlab(r *fcraw.Reader) {
+	if s, ok := r.Aux.(*voteSlab); ok {
+		s.n = 0
+	}
+}
+
 func readVote(r *fcraw.Reader) (Operation, error) {
-	o := new(Vote)
+	var o *Vote
+	if s, ok := r.Aux.(*voteSlab); ok {
+		if s.n < len(s.buf) {
+			o = &s.buf[s.n]
+			*o = Vote{}
+			s.n++
+		} else {
+			s.buf = append(s.buf, Vote{})
+			s.n = len(s.buf)
+			o = &s.buf[s.n-1]
+		}
+	} else {
+		s := &voteSlab{buf: make([]Vote, 0, 128)}
+		r.Aux = s
+		s.buf = append(s.buf, Vote{})
+		s.n = 1
+		o = &s.buf[0]
+	}
 	var err error
 	if o.Voter, err = r.ReadString(); err != nil {
 		return nil, err

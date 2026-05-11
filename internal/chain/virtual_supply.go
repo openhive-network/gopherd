@@ -2,9 +2,10 @@ package chain
 
 import (
 	"fmt"
-	"math/big"
+	"math/bits"
 	"os"
 
+	"hived-go/internal/math128"
 	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
@@ -67,13 +68,20 @@ func updateVirtualSupply(s *state.Session, blockNum uint32) {
 		var percentHBD int64
 		if virtualSupplyForRatio > 0 {
 			hbdAsHive := convertHBDToHive(hbdSupply, fh.CurrentMedianHistory)
-			num := new(big.Int).Mul(big.NewInt(hbdAsHive), big.NewInt(10000))
+			// num = hbdAsHive × 10000 [+ virtualSupplyForRatio/2 for HF21 round-half-up]
+			// Native U128 replaces the math/big triple-alloc that fired on
+			// every block in updateVirtualSupply (~290 MB cum across an
+			// 8M run — the single biggest remaining math/big caller).
+			num := math128.Mul64Wide(uint64(hbdAsHive), 10000)
 			if hf.Has(hardfork.HF21) {
-				num.Add(num, big.NewInt(virtualSupplyForRatio/2))
+				half := uint64(virtualSupplyForRatio / 2)
+				lo, carry := bits.Add64(num.Lo, half, 0)
+				hi := num.Hi + carry
+				num = math128.U128{Hi: hi, Lo: lo}
 			}
-			num.Quo(num, big.NewInt(virtualSupplyForRatio))
-			if num.IsInt64() {
-				percentHBD = num.Int64()
+			q := num.DivU64(uint64(virtualSupplyForRatio))
+			if q.Hi == 0 && q.Lo <= 1<<63-1 {
+				percentHBD = int64(q.Lo)
 			}
 		}
 		start := int64(dgpo.HBDStartPercent)
