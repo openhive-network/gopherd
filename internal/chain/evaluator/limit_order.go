@@ -73,8 +73,11 @@ func cappedExpirationCreate2(ctx *Context, expiration uint32) uint32 {
 // env var is set, matching the format of the patched hived in
 // libraries/chain/database_market.cpp + hive_evaluator_transfer.cpp. Used
 // to side-by-side diff replay traces. Filtered to adm/abit by default.
+// Uses the cached package-level envGhivediff to avoid the per-call
+// os.Getenv syscall on the cashout-cascade hot path (CASHOUT-CURATOR /
+// CASHOUT-AUTHOR traces fire from every CreateVesting in cashout).
 func ghiveDiff(format string, args ...any) {
-	if os.Getenv("GHIVEDIFF") == "" {
+	if envGhivediff == "" {
 		return
 	}
 	fmt.Fprintf(os.Stderr, format, args...)
