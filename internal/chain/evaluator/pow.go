@@ -123,21 +123,21 @@ func (pow2Evaluator) Apply(ctx *Context, o op.Operation) error {
 	hasAcct, _ := objects.HasAccount(ctx.DB, worker)
 	if hasAcct {
 		if pw.NewOwnerKey != nil {
-			if os.Getenv("GHIVEDIFF_POWBUMP") != "" {
+			if envGhivediffPowbump != "" {
 				fmt.Fprintf(os.Stderr, "POW2REJECT-newkey block=%d worker=%s\n", ctx.BlockNum, worker)
 			}
 			return fmt.Errorf("pow2: cannot specify new_owner_key for existing account %q", worker)
 		}
 		hasWit, _ := objects.HasWitness(ctx.DB, worker)
 		if !hasWit {
-			if os.Getenv("GHIVEDIFF_POWBUMP") != "" {
+			if envGhivediffPowbump != "" {
 				fmt.Fprintf(os.Stderr, "POW2REJECT-nowitness block=%d worker=%s\n", ctx.BlockNum, worker)
 			}
 			return fmt.Errorf("pow2: witness must exist for existing account %q before mining", worker)
 		}
 	} else {
 		if pw.NewOwnerKey == nil {
-			if os.Getenv("GHIVEDIFF_POWBUMP") != "" {
+			if envGhivediffPowbump != "" {
 				fmt.Fprintf(os.Stderr, "POW2REJECT-newkey-missing block=%d worker=%s\n", ctx.BlockNum, worker)
 			}
 			return fmt.Errorf("pow2: new_owner_key required to create account %q", worker)
@@ -154,7 +154,7 @@ func (pow2Evaluator) Apply(ctx *Context, o op.Operation) error {
 	// hived=102 cascade).
 	if dgpo, derr := objects.GetDGPO(ctx.DB); derr == nil {
 		if workPrev != dgpo.HeadBlockID {
-			if os.Getenv("GHIVEDIFF_POWBUMP") != "" {
+			if envGhivediffPowbump != "" {
 				fmt.Fprintf(os.Stderr, "POW2REJECT-prevblock block=%d worker=%s want=%x got=%x\n", ctx.BlockNum, worker, dgpo.HeadBlockID, workPrev)
 			}
 			return fmt.Errorf("pow2: work prev_block does not match head_block_id (worker=%q)", worker)
@@ -165,7 +165,7 @@ func (pow2Evaluator) Apply(ctx *Context, o op.Operation) error {
 	// = 65536 * 2 = 131072. Voting too small a block size is rejected.
 	const minBlockSizeFloor uint32 = 65536 * 2
 	if pw.Props.MaximumBlockSize < minBlockSizeFloor {
-		if os.Getenv("GHIVEDIFF_POWBUMP") != "" {
+		if envGhivediffPowbump != "" {
 			fmt.Fprintf(os.Stderr, "POW2REJECT-blocksize block=%d worker=%s size=%d\n", ctx.BlockNum, worker, pw.Props.MaximumBlockSize)
 		}
 		return fmt.Errorf("pow2: voted maximum_block_size too small (%d < %d) for worker %q", pw.Props.MaximumBlockSize, minBlockSizeFloor, worker)
@@ -400,7 +400,7 @@ func ensureMinerAccountForPow(ctx *Context, worker string, payReward bool, props
 		w.LastWork = *pow1WorkHash
 	}
 	objects.PutWitness(ctx.DB, &w)
-	if os.Getenv("GHIVEDIFF_POWBUMP") != "" {
+	if envGhivediffPowbump != "" {
 		fmt.Fprintf(os.Stderr, "POWBUMP block=%d worker=%s total=%d num=%d\n",
 			ctx.BlockNum, worker, dgpoForPow.TotalPow, dgpoForPow.NumPowWitnesses)
 	}

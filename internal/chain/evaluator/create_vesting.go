@@ -16,10 +16,11 @@ import (
 // fires from every CreateVesting call (cashout-cascade + producer
 // reward + delegations). Production replays leave GHIVEDIFF unset.
 var (
-	envGhivediff         = os.Getenv("GHIVEDIFF")
-	envGhivediffAllVest  = os.Getenv("GHIVEDIFF_ALL_VEST")
-	envGhivediffSimpleV  = envGhivediff != "" && (envGhivediff == "1" || (!strings.ContainsRune(envGhivediff, ',') && len(envGhivediff) <= 2))
-	envGhivediffNamesV   = splitTraceNames(envGhivediff)
+	envGhivediff        = os.Getenv("GHIVEDIFF")
+	envGhivediffAllVest = os.Getenv("GHIVEDIFF_ALL_VEST")
+	envGhivediffPowbump = os.Getenv("GHIVEDIFF_POWBUMP")
+	envGhivediffSimpleV = envGhivediff != "" && (envGhivediff == "1" || (!strings.ContainsRune(envGhivediff, ',') && len(envGhivediff) <= 2))
+	envGhivediffNamesV  = splitTraceNames(envGhivediff)
 )
 
 func splitTraceNames(v string) []string {
