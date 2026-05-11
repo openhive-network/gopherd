@@ -189,7 +189,13 @@ func readTransactionBody(r *fcraw.Reader) (Transaction, error) {
 			}
 		}
 	}
-	t.Extensions = append([]byte(nil), r.SourceRange(extStart, r.Pos())...)
+	// Alias into the raw block buffer instead of copying — t.Extensions
+	// only lives for the duration of the ApplyBlock loop in replay/live
+	// sync; it is not stored long-term. The dedup store keeps only
+	// (TrxID, Expiration), and re-serialization in EncodeTransaction
+	// reads the bytes immediately. Saved ~145 MB cum/8M-block run that
+	// the copy was burning on the empty-extensions case.
+	t.Extensions = r.SourceRange(extStart, r.Pos())
 	return t, nil
 }
 
