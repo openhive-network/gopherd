@@ -255,14 +255,13 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 		})
 	}
 	for _, owner := range voteCands {
-		w, err := objects.GetWitness(s, owner)
-		if err != nil {
+		if !objects.MutateWitness(s, owner, func(w *objects.Witness) {
+			w.Schedule = objects.WitnessScheduleElected
+		}) {
 			continue
 		}
-		selectedVoted[string(w.Owner)] = true
-		active = append(active, schedPicked{owner: w.Owner, kind: objects.WitnessScheduleElected})
-		w.Schedule = objects.WitnessScheduleElected
-		objects.PutWitness(s, &w)
+		selectedVoted[string(owner)] = true
+		active = append(active, schedPicked{owner: owner, kind: objects.WitnessScheduleElected})
 	}
 
 	// Comprehensive per-rebuild full-state dump matching hived's

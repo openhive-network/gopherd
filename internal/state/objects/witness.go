@@ -369,6 +369,15 @@ func GetWitnessRef(s *state.Session, owner auth.AccountName) (*Witness, bool) {
 	return EnsureWitnessStore(s).GetRef(owner)
 }
 
+// MutateWitness applies an in-place modification to the witness slot
+// for owner via WitnessStore.Mutate. Returns false if the row
+// doesn't exist. Saves the Get value-copy + Put copy-back pair on
+// the schedule-rebuild hot path (21 witnesses × ~190K rounds = ~4M
+// 256-byte copies eliminated per 4M-block run).
+func MutateWitness(s *state.Session, owner auth.AccountName, fn func(*Witness)) bool {
+	return EnsureWitnessStore(s).Mutate(owner, fn)
+}
+
 // HasWitness reports whether a witness owner exists.
 func HasWitness(s *state.Session, owner auth.AccountName) (bool, error) {
 	return EnsureWitnessStore(s).Has(owner), nil
