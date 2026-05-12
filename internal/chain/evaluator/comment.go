@@ -662,12 +662,12 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 	// hf20_vote_evaluator (hive_evaluator_social.cpp:712-755).
 	usedFromUpvote := usedPower
 	if ctx.Hardforks.Has(hardfork.HF20) && v.Weight < 0 {
-		dgpo, _ := objects.GetDGPO(ctx.DB)
+		dgpoRef, _ := objects.GetDGPORef(ctx.DB)
 		// Downvote pool size: HF20 = max/4 (25%), HF21+ scales by
 		// dgpo.DownvotePoolPercent × max / 100%.
 		downvotePool := hivePercent / 4
-		if ctx.Hardforks.Has(hardfork.HF21) && dgpo.DownvotePoolPercent > 0 {
-			downvotePool = hivePercent * int64(dgpo.DownvotePoolPercent) / hivePercent
+		if ctx.Hardforks.Has(hardfork.HF21) && dgpoRef != nil && dgpoRef.DownvotePoolPercent > 0 {
+			downvotePool = hivePercent * int64(dgpoRef.DownvotePoolPercent) / hivePercent
 		}
 		// Regenerate downvote_manabar to its (capped) max.
 		dvElapsed := int64(ctx.HeadBlockTime) - int64(voter.DownvoteManaLastUpdate)
@@ -788,10 +788,10 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 		// (chain/include/.../global_property_object.hpp:139); we mirror
 		// with a time-based fallback so the discount fires pre-HF6-block.
 		const hf6ReverseAuctionTime uint32 = 1466776800
-		dgpo, _ := objects.GetDGPO(ctx.DB)
+		dgpoRef, _ := objects.GetDGPORef(ctx.DB)
 		reverseAuction := uint32(0)
-		if dgpo.ReverseAuctionSeconds > 0 {
-			reverseAuction = dgpo.ReverseAuctionSeconds
+		if dgpoRef != nil && dgpoRef.ReverseAuctionSeconds > 0 {
+			reverseAuction = dgpoRef.ReverseAuctionSeconds
 		} else if ctx.HeadBlockTime > hf6ReverseAuctionTime {
 			reverseAuction = 30 * 60 // HIVE_REVERSE_AUCTION_WINDOW_SECONDS_HF6
 		}
