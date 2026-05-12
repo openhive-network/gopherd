@@ -290,6 +290,15 @@ type ApplyOptions struct {
 	// check (mirrors hived's skip_witness_signature). Same rationale
 	// as above for replay.
 	SkipBlockSignature bool
+	// SkipDedupAndTaPOS bypasses the per-tx dedup-window probe
+	// (HasTransaction), TaPOS ring lookup, and PutTransactionRecord
+	// write, and skips the per-block PruneExpiredTransactions sweep.
+	// Replay against a canonical block_log can safely set this — the
+	// block_log already guarantees no duplicate or out-of-window txs;
+	// these checks are pure overhead. Live sync MUST leave it false.
+	// Skips DigestFromBytes (sha256) on the unsigned bytes too, since
+	// the only remaining txID consumer is dedup itself.
+	SkipDedupAndTaPOS bool
 	// PreRecoveredTxKeys, when non-nil, is the per-tx pre-recovered
 	// signer pubkey set produced by RecoverBlockTxSignerKeys upstream
 	// (typically on a worker pool that runs decode + sig recovery in
@@ -508,8 +517,13 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 
 		// Compute the tx_id (first 20 bytes of sha256 over the unsigned
 		// transaction body). Used by both TaPOS and dedup checks below.
-		unsignedBytes := rawBlock[hdrLen+txRes.UnsignedStart : hdrLen+txRes.UnsignedEnd]
-		txID := tx.IDFromDigest(tx.DigestFromBytes(unsignedBytes))
+		// Skipped under SkipDedupAndTaPOS (replay against canonical
+		// block_log) — sha256 is ~5s of CPU across an 8M run.
+		var txID [20]byte
+		if !opts.SkipDedupAndTaPOS {
+			ub := rawBlock[hdrLen+txRes.UnsignedStart : hdrLen+txRes.UnsignedEnd]
+			txID = tx.IDFromDigest(tx.DigestFromBytes(ub))
+		}
 
 		// Pre-flight checks: expiration window + dedup + TaPOS slot
 		// existence. Pass `headBlockTime` (= dgpo.Time at start of
@@ -555,19 +569,21 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 				return objects.DynamicGlobalProperty{}, fmt.Errorf("apply_block %d tx %d: %w", blockNum, i, failErr)
 			}
 		}
-		if err := validateTxPreFlight(session, &txRes.SignedTx, blockNum, headBlockTime, txID, !opts.SkipBlockSignature); err != nil {
-			txFailed = true
-			failOp = "tx-preflight"
-			failErr = err
-			session.Restore(txSnap)
-			if stats != nil {
-				stats.recordSkip(failOp, failErr)
+		if !opts.SkipDedupAndTaPOS {
+			if err := validateTxPreFlight(session, &txRes.SignedTx, blockNum, headBlockTime, txID, !opts.SkipBlockSignature); err != nil {
+				txFailed = true
+				failOp = "tx-preflight"
+				failErr = err
+				session.Restore(txSnap)
+				if stats != nil {
+					stats.recordSkip(failOp, failErr)
+				}
+				skippedThisBlock++
+				if opts.TolerateFailingOps {
+					continue
+				}
+				return objects.DynamicGlobalProperty{}, fmt.Errorf("apply_block %d tx %d: %w", blockNum, i, failErr)
 			}
-			skippedThisBlock++
-			if opts.TolerateFailingOps {
-				continue
-			}
-			return objects.DynamicGlobalProperty{}, fmt.Errorf("apply_block %d tx %d: %w", blockNum, i, failErr)
 		}
 		for j, o := range txRes.SignedTx.Operations {
 			if err := evaluator.Apply(ctx, o); err != nil {
@@ -618,11 +634,14 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 			return objects.DynamicGlobalProperty{}, fmt.Errorf("apply_block %d tx %d: %w", blockNum, i, failErr)
 		}
 		// Tx applied cleanly: record it in the dedup window so a future
-		// rebroadcast of the same trx_id is rejected.
-		objects.PutTransactionRecord(session, &objects.TransactionRecord{
-			TrxID:      txID,
-			Expiration: txRes.SignedTx.Expiration,
-		})
+		// rebroadcast of the same trx_id is rejected. Skipped under
+		// SkipDedupAndTaPOS for canonical-block_log replay.
+		if !opts.SkipDedupAndTaPOS {
+			objects.PutTransactionRecord(session, &objects.TransactionRecord{
+				TrxID:      txID,
+				Expiration: txRes.SignedTx.Expiration,
+			})
+		}
 		// Release the tx savepoint so subsystem stores can stop logging
 		// undo entries we'll never use. Flips db.UndoEnabled to false
 		// when depth reaches 0, which is the common case once the last
@@ -826,7 +845,9 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	processHardforks(session, blockNum)
 
 	objects.PutBlockSummary(session, blockNum, dgpo.HeadBlockID)
-	objects.PruneExpiredTransactions(session, hdr.Timestamp)
+	if !opts.SkipDedupAndTaPOS {
+		objects.PruneExpiredTransactions(session, hdr.Timestamp)
+	}
 
 	// RC subsystem finalize_block hook (HF20+). Runs the per-block
 	// pool decay + expired-delegation refund. Pre-HF20 only the
