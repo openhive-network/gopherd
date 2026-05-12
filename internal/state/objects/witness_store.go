@@ -1,7 +1,6 @@
 package objects
 
 import (
-	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -173,10 +172,27 @@ func EnsureWitnessStore(s *state.Session) *WitnessStore {
 }
 
 func newWitnessStore() *WitnessStore {
+	// The sort[20]byte field encodes the BE-ordered numeric key per
+	// secondary index (negated votes, vst[16], pow[8]+created[4]).
+	// Reading it as two uint64s + one uint32 lets the Less compare
+	// run as 3 native-word compares (with a byte-swap to BE), much
+	// faster than bytes.Compare's per-byte loop on 20 bytes —
+	// flushSecondaries btree.Less was 6.4s flat on an 8M run.
 	less := func(a, b witnessSecKey) bool {
-		cmp := bytes.Compare(a.sort[:], b.sort[:])
-		if cmp != 0 {
-			return cmp < 0
+		ah0 := binary.BigEndian.Uint64(a.sort[0:8])
+		bh0 := binary.BigEndian.Uint64(b.sort[0:8])
+		if ah0 != bh0 {
+			return ah0 < bh0
+		}
+		ah1 := binary.BigEndian.Uint64(a.sort[8:16])
+		bh1 := binary.BigEndian.Uint64(b.sort[8:16])
+		if ah1 != bh1 {
+			return ah1 < bh1
+		}
+		ah2 := binary.BigEndian.Uint32(a.sort[16:20])
+		bh2 := binary.BigEndian.Uint32(b.sort[16:20])
+		if ah2 != bh2 {
+			return ah2 < bh2
 		}
 		return a.owner < b.owner
 	}
