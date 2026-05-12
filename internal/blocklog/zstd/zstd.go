@@ -124,17 +124,26 @@ type Decompressor struct {
 	// ~one decompress per block; without the pool reframe allocates a
 	// fresh slice every call (1.07 GB cum on a 4M-block run).
 	framedPool sync.Pool
+	// cgo is a libzstd-backed DCtx pool for the hot Decompress path.
+	// Decodes hived's magicless-format payloads directly (no reframe)
+	// at typically 2-3× klauspost's speed on small payloads. Per-dict
+	// DCtxs are pre-loaded with the trained dictionary.
+	cgo *cgoDecoderPool
 }
 
 // NewDecompressor returns a fresh Decompressor.
 func NewDecompressor() *Decompressor {
 	d := &Decompressor{decoders: map[uint8]*zstd.Decoder{}}
 	d.framedPool.New = func() any { b := make([]byte, 0, 8192); return &b }
+	d.cgo = newCGODecoderPool()
 	return d
 }
 
 // Close releases all decoder resources.
 func (d *Decompressor) Close() {
+	if d.cgo != nil {
+		d.cgo.close()
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	for k, dec := range d.decoders {
@@ -284,20 +293,15 @@ func reframe(payload []byte, dictNum uint8) ([]byte, error) {
 // payload is expected to be in hived's on-disk format — magicless and with no
 // in-frame DictionaryID.
 func (d *Decompressor) Decompress(payload []byte, dictNum uint8, dst []byte) ([]byte, error) {
-	dec, err := d.decoderFor(dictNum)
+	// libzstd path: decodes magicless format directly with no reframe.
+	// Single CGO call into ZSTD_decompressDCtx; per-dict DCtxs are
+	// pre-loaded with the trained dictionary. ~2-3× faster than the
+	// klauspost path on small payloads.
+	cdec, err := d.cgo.decoderFor(dictNum)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("blocklog/zstd: cgo decoderFor(dict %d): %w", dictNum, err)
 	}
-	bufPtr := d.framedPool.Get().(*[]byte)
-	framed, err := reframeInto(*bufPtr, payload, dictNum)
-	if err != nil {
-		*bufPtr = (*bufPtr)[:0]
-		d.framedPool.Put(bufPtr)
-		return nil, err
-	}
-	out, err := dec.DecodeAll(framed, dst)
-	*bufPtr = framed[:0]
-	d.framedPool.Put(bufPtr)
+	out, err := cdec.decompress(payload, dst)
 	if err != nil {
 		return nil, fmt.Errorf("blocklog/zstd: decode block (dict %d, %d compressed bytes): %w", dictNum, len(payload), err)
 	}
@@ -309,15 +313,11 @@ func (d *Decompressor) Decompress(payload []byte, dictNum uint8, dst []byte) ([]
 // but this is kept as the symmetric API in case dict-less compressed blocks
 // are encountered.
 func (d *Decompressor) DecompressNoDict(payload, dst []byte) ([]byte, error) {
-	dec, err := d.decoderFor(noDictKey)
+	cdec, err := d.cgo.decoderFor(noDictKey)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("blocklog/zstd: cgo decoderFor(no-dict): %w", err)
 	}
-	// No dict means we don't inject — just prepend magic.
-	out := make([]byte, len(payload)+4)
-	copy(out[:4], magic[:])
-	copy(out[4:], payload)
-	return dec.DecodeAll(out, dst)
+	return cdec.decompress(payload, dst)
 }
 
 const noDictKey uint8 = 255 // sentinel for the "no dictionary" decoder slot
