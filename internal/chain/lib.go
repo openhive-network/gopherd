@@ -21,15 +21,15 @@ const hundredPercentBP uint32 = 10000
 //
 // LIB is monotonically non-decreasing — never moves backwards.
 func (d *Database) updateLastIrreversibleBlock(s *state.Session) {
-	dgpo, err := objects.GetDGPO(s)
-	if err != nil {
+	dgpoRef, ok := objects.GetDGPORef(s)
+	if !ok {
 		return
 	}
-	ws, err := objects.GetWitnessSchedule(s)
-	if err != nil {
+	wsRef, ok := objects.GetWitnessScheduleRef(s)
+	if !ok {
 		return
 	}
-	if ws.NumScheduledWitnesses == 0 {
+	if wsRef.NumScheduledWitnesses == 0 {
 		return
 	}
 
@@ -38,7 +38,7 @@ func (d *Database) updateLastIrreversibleBlock(s *state.Session) {
 	// CurrentShuffledWitnesses changes every 21 blocks (once per
 	// schedule rebuild); between rebuilds the slice is stable so the
 	// cache hits on every per-block LIB update.
-	d.refreshSchedWitPtrs(s, ws.CurrentShuffledWitnesses)
+	d.refreshSchedWitPtrs(s, wsRef.CurrentShuffledWitnesses)
 	for _, w := range d.schedWitPtrs {
 		if w == nil {
 			continue
@@ -68,9 +68,10 @@ func (d *Database) updateLastIrreversibleBlock(s *state.Session) {
 		offset = len(confirmed) - 1
 	}
 	newLIB := confirmed[offset]
-	if newLIB > dgpo.LastIrreversibleBlockNum {
-		dgpo.LastIrreversibleBlockNum = newLIB
-		objects.PutDGPO(s, &dgpo)
+	if newLIB > dgpoRef.LastIrreversibleBlockNum {
+		objects.MutateDGPO(s, func(p *objects.DynamicGlobalProperty) {
+			p.LastIrreversibleBlockNum = newLIB
+		})
 	}
 }
 
