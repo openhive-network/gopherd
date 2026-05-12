@@ -497,11 +497,10 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 			// adjust_supply pair: HIVE -share burned, HBD +hbdPayout minted
 			// (with VS recompute on the HBD branch). Mirrors C++
 			// database_comment.cpp:283-285.
-			if dgpo, derr := objects.GetDGPO(s); derr == nil {
-				adjustSupplyHive(s, &dgpo, -share)
-				adjustSupplyHbd(s, &dgpo, hbdPayout)
-				objects.PutDGPO(s, &dgpo)
-			}
+			objects.MutateDGPO(s, func(p *objects.DynamicGlobalProperty) {
+				adjustSupplyHive(s, p, -share)
+				adjustSupplyHbd(s, p, hbdPayout)
+			})
 			totalBeneficiary += share
 			continue
 		}
@@ -702,8 +701,8 @@ func payCreateHbd(s *state.Session, a *objects.Account, blockTime uint32, hiveAm
 	// to HIVE. Cumulative effect on cryptos through 6,198,475: -35,850
 	// sat-HIVE balance / +6,681 sat-HBD balance.
 	hbdPrintRate := int64(10000)
-	if dgpo, derr := objects.GetDGPO(s); derr == nil {
-		hbdPrintRate = int64(dgpo.HBDPrintRate)
+	if dgpoRef, ok := objects.GetDGPORef(s); ok {
+		hbdPrintRate = int64(dgpoRef.HBDPrintRate)
 	}
 	toHbdHive := hiveAmount * hbdPrintRate / 10000
 	toHive := hiveAmount - toHbdHive
@@ -721,11 +720,10 @@ func payCreateHbd(s *state.Session, a *objects.Account, blockTime uint32, hiveAm
 	// `hbd × median` per cashout — visible to the next intra-block
 	// reader (process_funds, pay_liquidity_reward) and (transitively)
 	// to subsequent HBD-supply ratio calcs at next-block updateVirtualSupply.
-	if dgpo, derr := objects.GetDGPO(s); derr == nil {
-		adjustSupplyHive(s, &dgpo, -toHbdHive)
-		adjustSupplyHbd(s, &dgpo, hbdAmount)
-		objects.PutDGPO(s, &dgpo)
-	}
+	objects.MutateDGPO(s, func(p *objects.DynamicGlobalProperty) {
+		adjustSupplyHive(s, p, -toHbdHive)
+		adjustSupplyHbd(s, p, hbdAmount)
+	})
 }
 
 // convertHiveToHBD applies a HBD/HIVE feed price to convert a HIVE
