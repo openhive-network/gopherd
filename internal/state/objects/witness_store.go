@@ -435,30 +435,34 @@ func (s *WitnessStore) flushSecondaries() {
 			continue
 		}
 		owner := string(w.Owner)
-		cur := s.primary[owner]
 		old := w.lastFlushedSecondary
 		hadOld := w.lastFlushedValid
-		if cur == nil {
-			// Witness was created and then deleted/undone; drop btree
-			// entries keyed on the old snapshot if any.
-			if hadOld {
-				s.byVote.DeleteHint(witnessByVoteSecKey(old.Votes, owner), hVote)
-				if !virtualTimeIsZeroFlat(old.VST) {
-					s.byVST.DeleteHint(witnessByVSTSecKey(old.VST, old.Created, owner), hVST)
+		// Under UndoEnabled a RestoreToPoint may have removed w from
+		// primary while leaving the pointer in dirtyOrder — verify
+		// existence before reading. Skipping this map probe (~850ms
+		// flat on an 8M run) under !UndoEnabled is safe because no
+		// rollback ever fires there.
+		if s.db.UndoEnabled {
+			if cur := s.primary[owner]; cur == nil {
+				if hadOld {
+					s.byVote.DeleteHint(witnessByVoteSecKey(old.Votes, owner), hVote)
+					if !virtualTimeIsZeroFlat(old.VST) {
+						s.byVST.DeleteHint(witnessByVSTSecKey(old.VST, old.Created, owner), hVST)
+					}
+					if old.Pow != 0 {
+						s.byPow.DeleteHint(witnessByPowSecKey(old.Pow, old.Created, owner), hPow)
+					}
+					w.lastFlushedValid = false
+					w.lastFlushedSecondary = witnessSecondaryKeyEmbed{}
 				}
-				if old.Pow != 0 {
-					s.byPow.DeleteHint(witnessByPowSecKey(old.Pow, old.Created, owner), hPow)
-				}
-				w.lastFlushedValid = false
-				w.lastFlushedSecondary = witnessSecondaryKeyEmbed{}
+				continue
 			}
-			continue
 		}
 		newK := witnessSecondaryKeyEmbed{
-			Votes:   cur.TotalVotesVests,
-			VST:     cur.VirtualScheduledTime,
-			Pow:     cur.PowWorker,
-			Created: cur.Created,
+			Votes:   w.TotalVotesVests,
+			VST:     w.VirtualScheduledTime,
+			Pow:     w.PowWorker,
+			Created: w.Created,
 		}
 		if hadOld {
 			if old.Votes != newK.Votes {
