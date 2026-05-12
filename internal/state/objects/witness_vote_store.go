@@ -217,6 +217,29 @@ func (s *WitnessVoteStore) VotesForEachWitness(account auth.AccountName, wstore 
 	}
 }
 
+// VotesForSet returns the raw votes map for the caller to iterate
+// directly, avoiding the closure call overhead in
+// VotesForEachWitness. Pointer-resolution still happens lazily; the
+// caller must check for nil w and call ResolveVoteWitness.
+//
+// Used by AdjustWitnessVotesForVoter where the inner closure body is
+// tight and the closure call dispatch (~50ns × 30 witnesses × 8M
+// blocks ≈ 12 GB of dispatch cycles) was material.
+func (s *WitnessVoteStore) VotesForSet(account auth.AccountName) map[string]*Witness {
+	return s.votes[string(account)]
+}
+
+// ResolveVoteWitness lazily resolves a nil-cached *Witness in the
+// votes set. Returns false if the witness no longer exists.
+func (s *WitnessVoteStore) ResolveVoteWitness(set map[string]*Witness, name string, wstore *WitnessStore) (*Witness, bool) {
+	cur, hit := wstore.primary[name]
+	if !hit {
+		return nil, false
+	}
+	set[name] = cur
+	return cur, true
+}
+
 // VotesForCount returns how many witnesses `account` votes for.
 func (s *WitnessVoteStore) VotesForCount(account auth.AccountName) int {
 	return len(s.votes[string(account)])

@@ -469,16 +469,25 @@ func AdjustWitnessVotesForVoter(s *state.Session, account auth.AccountName, delt
 	if wsRef != nil {
 		currentVT = wsRef.CurrentVirtualTime
 	}
-	// VotesForEachWitness pre-resolves the *Witness pointer from the
-	// vote cache so the inner loop skips one map lookup per witness
-	// (30+ per call × every CreateVesting × every block past HF7).
-	wvs.VotesForEachWitness(account, wstore, func(witnessName auth.AccountName, w *Witness) bool {
-		// Snap capture for tx-rollback safety + dirty-mark, then in-
-		// place mutate. Same semantics as wstore.Mutate but the
-		// caller already has *Witness.
-		if wstore.db.UndoEnabled {
+	// Direct map iteration replaces VotesForEachWitness's closure
+	// callback — the closure dispatch was ~50ns × ~30 witnesses ×
+	// millions of calls ≈ 1-2s of wasted cycles.
+	set := wvs.VotesForSet(account)
+	if set == nil {
+		return
+	}
+	undoEnabled := wstore.db.UndoEnabled
+	for name, w := range set {
+		if w == nil {
+			var ok bool
+			w, ok = wvs.ResolveVoteWitness(set, name, wstore)
+			if !ok {
+				continue
+			}
+		}
+		if undoEnabled {
 			wstore.undoLog = append(wstore.undoLog, witnessUndo{
-				owner: string(witnessName), hadPrev: true, slot: w, snap: *w,
+				owner: name, hadPrev: true, slot: w, snap: *w,
 			})
 		}
 		if wsErr == nil {
@@ -487,8 +496,7 @@ func AdjustWitnessVotesForVoter(s *state.Session, account auth.AccountName, delt
 			w.TotalVotesVests += delta
 		}
 		wstore.markDirty(w)
-		return true
-	})
+	}
 }
 
 // AdjustWitnessVote mirrors C++ database::adjust_witness_vote
