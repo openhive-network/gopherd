@@ -425,8 +425,14 @@ func AdjustWitnessVotesForVoter(s *state.Session, account auth.AccountName, delt
 	// VotesForCount was checked here before the loop; the inner
 	// VotesForEachWitness already short-circuits on an empty set, so
 	// skip the duplicate map probe (~1.86s on an 8M replay).
-	dgpo, _ := GetDGPO(s)
-	hf := hardfork.SetForBlock(dgpo.HeadBlockNumber)
+	// Read-only fast path: GetDGPORef skips the ~1 KB value-copy that
+	// GetDGPO does; we only consult HeadBlockNumber here.
+	dgpoRef, _ := GetDGPORef(s)
+	var headBlockNum uint32
+	if dgpoRef != nil {
+		headBlockNum = dgpoRef.HeadBlockNumber
+	}
+	hf := hardfork.SetForBlock(headBlockNum)
 	// Hoist the witness schedule read out of the per-witness loop —
 	// AdjustWitnessVote needs CurrentVirtualTime which doesn't change
 	// across iterations of this loop (only updated by the per-block
@@ -668,11 +674,11 @@ func ClearWitnessVotesForAccount(s *state.Session, account auth.AccountName, vot
 // state/objects doesn't have to import the hardfork package at build
 // time — caller injects via the session's DGPO snapshot.
 func hardforkSetForBlockNum(s *state.Session) hardfork.Set {
-	dgpo, err := GetDGPO(s)
-	if err != nil {
+	dgpoRef, ok := GetDGPORef(s)
+	if !ok {
 		return 0
 	}
-	return hardfork.SetForBlock(dgpo.HeadBlockNumber)
+	return hardfork.SetForBlock(dgpoRef.HeadBlockNumber)
 }
 
 // --- private helpers (added here to avoid cycling imports) --------------

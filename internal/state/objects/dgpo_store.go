@@ -97,6 +97,17 @@ func (s *DGPOStore) Get() (DynamicGlobalProperty, bool) {
 	return s.val, s.valid
 }
 
+// GetRef returns a pointer to the in-place singleton, or (nil, false)
+// when not populated. The caller MUST NOT mutate through the pointer
+// — use Put for that. Saves the ~1 KB value-copy that Get does
+// (~2.1s cum on an 8M-block replay).
+func (s *DGPOStore) GetRef() (*DynamicGlobalProperty, bool) {
+	if !s.valid {
+		return nil, false
+	}
+	return &s.val, true
+}
+
 // dgpoStoreSnapshotMagic identifies a dgpo_store snapshot stream.
 var dgpoStoreSnapshotMagic = [4]byte{'D', 'G', 'P', 'O'}
 

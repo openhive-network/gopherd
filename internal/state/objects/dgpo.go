@@ -364,6 +364,13 @@ func GetDGPO(s *state.Session) (DynamicGlobalProperty, error) {
 	return p, nil
 }
 
+// GetDGPORef returns a pointer to the in-place DGPO singleton.
+// Read-only: see DGPOStore.GetRef. Saves the ~1 KB value-copy on hot
+// read paths that only need to inspect a few fields.
+func GetDGPORef(s *state.Session) (*DynamicGlobalProperty, bool) {
+	return EnsureDGPOStore(s).GetRef()
+}
+
 // --- private helpers ----------------------------------------------------
 
 func appendU32LE(dst []byte, v uint32) []byte {
