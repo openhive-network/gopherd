@@ -189,7 +189,13 @@ func (s *AccountStore) Put(a *Account) {
 				name: name, op: 1, slot: cur, snap: *cur,
 			})
 		}
-		*cur = *a
+		// Same-slot pointer (caller did GetAccountRef + mutate + Put)?
+		// Skip the no-op self-copy — the slot is already at the
+		// post-mutation state. Saves the ~700-byte struct copy per call
+		// for sites that have adopted the Ref-and-mutate pattern.
+		if cur != a {
+			*cur = *a
+		}
 		return
 	}
 	var cp *Account

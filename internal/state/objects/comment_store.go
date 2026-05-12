@@ -290,7 +290,11 @@ func (s *CommentStore) Put(c *Comment) {
 					snap:          *prev,
 				})
 			}
-			*prev = *c
+			// Skip the self-copy when caller already mutated via the
+			// slot pointer (GetCommentRef + in-place mutate + Put).
+			if prev != c {
+				*prev = *c
+			}
 			return
 		}
 	}

@@ -387,7 +387,10 @@ func (s *WitnessStore) Put(w *Witness) {
 			cur.VirtualScheduledTime != w.VirtualScheduledTime ||
 			cur.PowWorker != w.PowWorker ||
 			cur.Created != w.Created
-		*cur = *w
+		// Skip the self-copy when caller mutated via the slot pointer.
+		if cur != w {
+			*cur = *w
+		}
 		if dirty {
 			s.markDirty(cur)
 		}
