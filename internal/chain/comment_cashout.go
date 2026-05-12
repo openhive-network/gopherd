@@ -355,11 +355,14 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 	// against `claimed` (HIVE-sat), convert via the median feed.
 	// Mirrors libraries/chain/util/reward.cpp:27-29 + database_comment.cpp:219:
 	// `max_hive = to_hive(current_hive_price, max_hbd); payout = min(payout, max_hive)`.
+	// One GetFeedHistory lookup, reused below for the min-payout gate.
+	feedHistoryFetched, feedHistoryOK := objects.GetFeedHistory(s)
+	feedReady := feedHistoryOK == nil && !priceIsZero(feedHistoryFetched.CurrentMedianHistory)
 	maxClaim := c.MaxAcceptedPayout
-	if fh, ferr := objects.GetFeedHistory(s); ferr == nil && !priceIsZero(fh.CurrentMedianHistory) {
-		maxClaim = convertHBDToHive(c.MaxAcceptedPayout, fh.CurrentMedianHistory)
+	if feedReady {
+		maxClaim = convertHBDToHive(c.MaxAcceptedPayout, feedHistoryFetched.CurrentMedianHistory)
 		if maxClaim <= 0 {
-			maxClaim = c.MaxAcceptedPayout // fallback if conversion yields 0
+			maxClaim = c.MaxAcceptedPayout
 		}
 	}
 	if claimed > maxClaim {
@@ -371,12 +374,9 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 	// HIVE_MIN_PAYOUT_HBD = 20 satoshi (= 0.020 HBD). If the payout
 	// expressed in HBD via the median feed is below this threshold,
 	// hived zeroes the payout (libraries/chain/util/reward.cpp:24).
-	// This prevents 1-satoshi rounding payouts from cluttering vops.
-	if claimed > 0 {
-		if fh, ferr := objects.GetFeedHistory(s); ferr == nil && !priceIsZero(fh.CurrentMedianHistory) {
-			if convertHiveToHBD(claimed, fh.CurrentMedianHistory) < 20 {
-				claimed = 0
-			}
+	if claimed > 0 && feedReady {
+		if convertHiveToHBD(claimed, feedHistoryFetched.CurrentMedianHistory) < 20 {
+			claimed = 0
 		}
 	}
 
