@@ -230,6 +230,14 @@ func GetWitnessSchedule(s *state.Session) (WitnessSchedule, error) {
 	return w, nil
 }
 
+// GetWitnessScheduleRef returns a pointer to the in-place
+// WitnessSchedule singleton. Read-only; see WitnessScheduleStore.GetRef.
+// Saves the struct value-copy (~200 bytes + slice headers) on hot
+// read paths.
+func GetWitnessScheduleRef(s *state.Session) (*WitnessSchedule, bool) {
+	return EnsureWitnessScheduleStore(s).GetRef()
+}
+
 // _unused_GetWitnessScheduleKV is kept as a placeholder for the prior
 // implementation so the comment-cache invariants doc below still
 // references something meaningful.

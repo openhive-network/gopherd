@@ -436,11 +436,19 @@ func AdjustWitnessVotesForVoter(s *state.Session, account auth.AccountName, delt
 	// Hoist the witness schedule read out of the per-witness loop —
 	// AdjustWitnessVote needs CurrentVirtualTime which doesn't change
 	// across iterations of this loop (only updated by the per-block
-	// schedule rebuild). Saves a btree Get + ReadWitnessSchedule per
-	// witness vote (30+ saves per producer-reward block).
-	ws, wsErr := GetWitnessSchedule(s)
+	// schedule rebuild). GetRef skips the WitnessSchedule struct
+	// value-copy (~9.6s cum on an 8M run — the largest single hot-path
+	// value-copy outside of GetAccount).
+	wsRef, wsOk := GetWitnessScheduleRef(s)
+	wsErr := state.ErrNotFound
+	if wsOk {
+		wsErr = nil
+	}
 	wstore := EnsureWitnessStore(s)
-	currentVT := ws.CurrentVirtualTime
+	var currentVT [16]byte
+	if wsRef != nil {
+		currentVT = wsRef.CurrentVirtualTime
+	}
 	// VotesForEachWitness pre-resolves the *Witness pointer from the
 	// vote cache so the inner loop skips one map lookup per witness
 	// (30+ per call × every CreateVesting × every block past HF7).

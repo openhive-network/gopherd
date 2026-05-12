@@ -92,6 +92,16 @@ func (s *WitnessScheduleStore) Get() (WitnessSchedule, bool) {
 	return s.val, s.valid
 }
 
+// GetRef returns a pointer to the in-place WitnessSchedule, or
+// (nil, false) when not populated. Caller MUST NOT mutate through
+// the pointer; use Put for that.
+func (s *WitnessScheduleStore) GetRef() (*WitnessSchedule, bool) {
+	if !s.valid {
+		return nil, false
+	}
+	return &s.val, true
+}
+
 // witnessScheduleStoreSnapshotMagic identifies a witness_schedule_store snapshot.
 var witnessScheduleStoreSnapshotMagic = [4]byte{'W', 'S', 'C', 'H'}
 
