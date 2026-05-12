@@ -80,6 +80,15 @@ type Database struct {
 	// (only updateProducerLastConfirmed mutates LCB), so consistency
 	// holds as long as we update cache and state together.
 	lcbCache map[string]uint32
+	// schedWitPtrs is the resolved *Witness slice for the current
+	// CurrentShuffledWitnesses (~21 entries). Refreshed every schedule
+	// rebuild so per-block updateLastIrreversibleBlock can read each
+	// witness's LastConfirmedBlockNum directly through the pointer —
+	// no per-block map probes against lcbCache (~2.2s flat). The slice
+	// shares backing with WitnessSchedule.CurrentShuffledWitnesses by
+	// index: schedWitPtrs[i] is the witness named at that index.
+	schedWitPtrs    []*objects.Witness
+	schedWitPtrsKey []auth.AccountName // matches the CurrentShuffledWitnesses snapshot
 	// libConfirmedBuf is the per-block sort buffer used by
 	// updateLastIrreversibleBlock to assemble each scheduled witness's
 	// LCB before computing the 75% median. Reused across blocks (~21

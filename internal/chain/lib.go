@@ -1,6 +1,7 @@
 package chain
 
 import (
+	"hived-go/internal/protocol/auth"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
 )
@@ -33,23 +34,15 @@ func (d *Database) updateLastIrreversibleBlock(s *state.Session) {
 	}
 
 	d.libConfirmedBuf = d.libConfirmedBuf[:0]
-	for i := uint8(0); i < ws.NumScheduledWitnesses; i++ {
-		if int(i) >= len(ws.CurrentShuffledWitnesses) {
-			break
-		}
-		name := ws.CurrentShuffledWitnesses[i]
-		// Cache hit avoids a btree Get + full Witness deserialize.
-		// updateProducerLastConfirmed is the only writer of LCB, so the
-		// cache stays consistent without invalidation hooks elsewhere.
-		if lcb, ok := d.lcbCache[string(name)]; ok {
-			d.libConfirmedBuf = append(d.libConfirmedBuf, lcb)
+	// Refresh the cached *Witness slice if the schedule has rotated.
+	// CurrentShuffledWitnesses changes every 21 blocks (once per
+	// schedule rebuild); between rebuilds the slice is stable so the
+	// cache hits on every per-block LIB update.
+	d.refreshSchedWitPtrs(s, ws.CurrentShuffledWitnesses)
+	for _, w := range d.schedWitPtrs {
+		if w == nil {
 			continue
 		}
-		w, ok := objects.GetWitnessRef(s, name)
-		if !ok {
-			continue
-		}
-		d.lcbCache[string(name)] = w.LastConfirmedBlockNum
 		d.libConfirmedBuf = append(d.libConfirmedBuf, w.LastConfirmedBlockNum)
 	}
 	confirmed := d.libConfirmedBuf
@@ -105,4 +98,41 @@ func (d *Database) updateProducerLastConfirmed(s *state.Session, witness string,
 	w.LastConfirmedBlockNum = blockNum
 	objects.PutWitnessIndexed(s, &w, oldVotes, oldVST, oldPow)
 	d.lcbCache[witness] = blockNum
+}
+
+// refreshSchedWitPtrs rebuilds the cached *Witness slice when the
+// schedule's CurrentShuffledWitnesses has rotated. Compares the slice
+// header against the cached snapshot — when the underlying array is
+// the same (no rotation since last call), no work is done.
+func (d *Database) refreshSchedWitPtrs(s *state.Session, current []auth.AccountName) {
+	if sameNameSlice(d.schedWitPtrsKey, current) {
+		return
+	}
+	if cap(d.schedWitPtrs) < len(current) {
+		d.schedWitPtrs = make([]*objects.Witness, len(current))
+		d.schedWitPtrsKey = make([]auth.AccountName, len(current))
+	} else {
+		d.schedWitPtrs = d.schedWitPtrs[:len(current)]
+		d.schedWitPtrsKey = d.schedWitPtrsKey[:len(current)]
+	}
+	for i, name := range current {
+		d.schedWitPtrsKey[i] = name
+		if w, ok := objects.GetWitnessRef(s, name); ok {
+			d.schedWitPtrs[i] = w
+		} else {
+			d.schedWitPtrs[i] = nil
+		}
+	}
+}
+
+func sameNameSlice(a, b []auth.AccountName) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
