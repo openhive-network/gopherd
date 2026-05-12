@@ -35,8 +35,12 @@ const dgpoStoreSubsystemKey = "dgpo_store"
 // EnsureDGPOStore returns the database's DGPOStore.
 func EnsureDGPOStore(s *state.Session) *DGPOStore {
 	db := s.Database()
+	if x := db.HotSubsystem(hotSlotDGPO); x != nil {
+		return x.(*DGPOStore)
+	}
 	if existing := db.GetSubsystem(dgpoStoreSubsystemKey); existing != nil {
 		if t, ok := existing.(*DGPOStore); ok {
+			db.SetHotSubsystem(hotSlotDGPO, t)
 			return t
 		}
 	}
@@ -45,6 +49,7 @@ func EnsureDGPOStore(s *state.Session) *DGPOStore {
 		undoLog: make([]dgpoUndo, 0, 8),
 	}
 	db.RegisterSubsystem(dgpoStoreSubsystemKey, t, t)
+	db.SetHotSubsystem(hotSlotDGPO, t)
 	return t
 }
 

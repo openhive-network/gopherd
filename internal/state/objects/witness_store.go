@@ -156,14 +156,19 @@ const witnessStoreSubsystemKey = "witness_store"
 // always wired.
 func EnsureWitnessStore(s *state.Session) *WitnessStore {
 	db := s.Database()
+	if x := db.HotSubsystem(hotSlotWitness); x != nil {
+		return x.(*WitnessStore)
+	}
 	if existing := db.GetSubsystem(witnessStoreSubsystemKey); existing != nil {
 		if ws, ok := existing.(*WitnessStore); ok {
+			db.SetHotSubsystem(hotSlotWitness, ws)
 			return ws
 		}
 	}
 	ws := newWitnessStore()
 	ws.db = db
 	db.RegisterSubsystem(witnessStoreSubsystemKey, ws, ws)
+	db.SetHotSubsystem(hotSlotWitness, ws)
 	return ws
 }
 

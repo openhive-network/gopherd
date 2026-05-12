@@ -71,14 +71,19 @@ const commentVoteStoreSubsystemKey = "comment_vote_store"
 // EnsureCommentVoteStore returns the database's CommentVoteStore.
 func EnsureCommentVoteStore(s *state.Session) *CommentVoteStore {
 	db := s.Database()
+	if x := db.HotSubsystem(hotSlotCommentVote); x != nil {
+		return x.(*CommentVoteStore)
+	}
 	if existing := db.GetSubsystem(commentVoteStoreSubsystemKey); existing != nil {
 		if cs, ok := existing.(*CommentVoteStore); ok {
+			db.SetHotSubsystem(hotSlotCommentVote, cs)
 			return cs
 		}
 	}
 	cs := newCommentVoteStore()
 	cs.db = db
 	db.RegisterSubsystem(commentVoteStoreSubsystemKey, cs, cs)
+	db.SetHotSubsystem(hotSlotCommentVote, cs)
 	return cs
 }
 

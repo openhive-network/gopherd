@@ -82,14 +82,19 @@ const commentStoreSubsystemKey = "comment_store"
 // first call.
 func EnsureCommentStore(s *state.Session) *CommentStore {
 	db := s.Database()
+	if x := db.HotSubsystem(hotSlotComment); x != nil {
+		return x.(*CommentStore)
+	}
 	if existing := db.GetSubsystem(commentStoreSubsystemKey); existing != nil {
 		if cs, ok := existing.(*CommentStore); ok {
+			db.SetHotSubsystem(hotSlotComment, cs)
 			return cs
 		}
 	}
 	cs := newCommentStore()
 	cs.db = db
 	db.RegisterSubsystem(commentStoreSubsystemKey, cs, cs)
+	db.SetHotSubsystem(hotSlotComment, cs)
 	return cs
 }
 

@@ -45,7 +45,16 @@ type Database struct {
 	// borrows one per tx; DiscardSavepoint/Restore returns it. Eliminates the
 	// per-tx make([]int, 0, 10) that contributed ~300 MB to a 4M-block run.
 	subPointsPool [][]int
+	// hotSubsystem is an indexed fast-path cache for hot subsystem
+	// pointers. Each subsystem in the objects/ package picks a unique
+	// slot ID at init time and stashes itself here; Ensure* accessors
+	// load the slot directly instead of paying the subsystemReg map
+	// probe (~80ns) on every call. Replay calls these 30M+ times so
+	// the saving is ~2.4s of CPU.
+	hotSubsystem [hotSubsystemSlotCount]any
 }
+
+const hotSubsystemSlotCount = 16
 
 // SnapshotSubsystem is implemented by typed in-memory state containers
 // (objects.WitnessStore, future Account/Comment stores). Each container
@@ -97,6 +106,20 @@ func (d *Database) GetSubsystem(name string) any {
 		return nil
 	}
 	return d.subsystemReg[name]
+}
+
+// HotSubsystem returns the typed container at the indexed fast-path
+// slot, or nil if none is set. Used by Ensure* accessors in the
+// objects/ package to skip the subsystemReg map probe on the hot
+// path — each subsystem allocates a unique compile-time slot.
+func (d *Database) HotSubsystem(slot int) any {
+	return d.hotSubsystem[slot]
+}
+
+// SetHotSubsystem stashes the typed container at the indexed slot.
+// Called once per Database lifetime, at first Ensure* invocation.
+func (d *Database) SetHotSubsystem(slot int, v any) {
+	d.hotSubsystem[slot] = v
 }
 
 // SubsystemNames returns every registered subsystem name in

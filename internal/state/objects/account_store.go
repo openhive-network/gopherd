@@ -67,14 +67,19 @@ const accountStoreSubsystemKey = "account_store"
 // always wired.
 func EnsureAccountStore(s *state.Session) *AccountStore {
 	db := s.Database()
+	if x := db.HotSubsystem(hotSlotAccount); x != nil {
+		return x.(*AccountStore)
+	}
 	if existing := db.GetSubsystem(accountStoreSubsystemKey); existing != nil {
 		if as, ok := existing.(*AccountStore); ok {
+			db.SetHotSubsystem(hotSlotAccount, as)
 			return as
 		}
 	}
 	as := newAccountStore()
 	as.db = db
 	db.RegisterSubsystem(accountStoreSubsystemKey, as, as)
+	db.SetHotSubsystem(hotSlotAccount, as)
 	return as
 }
 

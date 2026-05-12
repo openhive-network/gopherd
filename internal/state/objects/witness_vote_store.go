@@ -53,8 +53,12 @@ const witnessVoteStoreSubsystemKey = "witness_vote_store"
 // lazily creating + registering it on first call.
 func EnsureWitnessVoteStore(s *state.Session) *WitnessVoteStore {
 	db := s.Database()
+	if x := db.HotSubsystem(hotSlotWitnessVote); x != nil {
+		return x.(*WitnessVoteStore)
+	}
 	if existing := db.GetSubsystem(witnessVoteStoreSubsystemKey); existing != nil {
 		if vs, ok := existing.(*WitnessVoteStore); ok {
+			db.SetHotSubsystem(hotSlotWitnessVote, vs)
 			return vs
 		}
 	}
@@ -64,6 +68,7 @@ func EnsureWitnessVoteStore(s *state.Session) *WitnessVoteStore {
 		undoLog: make([]witnessVoteUndo, 0, 32),
 	}
 	db.RegisterSubsystem(witnessVoteStoreSubsystemKey, vs, vs)
+	db.SetHotSubsystem(hotSlotWitnessVote, vs)
 	return vs
 }
 
