@@ -222,11 +222,13 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 	c.LastPayout = blockTime
 	rescheduleTime := uint32(0) // default: frozen
 	isRoot := c.ParentAuthor == ""
-	if dgpo, derr := objects.GetDGPO(s); derr == nil {
-		hf := hardfork.SetForBlock(dgpo.HeadBlockNumber)
-		if !hf.Has(hardfork.HF17) && isRoot && hf.Has(hardfork.HF12) && !wasPaidPre {
-			rescheduleTime = blockTime + hiveSecondCashoutWindow
-		}
+	// blockNum already identifies the active hardfork set for this
+	// cashout; the previous code did a GetDGPO + read of HeadBlockNumber
+	// purely to call SetForBlock — redundant, since blockNum == the
+	// cashout's containing block from processCommentCashouts.
+	hfReschedule := hardfork.SetForBlock(blockNum)
+	if !hfReschedule.Has(hardfork.HF17) && isRoot && hfReschedule.Has(hardfork.HF12) && !wasPaidPre {
+		rescheduleTime = blockTime + hiveSecondCashoutWindow
 	}
 	c.CashoutTime = rescheduleTime
 	// Mirror comment_cashout_object::on_payout (comment_object.hpp:213-219)
