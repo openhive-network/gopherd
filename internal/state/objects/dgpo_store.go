@@ -108,6 +108,21 @@ func (s *DGPOStore) GetRef() (*DynamicGlobalProperty, bool) {
 	return &s.val, true
 }
 
+// Mutate captures a snap (if UndoEnabled) then calls fn with the
+// in-place slot pointer. Avoids the Get value-copy AND the Put
+// value-copy for the common get-modify-put cycle. Returns false if
+// the singleton isn't populated.
+func (s *DGPOStore) Mutate(fn func(*DynamicGlobalProperty)) bool {
+	if !s.valid {
+		return false
+	}
+	if s.db.UndoEnabled {
+		s.undoLog = append(s.undoLog, dgpoUndo{prev: s.val, prevValid: s.valid})
+	}
+	fn(&s.val)
+	return true
+}
+
 // dgpoStoreSnapshotMagic identifies a dgpo_store snapshot stream.
 var dgpoStoreSnapshotMagic = [4]byte{'D', 'G', 'P', 'O'}
 

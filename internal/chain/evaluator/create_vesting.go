@@ -95,13 +95,18 @@ func AdjustAccountVestingBalance(s *state.Session, accountName string, hiveSatos
 }
 
 func createVestingImpl(s *state.Session, accountName string, hiveSatoshi int64, toReward, adjustVotes bool) (int64, error) {
-	dgpo, err := objects.GetDGPO(s)
-	if err != nil && err != state.ErrNotFound {
-		return 0, err
+	dgpoRef, ok := objects.GetDGPORef(s)
+	if !ok {
+		// Singleton not yet populated — defer to the legacy zero path.
 	}
 
 	var vestsAmount int64
-	if dgpo.TotalVestingFundHive == 0 || dgpo.TotalVestingShares == 0 {
+	var totalVestingFundHive, totalVestingShares int64
+	if dgpoRef != nil {
+		totalVestingFundHive = dgpoRef.TotalVestingFundHive
+		totalVestingShares = dgpoRef.TotalVestingShares
+	}
+	if totalVestingFundHive == 0 || totalVestingShares == 0 {
 		vestsAmount = hiveSatoshi * 1000
 	} else {
 		// vests = hive * total_vesting_shares / total_vesting_fund_hive.
@@ -109,8 +114,8 @@ func createVestingImpl(s *state.Session, accountName string, hiveSatoshi int64, 
 		// quotient back to int64 (mirrors the old IsInt64 saturation).
 		// Native uint128 replaces a math/big triple-alloc that fired on
 		// every CreateVesting call (~1.78 GB cum / 4M-block run).
-		hi, lo := bits.Mul64(uint64(hiveSatoshi), uint64(dgpo.TotalVestingShares))
-		d := uint64(dgpo.TotalVestingFundHive)
+		hi, lo := bits.Mul64(uint64(hiveSatoshi), uint64(totalVestingShares))
+		d := uint64(totalVestingFundHive)
 		if hi >= d {
 			vestsAmount = 0
 		} else {
@@ -139,13 +144,14 @@ func createVestingImpl(s *state.Session, accountName string, hiveSatoshi int64, 
 		return 0, fmt.Errorf("createVesting: account %q not found", accountName)
 	}
 
-	dgpo.TotalVestingShares += vestsAmount
-	dgpo.TotalVestingFundHive += hiveSatoshi
-	objects.PutDGPO(s, &dgpo)
+	objects.MutateDGPO(s, func(p *objects.DynamicGlobalProperty) {
+		p.TotalVestingShares += vestsAmount
+		p.TotalVestingFundHive += hiveSatoshi
+	})
 	traceAll := envGhivediffAllVest != ""
-	if vestTraceAccount(accountName) || (traceAll && dgpo.HeadBlockNumber >= 2888500 && dgpo.HeadBlockNumber <= 2910000) {
+	if dgpoRef != nil && (vestTraceAccount(accountName) || (traceAll && dgpoRef.HeadBlockNumber >= 2888500 && dgpoRef.HeadBlockNumber <= 2910000)) {
 		fmt.Fprintf(os.Stderr, "GHIVEDIFF VEST-CREATE block=%d acct=%s liquid=%d new_vests=%d after_vests=%d fund_pre=%d shares_pre=%d toReward=%v\n",
-			dgpo.HeadBlockNumber, accountName, hiveSatoshi, vestsAmount, aSlot.VestingShares, dgpo.TotalVestingFundHive-hiveSatoshi, dgpo.TotalVestingShares-vestsAmount, toReward)
+			dgpoRef.HeadBlockNumber, accountName, hiveSatoshi, vestsAmount, aSlot.VestingShares, dgpoRef.TotalVestingFundHive-hiveSatoshi, dgpoRef.TotalVestingShares-vestsAmount, toReward)
 	}
 
 	// C++ create_vesting2 calls adjust_proxied_witness_votes when

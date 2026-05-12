@@ -371,6 +371,12 @@ func GetDGPORef(s *state.Session) (*DynamicGlobalProperty, bool) {
 	return EnsureDGPOStore(s).GetRef()
 }
 
+// MutateDGPO applies an in-place modification to the DGPO singleton
+// via the slot pointer. See DGPOStore.Mutate.
+func MutateDGPO(s *state.Session, fn func(*DynamicGlobalProperty)) bool {
+	return EnsureDGPOStore(s).Mutate(fn)
+}
+
 // --- private helpers ----------------------------------------------------
 
 func appendU32LE(dst []byte, v uint32) []byte {
