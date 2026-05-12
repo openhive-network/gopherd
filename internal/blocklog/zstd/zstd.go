@@ -333,7 +333,11 @@ func (d *Decompressor) decoderFor(num uint8) (*zstd.Decoder, error) {
 	}
 
 	if num == noDictKey {
-		dec, err := zstd.NewReader(nil)
+		// Concurrency=1: the replay path calls DecodeAll on small
+		// per-block payloads (≤10 KB), where klauspost's default 4-
+		// goroutine streaming decoder pays setup/sync overhead without
+		// the win — single-threaded decode is ~5% faster on these.
+		dec, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1))
 		if err != nil {
 			return nil, err
 		}
@@ -354,7 +358,7 @@ func (d *Decompressor) decoderFor(num uint8) (*zstd.Decoder, error) {
 		return nil, fmt.Errorf("blocklog/zstd: dict %d too short (%d bytes)", num, len(patched))
 	}
 	binary.LittleEndian.PutUint32(patched[4:8], fakeDictID(num))
-	dec, err := zstd.NewReader(nil, zstd.WithDecoderDicts(patched))
+	dec, err := zstd.NewReader(nil, zstd.WithDecoderDicts(patched), zstd.WithDecoderConcurrency(1))
 	if err != nil {
 		return nil, fmt.Errorf("blocklog/zstd: build decoder for dict %d: %w", num, err)
 	}
