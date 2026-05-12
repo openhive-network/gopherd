@@ -250,59 +250,50 @@ func processProducerReward(s *state.Session, witnessName string, blockNum uint32
 // hived's per-block delta.
 func processFunds(s *state.Session, blockNum uint32, witnessName string) {
 	hf := hardfork.SetForBlock(blockNum)
-	dgpo, err := objects.GetDGPO(s)
-	if err != nil && err != state.ErrNotFound {
-		return
-	}
-
 	if hf.Has(hardfork.HF16) {
+		// HF16+ branches off into processFundsHF16, which still uses
+		// the GetDGPO+PutDGPO pattern (more complex flow). Pre-HF16
+		// can use MutateDGPO since the entire body is read-modify-write
+		// on the same slot.
+		dgpo, err := objects.GetDGPO(s)
+		if err != nil && err != state.ErrNotFound {
+			return
+		}
 		processFundsHF16(s, &dgpo, blockNum, witnessName)
 		return
 	}
 	// Pre-HF16 path: rewards computed off virtual_supply (HIVE + HBD-as-HIVE
-	// at the median feed). C++ database.cpp:2331 calls update_virtual_supply
-	// just before process_funds, so by the time get_content_reward fires
-	// virtual_supply already reflects HBD growth. Using current_supply here
-	// produces under-rewards once HBD circulates (pre-HF1) and once a feed
-	// is published.
-	virtualSupply := dgpo.VirtualSupply
-	if virtualSupply <= 0 {
-		virtualSupply = dgpo.CurrentSupply
-	}
-
-	contentReward := percentRewardPerBlock(virtualSupply, contentAPRPercent)
-	if contentReward < minContentReward {
-		contentReward = minContentReward
-	}
-	curateReward := percentRewardPerBlock(virtualSupply, curateAPRPercent)
-	if curateReward < minCurateReward {
-		curateReward = minCurateReward
-	}
-	witnessPay := percentRewardPerBlock(virtualSupply, producerAPRPercent)
-	if witnessPay < minProducerReward {
-		witnessPay = minProducerReward
-	}
-
-	vestingReward := contentReward + curateReward + witnessPay
-	if blockNum < startVestingBlock {
-		vestingReward = 0
-	} else {
-		vestingReward *= 9
-	}
-
-	dgpo.TotalVestingFundHive += vestingReward
-	dgpo.TotalRewardFundHive += contentReward + curateReward
-	// Mirror C++ database.cpp:1909-1913:
-	//   p.current_supply += content_reward + witness_pay + vesting_reward
-	//   p.virtual_supply += content_reward + witness_pay + vesting_reward
-	// (where content_reward is the curate-folded value). Bump virtual_supply
-	// atomically alongside current_supply so any in-block reader (e.g.
-	// pay_liquidity_reward at FEED_INTERVAL boundaries) sees the post-funds
-	// value rather than the pre-funds one.
-	delta := contentReward + curateReward + witnessPay + vestingReward
-	dgpo.CurrentSupply += delta
-	dgpo.VirtualSupply += delta
-	objects.PutDGPO(s, &dgpo)
+	// at the median feed). MutateDGPO collapses read+write into a single
+	// in-place slot mutation; no value-copies on the way in or out.
+	objects.MutateDGPO(s, func(p *objects.DynamicGlobalProperty) {
+		virtualSupply := p.VirtualSupply
+		if virtualSupply <= 0 {
+			virtualSupply = p.CurrentSupply
+		}
+		contentReward := percentRewardPerBlock(virtualSupply, contentAPRPercent)
+		if contentReward < minContentReward {
+			contentReward = minContentReward
+		}
+		curateReward := percentRewardPerBlock(virtualSupply, curateAPRPercent)
+		if curateReward < minCurateReward {
+			curateReward = minCurateReward
+		}
+		witnessPay := percentRewardPerBlock(virtualSupply, producerAPRPercent)
+		if witnessPay < minProducerReward {
+			witnessPay = minProducerReward
+		}
+		vestingReward := contentReward + curateReward + witnessPay
+		if blockNum < startVestingBlock {
+			vestingReward = 0
+		} else {
+			vestingReward *= 9
+		}
+		p.TotalVestingFundHive += vestingReward
+		p.TotalRewardFundHive += contentReward + curateReward
+		delta := contentReward + curateReward + witnessPay + vestingReward
+		p.CurrentSupply += delta
+		p.VirtualSupply += delta
+	})
 }
 
 // HIVE_INFLATION constants from libraries/protocol/include/hive/protocol/config.hpp.
