@@ -94,6 +94,26 @@ type Witness struct {
 	// for the current round. Skipping a per-Mutate map.access on this
 	// hot path. See WitnessStore.markDirty / flushSecondaries.
 	dirtyEpoch uint32
+	// lastFlushedSecondary mirrors what the WitnessStore.flushed map
+	// used to track per *Witness: the (votes, vst, pow, created) values
+	// the secondary btrees are currently keyed on for this witness.
+	// Storing on the Witness slot instead of a map[*Witness]K saves the
+	// per-flush map probe (~1.4s on an 8M run) and keeps cache locality
+	// since flushSecondaries reads dirtyEpoch+Owner+TotalVotesVests etc.
+	// already from the same struct. lastFlushedValid distinguishes
+	// "never flushed" (zero value) from "flushed with zeros" (valid).
+	lastFlushedSecondary witnessSecondaryKeyEmbed
+	lastFlushedValid     bool
+}
+
+// witnessSecondaryKeyEmbed mirrors witnessSecondaryKey (private to the
+// witness_store.go file) but lives at the Witness struct level so we
+// can stash flushed state inline.
+type witnessSecondaryKeyEmbed struct {
+	Votes   int64
+	VST     [16]byte
+	Pow     uint64
+	Created uint32
 }
 
 // WitnessScheduleType mirrors witness_object::schedule_type:

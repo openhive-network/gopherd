@@ -55,12 +55,9 @@ type WitnessStore struct {
 	// hold entries keyed on flushed[owner]'s (votes, vst, pow). Owners
 	// in `dirty` may have primary[owner] values that differ from
 	// flushed[owner]; flushSecondaries reconciles them.
-	// flushed tracks, per *Witness slot, the (votes, vst, pow, created)
-	// the secondary btrees are currently keyed on. Used by flush to
-	// emit Delete on the OLD key + Set on the NEW key when fields
-	// differ. Pointer-keyed (fast64 hash) — saves a string(w.Owner)
-	// conversion per lookup vs the prior string key.
-	flushed map[*Witness]witnessSecondaryKey
+	// lastFlushedSecondary now lives on each *Witness slot directly;
+	// see witness.go. The map was 1.4s flat on an 8M run for the per-
+	// flush probe — inlining onto the slot keeps everything cache-warm.
 	// dirty is the set of owners whose secondary entries need
 	// reconciliation. Implemented as a map for O(1) dedup but with
 	// a backing slice (dirtyOrder) for cache-friendly iteration in
@@ -209,7 +206,6 @@ func newWitnessStore() *WitnessStore {
 		byVST:      btree.NewBTreeGOptions[witnessSecKey](less, btree.Options{Degree: witnessIndexDegree, NoLocks: true}),
 		byPow:      btree.NewBTreeGOptions[witnessSecKey](less, btree.Options{Degree: witnessIndexDegree, NoLocks: true}),
 		undoLog:    make([]witnessUndo, 0, 64),
-		flushed:    make(map[*Witness]witnessSecondaryKey, 64),
 		dirtyOrder: make([]*Witness, 0, 32),
 		dirtyEpoch: 1, // 0 reserved for "fresh slot, never marked"
 	}
@@ -264,6 +260,8 @@ func (s *WitnessStore) RestoreToPoint(snap int) {
 				// "for free" via the epoch match on the same slot
 				// when it's pulled from the freelist later.
 				cur.dirtyEpoch = 0
+				cur.lastFlushedValid = false
+				cur.lastFlushedSecondary = witnessSecondaryKeyEmbed{}
 			}
 		}
 		e.slot = nil
@@ -435,59 +433,62 @@ func (s *WitnessStore) flushSecondaries() {
 		}
 		owner := string(w.Owner)
 		cur := s.primary[owner]
-		old, hadOld := s.flushed[w]
+		old := w.lastFlushedSecondary
+		hadOld := w.lastFlushedValid
 		if cur == nil {
 			// Witness was created and then deleted/undone; drop btree
 			// entries keyed on the old snapshot if any.
 			if hadOld {
-				s.byVote.DeleteHint(witnessByVoteSecKey(old.votes, owner), hVote)
-				if !virtualTimeIsZeroFlat(old.vst) {
-					s.byVST.DeleteHint(witnessByVSTSecKey(old.vst, old.created, owner), hVST)
+				s.byVote.DeleteHint(witnessByVoteSecKey(old.Votes, owner), hVote)
+				if !virtualTimeIsZeroFlat(old.VST) {
+					s.byVST.DeleteHint(witnessByVSTSecKey(old.VST, old.Created, owner), hVST)
 				}
-				if old.pow != 0 {
-					s.byPow.DeleteHint(witnessByPowSecKey(old.pow, old.created, owner), hPow)
+				if old.Pow != 0 {
+					s.byPow.DeleteHint(witnessByPowSecKey(old.Pow, old.Created, owner), hPow)
 				}
-				delete(s.flushed, w)
+				w.lastFlushedValid = false
+				w.lastFlushedSecondary = witnessSecondaryKeyEmbed{}
 			}
 			continue
 		}
-		newK := witnessSecondaryKey{
-			votes:   cur.TotalVotesVests,
-			vst:     cur.VirtualScheduledTime,
-			pow:     cur.PowWorker,
-			created: cur.Created,
+		newK := witnessSecondaryKeyEmbed{
+			Votes:   cur.TotalVotesVests,
+			VST:     cur.VirtualScheduledTime,
+			Pow:     cur.PowWorker,
+			Created: cur.Created,
 		}
 		if hadOld {
-			if old.votes != newK.votes {
-				s.byVote.DeleteHint(witnessByVoteSecKey(old.votes, owner), hVote)
-				s.byVote.SetHint(witnessByVoteSecKey(newK.votes, owner), hVote)
+			if old.Votes != newK.Votes {
+				s.byVote.DeleteHint(witnessByVoteSecKey(old.Votes, owner), hVote)
+				s.byVote.SetHint(witnessByVoteSecKey(newK.Votes, owner), hVote)
 			}
-			if old.vst != newK.vst {
-				if !virtualTimeIsZeroFlat(old.vst) {
-					s.byVST.DeleteHint(witnessByVSTSecKey(old.vst, old.created, owner), hVST)
+			if old.VST != newK.VST {
+				if !virtualTimeIsZeroFlat(old.VST) {
+					s.byVST.DeleteHint(witnessByVSTSecKey(old.VST, old.Created, owner), hVST)
 				}
-				if !virtualTimeIsZeroFlat(newK.vst) {
-					s.byVST.SetHint(witnessByVSTSecKey(newK.vst, newK.created, owner), hVST)
+				if !virtualTimeIsZeroFlat(newK.VST) {
+					s.byVST.SetHint(witnessByVSTSecKey(newK.VST, newK.Created, owner), hVST)
 				}
 			}
-			if old.pow != newK.pow {
-				if old.pow != 0 {
-					s.byPow.DeleteHint(witnessByPowSecKey(old.pow, old.created, owner), hPow)
+			if old.Pow != newK.Pow {
+				if old.Pow != 0 {
+					s.byPow.DeleteHint(witnessByPowSecKey(old.Pow, old.Created, owner), hPow)
 				}
-				if newK.pow != 0 {
-					s.byPow.SetHint(witnessByPowSecKey(newK.pow, newK.created, owner), hPow)
+				if newK.Pow != 0 {
+					s.byPow.SetHint(witnessByPowSecKey(newK.Pow, newK.Created, owner), hPow)
 				}
 			}
 		} else {
-			s.byVote.SetHint(witnessByVoteSecKey(newK.votes, owner), hVote)
-			if !virtualTimeIsZeroFlat(newK.vst) {
-				s.byVST.SetHint(witnessByVSTSecKey(newK.vst, newK.created, owner), hVST)
+			s.byVote.SetHint(witnessByVoteSecKey(newK.Votes, owner), hVote)
+			if !virtualTimeIsZeroFlat(newK.VST) {
+				s.byVST.SetHint(witnessByVSTSecKey(newK.VST, newK.Created, owner), hVST)
 			}
-			if newK.pow != 0 {
-				s.byPow.SetHint(witnessByPowSecKey(newK.pow, newK.created, owner), hPow)
+			if newK.Pow != 0 {
+				s.byPow.SetHint(witnessByPowSecKey(newK.Pow, newK.Created, owner), hPow)
 			}
 		}
-		s.flushed[w] = newK
+		w.lastFlushedSecondary = newK
+		w.lastFlushedValid = true
 	}
 	// Bump epoch so all current dirtyEpoch tags become stale; truncate
 	// dirtyOrder. No mapclear pass needed. Reserve 0 as the "never
@@ -691,7 +692,9 @@ func (s *WitnessStore) UnmarshalSnapshot(r io.Reader) error {
 	s.byVote.Clear()
 	s.byVST.Clear()
 	s.byPow.Clear()
-	s.flushed = make(map[*Witness]witnessSecondaryKey, count)
+	// lastFlushedSecondary lives on the Witness struct now — nothing
+	// to reset on UnmarshalSnapshot since the slots themselves are
+	// freshly allocated below.
 	s.dirtyOrder = make([]*Witness, 0, count)
 	s.dirtyEpoch = 1
 	s.undoLog = s.undoLog[:0]
