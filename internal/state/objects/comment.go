@@ -593,6 +593,11 @@ func GetCommentVote(s *state.Session, voter, author auth.AccountName, permlink s
 	return cv, nil
 }
 
+// GetCommentVoteRef returns a read-only pointer; see CommentVoteStore.GetRef.
+func GetCommentVoteRef(s *state.Session, voter, author auth.AccountName, permlink string) (*CommentVote, bool) {
+	return EnsureCommentVoteStore(s).GetRef(voter, author, permlink)
+}
+
 // HasCommentVote reports vote existence.
 func HasCommentVote(s *state.Session, voter, author auth.AccountName, permlink string) (bool, error) {
 	return EnsureCommentVoteStore(s).Has(voter, author, permlink), nil

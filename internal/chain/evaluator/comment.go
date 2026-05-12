@@ -490,14 +490,11 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 		}
 	}
 
-	prev, err := objects.GetCommentVote(ctx.DB, v.Voter, v.Author, v.Permlink)
-	if err != nil && err != state.ErrNotFound {
-		return err
-	}
+	prev, prevExists := objects.GetCommentVoteRef(ctx.DB, v.Voter, v.Author, v.Permlink)
+	isNew := !prevExists
 
 	// hived only enforces "weight != 0" on FIRST cast; recasts may set
 	// weight to 0 to remove the vote (libraries/chain/hive_evaluator_social.cpp:456).
-	isNew := err == state.ErrNotFound
 	if isNew && v.Weight == 0 {
 		return ErrVoteWeightZero
 	}
@@ -719,7 +716,7 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 	// gated on !was_paid — votes cast on a comment that has already paid
 	// out (in its second-cashout window) accumulate zero curation weight,
 	// so the curator_pool stays unclaimed and folds back to the author.
-	curationEligible := rshares > 0 && c.AllowCurationRewards && err == state.ErrNotFound && !c.WasPaid
+	curationEligible := rshares > 0 && c.AllowCurationRewards && isNew && !c.WasPaid
 	if curationEligible {
 		oldVoteRshares := c.VoteRshares
 		newVoteRshares := oldVoteRshares + uint64(rshares)
@@ -823,7 +820,7 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 	// where curationEligible is FALSE (e.g., post-cashout votes pre-HF12,
 	// !AllowCurationRewards), we still need to bump VoteRshares so
 	// future curation_weight calcs match C++.
-	if !curationEligible && err == state.ErrNotFound && rshares > 0 {
+	if !curationEligible && isNew && rshares > 0 {
 		c.VoteRshares += uint64(rshares)
 	}
 
@@ -833,7 +830,7 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 	// updated total at cashout.
 	oldNetRshares := c.NetRshares
 	voteDebug := v.Author == "bitbo" && v.Permlink == "some-photos-from-magadan-russia"
-	if err == state.ErrNotFound {
+	if isNew {
 		objects.PutCommentVote(ctx.DB, &objects.CommentVote{
 			Voter:          v.Voter,
 			Author:         v.Author,
@@ -863,16 +860,26 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 		// drifting state from C++ over millions of recasts.
 		c.TotalVoteWeight -= prev.CurationWeight
 		c.NetRshares += rshares - prev.Rshares
-		prev.Rshares = rshares
-		prev.Weight = v.Weight
-		prev.NumChanges++
-		prev.LastUpdate = ctx.HeadBlockTime
-		prev.CurationWeight = 0
-		objects.PutCommentVote(ctx.DB, &prev)
+		// Build a fresh CommentVote rather than mutating *prev — prev
+		// aliases the in-place store slot under GetCommentVoteRef, and
+		// mutating it before PutCommentVote would scramble the undo
+		// snap (which captures post-mutation state in the UndoEnabled
+		// path).
+		recast := objects.CommentVote{
+			Voter:          v.Voter,
+			Author:         v.Author,
+			Permlink:       v.Permlink,
+			Weight:         v.Weight,
+			NumChanges:     prev.NumChanges + 1,
+			Rshares:        rshares,
+			LastUpdate:     ctx.HeadBlockTime,
+			CurationWeight: 0,
+		}
+		objects.PutCommentVote(ctx.DB, &recast)
 		if voteDebug {
 			ghiveDiff("GHIVEDIFF VOTE-RECAST block=%d t=%d voter=%s author=%s permlink=%s weight=%d rshares=%d prev_rshares=%d prev_curation_weight=%d total_vote_weight_after=%d\n",
 				ctx.BlockNum, ctx.HeadBlockTime, v.Voter, v.Author, v.Permlink,
-				v.Weight, rshares, prev.Rshares, prev.CurationWeight, c.TotalVoteWeight)
+				v.Weight, rshares, recast.Rshares, recast.CurationWeight, c.TotalVoteWeight)
 		}
 	}
 	// Track AbsRshares for the beneficiary "no votes yet" gate.

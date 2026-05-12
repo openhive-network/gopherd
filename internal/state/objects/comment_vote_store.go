@@ -185,6 +185,22 @@ func (s *CommentVoteStore) Get(voter, author auth.AccountName, permlink string) 
 	return *cv, true
 }
 
+// GetRef returns a read-only pointer to the CommentVote slot — skips
+// the value-copy that Get does. The caller must NOT mutate the slot;
+// use Put for that. Returns (nil, false) when no row exists.
+//
+// Hot use: voteEvaluator does GetCommentVote to read prev on recasts;
+// most votes are NEW (prev is unused) so the value-copy is pure cost
+// in the common case. Using GetRef + dereferencing prev.* lazily saves
+// ~75-byte copies × 9.5M votes ≈ 700 MB cum on an 8M replay.
+func (s *CommentVoteStore) GetRef(voter, author auth.AccountName, permlink string) (*CommentVote, bool) {
+	cv, ok := s.primary[newCommentVotePK(voter, author, permlink)]
+	if !ok {
+		return nil, false
+	}
+	return cv, true
+}
+
 // Put inserts or replaces a vote. Maintains byComment membership.
 //
 // Allocation: pulls a *CommentVote slot from the freelist when available
