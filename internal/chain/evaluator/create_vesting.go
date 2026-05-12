@@ -25,7 +25,7 @@ var (
 )
 
 func splitTraceNames(v string) []string {
-	if v == "" || v == "1" || !strings.ContainsRune(v, ',') {
+	if v == "" || v == "1" {
 		return nil
 	}
 	return strings.Split(v, ",")
