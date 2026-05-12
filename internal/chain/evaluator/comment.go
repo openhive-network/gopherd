@@ -514,12 +514,31 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 	// 100%-weight vote — i.e. ~50 mana per max-weight vote pre-HF20
 	// (reserve_rate = 40), letting an account cast ~200 full-power
 	// votes before depletion.
-	voter, verr := objects.GetAccount(ctx.DB, v.Voter)
-	if verr != nil {
-		if verr == state.ErrNotFound {
+	// Dual path: under SkipTxSavepoints (replay, UndoEnabled=false) we
+	// mutate the AccountStore slot directly through a *Account pointer
+	// — no value-copy on Get, no PutAccount at the end. Under
+	// UndoEnabled=true (live sync / tests) we fall back to a value-copy
+	// + slot-swap so the undoLog captures the correct pre-mutation
+	// snap. Account is ~700 bytes; voteEvaluator fires 9.5M times on
+	// an 8M run, so the read+write copy pair was ~13 GB of memcpy.
+	var voterLocal objects.Account
+	var voter *objects.Account
+	if ctx.DB.Database().UndoEnabled {
+		var verr error
+		voterLocal, verr = objects.GetAccount(ctx.DB, v.Voter)
+		if verr != nil {
+			if verr == state.ErrNotFound {
+				return fmt.Errorf("%w: voter=%q", ErrAccountNotFound, v.Voter)
+			}
+			return verr
+		}
+		voter = &voterLocal
+	} else {
+		var ok bool
+		voter, ok = objects.GetAccountRef(ctx.DB, v.Voter)
+		if !ok {
 			return fmt.Errorf("%w: voter=%q", ErrAccountNotFound, v.Voter)
 		}
-		return verr
 	}
 	if !voter.CanVote() {
 		return fmt.Errorf("vote: %q has declined voting rights", v.Voter)
@@ -1015,7 +1034,12 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 rootDone:
 	objects.PutComment(ctx.DB, &c)
 	voter.LastVoteTime = ctx.HeadBlockTime
-	objects.PutAccount(ctx.DB, &voter)
+	if ctx.DB.Database().UndoEnabled {
+		// Slot-swap path: commit the local copy back to the AccountStore
+		// slot. Under !UndoEnabled, voter already aliases the slot and
+		// the mutations are in-place — no PutAccount needed.
+		objects.PutAccount(ctx.DB, voter)
+	}
 	adjustRewardShares2(ctx.DB, oldNetRshares, c.NetRshares)
 	return nil
 }
