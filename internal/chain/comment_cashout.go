@@ -5,7 +5,6 @@ import (
 	"math/bits"
 	"os"
 	"slices"
-	"sort"
 	"strings"
 
 	"hived-go/internal/math128"
@@ -137,7 +136,14 @@ func processCommentCashouts(s *state.Session, blockTime, blockNum uint32, hooks 
 	// comment under that root_id together. Already-paid comments are
 	// skipped via a per-call dedup set, so we never double-pay even
 	// when multiple replies in the same thread land in `ready`.
-	paid := make(map[string]struct{}, len(*ready))
+	if hooks.paid == nil {
+		hooks.paid = make(map[cashoutPaidKey]struct{}, 32)
+	} else {
+		for k := range hooks.paid {
+			delete(hooks.paid, k)
+		}
+	}
+	paid := hooks.paid
 	for _, p := range *ready {
 		// Read-only: only inspect Root* fields to find the discussion
 		// root for this comment, then walk the by-root sibling list.
@@ -159,16 +165,10 @@ func processCommentCashouts(s *state.Session, blockTime, blockNum uint32, hooks 
 		// match: the order in which create_vesting calls fire mutates
 		// the global vesting share price between calls, so a different
 		// order produces different per-curator/author VESTS amounts.
-		type sibling struct {
-			author      string
-			permlink    string
-			cashoutTime uint32
-			id          uint64
-		}
-		var siblings []sibling
+		hooks.siblings = hooks.siblings[:0]
 		_ = objects.RangeCommentsByRoot(s, auth.AccountName(rootAuthor), rootPermlink,
 			func(sib *objects.Comment) (bool, error) {
-				siblings = append(siblings, sibling{
+				hooks.siblings = append(hooks.siblings, cashoutSibling{
 					author:      string(sib.Author),
 					permlink:    sib.Permlink,
 					cashoutTime: sib.CashoutTime,
@@ -176,9 +176,16 @@ func processCommentCashouts(s *state.Session, blockTime, blockNum uint32, hooks 
 				})
 				return true, nil
 			})
-		sort.Slice(siblings, func(i, j int) bool { return siblings[i].id < siblings[j].id })
-		for _, sib := range siblings {
-			key := sib.author + "/" + sib.permlink
+		slices.SortFunc(hooks.siblings, func(a, b cashoutSibling) int {
+			if a.id < b.id {
+				return -1
+			} else if a.id > b.id {
+				return 1
+			}
+			return 0
+		})
+		for _, sib := range hooks.siblings {
+			key := cashoutPaidKey{author: sib.author, permlink: sib.permlink}
 			if _, dup := paid[key]; dup {
 				continue
 			}

@@ -37,9 +37,30 @@ type CuratorPay struct {
 	Share  int64
 }
 
+// cashoutSibling is a per-cashout sibling record used in the pre-HF17
+// thread-cashout grouping loop. Pooled across cashouts via the
+// blockHookScratch so the per-cashout siblings slice (~430 MB cum on
+// an 8M run) reuses its backing storage.
+type cashoutSibling struct {
+	author      string
+	permlink    string
+	cashoutTime uint32
+	id          uint64
+}
+
+// cashoutPaidKey is a struct key for the "already paid this cashout"
+// dedup map — avoids the per-sibling `author + "/" + permlink` string
+// concat (~286 MB cum on an 8M run).
+type cashoutPaidKey struct {
+	author   string
+	permlink string
+}
+
 type blockHookScratch struct {
 	conversionPending []blockHookConvertPending
 	withdrawalPending []blockHookWithdrawalPending
 	cashoutPending    []blockHookCashoutPending
 	curatorPays       []CuratorPay
+	siblings          []cashoutSibling
+	paid              map[cashoutPaidKey]struct{}
 }
