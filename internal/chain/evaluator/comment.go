@@ -74,10 +74,11 @@ var (
 type commentEvaluator struct{}
 
 func (commentEvaluator) Apply(ctx *Context, o op.Operation) error {
-	c, ok := o.(op.Comment)
+	cp, ok := o.(*op.Comment)
 	if !ok {
 		return fmt.Errorf("commentEvaluator: unexpected op type %T", o)
 	}
+	c := *cp
 	// The author must exist.
 	authorAcct, err := objects.GetAccount(ctx.DB, c.Author)
 	if err != nil {

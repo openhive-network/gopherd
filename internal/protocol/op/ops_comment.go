@@ -33,7 +33,7 @@ func (o Comment) AppendFCBody(dst []byte) []byte {
 }
 
 func readComment(r *fcraw.Reader) (Operation, error) {
-	var o Comment
+	o := ensureOpSlabs(r).nextComment()
 	var err error
 	if o.ParentAuthor, err = r.ReadString(); err != nil {
 		return nil, err

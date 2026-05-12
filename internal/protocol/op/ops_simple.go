@@ -26,11 +26,12 @@ func (o Vote) AppendFCBody(dst []byte) []byte {
 	return binary.LittleEndian.AppendUint16(dst, uint16(o.Weight))
 }
 
-// voteSlab is a per-Reader scratch pool for *Vote slots, stashed in
-// fcraw.Reader.Aux. The replay/apply path consumes votes within the
-// op loop; once ApplyBlock has dispatched a block's ops the previous
-// block's votes are dead, so the slab can be reset (n=0) and the
-// backing storage reused.
+// opSlabs is a per-Reader scratch pool stashed in fcraw.Reader.Aux,
+// holding monotonic-index slabs for the small op types we deserialize
+// most often (Vote and Comment). The replay/apply path consumes ops
+// within the op loop; once ApplyBlock has dispatched a block's ops,
+// the previous block's slots are dead, so each slab can be reset
+// (n=0) and its backing storage reused.
 //
 // Within a block: handouts come from buf[n], with n monotonically
 // increasing. A grow appends a new entry and leaves prior pointers
@@ -41,40 +42,65 @@ func (o Vote) AppendFCBody(dst []byte) []byte {
 // new(Vote)'s 80-byte alloc cost in a prior attempt (see
 // feedback memo). The non-atomic slab here is single-goroutine
 // under chain.applyMu.
-type voteSlab struct {
-	buf []Vote
-	n   int
+type opSlabs struct {
+	votes    []Vote
+	voteN    int
+	comments []Comment
+	commentN int
 }
 
-// ResetVoteSlab resets the per-Reader Vote slab to n=0, reusing the
+// ResetOpSlabs resets the per-Reader op slabs to n=0, reusing the
 // existing backing storage. Called by the block-apply loop before
 // parsing each block. Safe to call when Aux is unset or holds a
-// non-voteSlab type (no-op).
-func ResetVoteSlab(r *fcraw.Reader) {
-	if s, ok := r.Aux.(*voteSlab); ok {
-		s.n = 0
+// non-opSlabs type (no-op).
+func ResetOpSlabs(r *fcraw.Reader) {
+	if s, ok := r.Aux.(*opSlabs); ok {
+		s.voteN = 0
+		s.commentN = 0
 	}
+}
+
+// ResetVoteSlab is a back-compat alias for ResetOpSlabs.
+func ResetVoteSlab(r *fcraw.Reader) { ResetOpSlabs(r) }
+
+func ensureOpSlabs(r *fcraw.Reader) *opSlabs {
+	if s, ok := r.Aux.(*opSlabs); ok {
+		return s
+	}
+	s := &opSlabs{
+		votes:    make([]Vote, 0, 128),
+		comments: make([]Comment, 0, 32),
+	}
+	r.Aux = s
+	return s
+}
+
+func (s *opSlabs) nextVote() *Vote {
+	if s.voteN < len(s.votes) {
+		o := &s.votes[s.voteN]
+		*o = Vote{}
+		s.voteN++
+		return o
+	}
+	s.votes = append(s.votes, Vote{})
+	s.voteN = len(s.votes)
+	return &s.votes[s.voteN-1]
+}
+
+func (s *opSlabs) nextComment() *Comment {
+	if s.commentN < len(s.comments) {
+		o := &s.comments[s.commentN]
+		*o = Comment{}
+		s.commentN++
+		return o
+	}
+	s.comments = append(s.comments, Comment{})
+	s.commentN = len(s.comments)
+	return &s.comments[s.commentN-1]
 }
 
 func readVote(r *fcraw.Reader) (Operation, error) {
-	var o *Vote
-	if s, ok := r.Aux.(*voteSlab); ok {
-		if s.n < len(s.buf) {
-			o = &s.buf[s.n]
-			*o = Vote{}
-			s.n++
-		} else {
-			s.buf = append(s.buf, Vote{})
-			s.n = len(s.buf)
-			o = &s.buf[s.n-1]
-		}
-	} else {
-		s := &voteSlab{buf: make([]Vote, 0, 128)}
-		r.Aux = s
-		s.buf = append(s.buf, Vote{})
-		s.n = 1
-		o = &s.buf[0]
-	}
+	o := ensureOpSlabs(r).nextVote()
 	var err error
 	if o.Voter, err = r.ReadString(); err != nil {
 		return nil, err
