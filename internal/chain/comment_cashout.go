@@ -213,8 +213,13 @@ func processCommentCashouts(s *state.Session, blockTime, blockNum uint32, hooks 
 func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint32, commentID uint64, author, permlink string, curationPct int64, hooks *blockHookScratch) {
 	objects.DeleteCommentCashoutSchedule(s, scheduledTime, commentID)
 
-	c, err := objects.GetComment(s, author, permlink)
-	if err != nil {
+	// processOneCashout runs in the per-block hooks (after the tx
+	// loop's DiscardSavepoint), so UndoEnabled is always false here.
+	// GetCommentRef gives a *Comment aliased to the CommentStore slot
+	// — all field mutations below are in-place, and the trailing
+	// PutComment becomes a no-op (skipped).
+	c, ok := objects.GetCommentRef(s, author, permlink)
+	if !ok {
 		return
 	}
 	// Compute the post-cashout reschedule. Mirror of
@@ -269,7 +274,7 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 		c.MaxCashoutTime = 0
 	}
 	defer func() {
-		objects.PutComment(s, &c)
+		// c aliases the in-place slot — no PutComment needed.
 		if rescheduleTime != 0 {
 			objects.PutCommentCashoutSchedule(s, rescheduleTime, c.ID, c.Author, c.Permlink)
 		}
