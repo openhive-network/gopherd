@@ -203,11 +203,10 @@ func (commentEvaluator) Apply(ctx *Context, o op.Operation) error {
 		// schedule can tie-break same-time entries by insertion order
 		// (mirrors C++'s comment_object::id auto-increment).
 		commentID := uint64(0)
-		if dgpo, derr := objects.GetDGPO(ctx.DB); derr == nil {
-			commentID = dgpo.NextCommentID
-			dgpo.NextCommentID++
-			objects.PutDGPO(ctx.DB, &dgpo)
-		}
+		objects.MutateDGPO(ctx.DB, func(p *objects.DynamicGlobalProperty) {
+			commentID = p.NextCommentID
+			p.NextCommentID++
+		})
 		objects.PutComment(ctx.DB, &objects.Comment{
 			Author:               c.Author,
 			Permlink:             c.Permlink,
@@ -1152,16 +1151,13 @@ func adjustRewardShares2(s *state.Session, oldNetRshares, newNetRshares int64) {
 		objects.PutRewardFund(s, &fund)
 		return
 	}
-	dgpo, err := objects.GetDGPO(s)
-	if err != nil {
-		return
-	}
-	total := reward.Uint128FromBytes(dgpo.TotalRewardShares2)
-	oldCurve := reward.EvaluateRewardCurveQuadratic(oldNetRshares)
-	newCurve := reward.EvaluateRewardCurveQuadratic(newNetRshares)
-	total = total.Sub(oldCurve).Add(newCurve)
-	dgpo.TotalRewardShares2 = reward.Uint128ToBytes(total)
-	objects.PutDGPO(s, &dgpo)
+	objects.MutateDGPO(s, func(p *objects.DynamicGlobalProperty) {
+		total := reward.Uint128FromBytes(p.TotalRewardShares2)
+		oldCurve := reward.EvaluateRewardCurveQuadratic(oldNetRshares)
+		newCurve := reward.EvaluateRewardCurveQuadratic(newNetRshares)
+		total = total.Sub(oldCurve).Add(newCurve)
+		p.TotalRewardShares2 = reward.Uint128ToBytes(total)
+	})
 }
 
 // evaluateCurveForFund applies the reward_fund's author_reward_curve
