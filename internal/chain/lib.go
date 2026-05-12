@@ -83,21 +83,19 @@ func (d *Database) updateProducerLastConfirmed(s *state.Session, witness string,
 	if witness == "" {
 		return
 	}
-	w, err := objects.GetWitness(s, witness)
-	if err != nil {
+	// Per-block hot path. Fires from ApplyBlock AFTER DiscardSavepoint,
+	// so UndoEnabled is always false here. GetWitnessRef + in-place
+	// pointer mutation: LastConfirmedBlockNum isn't a secondary-index
+	// key so no flushSecondaries dirty marking is needed. Skip the
+	// PutWitnessIndexed (~700-byte Witness value-copy) entirely.
+	wRef, ok := objects.GetWitnessRef(s, auth.AccountName(witness))
+	if !ok {
 		return
 	}
-	if w.LastConfirmedBlockNum >= blockNum {
+	if wRef.LastConfirmedBlockNum >= blockNum {
 		return
 	}
-	// Per-block hot path. Snapshot pre-modify index fields so PutWitnessIndexed
-	// can skip the read-prev step PutWitness would otherwise do — saves a
-	// full Get + ReadWitness round-trip every single block.
-	oldVotes := w.TotalVotesVests
-	oldVST := w.VirtualScheduledTime
-	oldPow := w.PowWorker
-	w.LastConfirmedBlockNum = blockNum
-	objects.PutWitnessIndexed(s, &w, oldVotes, oldVST, oldPow)
+	wRef.LastConfirmedBlockNum = blockNum
 	d.lcbCache[witness] = blockNum
 }
 
