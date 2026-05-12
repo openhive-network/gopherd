@@ -189,6 +189,7 @@ func cmdReplay(args []string) int {
 		SkipTransactionSignatures: true, // replay always skips sigs
 		SkipBlockSignature:        true,
 		SkipDedupAndTaPOS:         true, // canonical block_log; sha256+dedup+TaPOS+prune redundant
+		SkipTxSavepoints:          true, // canonical block_log; per-tx undo snap captures redundant
 	}
 
 	type acctSnap struct {

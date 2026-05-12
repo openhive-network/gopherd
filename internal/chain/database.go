@@ -299,6 +299,18 @@ type ApplyOptions struct {
 	// Skips DigestFromBytes (sha256) on the unsigned bytes too, since
 	// the only remaining txID consumer is dedup itself.
 	SkipDedupAndTaPOS bool
+	// SkipTxSavepoints bypasses the per-tx session.Snapshot /
+	// DiscardSavepoint pair AND the failure-recovery Restore. Subsystem
+	// stores then never set UndoEnabled, eliminating ALL per-mutation
+	// undoLog snap captures (WitnessStore ~700-byte / Account ~256-byte
+	// / Comment ~256-byte / CommentVote ~75-byte) across the run.
+	//
+	// CORRECTNESS NOTE: any failure inside evaluator.Apply leaves the
+	// session with a half-applied tx — no rollback is possible. Replay
+	// against a canonical block_log expects zero failures, so we halt
+	// immediately with the error message and let the caller diagnose.
+	// Live sync MUST leave this false.
+	SkipTxSavepoints bool
 	// PreRecoveredTxKeys, when non-nil, is the per-tx pre-recovered
 	// signer pubkey set produced by RecoverBlockTxSignerKeys upstream
 	// (typically on a worker pool that runs decode + sig recovery in
@@ -509,8 +521,13 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 		// undo session — if any op in the tx throws, the whole tx is
 		// rolled back atomically. Subsequent txs in the same block
 		// are unaffected. We mirror that by snapshotting the overlay
-		// at tx-start; on failure we Restore.
-		txSnap := session.Snapshot()
+		// at tx-start; on failure we Restore. Under SkipTxSavepoints
+		// (trusted-block_log replay) the savepoint is skipped and a
+		// failure halts immediately — no rollback is possible.
+		var txSnap state.Savepoint
+		if !opts.SkipTxSavepoints {
+			txSnap = session.Snapshot()
+		}
 		txFailed := false
 		var failOp string
 		var failErr error
@@ -558,7 +575,9 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 				txFailed = true
 				failOp = "tx-sigverify"
 				failErr = sigErr
-				session.Restore(txSnap)
+				if !opts.SkipTxSavepoints {
+					session.Restore(txSnap)
+				}
 				if stats != nil {
 					stats.recordSkip(failOp, failErr)
 				}
@@ -574,7 +593,9 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 				txFailed = true
 				failOp = "tx-preflight"
 				failErr = err
-				session.Restore(txSnap)
+				if !opts.SkipTxSavepoints {
+					session.Restore(txSnap)
+				}
 				if stats != nil {
 					stats.recordSkip(failOp, failErr)
 				}
@@ -612,7 +633,9 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 		}
 		if txFailed {
 			// Roll back the partial tx's writes; subsequent txs proceed.
-			session.Restore(txSnap)
+			if !opts.SkipTxSavepoints {
+				session.Restore(txSnap)
+			}
 			// Undo the per-op `OpsApplied` increments for the rolled-back ops.
 			if stats != nil {
 				// Number of ops successfully applied within this tx
@@ -649,7 +672,9 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 		// (processProducerReward → AdjustWitnessVotesForVoter,
 		// processCommentCashouts, schedule rebuild) then bypass the
 		// 700-byte Witness / 256-byte Account snap copies entirely.
-		session.DiscardSavepoint(txSnap)
+		if !opts.SkipTxSavepoints {
+			session.DiscardSavepoint(txSnap)
+		}
 	}
 	if stats != nil {
 		stats.OpsSkipped += skippedThisBlock
