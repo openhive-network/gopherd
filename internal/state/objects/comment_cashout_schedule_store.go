@@ -61,8 +61,12 @@ const commentCashoutScheduleStoreSubsystemKey = "comment_cashout_schedule_store"
 
 func EnsureCommentCashoutScheduleStore(s *state.Session) *CommentCashoutScheduleStore {
 	db := s.Database()
+	if x := db.HotSubsystem(hotSlotCommentCashout); x != nil {
+		return x.(*CommentCashoutScheduleStore)
+	}
 	if existing := db.GetSubsystem(commentCashoutScheduleStoreSubsystemKey); existing != nil {
 		if t, ok := existing.(*CommentCashoutScheduleStore); ok {
+			db.SetHotSubsystem(hotSlotCommentCashout, t)
 			return t
 		}
 	}
@@ -75,6 +79,7 @@ func EnsureCommentCashoutScheduleStore(s *state.Session) *CommentCashoutSchedule
 		undoLog: make([]commentCashoutScheduleUndo, 0, 32),
 	}
 	db.RegisterSubsystem(commentCashoutScheduleStoreSubsystemKey, t, t)
+	db.SetHotSubsystem(hotSlotCommentCashout, t)
 	return t
 }
 

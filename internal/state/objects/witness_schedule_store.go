@@ -36,8 +36,12 @@ const witnessScheduleStoreSubsystemKey = "witness_schedule_store"
 // EnsureWitnessScheduleStore returns the database's WitnessScheduleStore.
 func EnsureWitnessScheduleStore(s *state.Session) *WitnessScheduleStore {
 	db := s.Database()
+	if x := db.HotSubsystem(hotSlotWitnessSchedule); x != nil {
+		return x.(*WitnessScheduleStore)
+	}
 	if existing := db.GetSubsystem(witnessScheduleStoreSubsystemKey); existing != nil {
 		if t, ok := existing.(*WitnessScheduleStore); ok {
+			db.SetHotSubsystem(hotSlotWitnessSchedule, t)
 			return t
 		}
 	}
@@ -46,6 +50,7 @@ func EnsureWitnessScheduleStore(s *state.Session) *WitnessScheduleStore {
 		undoLog: make([]witnessScheduleUndo, 0, 8),
 	}
 	db.RegisterSubsystem(witnessScheduleStoreSubsystemKey, t, t)
+	db.SetHotSubsystem(hotSlotWitnessSchedule, t)
 	return t
 }
 

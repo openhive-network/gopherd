@@ -52,8 +52,12 @@ const vestingWithdrawalScheduleStoreSubsystemKey = "vesting_withdrawal_schedule_
 
 func EnsureVestingWithdrawalScheduleStore(s *state.Session) *VestingWithdrawalScheduleStore {
 	db := s.Database()
+	if x := db.HotSubsystem(hotSlotVestWithdrawal); x != nil {
+		return x.(*VestingWithdrawalScheduleStore)
+	}
 	if existing := db.GetSubsystem(vestingWithdrawalScheduleStoreSubsystemKey); existing != nil {
 		if t, ok := existing.(*VestingWithdrawalScheduleStore); ok {
+			db.SetHotSubsystem(hotSlotVestWithdrawal, t)
 			return t
 		}
 	}
@@ -65,6 +69,7 @@ func EnsureVestingWithdrawalScheduleStore(s *state.Session) *VestingWithdrawalSc
 		undoLog: make([]vestingWithdrawalScheduleUndo, 0, 16),
 	}
 	db.RegisterSubsystem(vestingWithdrawalScheduleStoreSubsystemKey, t, t)
+	db.SetHotSubsystem(hotSlotVestWithdrawal, t)
 	return t
 }
 

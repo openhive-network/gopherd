@@ -63,8 +63,12 @@ const convertRequestStoreSubsystemKey = "convert_request_store"
 
 func EnsureConvertRequestStore(s *state.Session) *ConvertRequestStore {
 	db := s.Database()
+	if x := db.HotSubsystem(hotSlotConvertRequest); x != nil {
+		return x.(*ConvertRequestStore)
+	}
 	if existing := db.GetSubsystem(convertRequestStoreSubsystemKey); existing != nil {
 		if t, ok := existing.(*ConvertRequestStore); ok {
+			db.SetHotSubsystem(hotSlotConvertRequest, t)
 			return t
 		}
 	}
@@ -77,6 +81,7 @@ func EnsureConvertRequestStore(s *state.Session) *ConvertRequestStore {
 		undoLog: make([]convertRequestUndo, 0, 16),
 	}
 	db.RegisterSubsystem(convertRequestStoreSubsystemKey, t, t)
+	db.SetHotSubsystem(hotSlotConvertRequest, t)
 	return t
 }
 

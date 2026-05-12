@@ -40,8 +40,12 @@ const blockSummaryStoreSubsystemKey = "block_summary_store"
 // EnsureBlockSummaryStore returns the database's BlockSummaryStore.
 func EnsureBlockSummaryStore(s *state.Session) *BlockSummaryStore {
 	db := s.Database()
+	if x := db.HotSubsystem(hotSlotBlockSummary); x != nil {
+		return x.(*BlockSummaryStore)
+	}
 	if existing := db.GetSubsystem(blockSummaryStoreSubsystemKey); existing != nil {
 		if t, ok := existing.(*BlockSummaryStore); ok {
+			db.SetHotSubsystem(hotSlotBlockSummary, t)
 			return t
 		}
 	}
@@ -50,6 +54,7 @@ func EnsureBlockSummaryStore(s *state.Session) *BlockSummaryStore {
 		undoLog: make([]blockSummaryUndo, 0, 8),
 	}
 	db.RegisterSubsystem(blockSummaryStoreSubsystemKey, t, t)
+	db.SetHotSubsystem(hotSlotBlockSummary, t)
 	return t
 }
 

@@ -112,14 +112,19 @@ const limitOrderStoreSubsystemKey = "limit_order_store"
 // EnsureLimitOrderStore returns the database's LimitOrderStore.
 func EnsureLimitOrderStore(s *state.Session) *LimitOrderStore {
 	db := s.Database()
+	if x := db.HotSubsystem(hotSlotLimitOrder); x != nil {
+		return x.(*LimitOrderStore)
+	}
 	if existing := db.GetSubsystem(limitOrderStoreSubsystemKey); existing != nil {
 		if t, ok := existing.(*LimitOrderStore); ok {
+			db.SetHotSubsystem(hotSlotLimitOrder, t)
 			return t
 		}
 	}
 	t := newLimitOrderStore()
 	t.db = db
 	db.RegisterSubsystem(limitOrderStoreSubsystemKey, t, t)
+	db.SetHotSubsystem(hotSlotLimitOrder, t)
 	return t
 }
 

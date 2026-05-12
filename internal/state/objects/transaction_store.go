@@ -81,14 +81,19 @@ const transactionStoreSubsystemKey = "transaction_store"
 // EnsureTransactionStore returns the database's TransactionStore.
 func EnsureTransactionStore(s *state.Session) *TransactionStore {
 	db := s.Database()
+	if x := db.HotSubsystem(hotSlotTransaction); x != nil {
+		return x.(*TransactionStore)
+	}
 	if existing := db.GetSubsystem(transactionStoreSubsystemKey); existing != nil {
 		if t, ok := existing.(*TransactionStore); ok {
+			db.SetHotSubsystem(hotSlotTransaction, t)
 			return t
 		}
 	}
 	t := newTransactionStore()
 	t.db = db
 	db.RegisterSubsystem(transactionStoreSubsystemKey, t, t)
+	db.SetHotSubsystem(hotSlotTransaction, t)
 	return t
 }
 
