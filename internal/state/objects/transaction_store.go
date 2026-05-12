@@ -27,10 +27,11 @@ import (
 //     the scan, matching the C++ by_expiration prune).
 //   - undoLog captures pre-mutation state for Snapshot/Restore.
 type TransactionStore struct {
-	db      *state.Database
-	primary map[[20]byte]uint32
-	byExp   *btree.BTreeG[txExpKey]
-	undoLog []txUndo
+	db          *state.Database
+	primary     map[[20]byte]uint32
+	byExp       *btree.BTreeG[txExpKey]
+	hintByExp   btree.PathHint
+	undoLog     []txUndo
 	// pruneBuf is reused across PruneExpired calls to avoid the
 	// per-call slice growth that escaped through the btree.Scan closure
 	// (180 MB cum on a 4M-block run).
@@ -151,10 +152,10 @@ func (s *TransactionStore) Put(trxID [20]byte, expiration uint32) {
 		})
 	}
 	if had {
-		s.byExp.Delete(txExpKey{exp: prev, trxID: trxID})
+		s.byExp.DeleteHint(txExpKey{exp: prev, trxID: trxID}, &s.hintByExp)
 	}
 	s.primary[trxID] = expiration
-	s.byExp.Set(txExpKey{exp: expiration, trxID: trxID})
+	s.byExp.SetHint(txExpKey{exp: expiration, trxID: trxID}, &s.hintByExp)
 }
 
 // Delete removes the trxID row (if present). Captures undo state when
@@ -170,7 +171,7 @@ func (s *TransactionStore) Delete(trxID [20]byte) {
 		})
 	}
 	delete(s.primary, trxID)
-	s.byExp.Delete(txExpKey{exp: prev, trxID: trxID})
+	s.byExp.DeleteHint(txExpKey{exp: prev, trxID: trxID}, &s.hintByExp)
 }
 
 // PruneExpired removes every entry whose expiration ≤ now. Mirrors C++
@@ -199,7 +200,7 @@ func (s *TransactionStore) PruneExpired(now uint32) {
 			})
 		}
 		delete(s.primary, k.trxID)
-		s.byExp.Delete(k)
+		s.byExp.DeleteHint(k, &s.hintByExp)
 	}
 }
 
