@@ -429,9 +429,9 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	// to evaluators so they match C++.
 	headBlockTime := hdr.Timestamp
 	prevCurrentAslot := uint64(0)
-	if dgpo, err := objects.GetDGPO(session); err == nil {
-		headBlockTime = dgpo.Time
-		prevCurrentAslot = dgpo.CurrentAslot
+	if dgpoRef, ok := objects.GetDGPORef(session); ok {
+		headBlockTime = dgpoRef.Time
+		prevCurrentAslot = dgpoRef.CurrentAslot
 	}
 
 	// Witness-scheduling assert + block-level invariants (chain
@@ -491,13 +491,9 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	// the previous block's. Go's evaluator.Context.Witness is also set
 	// to hdr.Witness (line 210), so the in-Context reads are independent;
 	// this only matters for code paths that read dgpo directly.
-	{
-		dgpoPre, derr := objects.GetDGPO(session)
-		if derr == nil {
-			dgpoPre.CurrentWitness = hdr.Witness
-			objects.PutDGPO(session, &dgpoPre)
-		}
-	}
+	objects.MutateDGPO(session, func(p *objects.DynamicGlobalProperty) {
+		p.CurrentWitness = hdr.Witness
+	})
 
 	// Mirror C++ database.cpp:2379 — process_header_extensions runs
 	// BEFORE the tx loop so witness running_version + hardfork_version_vote
@@ -724,22 +720,19 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	if blockNum > 1 && slotForBlock > 1 {
 		updateWitnessMissedBlocks(session, hdr.Witness, slotForBlock-1, hf, blockNum)
 	}
-	dgpo, err := objects.GetDGPO(session)
-	if err != nil && err != state.ErrNotFound {
-		return objects.DynamicGlobalProperty{}, fmt.Errorf("apply_block %d dgpo read: %w", blockNum, err)
-	}
-	dgpo.HeadBlockNumber = blockNum
-	dgpo.Time = hdr.Timestamp
-	dgpo.HeadBlockID = block.ConstructID(rawBlock[:hdrLen], blockNum)
-	// Advance CurrentAslot by slotForBlock — mirrors hived's
-	// update_global_dynamic_data (database.cpp:2912-2920) which adds
-	// the block's slot index (1 + missed slots since previous block) to
-	// dgpo.current_aslot. ScheduledWitnessForSlot reads CurrentAslot to
-	// resolve which witness should produce slot N from the schedule
-	// shuffle. Without advancing on missed slots, miss-counter
-	// attribution looks at the WRONG witness for each missed slot.
-	dgpo.CurrentAslot += uint64(slotForBlock)
-	objects.PutDGPO(session, &dgpo)
+	hdrID := block.ConstructID(rawBlock[:hdrLen], blockNum)
+	objects.MutateDGPO(session, func(p *objects.DynamicGlobalProperty) {
+		p.HeadBlockNumber = blockNum
+		p.Time = hdr.Timestamp
+		p.HeadBlockID = hdrID
+		// Advance CurrentAslot by slotForBlock — mirrors hived's
+		// update_global_dynamic_data (database.cpp:2912-2920) which adds
+		// the block's slot index (1 + missed slots since previous block)
+		// to dgpo.current_aslot. ScheduledWitnessForSlot reads CurrentAslot
+		// to resolve which witness should produce slot N from the schedule
+		// shuffle.
+		p.CurrentAslot += uint64(slotForBlock)
+	})
 
 	// Per-block hooks — order mirrors libraries/chain/database.cpp's
 	// _apply_block (lines 2335-2356):
@@ -878,7 +871,14 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	processRecurrentTransfers(session, hdr.Timestamp, blockNum)
 	processHardforks(session, blockNum)
 
-	objects.PutBlockSummary(session, blockNum, dgpo.HeadBlockID)
+	{
+		dgpoRef, _ := objects.GetDGPORef(session)
+		var headBlockID [20]byte
+		if dgpoRef != nil {
+			headBlockID = dgpoRef.HeadBlockID
+		}
+		objects.PutBlockSummary(session, blockNum, headBlockID)
+	}
 	if !opts.SkipDedupAndTaPOS {
 		objects.PruneExpiredTransactions(session, hdr.Timestamp)
 	}
@@ -894,6 +894,7 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 
 	// Re-read dgpo so the returned value reflects per-block hook
 	// updates (supply, vesting fund, etc.).
+	var dgpo objects.DynamicGlobalProperty
 	if updated, err := objects.GetDGPO(session); err == nil {
 		dgpo = updated
 	}
