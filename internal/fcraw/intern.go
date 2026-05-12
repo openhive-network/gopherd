@@ -26,7 +26,11 @@ const HiveAccountNameMaxLen = 16
 // fatal. Reads use RLock (no contention between readers); the rare
 // miss escalates to Lock for the insert with a re-check inside.
 var (
-	internMu        sync.RWMutex
+	// Plain Mutex over RWMutex: single Lock+Unlock per call beats
+	// RLock+RUnlock when the read path is short (a single map probe).
+	// Even in live-sync with multiple deserialize goroutines, the lock
+	// is held only for the map probe — contention stays low.
+	internMu        sync.Mutex
 	internedStrings = make(map[string]string, 1<<14)
 )
 
@@ -38,18 +42,12 @@ func InternString(b []byte) string {
 	if len(b) > HiveAccountNameMaxLen {
 		return string(b)
 	}
-	internMu.RLock()
+	internMu.Lock()
 	if s, ok := internedStrings[string(b)]; ok {
-		internMu.RUnlock()
+		internMu.Unlock()
 		return s
 	}
-	internMu.RUnlock()
 	s := string(b)
-	internMu.Lock()
-	if existing, ok := internedStrings[s]; ok {
-		internMu.Unlock()
-		return existing
-	}
 	internedStrings[s] = s
 	internMu.Unlock()
 	return s
