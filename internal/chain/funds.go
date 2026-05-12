@@ -191,12 +191,12 @@ func processProducerReward(s *state.Session, witnessName string, blockNum uint32
 	// and creates that many VESTS at vest_price. Treating the formula as
 	// a flat MIN under-credits the witness by hundreds of sat-HIVE per
 	// block, drifting TVF/TVS at the rate of compounding inflation.
-	dgpo, derr := objects.GetDGPO(s)
+	dgpoRef, dgpoOk := objects.GetDGPORef(s)
 	pay := minProducerReward
-	if derr == nil {
-		virtualSupply := dgpo.VirtualSupply
+	if dgpoOk {
+		virtualSupply := dgpoRef.VirtualSupply
 		if virtualSupply <= 0 {
-			virtualSupply = dgpo.CurrentSupply
+			virtualSupply = dgpoRef.CurrentSupply
 		}
 		percent := percentRewardPerBlock(virtualSupply, producerAPRPercent)
 		if percent > pay {

@@ -41,10 +41,9 @@ func clearNullAccountBalance(s *state.Session, blockNum uint32) {
 	// interest accrual hook fires before the delta lands. The
 	// post-adjust account retains the just-minted interest as a residual,
 	// which gets cleared on the next round.
-	dgpo, dgpoErr := objects.GetDGPO(s)
 	blockTime := uint32(0)
-	if dgpoErr == nil {
-		blockTime = dgpo.Time
+	if dgpoRef, ok := objects.GetDGPORef(s); ok {
+		blockTime = dgpoRef.Time
 	}
 	if a.HBDBalance > 0 && blockTime != 0 {
 		objects.AdjustHBDBalance(s, &a, blockTime, -a.HBDBalance)
