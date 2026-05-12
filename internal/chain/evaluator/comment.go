@@ -444,12 +444,30 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 	if !ok {
 		return fmt.Errorf("voteEvaluator: unexpected op type %T", o)
 	}
-	c, err := objects.GetComment(ctx.DB, v.Author, v.Permlink)
-	if err != nil {
-		if err == state.ErrNotFound {
+	// Dual GetComment/GetCommentRef path: under !UndoEnabled (replay)
+	// c aliases the in-place CommentStore slot — read/write through
+	// the pointer with no value-copy on Get and no PutComment at the
+	// end. Under UndoEnabled (live sync / tests) we fall back to a
+	// value-copy + slot-swap on PutComment so the undoLog captures the
+	// pre-mutation snap.
+	var cLocal objects.Comment
+	var c *objects.Comment
+	if ctx.DB.Database().UndoEnabled {
+		var err error
+		cLocal, err = objects.GetComment(ctx.DB, v.Author, v.Permlink)
+		if err != nil {
+			if err == state.ErrNotFound {
+				return fmt.Errorf("%w: %q/%q", ErrCommentNotFound, v.Author, v.Permlink)
+			}
+			return err
+		}
+		c = &cLocal
+	} else {
+		var ok bool
+		c, ok = objects.GetCommentRef(ctx.DB, v.Author, v.Permlink)
+		if !ok {
 			return fmt.Errorf("%w: %q/%q", ErrCommentNotFound, v.Author, v.Permlink)
 		}
-		return err
 	}
 	// hived rejects allows_votes=false ONLY when this is an upvote
 	// (weight > 0); downvotes still go through to dock rshares
@@ -789,8 +807,8 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 				}
 			}
 		} else {
-			oldW := curationWeightCurve(ctx, &c, oldVoteRshares)
-			newW := curationWeightCurve(ctx, &c, newVoteRshares)
+			oldW := curationWeightCurve(ctx, c, oldVoteRshares)
+			newW := curationWeightCurve(ctx, c, newVoteRshares)
 			if newW > oldW {
 				voteCurationWeight = newW - oldW
 			}
@@ -933,7 +951,7 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 		}
 		var root objects.Comment
 		if rootIsSelf {
-			root = c
+			root = *c
 		} else {
 			r, rerr := objects.GetComment(ctx.DB, rootAuthor, rootPermlink)
 			if rerr != nil {
@@ -1026,13 +1044,17 @@ func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
 		}
 		root.ChildrenAbsRshares = newRootAbsRshares
 		if rootIsSelf {
-			c = root // mirror updates back into c so PutComment below persists them
+			*c = root // mirror updates back into c so PutComment below persists them
 		} else {
 			objects.PutComment(ctx.DB, &root)
 		}
 	}
 rootDone:
-	objects.PutComment(ctx.DB, &c)
+	// Under !UndoEnabled, c aliases the slot — PutComment is a no-op
+	// self-copy (elided by CommentStore.Put when cur == c). Under
+	// UndoEnabled, c is a local value and PutComment captures the
+	// snap before writing.
+	objects.PutComment(ctx.DB, c)
 	voter.LastVoteTime = ctx.HeadBlockTime
 	if ctx.DB.Database().UndoEnabled {
 		// Slot-swap path: commit the local copy back to the AccountStore
