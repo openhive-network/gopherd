@@ -22,28 +22,37 @@ type EscrowTransfer struct {
 }
 
 func (EscrowTransfer) OpTag() Tag { return TagEscrowTransfer }
+
+// AppendFCBody matches hived's FC_REFLECT field order for
+// escrow_transfer_operation (libraries/protocol/include/hive/protocol/
+// hive_operations.hpp:1223):
+//
+//	(from)(to)(hbd_amount)(hive_amount)(escrow_id)(agent)(fee)
+//	(json_meta)(ratification_deadline)(escrow_expiration)
+//
+// The Go struct field order in source is unrelated to the wire order —
+// reflected by FC_REFLECT alone.
 func (o EscrowTransfer) AppendFCBody(dst []byte) []byte {
 	dst = appendString(dst, o.From)
 	dst = appendString(dst, o.To)
-	dst = appendString(dst, o.Agent)
-	dst = binary.LittleEndian.AppendUint32(dst, o.EscrowID)
 	dst = asset.AppendAsset(dst, o.HbdAmount)
 	dst = asset.AppendAsset(dst, o.HiveAmount)
+	dst = binary.LittleEndian.AppendUint32(dst, o.EscrowID)
+	dst = appendString(dst, o.Agent)
 	dst = asset.AppendAsset(dst, o.Fee)
+	dst = appendString(dst, o.JSONMeta)
 	dst = binary.LittleEndian.AppendUint32(dst, o.RatificationDeadline)
-	dst = binary.LittleEndian.AppendUint32(dst, o.EscrowExpiration)
-	return appendString(dst, o.JSONMeta)
+	return binary.LittleEndian.AppendUint32(dst, o.EscrowExpiration)
 }
 
+// readEscrowTransfer mirrors the AppendFCBody order above.
 func readEscrowTransfer(r *fcraw.Reader) (Operation, error) {
 	var o EscrowTransfer
 	var err error
-	for _, dst := range []*string{&o.From, &o.To, &o.Agent} {
-		if *dst, err = r.ReadString(); err != nil {
-			return nil, err
-		}
+	if o.From, err = r.ReadString(); err != nil {
+		return nil, err
 	}
-	if o.EscrowID, err = r.ReadUint32(); err != nil {
+	if o.To, err = r.ReadString(); err != nil {
 		return nil, err
 	}
 	if o.HbdAmount, err = asset.ReadAsset(r); err != nil {
@@ -52,16 +61,22 @@ func readEscrowTransfer(r *fcraw.Reader) (Operation, error) {
 	if o.HiveAmount, err = asset.ReadAsset(r); err != nil {
 		return nil, err
 	}
+	if o.EscrowID, err = r.ReadUint32(); err != nil {
+		return nil, err
+	}
+	if o.Agent, err = r.ReadString(); err != nil {
+		return nil, err
+	}
 	if o.Fee, err = asset.ReadAsset(r); err != nil {
+		return nil, err
+	}
+	if o.JSONMeta, err = r.ReadString(); err != nil {
 		return nil, err
 	}
 	if o.RatificationDeadline, err = r.ReadUint32(); err != nil {
 		return nil, err
 	}
 	if o.EscrowExpiration, err = r.ReadUint32(); err != nil {
-		return nil, err
-	}
-	if o.JSONMeta, err = r.ReadString(); err != nil {
 		return nil, err
 	}
 	return o, nil
