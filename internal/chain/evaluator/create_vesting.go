@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	"hived-go/internal/protocol/auth"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
 )
@@ -122,16 +123,21 @@ func createVestingImpl(s *state.Session, accountName string, hiveSatoshi int64, 
 		}
 	}
 
-	a, err := objects.GetAccount(s, accountName)
-	if err != nil {
-		return 0, err
+	// MutateAccount: in-place mutate via slot pointer, captures snap only
+	// under UndoEnabled. Saves the GetAccount value-copy (~3.43s flat on
+	// the hot path, the largest CreateVesting cost beneath
+	// AdjustProxiedWitnessVotes).
+	var aSlot *objects.Account
+	if !objects.MutateAccount(s, auth.AccountName(accountName), func(a *objects.Account) {
+		if toReward {
+			a.RewardVests += vestsAmount
+		} else {
+			a.VestingShares += vestsAmount
+		}
+		aSlot = a
+	}) {
+		return 0, fmt.Errorf("createVesting: account %q not found", accountName)
 	}
-	if toReward {
-		a.RewardVests += vestsAmount
-	} else {
-		a.VestingShares += vestsAmount
-	}
-	objects.PutAccount(s, &a)
 
 	dgpo.TotalVestingShares += vestsAmount
 	dgpo.TotalVestingFundHive += hiveSatoshi
@@ -139,16 +145,14 @@ func createVestingImpl(s *state.Session, accountName string, hiveSatoshi int64, 
 	traceAll := envGhivediffAllVest != ""
 	if vestTraceAccount(accountName) || (traceAll && dgpo.HeadBlockNumber >= 2888500 && dgpo.HeadBlockNumber <= 2910000) {
 		fmt.Fprintf(os.Stderr, "GHIVEDIFF VEST-CREATE block=%d acct=%s liquid=%d new_vests=%d after_vests=%d fund_pre=%d shares_pre=%d toReward=%v\n",
-			dgpo.HeadBlockNumber, accountName, hiveSatoshi, vestsAmount, a.VestingShares, dgpo.TotalVestingFundHive-hiveSatoshi, dgpo.TotalVestingShares-vestsAmount, toReward)
+			dgpo.HeadBlockNumber, accountName, hiveSatoshi, vestsAmount, aSlot.VestingShares, dgpo.TotalVestingFundHive-hiveSatoshi, dgpo.TotalVestingShares-vestsAmount, toReward)
 	}
 
 	// C++ create_vesting2 calls adjust_proxied_witness_votes when
-	// !to_reward_balance. `a` already holds the post-mutation state
-	// (PutAccount copied our changes into the slot above) so we don't
-	// need to re-fetch — saves one AccountStore.Get per CreateVesting,
-	// the hottest AccountStore.Get caller.
+	// !to_reward_balance. aSlot points at the post-mutation slot so we
+	// pass it directly — saves one AccountStore.Get per CreateVesting.
 	if adjustVotes && !toReward && vestsAmount != 0 {
-		objects.AdjustProxiedWitnessVotes(s, &a, vestsAmount)
+		objects.AdjustProxiedWitnessVotes(s, aSlot, vestsAmount)
 	}
 	return vestsAmount, nil
 }
