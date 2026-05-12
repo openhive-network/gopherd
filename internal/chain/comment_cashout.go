@@ -829,17 +829,23 @@ func distributeCuratorPool(s *state.Session, author, permlink string, pool int64
 	})
 
 	paid := int64(0)
-	dgpoNow, _ := objects.GetDGPO(s)
+	// blockNum at the start of distributeCuratorPool is the dgpo's
+	// HeadBlockNumber (mutated by ApplyBlock pre-hooks). GetDGPORef
+	// skips the ~1 KB struct value-copy that GetDGPO would do per
+	// cashout (~500K cashouts in the 8M window).
+	var headBlockNum uint32
+	if dgpoRef, ok := objects.GetDGPORef(s); ok {
+		headBlockNum = dgpoRef.HeadBlockNumber
+	}
 	// HF17_659 (block 10,629,455 mainnet) flips curator vests to the
 	// reward_balance — claimable later via claim_reward_balance —
-	// instead of crediting vesting_shares directly. Mirrors C++ at
-	// database_comment.cpp:188 `create_vesting2(... has_hardfork(HF17_659) ...)`.
-	hf := hardfork.SetForBlock(dgpoNow.HeadBlockNumber)
+	// instead of crediting vesting_shares directly.
+	hf := hardfork.SetForBlock(headBlockNum)
 	toReward := hf.Has(hardfork.HF17)
 	for _, p := range *pays {
 		if traceAccount(p.Voter) || traceAccount(author) {
 			ghiveDiff("GHIVEDIFF CASHOUT-CURATOR block=%d author=%s permlink=%s voter=%s weight=%d total_weight=%d pool=%d claim=%d\n",
-				dgpoNow.HeadBlockNumber, author, permlink, p.Voter, p.Weight, c.TotalVoteWeight, pool, p.Share)
+				headBlockNum, author, permlink, p.Voter, p.Weight, c.TotalVoteWeight, pool, p.Share)
 		}
 		_, _ = CreateVesting_via_chain(s, p.Voter, p.Share, toReward)
 		paid += p.Share
