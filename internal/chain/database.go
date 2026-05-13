@@ -612,7 +612,7 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 			}
 		}
 		for j, o := range txRes.SignedTx.Operations {
-			if err := evaluator.Apply(ctx, o.Operation()); err != nil {
+			if err := evaluator.ApplyOp(ctx, o); err != nil {
 				txFailed = true
 				failOp = o.Tag.Name()
 				failErr = fmt.Errorf("op %d: %w", j, err)

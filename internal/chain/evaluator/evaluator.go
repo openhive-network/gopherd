@@ -94,6 +94,22 @@ func Apply(ctx *Context, o op.Operation) error {
 	return nil
 }
 
+// ApplyOp dispatches a tagged Op to the registered evaluator. Reads the
+// tag directly from the struct (no OpTag() iface call) and bridges to
+// the Operation form only when entering the evaluator. Once individual
+// evaluators are migrated to take op.Op natively, the inner conversion
+// goes away and the entire dispatch is iface-free.
+func ApplyOp(ctx *Context, o op.Op) error {
+	tag := o.Tag
+	if int(tag) >= len(dispatch) || dispatch[tag] == nil {
+		return fmt.Errorf("%w: tag %d (%s)", ErrNotImplemented, tag, tag.Name())
+	}
+	if err := dispatch[tag].Apply(ctx, o.Operation()); err != nil {
+		return fmt.Errorf("%s: %w", tag.Name(), err)
+	}
+	return nil
+}
+
 // ErrNotImplemented is returned when an op has no registered evaluator.
 var ErrNotImplemented = errors.New("evaluator not implemented")
 
