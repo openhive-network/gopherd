@@ -279,6 +279,61 @@ func TestCommentOptionsValidate(t *testing.T) {
 	expectErr(t, "negative payout", bad.Validate())
 }
 
+// TestCommentBeneficiariesValidate mirrors the C++ comment_beneficiaries_validate
+// test (libraries/chain/tests/operation_tests.cpp). Covers:
+//   - single beneficiary > 100% weight
+//   - cumulative beneficiaries > 100%
+//   - up to 127 routes allowed; 128+ rejected (HIVE_BENEFICIARY_LIMIT - 1)
+//   - duplicate / out-of-order accounts rejected
+func TestCommentBeneficiariesValidate(t *testing.T) {
+	base := func(bs []CommentBeneficiary) CommentOptions {
+		return CommentOptions{
+			Author: "alice", Permlink: "test",
+			MaxAcceptedPayout: hbd(1_000_000), PercentHbd: 5000,
+			Beneficiaries: bs,
+		}
+	}
+	expectErr(t, "single > 100%",
+		base([]CommentBeneficiary{{Account: "bob", Weight: hivePercent + 1}}).Validate())
+	expectErr(t, "cumulative > 100%",
+		base([]CommentBeneficiary{
+			{Account: "bob", Weight: 7500},
+			{Account: "sam", Weight: 7500},
+		}).Validate())
+
+	// 127 routes (max) — generate sorted names foo0..foo126
+	max127 := make([]CommentBeneficiary, 127)
+	for i := range max127 {
+		max127[i] = CommentBeneficiary{Account: routeAcct(i), Weight: 1}
+	}
+	expectOK(t, "127 routes max", base(max127).Validate())
+	expectErr(t, "128 routes too many",
+		base(append(max127, CommentBeneficiary{Account: "zzzz", Weight: 1})).Validate())
+
+	expectErr(t, "duplicate accounts",
+		base([]CommentBeneficiary{
+			{Account: "bob", Weight: 200},
+			{Account: "bob", Weight: 100},
+		}).Validate())
+
+	expectErr(t, "unsorted accounts",
+		base([]CommentBeneficiary{
+			{Account: "bob", Weight: 100},
+			{Account: "alice", Weight: 100},
+		}).Validate())
+}
+
+// routeAcct generates a 6-char zero-padded account "ben000".."ben999"
+// — sortable lexicographically, at least HIVE_MIN_ACCOUNT_NAME_LENGTH (3).
+func routeAcct(i int) string {
+	s := []byte{'0', '0', '0'}
+	for d := 2; d >= 0 && i > 0; d-- {
+		s[d] = byte('0' + i%10)
+		i /= 10
+	}
+	return "ben" + string(s)
+}
+
 func TestSetWithdrawVestingRouteValidate(t *testing.T) {
 	expectOK(t, "valid",
 		SetWithdrawVestingRoute{FromAccount: "alice", ToAccount: "bob", Percent: 5000}.Validate())

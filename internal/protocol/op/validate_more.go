@@ -392,6 +392,10 @@ func (o WitnessSetProperties) Validate() error {
 
 // ---- CommentOptions / SetWithdrawVestingRoute ------------------------
 
+// HIVE_BENEFICIARY_LIMIT — beneficiary count fits in one wire byte.
+// FC_REFLECT requires < 128. Mirrors config.hpp HIVE_BENEFICIARY_LIMIT.
+const hiveBeneficiaryLimit = 128
+
 func (o CommentOptions) Validate() error {
 	if err := validateAccountName("comment_options.author", string(o.Author)); err != nil {
 		return err
@@ -407,6 +411,43 @@ func (o CommentOptions) Validate() error {
 	}
 	if len(o.Permlink) == 0 || len(o.Permlink) > MaxPermlinkLength {
 		return fmt.Errorf("comment_options.permlink: length %d not in (0, %d]", len(o.Permlink), MaxPermlinkLength)
+	}
+	if err := validateCommentBeneficiaries(o.Beneficiaries); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateCommentBeneficiaries mirrors C++ comment_payout_beneficiaries::validate()
+// (libraries/protocol/hive_operations.cpp). Empty list is allowed at the
+// CommentOptions level (extension not set); when present, every rule
+// applies.
+func validateCommentBeneficiaries(bs []CommentBeneficiary) error {
+	if len(bs) == 0 {
+		return nil
+	}
+	if len(bs) >= hiveBeneficiaryLimit {
+		return fmt.Errorf("comment_options.beneficiaries: cannot specify more than %d beneficiaries", hiveBeneficiaryLimit-1)
+	}
+	var sum uint32
+	var prev string
+	for i, b := range bs {
+		if err := validateAccountName("comment_options.beneficiaries.account", string(b.Account)); err != nil {
+			return err
+		}
+		if b.Weight > uint16(hivePercent) {
+			return fmt.Errorf("comment_options.beneficiaries[%d]: weight %d exceeds 100%%", i, b.Weight)
+		}
+		sum += uint32(b.Weight)
+		if sum > uint32(hivePercent) {
+			return errors.New("comment_options.beneficiaries: cannot allocate more than 100% of rewards")
+		}
+		if i > 0 {
+			if string(b.Account) <= prev {
+				return fmt.Errorf("comment_options.beneficiaries[%d]: must be sorted ascending by account (got %q after %q)", i, b.Account, prev)
+			}
+		}
+		prev = string(b.Account)
 	}
 	return nil
 }
