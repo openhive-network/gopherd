@@ -1,22 +1,15 @@
 package objects
 
 import (
-	"errors"
-	"fmt"
-
-	"hived-go/internal/fcraw"
 	"hived-go/internal/state"
 )
 
 // RCPoolTable is the singleton holding the chain-wide rc_pool_object.
-// Mirrors hive::chain::rc_pool_object — five per-resource manabars whose
-// usage rate scales the per-tx RC cost.
+// Mirrors hive::chain::rc_pool_object.
 //
-// Activated at HF20. The pool size for each resource is recomputed every
-// block from witness-voted parameters in resource_dynamics_params + the
-// median chain_properties. This Go port stores enough to drive
-// finalize_block accounting; finer pool dynamics land alongside the
-// HF20 replay window.
+// Activated at HF20. The struct + codec live in rc_objects.go (Phase 1
+// foundation); this file holds the table id, resource enumeration and
+// singleton key.
 const RCPoolTable state.TableID = 28
 
 // rcPoolSingletonKey is the only valid key in the singleton table.
@@ -37,66 +30,17 @@ const (
 	RCExecutionTime RCResource = 4
 )
 
-// RCPool mirrors rc_pool_object's per-resource manabar plus the cost
-// coefficient used by the per-tx fee computation.
-//
-// Pool[i].Current = remaining capacity for that resource.
-// Pool[i].Max     = maximum capacity (set by the rd_dynamic_params).
-// Pool[i].Update  = last-update time_point_sec for regeneration.
-// Pool[i].Cost    = per-resource cost coefficient (rc_per_resource).
-type RCPool struct {
-	Pool [RCNumResources]RCPoolEntry
-}
-
+// RCPoolEntry is the legacy per-resource manabar shape (kept for the
+// scaffolding pre-HF20 init code in rc_finalize.go). The C++-faithful
+// rc_pool_object payload (PoolArray / UsageInWindow / LastKnownBudget /
+// ResourceWeights / SumOfResourceWeights / LastRecalcTime) sits on the
+// RCPool struct in rc_objects.go; both shapes co-exist on the wire so
+// older serialized state still decodes.
 type RCPoolEntry struct {
 	Current int64
 	Max     int64
 	Update  uint32
 	Cost    int64
-}
-
-// AppendRCPool serializes the pool. Order is fixed by the resource
-// enumeration above so future readers can decode it positionally.
-func AppendRCPool(dst []byte, p *RCPool) []byte {
-	for i := 0; i < RCNumResources; i++ {
-		dst = appendI64LE(dst, p.Pool[i].Current)
-		dst = appendI64LE(dst, p.Pool[i].Max)
-		dst = appendU32LE(dst, p.Pool[i].Update)
-		dst = appendI64LE(dst, p.Pool[i].Cost)
-	}
-	return dst
-}
-
-// ReadRCPool decodes a pool from src.
-func ReadRCPool(src []byte) (RCPool, error) {
-	if len(src) < RCNumResources*(8+8+4+8) {
-		return RCPool{}, fmt.Errorf("rc_pool: short read (%d bytes)", len(src))
-	}
-	r := fcraw.NewReader(src)
-	var p RCPool
-	for i := 0; i < RCNumResources; i++ {
-		c, err := r.ReadInt64()
-		if err != nil {
-			return p, fmt.Errorf("rc_pool[%d].current: %w", i, err)
-		}
-		m, err := r.ReadInt64()
-		if err != nil {
-			return p, fmt.Errorf("rc_pool[%d].max: %w", i, err)
-		}
-		u, err := r.ReadUint32()
-		if err != nil {
-			return p, fmt.Errorf("rc_pool[%d].update: %w", i, err)
-		}
-		k, err := r.ReadInt64()
-		if err != nil {
-			return p, fmt.Errorf("rc_pool[%d].cost: %w", i, err)
-		}
-		p.Pool[i] = RCPoolEntry{Current: c, Max: m, Update: u, Cost: k}
-	}
-	if !r.AtEnd() {
-		return p, errors.New("rc_pool: trailing bytes")
-	}
-	return p, nil
 }
 
 // PutRCPool stores the singleton.
