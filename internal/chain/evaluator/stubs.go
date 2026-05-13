@@ -17,32 +17,24 @@ package evaluator
 // Every other tag has a real evaluator registered elsewhere; the
 // TestEveryRegularTagHasEvaluator test enforces full coverage.
 
-import (
-	"fmt"
+import "hived-go/internal/protocol/op"
 
-	"hived-go/internal/protocol/op"
-)
-
-func stub(name string, validate func(op.Operation) error) Evaluator {
-	return EvaluatorFunc(func(ctx *Context, opArg op.Op) error {
-		if validate != nil {
-			if err := validate(opArg.Operation()); err != nil {
-				return fmt.Errorf("%s (stub): %w", name, err)
-			}
-		}
-		return nil
-	})
-}
-
-func noValidate(_ op.Operation) error { return nil }
+// noopStub returns nil for every op — used for tags whose state effects
+// live in plugins (custom*) or are pre-HF1 placeholders that never fire
+// on real mainnet (witness_block_approve, reset_account, set_reset_account).
+//
+// All registered stubs were previously paired with a noValidate function;
+// no surviving stub needs body validation, so the prior validate-callback
+// machinery is gone.
+func noopStub(ctx *Context, opArg op.Op) error { return nil }
 
 func init() {
-	register(op.TagCustom, stub("custom", noValidate))
+	register(op.TagCustom, EvaluatorFunc(noopStub))
 	// custom_json now has a real evaluator (custom_json_rc.go) that
 	// dispatches consensus-touching IDs (chiefly "rc" for delegate_rc
 	// post-HF22). It registers itself separately.
-	register(op.TagCustomBinary, stub("custom_binary", noValidate))
-	register(op.TagWitnessBlockApprove, stub("witness_block_approve", noValidate))
-	register(op.TagResetAccount, stub("reset_account", noValidate))
-	register(op.TagSetResetAccount, stub("set_reset_account", noValidate))
+	register(op.TagCustomBinary, EvaluatorFunc(noopStub))
+	register(op.TagWitnessBlockApprove, EvaluatorFunc(noopStub))
+	register(op.TagResetAccount, EvaluatorFunc(noopStub))
+	register(op.TagSetResetAccount, EvaluatorFunc(noopStub))
 }
