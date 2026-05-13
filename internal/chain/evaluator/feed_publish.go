@@ -66,6 +66,16 @@ func (declineVotingRightsEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	} else if !has {
 		return fmt.Errorf("%w: %q", ErrAccountNotFound, dv.Account)
 	}
+	// hived: HIVE_CHAIN_VOTING_ASSERT( account.can_vote ... ) — once an
+	// account has had its voting rights effectively revoked, no further
+	// decline_voting_rights ops (decline or cancel) are accepted.
+	a, err := objects.GetAccount(ctx.DB, dv.Account)
+	if err != nil {
+		return err
+	}
+	if !a.CanVote() {
+		return fmt.Errorf("decline_voting_rights: account %q already declined voting rights", dv.Account)
+	}
 	if dv.Decline {
 		if has, err := objects.HasDeclineVotingRightsRequest(ctx.DB, dv.Account); err != nil {
 			return err

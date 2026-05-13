@@ -105,6 +105,109 @@ func TestDeclinedVotingRightsCancelBeforeEffective(t *testing.T) {
 	}
 }
 
+// TestDeclinedVotingRightsBasic2 ports hf28_tests.cpp::
+// declined_voting_rights_basic_2 (HF27 + HF28). After the
+// decline_voting_rights effective date fires, a second
+// decline_voting_rights op for the same account must throw because the
+// account's can_vote flag is now false. Mirrors hived's
+// HIVE_CHAIN_VOTING_ASSERT( account.can_vote ... ) in
+// decline_voting_rights_evaluator.
+func TestDeclinedVotingRightsBasic2(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		hf   hardfork.ID
+	}{{"HF27", hardfork.HF27}, {"HF28", hardfork.HF28}} {
+		hf := tc.hf
+		t.Run(tc.name, func(t *testing.T) {
+			f := New(t)
+			f.HardforksUpTo(hf)
+			f.Actor("alice")
+			f.FundVesting("alice", 1_000)
+			f.GenerateBlock()
+
+			// First decline succeeds.
+			f.MustApplyOp(op.DeclineVotingRights{Account: "alice", Decline: true})
+
+			// Roll past the 30-day delay so the request fires.
+			f.SkipSeconds(60 * 60 * 24 * 30)
+			f.GenerateBlocks(2)
+
+			if !f.Account_("alice").VoteRevoked {
+				t.Fatal("alice.VoteRevoked should be true after effective date")
+			}
+
+			// Second decline must throw (account.can_vote == false).
+			if err := f.ApplyOp(op.DeclineVotingRights{Account: "alice", Decline: true}); err == nil {
+				t.Error("expected second decline to be rejected (can_vote=false)")
+			}
+		})
+	}
+}
+
+// TestDeclinedVotingRightsProposalVotes ports hf28_tests.cpp::
+// declined_voting_rights_proposal_votes. On HF28+, when a decline
+// effective date fires, any DHF proposal_votes the account has cast are
+// removed. Pre-HF28 the proposal votes survive.
+func TestDeclinedVotingRightsProposalVotes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		hf   hardfork.ID
+	}{{"HF27", hardfork.HF27}, {"HF28", hardfork.HF28}} {
+		hf := tc.hf
+		t.Run(tc.name, func(t *testing.T) {
+			f := New(t)
+			f.HardforksUpTo(hf)
+			f.Actors("alice", "bob")
+			f.GenerateBlock()
+			f.FundVesting("alice", 100_000)
+			f.FundVesting("bob", 100_000)
+			f.FundLiquidHBD("alice", 200_000)
+			f.FundLiquidHBD("bob", 200_000)
+			f.GenerateBlock()
+
+			// alice declines voting rights BEFORE casting a proposal vote.
+			f.MustApplyOp(op.DeclineVotingRights{Account: "alice", Decline: true})
+			f.GenerateBlock()
+
+			now := f.HeadBlockTime()
+			f.MustApplyOp(op.CreateProposal{
+				Creator:   "alice",
+				Receiver:  "bob",
+				StartDate: now + 60*60*24,
+				EndDate:   now + 60*60*24*20,
+				DailyPay:  HBD(100),
+				Subject:   "x",
+				Permlink:  "p",
+			})
+
+			f.MustApplyOp(op.UpdateProposalVotes{
+				Voter:       "alice",
+				ProposalIDs: []int64{1},
+				Approve:     true,
+			})
+			if has, _ := objects.HasProposalVote(state.NewSession(f.State), 1, "alice"); !has {
+				t.Fatal("alice's proposal vote should exist pre-effective")
+			}
+			f.GenerateBlock()
+
+			// Roll past 30-day delay — process_decline_voting_rights fires.
+			f.SkipSeconds(60 * 60 * 24 * 30)
+			f.GenerateBlocks(2)
+
+			has, _ := objects.HasProposalVote(state.NewSession(f.State), 1, "alice")
+			if hf >= hardfork.HF28 {
+				if has {
+					t.Error("HF28+: proposal vote should be removed by process_decline_voting_rights")
+				}
+			} else {
+				if !has {
+					t.Error("pre-HF28: proposal vote should be preserved")
+				}
+			}
+		})
+	}
+}
+
 // TestGlobalWitnessPropsHF26HBDPercents ports a slice of
 // hf28_tests.cpp::global_witness_props_basic_test (HF26 part). HF26
 // raises the HBD start/stop percent to 20% as a global witness prop.

@@ -1,6 +1,7 @@
 package chain
 
 import (
+	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
 )
@@ -8,6 +9,7 @@ import (
 // processDeclineVotingRights mirrors database::process_decline_voting_rights
 // (libraries/chain/database_dhf.cpp:207). For every
 // decline_voting_rights_request whose effective_date has passed:
+//   - HF28+: clear any DHF proposal_votes the account has cast
 //   - nullify_proxied_witness_votes: subtract the account's full proxy
 //     propagation (direct vest + proxied_vsf_votes[*]) from every
 //     witness it votes for (or from its proxy chain's terminal voter)
@@ -16,7 +18,7 @@ import (
 //   - clear any proxy
 //   - mark the account VoteRevoked = true
 //   - remove the request
-func processDeclineVotingRights(s *state.Session, blockTime uint32) {
+func processDeclineVotingRights(s *state.Session, blockTime, blockNum uint32) {
 	if hint, ok := s.GetExpHint(objects.DeclineVotingRightsRequestTable, objects.DeclineVotingRightsByEffectiveIndex); ok && hint > blockTime {
 		return
 	}
@@ -47,6 +49,7 @@ func processDeclineVotingRights(s *state.Session, blockTime uint32) {
 			return true, nil
 		})
 
+	hf := hardfork.SetForBlock(blockNum)
 	for _, p := range ready {
 		req, err := objects.GetDeclineVotingRightsRequest(s, p.account)
 		if err != nil {
@@ -54,6 +57,11 @@ func processDeclineVotingRights(s *state.Session, blockTime uint32) {
 		}
 		a, aerr := objects.GetAccount(s, p.account)
 		if aerr == nil {
+			// HF28: drop any DHF proposal votes the account has cast.
+			// Mirrors database_dhf.cpp:223 (remove_proposal_votes).
+			if hf.Has(hardfork.HF28) {
+				clearProposalVotesForVoter(s, p.account)
+			}
 			// nullify_proxied_witness_votes: subtract the account's full
 			// propagation (direct + proxied_vsf_votes[*]) from each
 			// witness it votes for or from its proxy chain. Mirrors
