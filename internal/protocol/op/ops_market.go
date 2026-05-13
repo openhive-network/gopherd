@@ -71,16 +71,24 @@ type LimitOrderCreate2 struct {
 }
 
 func (LimitOrderCreate2) OpTag() Tag { return TagLimitOrderCreate2 }
+
+// AppendFCBody matches hived's FC_REFLECT field order
+// (libraries/protocol/include/hive/protocol/hive_operations.hpp):
+//
+//	(owner)(orderid)(amount_to_sell)(exchange_rate)(fill_or_kill)(expiration)
+//
+// The Go struct's source-order is unrelated to the wire order — same
+// gotcha as op.EscrowTransfer (commit 5f87589).
 func (o LimitOrderCreate2) AppendFCBody(dst []byte) []byte {
 	dst = appendString(dst, o.Owner)
 	dst = binary.LittleEndian.AppendUint32(dst, o.OrderID)
 	dst = asset.AppendAsset(dst, o.AmountToSell)
+	dst = asset.AppendPrice(dst, o.ExchangeRate)
 	if o.FillOrKill {
 		dst = append(dst, 1)
 	} else {
 		dst = append(dst, 0)
 	}
-	dst = asset.AppendPrice(dst, o.ExchangeRate)
 	return binary.LittleEndian.AppendUint32(dst, o.Expiration)
 }
 
@@ -96,10 +104,10 @@ func readLimitOrderCreate2(r *fcraw.Reader) (Op, error) {
 	if o.AmountToSell, err = asset.ReadAsset(r); err != nil {
 		return Op{}, err
 	}
-	if o.FillOrKill, err = r.ReadBool(); err != nil {
+	if o.ExchangeRate, err = asset.ReadPrice(r); err != nil {
 		return Op{}, err
 	}
-	if o.ExchangeRate, err = asset.ReadPrice(r); err != nil {
+	if o.FillOrKill, err = r.ReadBool(); err != nil {
 		return Op{}, err
 	}
 	if o.Expiration, err = r.ReadUint32(); err != nil {

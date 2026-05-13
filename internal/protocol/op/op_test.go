@@ -62,6 +62,66 @@ func TestTransferRoundTrip(t *testing.T) {
 	}
 }
 
+// TestLimitOrderCreate2RoundTrip guards the FC_REFLECT field wire order
+// for limit_order_create2_operation. C++'s FC_REFLECT
+// (libraries/protocol/include/hive/protocol/hive_operations.hpp):
+//
+//	(owner)(orderid)(amount_to_sell)(exchange_rate)(fill_or_kill)(expiration)
+//
+// The Go struct lists FillOrKill before ExchangeRate; an earlier port had
+// AppendFCBody/readLimitOrderCreate2 follow source order, which caused
+// tx-extensions parse-error cascades at blocks 11,875,326 / 11,875,340 /
+// 11,889,434.
+func TestLimitOrderCreate2RoundTrip(t *testing.T) {
+	sell := asset.Asset{Amount: 1234, Symbol: asset.Symbol{Num: asset.HiveSymbol, WasLegacyEncoded: true}}
+	rate := asset.Price{
+		Base:  asset.Asset{Amount: 5, Symbol: asset.Symbol{Num: asset.HiveSymbol, WasLegacyEncoded: true}},
+		Quote: asset.Asset{Amount: 1, Symbol: asset.Symbol{Num: asset.HbdSymbol, WasLegacyEncoded: true}},
+	}
+	o := LimitOrderCreate2{
+		Owner:        "alice",
+		OrderID:      0xCAFEBABE,
+		AmountToSell: sell,
+		FillOrKill:   true,
+		ExchangeRate: rate,
+		Expiration:   1_700_000_000,
+	}
+	wire := AppendOperation(nil, o)
+	got, err := ReadOperation(fcraw.NewReader(wire))
+	if err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+	if got.OpTag() != TagLimitOrderCreate2 {
+		t.Fatalf("tag = %d, want %d", got.OpTag(), TagLimitOrderCreate2)
+	}
+	o2 := got.(LimitOrderCreate2)
+	if o2.Owner != o.Owner || o2.OrderID != o.OrderID ||
+		o2.AmountToSell.Amount != o.AmountToSell.Amount ||
+		o2.ExchangeRate.Base.Amount != o.ExchangeRate.Base.Amount ||
+		o2.ExchangeRate.Quote.Amount != o.ExchangeRate.Quote.Amount ||
+		o2.FillOrKill != o.FillOrKill ||
+		o2.Expiration != o.Expiration {
+		t.Fatalf("round-trip mismatch:\n got %+v\nwant %+v", o2, o)
+	}
+	wire2 := AppendOperation(nil, o2)
+	if !bytes.Equal(wire, wire2) {
+		t.Fatalf("re-marshal differs:\n got %x\nwant %x", wire2, wire)
+	}
+
+	// Pin the wire byte order so a future field-order regression fails
+	// here. After the tag (21 = limit_order_create2), owner string,
+	// then orderid u32 (little-endian), then asset (amount_to_sell)
+	// THEN price (exchange_rate) — not FillOrKill.
+	wantHead := []byte{
+		byte(TagLimitOrderCreate2),
+		5, 'a', 'l', 'i', 'c', 'e', // owner
+		0xBE, 0xBA, 0xFE, 0xCA, // orderid LE
+	}
+	if !bytes.Equal(wire[:len(wantHead)], wantHead) {
+		t.Fatalf("wire-head mismatch:\n got %x\nwant %x", wire[:len(wantHead)], wantHead)
+	}
+}
+
 // TestEscrowTransferRoundTrip guards the FC_REFLECT field wire order for
 // escrow_transfer_operation. The fields in the C++ source
 // (libraries/protocol/include/hive/protocol/hive_operations.hpp:1223
