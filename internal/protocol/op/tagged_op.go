@@ -1,6 +1,10 @@
 package op
 
-import "unsafe"
+import (
+	"unsafe"
+
+	"hived-go/internal/fcraw"
+)
 
 // Op is a tagged-union representation of a regular operation, replacing
 // the `Operation` interface dispatch on the hot path. The benefits over
@@ -69,3 +73,25 @@ func (o Op) Operation() Operation {
 // opAsIface is the per-tag conversion table: given a concrete-struct
 // pointer for that tag, return the boxed Operation. Populated by init().
 var opAsIface [TagFirstVirtual]func(unsafe.Pointer) Operation
+
+// ReadOp parses a single tagged operation from r and returns it as Op.
+// Bridge wrapper around ReadOperation during the iface→struct migration:
+// uses the existing readers (which already populate slab-pooled storage
+// where applicable) and then wraps in Op via FromOperation so callers
+// no longer touch the Operation interface directly.
+func ReadOp(r *fcraw.Reader) (Op, error) {
+	o, err := ReadOperation(r)
+	if err != nil {
+		return Op{}, err
+	}
+	return FromOperation(o), nil
+}
+
+// AppendOp writes a tagged operation as varint(tag) || body using the
+// Op container's concrete pointer. Bridge form of AppendOperation.
+func AppendOp(dst []byte, o Op) []byte {
+	if o.ptr == nil {
+		return dst
+	}
+	return AppendOperation(dst, o.Operation())
+}
