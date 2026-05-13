@@ -511,12 +511,15 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 		}
 		hbdSlice := share * int64(c.PercentHbd) / 20000
 		vestingSlice := share - hbdSlice
+		// HF17+ routes author/beneficiary payouts through reward_* fields
+		// that the user later moves to liquid via claim_reward_balance.
+		toReward := hfBene.Has(hardfork.HF17)
 		if hbdSlice > 0 {
-			payCreateHbd(s, &bAcct, blockTime, hbdSlice)
+			payCreateHbd(s, &bAcct, blockTime, hbdSlice, toReward)
 			objects.PutAccount(s, &bAcct)
 		}
 		if vestingSlice > 0 {
-			_, _ = CreateVesting_via_chain(s, b.Account, vestingSlice, false)
+			_, _ = CreateVesting_via_chain(s, b.Account, vestingSlice, toReward)
 		}
 		totalBeneficiary += share
 	}
@@ -533,14 +536,16 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 		ghiveDiff("GHIVEDIFF CASHOUT-AUTHOR block=%d author=%s permlink=%s author_tokens=%d hbd_hive=%d vesting_hive=%d curator_remainder=%d\n",
 			blockNum, author, permlink, authorPool, hbdHive, vestingHive, curatorRemainder)
 	}
+	hfHere := hardfork.SetForBlock(blockNum)
+	authorToReward := hfHere.Has(hardfork.HF17)
 	if hbdHive > 0 {
 		if a, gerr := objects.GetAccount(s, author); gerr == nil {
-			payCreateHbd(s, &a, blockTime, hbdHive)
+			payCreateHbd(s, &a, blockTime, hbdHive, authorToReward)
 			objects.PutAccount(s, &a)
 		}
 	}
 	if vestingHive > 0 {
-		_, _ = CreateVesting_via_chain(s, author, vestingHive, false)
+		_, _ = CreateVesting_via_chain(s, author, vestingHive, authorToReward)
 	}
 	if traceAccount(author) {
 		if a, gerr := objects.GetAccount(s, author); gerr == nil {
@@ -682,14 +687,18 @@ func chainISqrt64(n uint64) uint64 {
 //
 // hbd_print_rate is not yet tracked; we use HIVE_100_PERCENT (10000),
 // the post-genesis default, until the HF14 hard-cap logic lands.
-func payCreateHbd(s *state.Session, a *objects.Account, blockTime uint32, hiveAmount int64) {
+func payCreateHbd(s *state.Session, a *objects.Account, blockTime uint32, hiveAmount int64, toReward bool) {
 	if hiveAmount <= 0 {
 		return
 	}
 	fh, err := objects.GetFeedHistory(s)
 	if err != nil || priceIsZero(fh.CurrentMedianHistory) {
-		// No feed → everything pays as liquid HIVE.
-		a.Balance += hiveAmount
+		// No feed → everything pays as liquid HIVE (or reward HIVE).
+		if toReward {
+			a.RewardHive += hiveAmount
+		} else {
+			a.Balance += hiveAmount
+		}
 		return
 	}
 	// hbd_print_rate is recomputed each block by update_virtual_supply.
@@ -713,8 +722,17 @@ func payCreateHbd(s *state.Session, a *objects.Account, blockTime uint32, hiveAm
 	toHive := hiveAmount - toHbdHive
 
 	hbdAmount := convertHiveToHBD(toHbdHive, fh.CurrentMedianHistory)
-	objects.AdjustHBDBalance(s, a, blockTime, hbdAmount)
-	a.Balance += toHive
+	if toReward {
+		// HF17+ reward-balance path: credit reward_hbd_balance and
+		// reward_hive_balance directly (no hbd_seconds accrual since
+		// reward balances don't earn interest). User claims later via
+		// claim_reward_balance.
+		a.RewardHBD += hbdAmount
+		a.RewardHive += toHive
+	} else {
+		objects.AdjustHBDBalance(s, a, blockTime, hbdAmount)
+		a.Balance += toHive
+	}
 
 	// Mirror C++'s pair of adjust_supply calls in create_hbd
 	// (database.cpp:979-980): adjust_supply(-to_hbd HIVE) bumps
