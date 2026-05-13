@@ -1,11 +1,14 @@
 package testfixture
 
 import (
+	"bytes"
 	"testing"
 
+	"hived-go/internal/protocol/asset"
 	"hived-go/internal/protocol/auth"
 	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/op"
+	"hived-go/internal/protocol/tx"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
 )
@@ -178,15 +181,214 @@ func authoritiesEqual(a, b auth.Authority) bool {
 //   - comment_options (carries max_accepted_payout asset): hf26 packing
 //     same as transfer — pre-HF26 throws, post-HF26 OK.
 //
-// MISSING in Go: there is no pack_type concept on the test fixture.
-// The ApplyOp path serializes through one canonical FC encoder and
-// the chain-side push_transaction has no
-// serialization_mode_controller / pack_type plumbing. The
-// transaction_auth_exception the C++ test catches comes specifically
-// from a mismatch between the declared pack_type and the asset
-// encoding inside the signed-transaction blob; we never sign here.
+// Go's tx codec preserves per-asset pack provenance via
+// Symbol.WasLegacyEncoded (see protocol/asset/symbol.go), and
+// tx.IsLegacyPack mirrors C++ full_transaction::is_legacy_pack().
+// The pre-HF26 gate in database.cpp is:
+//
+//	if (!has_hardfork(HIVE_HARDFORK_1_26_ENABLE_NEW_SERIALIZATION))
+//	  HIVE_ASSERT(full_transaction->is_legacy_pack(), ...);
+//
+// so the contract this test pins is: a tx that encodes any asset in
+// the HF26 (4-byte NAI) form must report IsLegacyPack==false (the
+// pre-HF26 gate would reject it), and a tx whose only assets are in
+// the legacy 8-byte form — or that contains no assets at all — must
+// report IsLegacyPack==true (the gate accepts both pre- and post-HF26).
+//
+// Round-trip is the bit-identity contract: RepackAsHF26 then
+// RepackAsLegacy must reproduce the original legacy wire byte-for-byte.
 func TestHF26PackTransactionBasic(t *testing.T) {
-	t.Skip("MISSING: pack_type::legacy vs pack_type::hf26 plumbing. Go tx layer has a single canonical FC encoder (see internal/protocol/tx/tx.go) and the fixture bypasses signature verification, so the pre-HF26 'hf26-packed asset rejection' that produces transaction_auth_exception cannot be observed. serialization_mode_controller is not ported.")
+	// Helper: build a SignedTransaction containing the given ops and
+	// emit its legacy wire form. Mirrors the C++ test's _get_trx +
+	// pack_type::legacy push.
+	legacyWire := func(ops ...op.Operation) []byte {
+		st := tx.SignedTransaction{
+			Transaction: tx.Transaction{
+				RefBlockNum:    1,
+				RefBlockPrefix: 0xdeadbeef,
+				Expiration:     1_700_000_000,
+				Operations:     op.Ops(ops...),
+			},
+		}
+		return tx.AppendSignedTransaction(nil, &st)
+	}
+
+	hiveLegacy := asset.Asset{
+		Amount: 66,
+		Symbol: asset.Symbol{Num: asset.HiveSymbol, WasLegacyEncoded: true},
+	}
+	hbdLegacy := asset.Asset{
+		Amount: 13456,
+		Symbol: asset.Symbol{Num: asset.HbdSymbol, WasLegacyEncoded: true},
+	}
+
+	// transfer — asset-bearing. The C++ test pushes it twice (legacy
+	// then hf26); pre-HF26 the hf26 push throws transaction_auth_exception.
+	t.Run("transfer", func(t *testing.T) {
+		wire := legacyWire(op.Transfer{From: "alice", To: "bob", Amount: hiveLegacy})
+
+		// Legacy wire: gate accepts in any era.
+		ok, err := tx.IsLegacyPack(wire)
+		if err != nil {
+			t.Fatalf("IsLegacyPack(legacy): %v", err)
+		}
+		if !ok {
+			t.Fatal("transfer/legacy: IsLegacyPack=false, want true (gate would reject pre-HF26)")
+		}
+
+		// Repack as HF26 (4-byte NAI). The gate rejects this pre-HF26
+		// with transaction_auth_exception; HF26+ accepts.
+		_, hf26, err := tx.RepackAsHF26(wire)
+		if err != nil {
+			t.Fatalf("RepackAsHF26: %v", err)
+		}
+		if bytes.Equal(wire, hf26) {
+			t.Fatal("transfer/hf26: wire unchanged after repack — asset symbol not re-encoded")
+		}
+		// Sanity: hf26 wire is shorter by exactly 4 bytes (8-byte
+		// legacy symbol → 4-byte NAI).
+		if len(wire)-len(hf26) != 4 {
+			t.Fatalf("transfer/hf26: size delta = %d, want 4", len(wire)-len(hf26))
+		}
+		ok, err = tx.IsLegacyPack(hf26)
+		if err != nil {
+			t.Fatalf("IsLegacyPack(hf26): %v", err)
+		}
+		if ok {
+			t.Fatal("transfer/hf26: IsLegacyPack=true, want false (pre-HF26 gate must reject)")
+		}
+
+		// Round-trip: repack-as-legacy must reproduce the original
+		// legacy wire byte-for-byte.
+		_, back, err := tx.RepackAsLegacy(hf26)
+		if err != nil {
+			t.Fatalf("RepackAsLegacy: %v", err)
+		}
+		if !bytes.Equal(wire, back) {
+			t.Fatalf("transfer: legacy round-trip mismatch\n got %x\nwant %x", back, wire)
+		}
+	})
+
+	// comment — no asset. Both packings must report IsLegacyPack=true
+	// (the gate accepts pre- and post-HF26) because there's no asset
+	// symbol to disagree about.
+	t.Run("comment", func(t *testing.T) {
+		commentOp := op.Comment{
+			Author:         "alice",
+			Permlink:       "lemon",
+			ParentPermlink: "ipsum",
+			Title:          "this is title",
+			Body:           "**body**",
+			JSONMetadata:   `{"foo":"bar"}`,
+		}
+		wire := legacyWire(commentOp)
+
+		ok, err := tx.IsLegacyPack(wire)
+		if err != nil || !ok {
+			t.Fatalf("comment legacy: IsLegacyPack=%v err=%v, want true/nil", ok, err)
+		}
+
+		// "hf26 repack" is a no-op for an asset-less op.
+		_, hf26, err := tx.RepackAsHF26(wire)
+		if err != nil {
+			t.Fatalf("RepackAsHF26: %v", err)
+		}
+		if !bytes.Equal(wire, hf26) {
+			t.Fatalf("comment: hf26 repack changed wire, want identical (no assets)")
+		}
+		ok, err = tx.IsLegacyPack(hf26)
+		if err != nil || !ok {
+			t.Fatalf("comment hf26: IsLegacyPack=%v err=%v, want true/nil", ok, err)
+		}
+	})
+
+	// decline_voting_rights — no asset. Symmetric to comment.
+	t.Run("decline_voting_rights", func(t *testing.T) {
+		wire := legacyWire(op.DeclineVotingRights{Account: "alice", Decline: true})
+
+		ok, err := tx.IsLegacyPack(wire)
+		if err != nil || !ok {
+			t.Fatalf("decline_voting_rights legacy: IsLegacyPack=%v err=%v, want true/nil", ok, err)
+		}
+
+		_, hf26, err := tx.RepackAsHF26(wire)
+		if err != nil {
+			t.Fatalf("RepackAsHF26: %v", err)
+		}
+		if !bytes.Equal(wire, hf26) {
+			t.Fatalf("decline_voting_rights: hf26 repack changed wire, want identical (no assets)")
+		}
+		ok, err = tx.IsLegacyPack(hf26)
+		if err != nil || !ok {
+			t.Fatalf("decline_voting_rights hf26: IsLegacyPack=%v err=%v, want true/nil", ok, err)
+		}
+	})
+
+	// comment_options — carries max_accepted_payout. Same contract as
+	// transfer: hf26 packing must be detectable by IsLegacyPack.
+	t.Run("comment_options", func(t *testing.T) {
+		wire := legacyWire(op.CommentOptions{
+			Author:               "alice",
+			Permlink:             "lemon",
+			MaxAcceptedPayout:    hbdLegacy,
+			PercentHbd:           10000,
+			AllowVotes:           true,
+			AllowCurationRewards: true,
+		})
+
+		ok, err := tx.IsLegacyPack(wire)
+		if err != nil || !ok {
+			t.Fatalf("comment_options legacy: IsLegacyPack=%v err=%v, want true/nil", ok, err)
+		}
+
+		_, hf26, err := tx.RepackAsHF26(wire)
+		if err != nil {
+			t.Fatalf("RepackAsHF26: %v", err)
+		}
+		if len(wire)-len(hf26) != 4 {
+			t.Fatalf("comment_options/hf26: size delta = %d, want 4", len(wire)-len(hf26))
+		}
+		ok, err = tx.IsLegacyPack(hf26)
+		if err != nil {
+			t.Fatalf("IsLegacyPack(hf26): %v", err)
+		}
+		if ok {
+			t.Fatal("comment_options/hf26: IsLegacyPack=true, want false")
+		}
+
+		// Round-trip back to legacy.
+		_, back, err := tx.RepackAsLegacy(hf26)
+		if err != nil {
+			t.Fatalf("RepackAsLegacy: %v", err)
+		}
+		if !bytes.Equal(wire, back) {
+			t.Fatalf("comment_options legacy round-trip mismatch\n got %x\nwant %x", back, wire)
+		}
+	})
+
+	// Mixed transaction: one asset-bearing op + one asset-less op.
+	// IsLegacyPack reflects the asset-bearing one only.
+	t.Run("mixed", func(t *testing.T) {
+		wire := legacyWire(
+			op.Transfer{From: "alice", To: "bob", Amount: hiveLegacy},
+			op.DeclineVotingRights{Account: "alice", Decline: true},
+		)
+		ok, err := tx.IsLegacyPack(wire)
+		if err != nil || !ok {
+			t.Fatalf("mixed legacy: IsLegacyPack=%v err=%v, want true", ok, err)
+		}
+		_, hf26, err := tx.RepackAsHF26(wire)
+		if err != nil {
+			t.Fatalf("RepackAsHF26: %v", err)
+		}
+		ok, err = tx.IsLegacyPack(hf26)
+		if err != nil {
+			t.Fatalf("IsLegacyPack(hf26): %v", err)
+		}
+		if ok {
+			t.Fatal("mixed hf26: IsLegacyPack=true, want false (transfer's asset is in NAI form)")
+		}
+	})
 }
 
 // TestHF26UpdateOperation is the 1:1 parity name for
