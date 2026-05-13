@@ -1,6 +1,7 @@
 package evaluator
 
 import (
+	"errors"
 	"fmt"
 
 	"hived-go/internal/protocol/hardfork"
@@ -8,6 +9,46 @@ import (
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
 )
+
+// HiveOwnerUpdateLimit mirrors hived's HIVE_OWNER_UPDATE_LIMIT
+// (libraries/protocol/include/hive/protocol/config.hpp:117) — 60
+// minutes between successive owner-authority rotations.
+const HiveOwnerUpdateLimit uint32 = 60 * 60
+
+// ErrOwnerUpdateLimit is returned when an account_update / account_update2
+// op tries to rotate the owner authority more frequently than
+// HIVE_OWNER_UPDATE_LIMIT allows. Pre-HF26 the cap is once per hour; at
+// HF26+ the cap widens to twice per hour (the prior-update timestamp is
+// taken into account so two updates ~1 hour apart are accepted).
+// Matches hive::chain::util::owner_update_limit_mgr::check semantics.
+var ErrOwnerUpdateLimit = errors.New("owner authority update rate-limited")
+
+// ownerUpdateLimitCheck returns nil if the proposed owner rotation at
+// headBlockTime is allowed given the recorded previous_owner_update and
+// last_owner_update timestamps, and the HF26 activation flag.
+//
+// Mirrors hive::chain::util::owner_update_limit_mgr::check(bool,
+// time_point_sec, time_point_sec, time_point_sec) at
+// libraries/chain/util/owner_update_limit_mgr.cpp:15-26 — the pre-HF26
+// path is single-bound on last_time; HF26+ widens to "succeed if either
+// last_time OR previous_time is more than LIMIT seconds ago".
+func ownerUpdateLimitCheck(hf26 bool, headBlockTime, previousTime, lastTime uint32) bool {
+	pass := func(refTime uint32) bool {
+		// fc::time_point_sec subtraction yields a signed seconds delta;
+		// guard against the unsigned wrap when refTime > head.
+		if headBlockTime <= refTime {
+			return false
+		}
+		return headBlockTime-refTime > HiveOwnerUpdateLimit
+	}
+	if hf26 {
+		if pass(lastTime) {
+			return true
+		}
+		return pass(previousTime)
+	}
+	return pass(lastTime)
+}
 
 // accountUpdateEvaluator implements account_update. The C++ semantics
 // also rotate owner/active/posting authorities into the
@@ -83,6 +124,20 @@ func (accountUpdateEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		authObj = objects.AccountAuthority{Account: au.Account}
 	}
 	if au.Owner != nil {
+		// hive_evaluator.cpp:518-522 — once HF11 is active, gate the owner
+		// rotation on HIVE_OWNER_UPDATE_LIMIT. Pre-HF26 the check looks at
+		// last_owner_update only; HF26+ allows either previous_owner_update
+		// or last_owner_update to satisfy the window (the "twice an hour"
+		// widening).
+		if ctx.Hardforks.Has(hardfork.HF11) {
+			if !ownerUpdateLimitCheck(ctx.Hardforks.Has(hardfork.HF26),
+				ctx.HeadBlockTime, authObj.PreviousOwnerUpdate, authObj.LastOwnerUpdate) {
+				if ctx.Hardforks.Has(hardfork.HF26) {
+					return fmt.Errorf("%w: Owner authority can only be updated twice an hour.", ErrOwnerUpdateLimit)
+				}
+				return fmt.Errorf("%w: Owner authority can only be updated once an hour.", ErrOwnerUpdateLimit)
+			}
+		}
 		objects.PutOwnerAuthorityHistory(ctx.DB, &objects.OwnerAuthorityHistory{
 			Account:                au.Account,
 			PreviousOwnerAuthority: authObj.Owner,
@@ -139,6 +194,17 @@ func (accountUpdate2Evaluator) Apply(ctx *Context, opArg op.Op) error {
 		authObj = objects.AccountAuthority{Account: au.Account}
 	}
 	if au.Owner != nil {
+		// hive_evaluator.cpp:585-588 — account_update2 unconditionally
+		// gates owner rotation on HIVE_OWNER_UPDATE_LIMIT (no HF11 check
+		// because account_update2 itself is HF21+; HF11 is implied).
+		// HF26+ widens the cap from once to twice per hour.
+		if !ownerUpdateLimitCheck(ctx.Hardforks.Has(hardfork.HF26),
+			ctx.HeadBlockTime, authObj.PreviousOwnerUpdate, authObj.LastOwnerUpdate) {
+			if ctx.Hardforks.Has(hardfork.HF26) {
+				return fmt.Errorf("%w: Owner authority can only be updated twice an hour.", ErrOwnerUpdateLimit)
+			}
+			return fmt.Errorf("%w: Owner authority can only be updated once an hour.", ErrOwnerUpdateLimit)
+		}
 		objects.PutOwnerAuthorityHistory(ctx.DB, &objects.OwnerAuthorityHistory{
 			Account:                au.Account,
 			PreviousOwnerAuthority: authObj.Owner,

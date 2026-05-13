@@ -132,12 +132,13 @@ func (createClaimedAccountEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	}
 	objects.PutAccount(ctx.DB, &newAcct)
 	objects.PutAccountAuthority(ctx.DB, &objects.AccountAuthority{
-		Account:             cc.NewAccountName,
-		Owner:               cc.Owner,
-		Active:              cc.Active,
-		Posting:             cc.Posting,
-		LastOwnerUpdate:     ctx.HeadBlockTime,
-		PreviousOwnerUpdate: ctx.HeadBlockTime,
+		Account: cc.NewAccountName,
+		Owner:   cc.Owner,
+		Active:  cc.Active,
+		Posting: cc.Posting,
+		// hive_evaluator.cpp:459-460 — both init to time_point_sec::min().
+		LastOwnerUpdate:     0,
+		PreviousOwnerUpdate: 0,
 	})
 	return nil
 }
@@ -213,12 +214,13 @@ func (accountCreateWithDelegationEvaluator) Apply(ctx *Context, opArg op.Op) err
 	}
 	objects.PutAccount(ctx.DB, &newAcct)
 	objects.PutAccountAuthority(ctx.DB, &objects.AccountAuthority{
-		Account:             ac.NewAccountName,
-		Owner:               ac.Owner,
-		Active:              ac.Active,
-		Posting:             ac.Posting,
-		LastOwnerUpdate:     ctx.HeadBlockTime,
-		PreviousOwnerUpdate: ctx.HeadBlockTime,
+		Account: ac.NewAccountName,
+		Owner:   ac.Owner,
+		Active:  ac.Active,
+		Posting: ac.Posting,
+		// hive_evaluator.cpp init: time_point_sec::min().
+		LastOwnerUpdate:     0,
+		PreviousOwnerUpdate: 0,
 	})
 	// Convert the fee to starter VESTS for the new account, matching
 	// hived's account_create_with_delegation_evaluator (libraries/chain/

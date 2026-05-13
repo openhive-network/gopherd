@@ -3,9 +3,18 @@ package testfixture
 import (
 	"testing"
 
+	"hived-go/internal/protocol/auth"
 	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/op"
+	"hived-go/internal/state"
+	"hived-go/internal/state/objects"
 )
+
+// getAccountAuthorityFromFixture reads the AccountAuthority row for the
+// named account from the fixture's committed state.
+func getAccountAuthorityFromFixture(f *Fixture, name string) (objects.AccountAuthority, error) {
+	return objects.GetAccountAuthority(state.NewSession(f.State), auth.AccountName(name))
+}
 
 // 1:1 parity scaffolds for hive_tes/tests/unit/tests/hf26_tests.cpp.
 //
@@ -39,7 +48,123 @@ import (
 // (both pre- and post-HF26 branches), the success/throw contrast the
 // C++ test asserts cannot be reproduced.
 func TestHF26OwnerUpdateLimit(t *testing.T) {
-	t.Skip("MISSING: HIVE_OWNER_UPDATE_LIMIT cooldown enforcement in account_update evaluator — LastOwnerUpdate/PreviousOwnerUpdate are tracked but never checked. owner_update_limit_mgr::check has no Go port. C++ test asserts 1 success / 2 throws pre-HF26 and 2 successes / 1 throw post-HF26.")
+	// Port of hf26_tests.cpp::update_operation. The C++ test creates
+	// `bob`, then runs three back-to-back account_update ops rotating
+	// bob's owner key:
+	//   pre-HF26 — only the first succeeds; updates #2 and #3 throw
+	//              ("Owner authority can only be updated once an hour.").
+	//   HF26+   — updates #1 and #2 succeed; #3 throws ("…twice an hour.").
+	//
+	// We exercise two independent fixtures (one fast-forwarded to HF25,
+	// the other to HF26) so the prev/last_owner_update timestamps are
+	// fresh in each scenario.
+
+	t.Run("pre-HF26", func(t *testing.T) {
+		f := New(t)
+		f.HardforksUpTo(hardfork.HF25)
+		f.Actor("bob")
+		f.GenerateBlock()
+
+		// First rotation — bob's last_owner_update is genesis (0); the
+		// cooldown gate passes trivially.
+		k1 := newAuth([33]byte{0x02, 'K', '1'})
+		if err := f.ApplyOp(op.AccountUpdate{Account: "bob", Owner: &k1}); err != nil {
+			t.Fatalf("first owner update should succeed: %v", err)
+		}
+
+		// Second rotation — only a few seconds since last update; gate
+		// must fire pre-HF26.
+		k2 := newAuth([33]byte{0x02, 'K', '2'})
+		if err := f.ApplyOp(op.AccountUpdate{Account: "bob", Owner: &k2}); err == nil {
+			t.Fatal("second owner update within 1 hour should fail pre-HF26")
+		}
+
+		// Third rotation — still within window; still fails.
+		k3 := newAuth([33]byte{0x02, 'K', '3'})
+		if err := f.ApplyOp(op.AccountUpdate{Account: "bob", Owner: &k3}); err == nil {
+			t.Fatal("third owner update within 1 hour should fail pre-HF26")
+		}
+
+		// Owner authority must still match k1 — the failed updates
+		// rolled back cleanly.
+		authObj, err := getAccountAuthorityFromFixture(f, "bob")
+		if err != nil {
+			t.Fatalf("get bob authority: %v", err)
+		}
+		if !authoritiesEqual(authObj.Owner, k1) {
+			t.Fatalf("bob's owner authority should still be k1 after failed updates")
+		}
+
+		// After waiting > 1 hour, the next rotation should succeed.
+		f.SkipSeconds(3700)
+		if err := f.ApplyOp(op.AccountUpdate{Account: "bob", Owner: &k2}); err != nil {
+			t.Fatalf("owner update after 1-hour wait should succeed pre-HF26: %v", err)
+		}
+	})
+
+	t.Run("HF26", func(t *testing.T) {
+		f := New(t)
+		f.HardforksUpTo(hardfork.HF26)
+		f.Actor("carol")
+		f.GenerateBlock()
+
+		// First rotation — succeeds (last=prev=0 at creation).
+		k1 := newAuth([33]byte{0x02, 'C', '1'})
+		if err := f.ApplyOp(op.AccountUpdate{Account: "carol", Owner: &k1}); err != nil {
+			t.Fatalf("first owner update should succeed: %v", err)
+		}
+
+		// Second rotation — last=t1 (~5s ago), prev=0. HF26 widening:
+		// previous is more than 1 hour ago (it's 0 → epoch) → pass.
+		k2 := newAuth([33]byte{0x02, 'C', '2'})
+		if err := f.ApplyOp(op.AccountUpdate{Account: "carol", Owner: &k2}); err != nil {
+			t.Fatalf("second owner update should succeed at HF26+: %v", err)
+		}
+
+		// Third rotation — last=t2 (~3s ago), prev=t1 (~6s ago). Both
+		// within the 1-hour window → fail.
+		k3 := newAuth([33]byte{0x02, 'C', '3'})
+		if err := f.ApplyOp(op.AccountUpdate{Account: "carol", Owner: &k3}); err == nil {
+			t.Fatal("third owner update within twice-per-hour cap should fail at HF26+")
+		}
+
+		// Owner authority should be k2 — the last successful rotation.
+		authObj, err := getAccountAuthorityFromFixture(f, "carol")
+		if err != nil {
+			t.Fatalf("get carol authority: %v", err)
+		}
+		if !authoritiesEqual(authObj.Owner, k2) {
+			t.Fatalf("carol's owner authority should be k2 after 2 successes / 1 failure")
+		}
+
+		// After waiting > 1 hour the next rotation succeeds again.
+		f.SkipSeconds(3700)
+		if err := f.ApplyOp(op.AccountUpdate{Account: "carol", Owner: &k3}); err != nil {
+			t.Fatalf("owner update after 1-hour wait should succeed at HF26+: %v", err)
+		}
+	})
+}
+
+// authoritiesEqual compares two Authority structs structurally — enough
+// for tests, doesn't need the full FC-encoding equality.
+func authoritiesEqual(a, b auth.Authority) bool {
+	if a.WeightThreshold != b.WeightThreshold {
+		return false
+	}
+	if len(a.KeyAuths) != len(b.KeyAuths) || len(a.AccountAuths) != len(b.AccountAuths) {
+		return false
+	}
+	for i := range a.KeyAuths {
+		if a.KeyAuths[i] != b.KeyAuths[i] {
+			return false
+		}
+	}
+	for i := range a.AccountAuths {
+		if a.AccountAuths[i] != b.AccountAuths[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // TestHF26PackTransactionBasic is the 1:1 parity name for
