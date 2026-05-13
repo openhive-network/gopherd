@@ -361,7 +361,7 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 		qClaim = 1<<63 - 1
 	}
 	claimed := int64(qClaim)
-	if traceAccount(author) || (envGhivediffAll != "" && blockNum >= 2888500 && blockNum <= 2910000) {
+	if traceAccount(author) || (envGhivediffAll != "" && ((blockNum >= 2888500 && blockNum <= 2910000) || (blockNum >= 9640246 && blockNum <= 9640246))) {
 		ghiveDiff("GHIVEDIFF CASHOUT-CALC block=%d author=%s permlink=%s id=%d cashoutTime=%d rshares=%d fundBalance=%d shares2_hi=%d shares2_lo=%d claimed_pre_clip=%d\n",
 			blockNum, author, permlink, c.ID, scheduledTime, c.NetRshares, fundBalance, shares2.Hi, shares2.Lo, claimed)
 	}
@@ -529,7 +529,7 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 	// half VESTS at the dynamic price.
 	hbdHive := authorPool * int64(c.PercentHbd) / 20000
 	vestingHive := authorPool - hbdHive
-	if traceAccount(author) || (envGhivediffAll != "" && blockNum >= 2888500 && blockNum <= 2910000) {
+	if traceAccount(author) || (envGhivediffAll != "" && ((blockNum >= 2888500 && blockNum <= 2910000) || (blockNum >= 9640246 && blockNum <= 9640246))) {
 		ghiveDiff("GHIVEDIFF CASHOUT-AUTHOR block=%d author=%s permlink=%s author_tokens=%d hbd_hive=%d vesting_hive=%d curator_remainder=%d\n",
 			blockNum, author, permlink, authorPool, hbdHive, vestingHive, curatorRemainder)
 	}
