@@ -30,11 +30,10 @@ import (
 type transferToVestingEvaluator struct{}
 
 func (transferToVestingEvaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	tv, ok := o.(op.TransferToVesting)
-	if !ok {
-		return fmt.Errorf("transferToVestingEvaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagTransferToVesting {
+		return fmt.Errorf("transferToVestingEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
+	tv := opArg.AsTransferToVesting()
 	if tv.Amount.Symbol.Num != asset.HiveSymbol {
 		return fmt.Errorf("%w: transfer_to_vesting requires HIVE", ErrUnsupportedSymbol)
 	}

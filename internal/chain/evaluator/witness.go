@@ -71,11 +71,10 @@ func updateGovernanceVoteExpirationTs(a *objects.Account, voteTime uint32) {
 type witnessUpdateEvaluator struct{}
 
 func (witnessUpdateEvaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	wu, ok := o.(op.WitnessUpdate)
-	if !ok {
-		return fmt.Errorf("witnessUpdateEvaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagWitnessUpdate {
+		return fmt.Errorf("witnessUpdateEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
+	wu := opArg.AsWitnessUpdate()
 	// hived's witness_update_evaluator only verifies the owner exists.
 	// The op's `fee` field is IGNORED — there is no on-chain fee for
 	// becoming a witness; the field is a historical artifact. Charging it
@@ -216,11 +215,10 @@ func (c *Context) witnessScheduleVirtualTimeBytes() [16]byte {
 type witnessSetPropertiesEvaluator struct{}
 
 func (witnessSetPropertiesEvaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	wsp, ok := o.(op.WitnessSetProperties)
-	if !ok {
-		return fmt.Errorf("witnessSetPropertiesEvaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagWitnessSetProperties {
+		return fmt.Errorf("witnessSetPropertiesEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
+	wsp := opArg.AsWitnessSetProperties()
 	// HF20__1620 — witness_set_properties is HF20+ only.
 	if !ctx.Hardforks.Has(hardfork.HF20) {
 		return fmt.Errorf("witness_set_properties: requires HF20")
@@ -345,11 +343,10 @@ func decodeFCString(buf []byte) (string, error) {
 type accountWitnessVoteEvaluator struct{}
 
 func (accountWitnessVoteEvaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	wv, ok := o.(op.AccountWitnessVote)
-	if !ok {
-		return fmt.Errorf("accountWitnessVoteEvaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagAccountWitnessVote {
+		return fmt.Errorf("accountWitnessVoteEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
+	wv := opArg.AsAccountWitnessVote()
 
 	voter, err := objects.GetAccount(ctx.DB, wv.Account)
 	if err != nil {
@@ -495,11 +492,10 @@ func applyWitnessVoteDelta(ctx *Context, voter *objects.Account, w *objects.Witn
 type accountWitnessProxyEvaluator struct{}
 
 func (accountWitnessProxyEvaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	pr, ok := o.(op.AccountWitnessProxy)
-	if !ok {
-		return fmt.Errorf("accountWitnessProxyEvaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagAccountWitnessProxy {
+		return fmt.Errorf("accountWitnessProxyEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
+	pr := opArg.AsAccountWitnessProxy()
 	if pr.Account == pr.Proxy {
 		return ErrSelfProxy
 	}

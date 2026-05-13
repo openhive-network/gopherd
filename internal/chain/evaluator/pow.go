@@ -62,11 +62,10 @@ func powPercentRewardPerRound(virtualSupply, aprPercent int64) int64 {
 type powEvaluator struct{}
 
 func (powEvaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	pw, ok := o.(op.Pow)
-	if !ok {
-		return fmt.Errorf("powEvaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagPow {
+		return fmt.Errorf("powEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
+	pw := opArg.AsPow()
 	// pow1 always pays the reward (it's deprecated at HF13 and chains
 	// past that point reject the op entirely; the block_log won't
 	// contain pow1 ops post-HF13). Pass the work.worker as signing_key
@@ -83,11 +82,10 @@ func (powEvaluator) Apply(ctx *Context, opArg op.Op) error {
 type pow2Evaluator struct{}
 
 func (pow2Evaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	pw, ok := o.(op.Pow2)
-	if !ok {
-		return fmt.Errorf("pow2Evaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagPow2 {
+		return fmt.Errorf("pow2Evaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
+	pw := opArg.AsPow2()
 	var worker string
 	var workPrev [20]byte
 	var powSummary uint32

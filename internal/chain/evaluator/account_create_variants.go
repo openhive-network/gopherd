@@ -27,11 +27,10 @@ var (
 type claimAccountEvaluator struct{}
 
 func (claimAccountEvaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	ca, ok := o.(op.ClaimAccount)
-	if !ok {
-		return fmt.Errorf("claimAccountEvaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagClaimAccount {
+		return fmt.Errorf("claimAccountEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
+	ca := opArg.AsClaimAccount()
 	// HF20__1771 — claim_account is HF20+ only.
 	if !ctx.Hardforks.Has(hardfork.HF20) {
 		return fmt.Errorf("claim_account: requires HF20")
@@ -92,11 +91,10 @@ func (claimAccountEvaluator) Apply(ctx *Context, opArg op.Op) error {
 type createClaimedAccountEvaluator struct{}
 
 func (createClaimedAccountEvaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	cc, ok := o.(op.CreateClaimedAccount)
-	if !ok {
-		return fmt.Errorf("createClaimedAccountEvaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagCreateClaimedAccount {
+		return fmt.Errorf("createClaimedAccountEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
+	cc := opArg.AsCreateClaimedAccount()
 	// HF20__1771 — create_claimed_account is HF20+ only.
 	if !ctx.Hardforks.Has(hardfork.HF20) {
 		return fmt.Errorf("create_claimed_account: requires HF20")
@@ -150,11 +148,10 @@ func (createClaimedAccountEvaluator) Apply(ctx *Context, opArg op.Op) error {
 type accountCreateWithDelegationEvaluator struct{}
 
 func (accountCreateWithDelegationEvaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	ac, ok := o.(op.AccountCreateWithDelegation)
-	if !ok {
-		return fmt.Errorf("accountCreateWithDelegationEvaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagAccountCreateWithDelegation {
+		return fmt.Errorf("accountCreateWithDelegationEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
+	ac := opArg.AsAccountCreateWithDelegation()
 	// HF20__1760 deprecates account_create_with_delegation; the op must
 	// be rejected post-HF20 (hive_evaluator_account.cpp:212).
 	if ctx.Hardforks.Has(hardfork.HF20) {

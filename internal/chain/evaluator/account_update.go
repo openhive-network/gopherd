@@ -17,11 +17,10 @@ import (
 type accountUpdateEvaluator struct{}
 
 func (accountUpdateEvaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	au, ok := o.(op.AccountUpdate)
-	if !ok {
-		return fmt.Errorf("accountUpdateEvaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagAccountUpdate {
+		return fmt.Errorf("accountUpdateEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
+	au := opArg.AsAccountUpdate()
 
 	a, err := objects.GetAccount(ctx.DB, au.Account)
 	if err != nil {
@@ -112,11 +111,10 @@ func (accountUpdateEvaluator) Apply(ctx *Context, opArg op.Op) error {
 type accountUpdate2Evaluator struct{}
 
 func (accountUpdate2Evaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	au, ok := o.(op.AccountUpdate2)
-	if !ok {
-		return fmt.Errorf("accountUpdate2Evaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagAccountUpdate2 {
+		return fmt.Errorf("accountUpdate2Evaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
+	au := opArg.AsAccountUpdate2()
 	// HF21__3274 — account_update2 is HF21+ only.
 	if !ctx.Hardforks.Has(hardfork.HF21) {
 		return fmt.Errorf("account_update2: requires HF21")

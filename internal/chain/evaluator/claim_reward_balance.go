@@ -18,11 +18,10 @@ import (
 type claimRewardBalanceEvaluator struct{}
 
 func (claimRewardBalanceEvaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	cr, ok := o.(op.ClaimRewardBalance)
-	if !ok {
-		return fmt.Errorf("claimRewardBalanceEvaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagClaimRewardBalance {
+		return fmt.Errorf("claimRewardBalanceEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
+	cr := opArg.AsClaimRewardBalance()
 
 	if cr.RewardHive.Symbol.Num != asset.HiveSymbol {
 		return fmt.Errorf("%w: reward_hive must be HIVE", ErrUnsupportedSymbol)

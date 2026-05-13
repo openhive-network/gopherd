@@ -25,11 +25,10 @@ var (
 type transferToSavingsEvaluator struct{}
 
 func (transferToSavingsEvaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	t, ok := o.(op.TransferToSavings)
-	if !ok {
-		return fmt.Errorf("transferToSavingsEvaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagTransferToSavings {
+		return fmt.Errorf("transferToSavingsEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
+	t := opArg.AsTransferToSavings()
 	if t.Amount.Amount <= 0 {
 		return ErrTransferAmountNotPos
 	}
@@ -83,11 +82,10 @@ func (transferToSavingsEvaluator) Apply(ctx *Context, opArg op.Op) error {
 type transferFromSavingsEvaluator struct{}
 
 func (transferFromSavingsEvaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	t, ok := o.(op.TransferFromSavings)
-	if !ok {
-		return fmt.Errorf("transferFromSavingsEvaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagTransferFromSavings {
+		return fmt.Errorf("transferFromSavingsEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
+	t := opArg.AsTransferFromSavings()
 	if t.Amount.Amount <= 0 {
 		return ErrTransferAmountNotPos
 	}
@@ -149,11 +147,10 @@ func (transferFromSavingsEvaluator) Apply(ctx *Context, opArg op.Op) error {
 type cancelTransferFromSavingsEvaluator struct{}
 
 func (cancelTransferFromSavingsEvaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	c, ok := o.(op.CancelTransferFromSavings)
-	if !ok {
-		return fmt.Errorf("cancelTransferFromSavingsEvaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagCancelTransferFromSavings {
+		return fmt.Errorf("cancelTransferFromSavingsEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
+	c := opArg.AsCancelTransferFromSavings()
 	w, err := objects.GetSavingsWithdraw(ctx.DB, c.From, c.RequestID)
 	if err != nil {
 		if err == state.ErrNotFound {

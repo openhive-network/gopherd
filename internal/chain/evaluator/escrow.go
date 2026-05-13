@@ -24,11 +24,10 @@ var (
 type escrowTransferEvaluator struct{}
 
 func (escrowTransferEvaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	e, ok := o.(op.EscrowTransfer)
-	if !ok {
-		return fmt.Errorf("escrowTransferEvaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagEscrowTransfer {
+		return fmt.Errorf("escrowTransferEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
+	e := opArg.AsEscrowTransfer()
 	if e.Fee.Symbol.Num != asset.HiveSymbol && e.Fee.Symbol.Num != asset.HbdSymbol {
 		return fmt.Errorf("%w: escrow fee must be HIVE or HBD", ErrUnsupportedSymbol)
 	}
@@ -108,11 +107,10 @@ func (escrowTransferEvaluator) Apply(ctx *Context, opArg op.Op) error {
 type escrowApproveEvaluator struct{}
 
 func (escrowApproveEvaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	a, ok := o.(op.EscrowApprove)
-	if !ok {
-		return fmt.Errorf("escrowApproveEvaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagEscrowApprove {
+		return fmt.Errorf("escrowApproveEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
+	a := opArg.AsEscrowApprove()
 	esc, err := objects.GetEscrow(ctx.DB, a.From, a.EscrowID)
 	if err != nil {
 		if err == state.ErrNotFound {
@@ -189,11 +187,10 @@ func (escrowApproveEvaluator) Apply(ctx *Context, opArg op.Op) error {
 type escrowDisputeEvaluator struct{}
 
 func (escrowDisputeEvaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	d, ok := o.(op.EscrowDispute)
-	if !ok {
-		return fmt.Errorf("escrowDisputeEvaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagEscrowDispute {
+		return fmt.Errorf("escrowDisputeEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
+	d := opArg.AsEscrowDispute()
 	// Verify from account exists (hive_evaluator_transfer.cpp:182).
 	if has, err := objects.HasAccount(ctx.DB, d.From); err != nil {
 		return err
@@ -232,11 +229,10 @@ func (escrowDisputeEvaluator) Apply(ctx *Context, opArg op.Op) error {
 type escrowReleaseEvaluator struct{}
 
 func (escrowReleaseEvaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	r, ok := o.(op.EscrowRelease)
-	if !ok {
-		return fmt.Errorf("escrowReleaseEvaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagEscrowRelease {
+		return fmt.Errorf("escrowReleaseEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
+	r := opArg.AsEscrowRelease()
 	// Verify from account exists.
 	if has, err := objects.HasAccount(ctx.DB, r.From); err != nil {
 		return err

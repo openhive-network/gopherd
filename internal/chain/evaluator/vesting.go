@@ -31,11 +31,10 @@ const (
 type withdrawVestingEvaluator struct{}
 
 func (withdrawVestingEvaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	w, ok := o.(op.WithdrawVesting)
-	if !ok {
-		return fmt.Errorf("withdrawVestingEvaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagWithdrawVesting {
+		return fmt.Errorf("withdrawVestingEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
+	w := opArg.AsWithdrawVesting()
 	if w.VestingShares.Symbol.Num != asset.VestsSymbol {
 		return fmt.Errorf("%w: withdraw_vesting requires VESTS", ErrUnsupportedSymbol)
 	}
@@ -105,11 +104,10 @@ func (withdrawVestingEvaluator) Apply(ctx *Context, opArg op.Op) error {
 type setWithdrawVestingRouteEvaluator struct{}
 
 func (setWithdrawVestingRouteEvaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	r, ok := o.(op.SetWithdrawVestingRoute)
-	if !ok {
-		return fmt.Errorf("setWithdrawVestingRouteEvaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagSetWithdrawVestingRoute {
+		return fmt.Errorf("setWithdrawVestingRouteEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
+	r := opArg.AsSetWithdrawVestingRoute()
 	if has, err := objects.HasAccount(ctx.DB, r.FromAccount); err != nil {
 		return err
 	} else if !has {
@@ -157,11 +155,10 @@ func (setWithdrawVestingRouteEvaluator) Apply(ctx *Context, opArg op.Op) error {
 type delegateVestingSharesEvaluator struct{}
 
 func (delegateVestingSharesEvaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	d, ok := o.(op.DelegateVestingShares)
-	if !ok {
-		return fmt.Errorf("delegateVestingSharesEvaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagDelegateVestingShares {
+		return fmt.Errorf("delegateVestingSharesEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
+	d := opArg.AsDelegateVestingShares()
 	if d.VestingShares.Symbol.Num != asset.VestsSymbol {
 		return fmt.Errorf("%w: delegate_vesting_shares requires VESTS", ErrUnsupportedSymbol)
 	}

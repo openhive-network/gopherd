@@ -75,11 +75,10 @@ var (
 type transferEvaluator struct{}
 
 func (transferEvaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	tx, ok := o.(op.Transfer)
-	if !ok {
-		return fmt.Errorf("transferEvaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagTransfer {
+		return fmt.Errorf("transferEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
+	tx := opArg.AsTransfer()
 
 	// Basic validation. Negative or zero transfers are rejected by the C++
 	// validator; replicate.

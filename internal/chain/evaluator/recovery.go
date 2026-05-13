@@ -18,11 +18,10 @@ const changeRecoveryEffectiveDelaySec uint32 = 60 * 60 * 24 * 30
 type requestAccountRecoveryEvaluator struct{}
 
 func (requestAccountRecoveryEvaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	rr, ok := o.(op.RequestAccountRecovery)
-	if !ok {
-		return fmt.Errorf("requestAccountRecoveryEvaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagRequestAccountRecovery {
+		return fmt.Errorf("requestAccountRecoveryEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
+	rr := opArg.AsRequestAccountRecovery()
 	if has, err := objects.HasAccount(ctx.DB, rr.AccountToRecover); err != nil {
 		return err
 	} else if !has {
@@ -39,11 +38,10 @@ func (requestAccountRecoveryEvaluator) Apply(ctx *Context, opArg op.Op) error {
 type recoverAccountEvaluator struct{}
 
 func (recoverAccountEvaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	r, ok := o.(op.RecoverAccount)
-	if !ok {
-		return fmt.Errorf("recoverAccountEvaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagRecoverAccount {
+		return fmt.Errorf("recoverAccountEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
+	r := opArg.AsRecoverAccount()
 	req, err := objects.GetAccountRecoveryRequest(ctx.DB, r.AccountToRecover)
 	if err != nil {
 		if err == state.ErrNotFound {
@@ -84,11 +82,10 @@ func (recoverAccountEvaluator) Apply(ctx *Context, opArg op.Op) error {
 type changeRecoveryAccountEvaluator struct{}
 
 func (changeRecoveryAccountEvaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	cr, ok := o.(op.ChangeRecoveryAccount)
-	if !ok {
-		return fmt.Errorf("changeRecoveryAccountEvaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagChangeRecoveryAccount {
+		return fmt.Errorf("changeRecoveryAccountEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
+	cr := opArg.AsChangeRecoveryAccount()
 	if has, err := objects.HasAccount(ctx.DB, cr.AccountToRecover); err != nil {
 		return err
 	} else if !has {

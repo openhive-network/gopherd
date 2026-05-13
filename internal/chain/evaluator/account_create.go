@@ -72,11 +72,10 @@ var ErrInvalidAccountFee = errors.New("account creation fee must be HIVE")
 type accountCreateEvaluator struct{}
 
 func (accountCreateEvaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	ac, ok := o.(op.AccountCreate)
-	if !ok {
-		return fmt.Errorf("accountCreateEvaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagAccountCreate {
+		return fmt.Errorf("accountCreateEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
+	ac := opArg.AsAccountCreate()
 
 	if ac.Fee.Symbol.Num != asset.HiveSymbol {
 		return ErrInvalidAccountFee

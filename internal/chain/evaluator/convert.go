@@ -33,11 +33,10 @@ var (
 type convertEvaluator struct{}
 
 func (convertEvaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	c, ok := o.(op.Convert)
-	if !ok {
-		return fmt.Errorf("convertEvaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagConvert {
+		return fmt.Errorf("convertEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
+	c := opArg.AsConvert()
 	if c.Amount.Symbol.Num != asset.HbdSymbol {
 		return fmt.Errorf("%w: convert requires HBD", ErrUnsupportedSymbol)
 	}
@@ -73,11 +72,10 @@ func (convertEvaluator) Apply(ctx *Context, opArg op.Op) error {
 type collateralizedConvertEvaluator struct{}
 
 func (collateralizedConvertEvaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	c, ok := o.(op.CollateralizedConvert)
-	if !ok {
-		return fmt.Errorf("collateralizedConvertEvaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagCollateralizedConvert {
+		return fmt.Errorf("collateralizedConvertEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
+	c := opArg.AsCollateralizedConvert()
 	// HF1_25 — collateralized_convert is HF25+ only.
 	if !ctx.Hardforks.Has(hardfork.HF25) {
 		return fmt.Errorf("collateralized_convert: requires HF25")

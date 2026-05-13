@@ -115,11 +115,10 @@ var (
 type limitOrderCreateEvaluator struct{}
 
 func (limitOrderCreateEvaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	lo, ok := o.(op.LimitOrderCreate)
-	if !ok {
-		return fmt.Errorf("limitOrderCreateEvaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagLimitOrderCreate {
+		return fmt.Errorf("limitOrderCreateEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
+	lo := opArg.AsLimitOrderCreate()
 	if ghiveDiffOwnerMatch(lo.Owner) || ghiveDiffWide(ctx.BlockNum) {
 		ghiveDiff("GHIVEDIFF CREATE block=%d t=%d owner=%s orderid=%d sell=%d/%d recv=%d/%d exp=%d\n",
 			ctx.BlockNum, ctx.HeadBlockTime, lo.Owner, lo.OrderID,
@@ -144,11 +143,10 @@ func (limitOrderCreateEvaluator) Apply(ctx *Context, opArg op.Op) error {
 type limitOrderCreate2Evaluator struct{}
 
 func (limitOrderCreate2Evaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	lo, ok := o.(op.LimitOrderCreate2)
-	if !ok {
-		return fmt.Errorf("limitOrderCreate2Evaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagLimitOrderCreate2 {
+		return fmt.Errorf("limitOrderCreate2Evaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
+	lo := opArg.AsLimitOrderCreate2()
 	if ghiveDiffOwnerMatch(lo.Owner) || ghiveDiffWide(ctx.BlockNum) {
 		ghiveDiff("GHIVEDIFF CREATE2 block=%d t=%d owner=%s orderid=%d sell=%d/%d rate=%d/%d/%d/%d exp=%d\n",
 			ctx.BlockNum, ctx.HeadBlockTime, lo.Owner, lo.OrderID,
@@ -303,11 +301,10 @@ func applyLimitOrderCreate(ctx *Context, owner string, orderID uint32, amountToS
 type limitOrderCancelEvaluator struct{}
 
 func (limitOrderCancelEvaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	lo, ok := o.(op.LimitOrderCancel)
-	if !ok {
-		return fmt.Errorf("limitOrderCancelEvaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagLimitOrderCancel {
+		return fmt.Errorf("limitOrderCancelEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
+	lo := opArg.AsLimitOrderCancel()
 	orderID := lo.OrderID
 	if !ctx.Hardforks.Has(hardfork.HF6) {
 		orderID &= 0xFFFF

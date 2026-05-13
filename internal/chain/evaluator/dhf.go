@@ -56,11 +56,10 @@ const (
 )
 
 func (createProposalEvaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	cp, ok := o.(op.CreateProposal)
-	if !ok {
-		return fmt.Errorf("createProposalEvaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagCreateProposal {
+		return fmt.Errorf("createProposalEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
+	cp := opArg.AsCreateProposal()
 	// HF21__3215 — DHF activates at HF21.
 	if !ctx.Hardforks.Has(hardfork.HF21) {
 		return fmt.Errorf("create_proposal: requires HF21")
@@ -148,11 +147,10 @@ func (createProposalEvaluator) Apply(ctx *Context, opArg op.Op) error {
 type updateProposalVotesEvaluator struct{}
 
 func (updateProposalVotesEvaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	uv, ok := o.(op.UpdateProposalVotes)
-	if !ok {
-		return fmt.Errorf("updateProposalVotesEvaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagUpdateProposalVotes {
+		return fmt.Errorf("updateProposalVotesEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
+	uv := opArg.AsUpdateProposalVotes()
 	if !ctx.Hardforks.Has(hardfork.HF21) {
 		return fmt.Errorf("update_proposal_votes: requires HF21")
 	}
@@ -200,11 +198,10 @@ func (updateProposalVotesEvaluator) Apply(ctx *Context, opArg op.Op) error {
 type removeProposalEvaluator struct{}
 
 func (removeProposalEvaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	rp, ok := o.(op.RemoveProposal)
-	if !ok {
-		return fmt.Errorf("removeProposalEvaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagRemoveProposal {
+		return fmt.Errorf("removeProposalEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
+	rp := opArg.AsRemoveProposal()
 	if !ctx.Hardforks.Has(hardfork.HF21) {
 		return fmt.Errorf("remove_proposal: requires HF21")
 	}
@@ -230,11 +227,10 @@ func (removeProposalEvaluator) Apply(ctx *Context, opArg op.Op) error {
 type updateProposalEvaluator struct{}
 
 func (updateProposalEvaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	up, ok := o.(op.UpdateProposal)
-	if !ok {
-		return fmt.Errorf("updateProposalEvaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagUpdateProposal {
+		return fmt.Errorf("updateProposalEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
+	up := opArg.AsUpdateProposal()
 	// HF24__71 — update_proposal is HF24+ only.
 	if !ctx.Hardforks.Has(hardfork.HF24) {
 		return fmt.Errorf("update_proposal: requires HF24")

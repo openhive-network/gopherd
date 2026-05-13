@@ -25,18 +25,17 @@ import (
 type customJSONEvaluator struct{}
 
 func (customJSONEvaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	cj, ok := o.(op.CustomJSON)
-	if !ok {
-		return fmt.Errorf("customJSONEvaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagCustomJSON {
+		return fmt.Errorf("customJSONEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
+	cj := opArg.AsCustomJSON()
 	switch cj.ID {
 	case "rc":
 		// HF22+ only.
 		if !ctx.Hardforks.Has(hardfork.HF22) {
 			return nil
 		}
-		return applyRCCustomJSON(ctx, cj)
+		return applyRCCustomJSON(ctx, *cj)
 	}
 	// All other custom_json IDs are plugin-data only (no chain state
 	// effect). Mirrors hived's behavior — custom_operation_interpreter

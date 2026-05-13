@@ -74,13 +74,11 @@ var (
 type commentEvaluator struct{}
 
 func (commentEvaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	cv, ok := o.(op.Comment)
-	if !ok {
-		return fmt.Errorf("commentEvaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagComment {
+		return fmt.Errorf("commentEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
-	cp := &cv
-	c := *cp
+	cp := opArg.AsComment()
+	c := cp
 	// The author must exist.
 	authorAcct, err := objects.GetAccount(ctx.DB, c.Author)
 	if err != nil {
@@ -258,11 +256,10 @@ func (commentEvaluator) Apply(ctx *Context, opArg op.Op) error {
 type deleteCommentEvaluator struct{}
 
 func (deleteCommentEvaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	dc, ok := o.(op.DeleteComment)
-	if !ok {
-		return fmt.Errorf("deleteCommentEvaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagDeleteComment {
+		return fmt.Errorf("deleteCommentEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
+	dc := opArg.AsDeleteComment()
 	c, err := objects.GetComment(ctx.DB, dc.Author, dc.Permlink)
 	if err != nil {
 		if err == state.ErrNotFound {
@@ -339,11 +336,10 @@ func deleteAllCommentVotes(s *state.Session, author, permlink string) {
 type commentOptionsEvaluator struct{}
 
 func (commentOptionsEvaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	co, ok := o.(op.CommentOptions)
-	if !ok {
-		return fmt.Errorf("commentOptionsEvaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagCommentOptions {
+		return fmt.Errorf("commentOptionsEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
+	co := opArg.AsCommentOptions()
 	c, err := objects.GetComment(ctx.DB, co.Author, co.Permlink)
 	if err != nil {
 		if err == state.ErrNotFound {
@@ -444,12 +440,10 @@ func (commentOptionsEvaluator) Apply(ctx *Context, opArg op.Op) error {
 type voteEvaluator struct{}
 
 func (voteEvaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	vv, ok := o.(op.Vote)
-	if !ok {
-		return fmt.Errorf("voteEvaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagVote {
+		return fmt.Errorf("voteEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
-	v := &vv
+	v := opArg.AsVote()
 	// Dual GetComment/GetCommentRef path: under !UndoEnabled (replay)
 	// c aliases the in-place CommentStore slot — read/write through
 	// the pointer with no value-copy on Get and no PutComment at the

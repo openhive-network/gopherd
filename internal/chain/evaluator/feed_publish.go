@@ -19,11 +19,10 @@ import (
 type feedPublishEvaluator struct{}
 
 func (feedPublishEvaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	fp, ok := o.(op.FeedPublish)
-	if !ok {
-		return fmt.Errorf("feedPublishEvaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagFeedPublish {
+		return fmt.Errorf("feedPublishEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
+	fp := opArg.AsFeedPublish()
 	w, err := objects.GetWitness(ctx.DB, fp.Publisher)
 	if err != nil {
 		if err == state.ErrNotFound {
@@ -54,11 +53,10 @@ const ownerAuthRecoveryPeriodSec uint32 = 60 * 60 * 24 * 30
 //   - decline=false: cancel pending request (if any)
 // process_decline_voting_rights fires once the effective date passes.
 func (declineVotingRightsEvaluator) Apply(ctx *Context, opArg op.Op) error {
-	o := opArg.Operation()
-	dv, ok := o.(op.DeclineVotingRights)
-	if !ok {
-		return fmt.Errorf("declineVotingRightsEvaluator: unexpected op type %T", o)
+	if opArg.Tag != op.TagDeclineVotingRights {
+		return fmt.Errorf("declineVotingRightsEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
+	dv := opArg.AsDeclineVotingRights()
 	// HF14__324 — decline_voting_rights is HF14+ only.
 	if !ctx.Hardforks.Has(hardfork.HF14) {
 		return fmt.Errorf("decline_voting_rights: requires HF14")
