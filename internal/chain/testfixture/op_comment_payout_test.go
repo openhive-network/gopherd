@@ -205,7 +205,11 @@ func TestCommentPayoutEqualize(t *testing.T) {
 		t.Errorf("alice/dave VESTS parity: alice=%d dave=%d", alice.VestingShares, dave.VestingShares)
 	}
 	// At least one of the payment buckets has something — alice was paid.
-	aliceTotal := alice.Balance + alice.HBDBalance + alice.VestingShares
+	// Post-HF17 the payout routes to reward_* fields (claim_reward_balance
+	// materializes them later); pre-HF17 it deposits to liquid directly.
+	// Check both pools so the test is HF-agnostic.
+	aliceTotal := alice.Balance + alice.HBDBalance + alice.VestingShares +
+		alice.RewardHive + alice.RewardHBD + alice.RewardVests
 	if aliceTotal == 0 {
 		t.Errorf("alice got nothing — reward fund seeding failed")
 	}
