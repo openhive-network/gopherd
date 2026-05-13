@@ -132,6 +132,138 @@ func TestHBDSavingsInterestPayout(t *testing.T) {
 	}
 }
 
+// Ports the third sub-test of operation_time_tests.cpp::
+// hbd_savings_interest ("Testing savings interest for longer period").
+// After the first payout, a sub-interval deposit accumulates coindays
+// without paying; a subsequent 7/3 × 30-day skip + deposit pays
+// interest computed over (current window + carried coindays).
+func TestHBDSavingsInterestLongerPeriodWithCoindays(t *testing.T) {
+	f := New(t)
+	f.Actor("alice")
+	f.GenerateBlock()
+
+	f.FundLiquidHBD("alice", 31_903)
+	if err := f.ApplyOp(op.TransferToSavings{
+		From: "alice", To: "alice", Amount: HBD(31_903),
+	}); err != nil {
+		t.Fatalf("seed savings: %v", err)
+	}
+	// Need a stock of liquid HBD to fund the trigger deposits.
+	f.FundLiquidHBD("alice", 10_000)
+
+	// Warmup: 30 days + savings deposit → interest fires.
+	f.SkipSeconds(hbdInterestCompoundIntervalSec + BlockInterval)
+	if err := f.ApplyOp(op.TransferToSavings{
+		From: "alice", To: "alice", Amount: HBD(1_000),
+	}); err != nil {
+		t.Fatalf("warmup deposit: %v", err)
+	}
+
+	// Sub-interval deposit (15d) — carry coindays, no payout.
+	startUpdate := f.Account_("alice").SavingsHBDSecondsLastUpdate
+	aliceSav := f.SavingsHBDBalance("alice")
+	f.SkipSeconds(hbdInterestCompoundIntervalSec / 2)
+	if err := f.ApplyOp(op.TransferToSavings{
+		From: "alice", To: "alice", Amount: HBD(1_000),
+	}); err != nil {
+		t.Fatalf("sub-interval deposit: %v", err)
+	}
+	coindays := uint64(aliceSav) * uint64(f.HeadBlockTime()-startUpdate)
+	aliceSavPostSub := f.SavingsHBDBalance("alice")
+	startUpdate2 := f.Account_("alice").SavingsHBDSecondsLastUpdate
+
+	// Longer interval (7/3 of compound interval) + trigger op.
+	f.SkipSeconds(hbdInterestCompoundIntervalSec * 7 / 3)
+	if err := f.ApplyOp(op.TransferToSavings{
+		From: "alice", To: "alice", Amount: HBD(1_000),
+	}); err != nil {
+		t.Fatalf("long deposit: %v", err)
+	}
+
+	rate := int64(f.DGPO().HBDInterestRate)
+	if rate == 0 {
+		rate = 1000
+	}
+	now := f.HeadBlockTime()
+	elapsed := now - startUpdate2
+	totalCoindays := uint64(aliceSavPostSub)*uint64(elapsed) + coindays
+	const secondsPerYear = uint64(60 * 60 * 24 * 365)
+	interest := int64(totalCoindays/secondsPerYear) * rate / 10000
+	want := aliceSavPostSub + 1_000 + interest
+	got := f.SavingsHBDBalance("alice")
+	// Allow ±1 sat for truncation order.
+	if got != want && got != want-1 && got != want+1 {
+		t.Fatalf("alice savings HBD after long interest: got %d, want %d (interest=%d, elapsed=%d, coindays=%d)",
+			got, want, interest, elapsed, totalCoindays)
+	}
+}
+
+// Ports the third sub-test of operation_time_tests.cpp::hbd_interest
+// ("Testing longer interest period"). After the initial 30-day window
+// pays out and a sub-interval transfer accumulates coindays without
+// paying, a subsequent 7/3 × 30-day skip + transfer pays interest
+// computed over (current window + carried coindays). Coverage gap vs
+// existing TestHBDInterestNoPayoutBelowInterval which only validates
+// the no-payout middle segment.
+func TestHBDInterestLongerPeriodWithCoindays(t *testing.T) {
+	f := New(t)
+	f.Actors("alice", "bob")
+	f.GenerateBlock()
+	f.FundLiquidHBD("alice", 31_903)
+
+	// Warmup: 30 days + transfer → interest fires, last_payment refreshed.
+	f.SkipSeconds(hbdInterestCompoundIntervalSec + BlockInterval)
+	if err := f.ApplyOp(op.Transfer{
+		From: "alice", To: "bob", Amount: HBD(1_000),
+	}); err != nil {
+		t.Fatalf("warmup transfer: %v", err)
+	}
+
+	// Sub-interval transfer (15d) — accrues coindays, no payout.
+	startUpdate := f.Account_("alice").HBDSecondsLastUpdate
+	aliceHBD := f.HBDBalance("alice")
+	f.SkipSeconds(hbdInterestCompoundIntervalSec / 2)
+	subTransferStart := f.HeadBlockTime()
+	if err := f.ApplyOp(op.Transfer{
+		From: "alice", To: "bob", Amount: HBD(1_000),
+	}); err != nil {
+		t.Fatalf("sub-interval transfer: %v", err)
+	}
+	// Carry: (alice_hbd × elapsed_to_sub) is captured in hbd_seconds.
+	coindays := uint64(aliceHBD) * uint64(f.HeadBlockTime()-startUpdate)
+	_ = subTransferStart
+
+	// Now skip a longer window (7/3 of compound interval ≈ 70 days) and
+	// transfer once more. The combined accrual covers the carried
+	// coindays plus the new window.
+	aliceHBDPostSub := f.HBDBalance("alice")
+	startUpdate2 := f.Account_("alice").HBDSecondsLastUpdate
+	f.SkipSeconds(hbdInterestCompoundIntervalSec * 7 / 3)
+	if err := f.ApplyOp(op.Transfer{
+		From: "alice", To: "bob", Amount: HBD(1_000),
+	}); err != nil {
+		t.Fatalf("long transfer: %v", err)
+	}
+
+	rate := int64(f.DGPO().HBDInterestRate)
+	if rate == 0 {
+		rate = 1000
+	}
+	now := f.HeadBlockTime()
+	elapsed := now - startUpdate2
+	totalCoindays := uint64(aliceHBDPostSub)*uint64(elapsed) + coindays
+	// interest = totalCoindays / seconds_per_year * rate / HIVE_100_PERCENT
+	const secondsPerYear = uint64(60 * 60 * 24 * 365)
+	interest := int64(totalCoindays/secondsPerYear) * rate / 10000
+	want := aliceHBDPostSub - 1_000 + interest
+	got := f.HBDBalance("alice")
+	// Allow ±1 sat for ordering differences in the big-int truncation.
+	if got != want && got != want-1 && got != want+1 {
+		t.Fatalf("alice HBD after long interest: got %d, want %d (interest=%d, elapsed=%d, coindays=%d)",
+			got, want, interest, elapsed, totalCoindays)
+	}
+}
+
 // Sub-interval transfers should NOT pay interest — only accumulate
 // hbd_seconds. Mirrors the second half of operation_time_tests.cpp::
 // hbd_interest: after the first 30-day window has paid out (which
