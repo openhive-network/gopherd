@@ -152,3 +152,24 @@ func PutCollateralizedConvert(s *state.Session, c *CollateralizedConvert) {
 func HasCollateralizedConvert(s *state.Session, owner auth.AccountName, requestID uint32) (bool, error) {
 	return s.Has(CollateralizedConvertTable, state.PrimaryIndex, collConvertKey(owner, requestID))
 }
+
+// DeleteCollateralizedConvert removes the row.
+func DeleteCollateralizedConvert(s *state.Session, owner auth.AccountName, requestID uint32) {
+	s.Delete(CollateralizedConvertTable, state.PrimaryIndex, collConvertKey(owner, requestID))
+}
+
+// RangeAllCollateralizedConvert iterates every collateralized_convert
+// row in primary-key order. The per-block settlement hook filters by
+// conversion_date itself. Outstanding-request count is small in
+// practice (≤7-day TTL × users with open requests), so a full scan per
+// block is acceptable; a by_conversion_date index can be added if it
+// ever becomes hot.
+func RangeAllCollateralizedConvert(s *state.Session, fn func(c CollateralizedConvert) bool) error {
+	return s.Range(CollateralizedConvertTable, state.PrimaryIndex, nil, func(_, value []byte) (bool, error) {
+		c, err := ReadCollateralizedConvert(value)
+		if err != nil {
+			return false, err
+		}
+		return fn(c), nil
+	})
+}

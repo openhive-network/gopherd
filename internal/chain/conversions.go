@@ -3,6 +3,7 @@ package chain
 import (
 	"math/bits"
 
+	"hived-go/internal/chain/evaluator"
 	"hived-go/internal/protocol/asset"
 	"hived-go/internal/protocol/auth"
 	"hived-go/internal/state"
@@ -23,11 +24,6 @@ import (
 // real Hive history).
 func processConversions(s *state.Session, blockTime uint32, hooks *blockHookScratch) {
 	store := objects.EnsureConvertRequestStore(s)
-	// Short-circuit when the earliest pending conversion is in the
-	// future — the common case (almost every block has nothing due).
-	if earliest, has := store.EarliestDue(); !has || earliest > blockTime {
-		return
-	}
 	fh, err := objects.GetFeedHistory(s)
 	if err != nil {
 		return // no feeds yet
@@ -38,10 +34,12 @@ func processConversions(s *state.Session, blockTime uint32, hooks *blockHookScra
 
 	hooks.conversionPending = hooks.conversionPending[:0]
 	ready := &hooks.conversionPending
-	store.RangeDueBefore(blockTime, func(c objects.ConvertRequest) bool {
-		*ready = append(*ready, blockHookConvertPending{conversion: c.Conversion, owner: string(c.Owner), requestID: c.RequestID})
-		return true
-	})
+	if earliest, has := store.EarliestDue(); has && earliest <= blockTime {
+		store.RangeDueBefore(blockTime, func(c objects.ConvertRequest) bool {
+			*ready = append(*ready, blockHookConvertPending{conversion: c.Conversion, owner: string(c.Owner), requestID: c.RequestID})
+			return true
+		})
+	}
 
 	for _, p := range *ready {
 		req, gerr := objects.GetConvertRequest(s, auth.AccountName(p.owner), p.requestID)
@@ -72,6 +70,33 @@ func processConversions(s *state.Session, blockTime uint32, hooks *blockHookScra
 			objects.PutDGPO(s, &dgpo)
 		}
 		objects.DeleteConvertRequestFull(s, &req)
+	}
+
+	// Collateralized requests. Two-pass walk: first collect matures
+	// (RangeAll snapshots values), then settle. Per-row deletion during
+	// Range would invalidate the iterator.
+	var matured []objects.CollateralizedConvert
+	_ = objects.RangeAllCollateralizedConvert(s, func(c objects.CollateralizedConvert) bool {
+		if c.Conversion <= blockTime {
+			matured = append(matured, c)
+		}
+		return true
+	})
+	for i := range matured {
+		req := &matured[i]
+		requiredHIVE, _, sErr := evaluator.SettleCollateralizedConvert(s, req, blockTime)
+		if sErr != nil {
+			continue
+		}
+		// current_supply -= requiredHIVE (the collateral that's burned);
+		// virtual_supply -= requiredHIVE too. HBD was already minted at
+		// op-apply, so HBD supply needs no further adjustment.
+		if dgpo, derr := objects.GetDGPO(s); derr == nil {
+			dgpo.CurrentSupply -= requiredHIVE
+			dgpo.VirtualSupply -= requiredHIVE
+			objects.PutDGPO(s, &dgpo)
+		}
+		objects.DeleteCollateralizedConvert(s, req.Owner, req.RequestID)
 	}
 }
 

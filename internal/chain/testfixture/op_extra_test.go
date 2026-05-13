@@ -3,6 +3,7 @@ package testfixture
 import (
 	"testing"
 
+	"hived-go/internal/protocol/asset"
 	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/op"
 )
@@ -159,6 +160,15 @@ func TestCollateralizedConvertApply(t *testing.T) {
 	f.Actor("alice")
 	f.FundLiquid("alice", 100_000)
 	f.GenerateBlock()
+
+	// HF25 evaluator requires an active feed + non-zero print-rate.
+	// Inject a 1 HBD = 1 HIVE feed directly + force print_rate>0 so
+	// the test focuses on the collateral-debit path.
+	setCollateralizedFeedAndPrintRate(t, f,
+		asset.Price{
+			Base:  asset.Asset{Amount: 1000, Symbol: asset.Symbol{Num: asset.HbdSymbol}},
+			Quote: asset.Asset{Amount: 1000, Symbol: asset.Symbol{Num: asset.HiveSymbol}},
+		})
 
 	t.Log("--- collateralized_convert debits HIVE collateral")
 	if err := f.ApplyOp(op.CollateralizedConvert{

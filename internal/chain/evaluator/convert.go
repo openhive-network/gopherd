@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 
+	"hived-go/internal/math128"
 	"hived-go/internal/protocol/asset"
 	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/op"
@@ -14,8 +15,15 @@ import (
 // HIVE_CONVERSION_DELAY: pre-HF16 it's 7 days; HF16+ is 3.5 days.
 // (libraries/protocol/include/hive/protocol/config.hpp)
 const (
-	conversionDelaySecPreHF16 uint32 = 60 * 60 * 24 * 7    // 7 days
+	conversionDelaySecPreHF16 uint32 = 60 * 60 * 24 * 7     // 7 days
 	conversionDelaySec        uint32 = 60 * 60 * 24 * 7 / 2 // 3.5 days
+)
+
+// Collateralized-convert constants — mirror libraries/protocol/config.hpp.
+const (
+	hive100Percent           = 10000
+	hiveCollateralRatio      = 2 * hive100Percent // 200%
+	hiveCollateralConvertFee = 5 * 100            // 5% (HIVE_1_PERCENT == 100)
 )
 
 func conversionDelay(hf hardfork.Set) uint32 {
@@ -101,21 +109,197 @@ func (collateralizedConvertEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	} else if has {
 		return fmt.Errorf("%w: %q/%d", ErrConvertExists, c.Owner, c.RequestID)
 	}
+
+	// Need an active price feed and a positive print-rate. Mirrors
+	// validate_price_feed_available + dgpo.hbd_print_rate > 0
+	// (hive_evaluator_transfer.cpp:483-489).
+	fh, ferr := objects.GetFeedHistory(ctx.DB)
+	if ferr != nil || priceIsZeroLocal(fh.CurrentMinHistory) || priceIsZeroLocal(fh.CurrentMedianHistory) {
+		return fmt.Errorf("collateralized_convert: price feed unavailable")
+	}
+	dgpo, derr := objects.GetDGPO(ctx.DB)
+	if derr != nil {
+		return derr
+	}
+	if dgpo.HBDPrintRate == 0 {
+		return fmt.Errorf("collateralized_convert: hbd_print_rate is zero (global limit hit)")
+	}
+
+	// _amount = o.amount × 100% / HIVE_CONVERSION_COLLATERAL_RATIO (i.e. ÷2).
+	immediateHIVE := mulDivCollateralized(c.Amount.Amount, hive100Percent, hiveCollateralRatio)
+	// converted_amount = multiply_with_fee(immediateHIVE, current_min_history, fee, fee_on=HIVE).
+	hbdOut := multiplyWithFeeHIVEToHBD(immediateHIVE, fh.CurrentMinHistory, hiveCollateralConvertFee)
+	if hbdOut <= 0 {
+		return fmt.Errorf("collateralized_convert: collateral too low - conversion gives no HBD")
+	}
+
 	a.Balance -= c.Amount.Amount
-	// Hived credits HBD immediately at the median price minus
-	// HIVE_COLLATERALIZED_CONVERSION_FEE; we don't have a price feed yet,
-	// so we credit a placeholder value of zero and settle nothing. The
-	// pending conversion is recorded for the per-block hook to finalize
-	// when the price feed lands.
+
+	// Credit HBD (accrues hbd_seconds — same path as ordinary HBD deposit).
+	objects.AdjustHBDBalance(ctx.DB, &a, ctx.HeadBlockTime, hbdOut)
 	objects.PutAccount(ctx.DB, &a)
+
+	// Update DGPO: current_hbd_supply += hbdOut, virtual_supply += hbdOut × median.
+	// HIVE supply will be corrected at settlement.
+	dgpo.CurrentHBDSupply += hbdOut
+	hbdAsHIVE := convertHBDToHiveLocal(hbdOut, fh.CurrentMedianHistory)
+	dgpo.VirtualSupply += hbdAsHIVE
+
+	// percent_hbd <= hbd_stop_percent (basis points). Use the freshly-
+	// updated supplies — mirrors calculate_HBD_percent.
+	percentHBD := calcHBDPercent(dgpo.CurrentHBDSupply, fh.CurrentMedianHistory, dgpo.VirtualSupply)
+	if percentHBD > int64(dgpo.HBDStopPercent) {
+		return fmt.Errorf("collateralized_convert: percent_hbd %d > hbd_stop_percent %d", percentHBD, dgpo.HBDStopPercent)
+	}
+	objects.PutDGPO(ctx.DB, &dgpo)
+
 	objects.PutCollateralizedConvert(ctx.DB, &objects.CollateralizedConvert{
 		Owner:      c.Owner,
 		RequestID:  c.RequestID,
 		Collateral: c.Amount.Amount,
-		HBDOut:     0,
+		HBDOut:     hbdOut,
 		Conversion: ctx.HeadBlockTime + conversionDelay(ctx.Hardforks),
 	})
 	return nil
+}
+
+// priceIsZeroLocal — local helper (chain.priceIsZero exists in the
+// chain pkg; duplicated here to avoid a cyclic import).
+func priceIsZeroLocal(p asset.Price) bool {
+	return p.Base.Amount <= 0 || p.Quote.Amount <= 0
+}
+
+// mulDivCollateralized = a × b / c using 128-bit intermediate.
+func mulDivCollateralized(a, b, c int64) int64 {
+	if c <= 0 || a < 0 {
+		return 0
+	}
+	r := math128.Mul64Wide(uint64(a), uint64(b)).DivU64(uint64(c))
+	return int64(r.Lo)
+}
+
+// multiplyWithFeeHIVEToHBD: HIVE (=quote of HBD_price) → HBD (=base),
+// fee applied to HIVE (the quote symbol). Mirrors the C++
+// "tiny_asset<QUOTE> * tiny_price → tiny_asset<BASE>" overload with
+// _APPLY_FEE_TO == _QUOTE_SYMBOL:
+//
+//	result = a × base × 100% / (quote × (100% + fee))
+//
+// Uses U192-precision intermediates so the multiply does not overflow
+// even when both base/quote are ~2^62 (wide_price test case).
+func multiplyWithFeeHIVEToHBD(hiveAmount int64, p asset.Price, fee uint16) int64 {
+	if hiveAmount <= 0 || priceIsZeroLocal(p) {
+		return 0
+	}
+	baseHBD, quoteHIVE := p.Base.Amount, p.Quote.Amount
+	if p.Base.Symbol.Num == asset.HiveSymbol && p.Quote.Symbol.Num == asset.HbdSymbol {
+		baseHBD, quoteHIVE = p.Quote.Amount, p.Base.Amount
+	}
+	num128 := math128.Mul64Wide(uint64(hiveAmount), uint64(baseHBD))
+	num192 := math128.Mul64x128(uint64(hive100Percent), num128)
+	denom := math128.Mul64Wide(uint64(quoteHIVE), uint64(hive100Percent)+uint64(fee))
+	q, _ := num192.QuoRem(denom)
+	if q > 1<<63-1 {
+		return 1<<63 - 1
+	}
+	return int64(q)
+}
+
+// multiplyWithFeeHBDToHIVE: HBD (=base) → HIVE (=quote), fee applied to
+// HIVE. Mirrors "tiny_asset<BASE> * tiny_price → tiny_asset<QUOTE>"
+// with _APPLY_FEE_TO == _QUOTE_SYMBOL:
+//
+//	result = a × quote × (100% + fee) / (base × 100%)
+func multiplyWithFeeHBDToHIVE(hbdAmount int64, p asset.Price, fee uint16) int64 {
+	if hbdAmount <= 0 || priceIsZeroLocal(p) {
+		return 0
+	}
+	baseHBD, quoteHIVE := p.Base.Amount, p.Quote.Amount
+	if p.Base.Symbol.Num == asset.HiveSymbol && p.Quote.Symbol.Num == asset.HbdSymbol {
+		baseHBD, quoteHIVE = p.Quote.Amount, p.Base.Amount
+	}
+	num128 := math128.Mul64Wide(uint64(hbdAmount), uint64(quoteHIVE))
+	num192 := math128.Mul64x128(uint64(hive100Percent)+uint64(fee), num128)
+	denom := math128.Mul64Wide(uint64(baseHBD), uint64(hive100Percent))
+	q, _ := num192.QuoRem(denom)
+	if q > 1<<63-1 {
+		return 1<<63 - 1
+	}
+	return int64(q)
+}
+
+// convertHBDToHiveLocal — HBD × price → HIVE, no fee. Same orientation
+// handling as multiplyWithFee. Duplicated from chain.convertHBDToHive
+// to avoid the import cycle.
+func convertHBDToHiveLocal(hbdAmount int64, p asset.Price) int64 {
+	if priceIsZeroLocal(p) {
+		return 0
+	}
+	baseHBD, quoteHIVE := p.Base.Amount, p.Quote.Amount
+	if p.Base.Symbol.Num == asset.HiveSymbol && p.Quote.Symbol.Num == asset.HbdSymbol {
+		baseHBD, quoteHIVE = p.Quote.Amount, p.Base.Amount
+	}
+	num := math128.Mul64Wide(uint64(hbdAmount), uint64(quoteHIVE))
+	q := num.DivU64(uint64(baseHBD))
+	if q.Hi != 0 || q.Lo > 1<<63-1 {
+		return 1<<63 - 1
+	}
+	return int64(q.Lo)
+}
+
+// calcHBDPercent mirrors database::calculate_HBD_percent:
+//
+//	percent_hbd = (hbd_supply × median_quote) × 10000 / (median_base × virtual_supply)
+//
+// (i.e. convert HBD → HIVE-equivalent then divide by virtual_supply,
+// in basis points). Returns 0 when virtual_supply is non-positive.
+func calcHBDPercent(hbdSupply int64, median asset.Price, virtualSupply int64) int64 {
+	if virtualSupply <= 0 {
+		return 0
+	}
+	hbdInHIVE := convertHBDToHiveLocal(hbdSupply, median)
+	num := math128.Mul64Wide(uint64(hbdInHIVE), uint64(hive100Percent))
+	q := num.DivU64(uint64(virtualSupply))
+	if q.Hi != 0 {
+		return 1 << 31
+	}
+	return int64(q.Lo)
+}
+
+// SettleCollateralizedConvert performs the per-request settlement for a
+// matured collateralized_convert_request_object. Returns
+// (requiredHIVE, excessRefunded). The HBD was already credited at
+// op-apply time, so this only refunds excess HIVE; caller is
+// responsible for deleting the row and adjusting DGPO supply.
+//
+// Math mirrors database_conversion.cpp:82-117 (collateralized branch):
+//
+//	required_hive = multiply_with_fee( req.hbd_out, market_median, fee )
+//	excess        = req.collateral - required_hive
+//	if excess > 0: owner.balance += excess
+//	if excess < 0: required_hive = req.collateral; excess = 0
+func SettleCollateralizedConvert(s *state.Session, req *objects.CollateralizedConvert, blockTime uint32) (requiredHIVE, excess int64, _ error) {
+	fh, err := objects.GetFeedHistory(s)
+	if err != nil || priceIsZeroLocal(fh.MarketMedianHistory) {
+		return 0, 0, fmt.Errorf("collateralized_convert settle: market median unavailable")
+	}
+	required := multiplyWithFeeHBDToHIVE(req.HBDOut, fh.MarketMedianHistory, hiveCollateralConvertFee)
+	exc := req.Collateral - required
+	if exc < 0 {
+		// Insufficient collateral (rare): consume the full collateral
+		// and refund nothing. C++ pushes a system_warning_operation; we
+		// silently absorb.
+		required = req.Collateral
+		exc = 0
+	} else if exc > 0 {
+		// Refund excess to owner.
+		owner, gerr := objects.GetAccount(s, req.Owner)
+		if gerr == nil {
+			owner.Balance += exc
+			objects.PutAccount(s, &owner)
+		}
+	}
+	return required, exc, nil
 }
 
 func init() {
