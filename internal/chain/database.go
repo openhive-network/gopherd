@@ -142,14 +142,25 @@ type Database struct {
 	// level driver since the per-block Sync flag is meaningless in
 	// batched mode.
 	commitSync bool
+
+	// customOpCountByAccount tracks per-account count of custom /
+	// custom_json / custom_binary ops applied in the CURRENT block.
+	// HIVE_CUSTOM_OP_BLOCK_LIMIT (=5) caps it: the 6th custom op for the
+	// same account in the same block fails the tx. Mirrors
+	// database.cpp::_pending_tx_custom_op_count, scoped to a single
+	// block apply rather than the pre-block pending pool — for canonical
+	// block_log replay the two are equivalent. Reset at the top of
+	// ApplyBlock; mutated inside the tx loop by enforceCustomOpBlockLimit.
+	customOpCountByAccount map[auth.AccountName]uint8
 }
 
 // New wraps an opened state.Database for block application.
 func New(s *state.Database) *Database {
 	return &Database{
-		state:    s,
-		session:  state.NewSession(s),
-		lcbCache: make(map[string]uint32, 32),
+		state:                  s,
+		session:                state.NewSession(s),
+		lcbCache:               make(map[string]uint32, 32),
+		customOpCountByAccount: make(map[auth.AccountName]uint8, 8),
 	}
 }
 
@@ -405,6 +416,65 @@ func indexOfByte(s string, c byte) int {
 	return -1
 }
 
+// customOpBlockLimit caps the number of custom / custom_json /
+// custom_binary operations a single account can submit in one block.
+// Mirrors HIVE_CUSTOM_OP_BLOCK_LIMIT (libraries/protocol/config.hpp =5).
+const customOpBlockLimit uint8 = 5
+
+// enforceCustomOpBlockLimit walks the tx's operations, finds every
+// custom* op, gathers the impacted accounts (per-op required auths),
+// and increments d.customOpCountByAccount. If any account's count
+// exceeds customOpBlockLimit the tx is rejected and the increments
+// rolled back so subsequent txs in the same block see no effect from
+// this failed tx.
+//
+// Mirrors libraries/chain/database.cpp::_push_transaction lines 631-640
+// — counts are committed to the block-wide map only on success.
+func (d *Database) enforceCustomOpBlockLimit(signed *tx.SignedTransaction) error {
+	// Per-tx delta map; merged into the block-wide map at end on success.
+	var delta map[auth.AccountName]uint8
+	for _, o := range signed.Operations {
+		var impacted []auth.AccountName
+		switch o.Tag {
+		case op.TagCustom:
+			impacted = o.AsCustom().RequiredAuths
+		case op.TagCustomJSON:
+			cj := o.AsCustomJSON()
+			impacted = append(impacted, cj.RequiredAuths...)
+			impacted = append(impacted, cj.RequiredPostingAuths...)
+		case op.TagCustomBinary:
+			cb := o.AsCustomBinary()
+			impacted = append(impacted, cb.RequiredOwnerAuths...)
+			impacted = append(impacted, cb.RequiredActiveAuths...)
+			impacted = append(impacted, cb.RequiredPostingAuths...)
+		default:
+			continue
+		}
+		if delta == nil {
+			delta = make(map[auth.AccountName]uint8, len(impacted))
+		}
+		// Deduplicate within the op (flat_set semantics in C++):
+		// the same account appearing twice in required_*_auths counts once.
+		seen := make(map[auth.AccountName]struct{}, len(impacted))
+		for _, a := range impacted {
+			if _, dup := seen[a]; dup {
+				continue
+			}
+			seen[a] = struct{}{}
+			delta[a]++
+			total := d.customOpCountByAccount[a] + delta[a]
+			if total > customOpBlockLimit {
+				return fmt.Errorf("account %s already submitted %d custom json operation(s) this block.",
+					a, customOpBlockLimit)
+			}
+		}
+	}
+	for a, n := range delta {
+		d.customOpCountByAccount[a] += n
+	}
+	return nil
+}
+
 // ApplyBlock runs every transaction's operations through their registered
 // evaluators against a fresh state.Session, then commits. Returns the
 // post-apply DGPO so callers can chain quickly without re-fetching.
@@ -510,6 +580,12 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	if err != nil {
 		return objects.DynamicGlobalProperty{}, fmt.Errorf("apply_block %d tx_count: %w", blockNum, err)
 	}
+	// Reset the per-block custom-op-per-account counters. See struct
+	// field doc — mirrors database.cpp's clear of _pending_tx_custom_op_count
+	// on block apply / pop / clear_pending.
+	for k := range d.customOpCountByAccount {
+		delete(d.customOpCountByAccount, k)
+	}
 	var skippedThisBlock uint64
 	for i := uint32(0); i < txCount; i++ {
 		var txRes tx.ReadResult
@@ -611,15 +687,28 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 				return objects.DynamicGlobalProperty{}, fmt.Errorf("apply_block %d tx %d: %w", blockNum, i, failErr)
 			}
 		}
-		for j, o := range txRes.SignedTx.Operations {
-			if err := evaluator.ApplyOp(ctx, o); err != nil {
-				txFailed = true
-				failOp = o.Tag.Name()
-				failErr = fmt.Errorf("op %d: %w", j, err)
-				break
-			}
-			if stats != nil {
-				stats.OpsApplied++
+		// HIVE_CUSTOM_OP_BLOCK_LIMIT (=5) — enforce BEFORE op apply to
+		// mirror database.cpp::_push_transaction lines 631-634 (the
+		// custom_op_visitor runs over the tx's ops and FC_ASSERTs the
+		// per-account cap; only on success do the per-tx counts get
+		// merged into the block-wide counter). On overflow the entire
+		// tx is rejected.
+		if cErr := d.enforceCustomOpBlockLimit(&txRes.SignedTx); cErr != nil {
+			txFailed = true
+			failOp = "tx-custom-op-limit"
+			failErr = cErr
+		}
+		if !txFailed {
+			for j, o := range txRes.SignedTx.Operations {
+				if err := evaluator.ApplyOp(ctx, o); err != nil {
+					txFailed = true
+					failOp = o.Tag.Name()
+					failErr = fmt.Errorf("op %d: %w", j, err)
+					break
+				}
+				if stats != nil {
+					stats.OpsApplied++
+				}
 			}
 		}
 		// HF20+: charge RC for the entire transaction. Use a stub
