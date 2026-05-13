@@ -665,7 +665,15 @@ func (voteEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	if !isNew {
 		prevRshares = prev.Rshares
 	}
-	if rshares > prevRshares {
+	if rshares > prevRshares && !c.WasPaid {
+		// hived's lockout check runs ONLY on comments that have a live
+		// comment_cashout_object (find_comment_cashout != nullptr). For
+		// already-paid comments the object is deleted in hived, so the
+		// check is skipped entirely and the late vote is silently
+		// allowed (curation weight stays 0 per the was_paid gate).
+		// Mirror that by gating on !c.WasPaid; first failing mainnet
+		// hit was block 10,629,464 (vote on a comment cashed out 1 week
+		// earlier).
 		lockoutCashoutTime := c.CashoutTime
 		if !ctx.Hardforks.Has(hardfork.HF17) && c.ParentAuthor != "" {
 			rootAuthor := c.RootAuthor
