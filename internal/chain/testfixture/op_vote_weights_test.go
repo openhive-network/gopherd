@@ -154,6 +154,49 @@ func TestVoteRsharesProportionalToVotePercent(t *testing.T) {
 	}
 }
 
+// TestVoteWeightEditZerosCurationPreHF20 mirrors the implicit assertion in
+// operation_tests.cpp::vote_weights that for pre-HF20 mainnet, a vote
+// EDIT (recast) sets the comment_vote's stored curation weight to 0 —
+// only the first-cast contributes to curation rewards. C++:
+// hive_evaluator_social.cpp:620 (`cv.set(_now, o.weight, 0, rshares)`).
+//
+// The C++ vote_weights test additionally checks the HF20+ path where
+// vote edits compute a fresh curation weight that matches the
+// pattern. The Go evaluator currently zeros on edit regardless of
+// HF20 (see internal/chain/evaluator/comment.go:920); this test
+// guards against accidentally turning that behavior on for pre-HF20
+// while the HF20+ vote-edit weight is in flight.
+func TestVoteWeightEditZerosCurationPreHF20(t *testing.T) {
+	f := New(t)
+	f.HardforksUpTo(hardfork.HF17)
+	f.Actors("voter", "author")
+	f.FundVesting("voter", 1_000_000)
+	f.GenerateBlock()
+
+	f.MustApplyOp(op.Comment{Author: "author", Permlink: "p", Body: "x"})
+	f.SkipSeconds(60 * 60) // past reverse-auction
+
+	// First cast — should produce a non-zero curation weight.
+	f.MustApplyOp(op.Vote{Voter: "voter", Author: "author", Permlink: "p", Weight: 100})
+	first, err := objects.GetCommentVote(state.NewSession(f.State), "voter", "author", "p")
+	if err != nil {
+		t.Fatalf("GetCommentVote first: %v", err)
+	}
+	if first.CurationWeight == 0 {
+		t.Fatal("expected non-zero curation weight on first cast")
+	}
+
+	// Recast — must zero the stored weight (pre-HF20 / current Go).
+	f.MustApplyOp(op.Vote{Voter: "voter", Author: "author", Permlink: "p", Weight: 300})
+	second, err := objects.GetCommentVote(state.NewSession(f.State), "voter", "author", "p")
+	if err != nil {
+		t.Fatalf("GetCommentVote second: %v", err)
+	}
+	if second.CurationWeight != 0 {
+		t.Errorf("recast curation_weight: got %d, want 0", second.CurationWeight)
+	}
+}
+
 // TestDownvoteSubtractsRshares verifies a negative vote subtracts from
 // net_rshares. Combined with an upvote of equal magnitude, net_rshares
 // should be ~0.
