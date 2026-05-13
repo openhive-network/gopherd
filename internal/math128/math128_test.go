@@ -99,6 +99,77 @@ func TestU192QuoRem(t *testing.T) {
 	}
 }
 
+// TestU128String ports basic_tests.cpp::fc_uint128_to_string. Walks a
+// shifting bit pattern across all 128 positions, then a multiplicative
+// growth from 333, then 1000 random Hi:Lo pairs. Compares against
+// math/big as the canonical big-integer reference.
+func TestU128String(t *testing.T) {
+	// Shift case: start at 0xf, shift left 1 bit per step, 128 steps.
+	fci := U128{Lo: 0xf}
+	ref := new(big.Int).SetUint64(0xf)
+	mask := new(big.Int).Lsh(big.NewInt(1), 128)
+	for i := 1; i < 129; i++ {
+		if fci.String() != ref.String() {
+			t.Fatalf("shift i=%d: got %s want %s", i, fci.String(), ref.String())
+		}
+		// shift both left by 1
+		fci = fci.Lsh1()
+		ref.Lsh(ref, 1)
+		ref.Mod(ref, mask)
+	}
+
+	// Growth case: start at 333, repeat += 261; *= i.
+	fci = U128{Lo: 333}
+	ref = new(big.Int).SetUint64(333)
+	for i := 1; i < 1001; i++ {
+		if fci.String() != ref.String() {
+			t.Fatalf("growth i=%d: got %s want %s", i, fci.String(), ref.String())
+		}
+		fci = fci.Add64(261).Mul64(uint64(i))
+		ref.Add(ref, big.NewInt(261)).Mul(ref, big.NewInt(int64(i))).Mod(ref, mask)
+	}
+
+	// Random case: 1000 random Hi:Lo pairs.
+	for i := 0; i < 1000; i++ {
+		hi := rand.Uint64()
+		lo := rand.Uint64()
+		v := FromHiLo(hi, lo)
+		want := new(big.Int).SetUint64(hi)
+		want.Lsh(want, 64)
+		want.Or(want, new(big.Int).SetUint64(lo))
+		if v.String() != want.String() {
+			t.Fatalf("rand hi=%d lo=%d: got %s want %s", hi, lo, v.String(), want.String())
+		}
+	}
+}
+
+// TestU128ApproxSqrt covers the curation-weight formula in
+// basic_tests.cpp::curation_weight_test. The first BOOST_REQUIRE checks
+// uint128_approx_sqrt(2 * 2e12) == 2002250.
+func TestU128ApproxSqrt(t *testing.T) {
+	// First C++ case: rshares = 856158, s = 2_000_000_000_000.
+	// approx_sqrt(rshares + 2s) == 2002250.
+	rshares := uint64(856158)
+	s := uint64(2_000_000_000_000)
+	in := U128{Lo: rshares + 2*s}
+	got := in.ApproxSqrt()
+	if got != 2002250 {
+		t.Fatalf("approx_sqrt(rshares+2s) with rshares=856158: got %d want 2002250", got)
+	}
+
+	// rshares = 0 → same sqrt result.
+	in = U128{Lo: 2 * s}
+	got = in.ApproxSqrt()
+	if got != 2002250 {
+		t.Fatalf("approx_sqrt(2s): got %d want 2002250", got)
+	}
+
+	// Sub of two equal U128 → 0.
+	if !FromHiLo(0, 0).Sub(FromHiLo(0, 0)).IsZero() {
+		t.Fatalf("0 - 0 != 0")
+	}
+}
+
 func add64(a, b, c uint64) (uint64, uint64) {
 	s := a + b + c
 	carry := uint64(0)
