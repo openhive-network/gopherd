@@ -98,6 +98,7 @@ func (escrowTransferEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		HBDAmount:            e.HbdAmount.Amount,
 		HiveAmount:           e.HiveAmount.Amount,
 		PendingFee:           e.Fee.Amount,
+		PendingFeeIsHBD:      e.Fee.Symbol.Num == asset.HbdSymbol,
 		RatificationDeadline: e.RatificationDeadline,
 		EscrowExpiration:     e.EscrowExpiration,
 	})
@@ -159,23 +160,30 @@ func (escrowApproveEvaluator) Apply(ctx *Context, opArg op.Op) error {
 			return err
 		}
 		from.Balance += esc.HiveAmount
-		// Fee: refund to whichever pool holds it.
-		// PendingFee currency is reflected by the original op symbol;
-		// without that recorded, reconstruct from the escrow position
-		// by adding to the matching balance. We track only HIVE in the
-		// liquid Balance bucket; the escrow always recorded fee in HIVE
-		// in pre-existing code so we keep that path here.
-		from.Balance += esc.PendingFee
-		objects.AdjustHBDBalance(ctx.DB, &from, ctx.HeadBlockTime, esc.HBDAmount)
+		// Fee refund: credit the asset symbol that was originally locked
+		// (PendingFeeIsHBD tracked at escrow_transfer time). Pre-fix
+		// always credited HIVE which silently miscredited HBD-fee
+		// escrows.
+		if esc.PendingFeeIsHBD {
+			objects.AdjustHBDBalance(ctx.DB, &from, ctx.HeadBlockTime, esc.PendingFee+esc.HBDAmount)
+		} else {
+			from.Balance += esc.PendingFee
+			objects.AdjustHBDBalance(ctx.DB, &from, ctx.HeadBlockTime, esc.HBDAmount)
+		}
 		objects.PutAccount(ctx.DB, &from)
 		objects.DeleteEscrowFull(ctx.DB, &esc)
 		return nil
 	}
-	// On full approval (both flags set) the agent collects the fee.
+	// On full approval (both flags set) the agent collects the fee in
+	// whichever asset symbol was locked at escrow_transfer time.
 	if esc.ToApproved && esc.AgentApproved && esc.PendingFee > 0 {
 		agent, err := objects.GetAccount(ctx.DB, esc.Agent)
 		if err == nil {
-			agent.Balance += esc.PendingFee
+			if esc.PendingFeeIsHBD {
+				objects.AdjustHBDBalance(ctx.DB, &agent, ctx.HeadBlockTime, esc.PendingFee)
+			} else {
+				agent.Balance += esc.PendingFee
+			}
 			objects.PutAccount(ctx.DB, &agent)
 		}
 		esc.PendingFee = 0

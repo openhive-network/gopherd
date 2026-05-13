@@ -15,12 +15,16 @@ type Escrow struct {
 	EscrowID             uint32
 	HBDAmount            int64
 	HiveAmount           int64
-	PendingFee           int64 // HIVE only
+	PendingFee           int64 // amount; symbol selected by PendingFeeIsHBD
 	RatificationDeadline uint32
 	EscrowExpiration     uint32
 	ToApproved           bool
 	AgentApproved        bool
 	Disputed             bool
+	// PendingFeeIsHBD distinguishes the fee's asset symbol. xtar's
+	// escrow at block 9,543,257 had a 1-sat HBD fee, previously
+	// miscredited to the agent's HIVE balance.
+	PendingFeeIsHBD bool
 }
 
 const EscrowTable state.TableID = 10
@@ -69,6 +73,11 @@ func AppendEscrow(dst []byte, e *Escrow) []byte {
 	} else {
 		dst = append(dst, 0)
 	}
+	if e.PendingFeeIsHBD {
+		dst = append(dst, 1)
+	} else {
+		dst = append(dst, 0)
+	}
 	return dst
 }
 
@@ -111,6 +120,14 @@ func ReadEscrow(src []byte) (Escrow, error) {
 	}
 	if e.Disputed, err = r.ReadBool(); err != nil {
 		return e, err
+	}
+	// PendingFeeIsHBD: optional trailing byte for backwards-compat with
+	// older serialized escrows that predate the asset-symbol tracking.
+	// Missing byte → defaults to false (HIVE), matching old behavior.
+	if !r.AtEnd() {
+		if e.PendingFeeIsHBD, err = r.ReadBool(); err != nil {
+			return e, err
+		}
 	}
 	if !r.AtEnd() {
 		return e, errors.New("escrow: trailing bytes")
