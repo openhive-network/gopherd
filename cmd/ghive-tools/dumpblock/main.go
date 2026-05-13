@@ -49,7 +49,7 @@ func main() {
 				i, len(res.SignedTx.Operations), len(res.SignedTx.Signatures),
 				res.SignedTx.Expiration, res.SignedTx.RefBlockNum, res.SignedTx.RefBlockPrefix)
 			for j, o := range res.SignedTx.Operations {
-				fmt.Printf("    op %d: type=%T tag=%v\n", j, o, o.OpTag())
+				fmt.Printf("    op %d: type=%T tag=%v\n", j, o, o.Tag)
 			}
 			for j, sig := range res.SignedTx.Signatures {
 				fmt.Printf("    sig %d: %s\n", j, hex.EncodeToString(sig[:]))

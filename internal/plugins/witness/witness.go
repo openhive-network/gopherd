@@ -62,7 +62,7 @@ type Plugin struct {
 	Broadcaster Broadcaster // optional; nil = no gossip
 
 	mu      sync.Mutex
-	pending []op.Operation // mempool — ops to include in our next block
+	pending []op.Op // mempool — ops to include in our next block
 
 	logMu       sync.Mutex
 	lastLogTime time.Time
@@ -104,7 +104,7 @@ func New(c *chain.Database, s *state.Database, producers []Producer) *Plugin {
 // The mempool is shared across all configured producers.
 func (p *Plugin) AddPending(o op.Operation) {
 	p.mu.Lock()
-	p.pending = append(p.pending, o)
+	p.pending = append(p.pending, op.FromOperation(o))
 	p.mu.Unlock()
 }
 
@@ -270,7 +270,7 @@ func (p *Plugin) buildBlock(prod *Producer, dgpo objects.DynamicGlobalProperty, 
 	}
 
 	p.mu.Lock()
-	pending := append([]op.Operation(nil), p.pending...)
+	pending := append([]op.Op(nil), p.pending...)
 	p.mu.Unlock()
 
 	var txBytes []byte

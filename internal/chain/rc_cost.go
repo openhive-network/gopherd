@@ -280,8 +280,8 @@ func ComputeRCCost(signedTx *tx.SignedTransaction, blockNum uint32) int64 {
 	}
 	cost := transactionExecTimeNS
 	for _, o := range signedTx.Operations {
-		cost += stateBytesForOp(o)
-		if t, ok := execTimeNS[o.OpTag()]; ok {
+		cost += stateBytesForOp(o.Operation())
+		if t, ok := execTimeNS[o.Tag]; ok {
 			cost += t
 		}
 	}

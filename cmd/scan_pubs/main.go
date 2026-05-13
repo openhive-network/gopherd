@@ -42,7 +42,7 @@ func main() {
 				continue
 			}
 			for _, o := range txRes.SignedTx.Operations {
-				if fp, ok := o.(op.FeedPublish); ok {
+				if fp, ok := o.Operation().(op.FeedPublish); ok {
 					name := string(fp.Publisher)
 					if _, exists := pubs[name]; !exists {
 						pubs[name] = &lastFeed{}

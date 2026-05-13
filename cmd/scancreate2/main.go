@@ -28,7 +28,7 @@ func main() {
 			txRes, err := tx.ReadSignedTransaction(rd)
 			if err != nil { continue }
 			for _, o := range txRes.SignedTx.Operations {
-				if c2, ok := o.(op.LimitOrderCreate2); ok {
+				if c2, ok := o.Operation().(op.LimitOrderCreate2); ok {
 					count++
 					if count <= 10 {
 						fmt.Printf("block %d CREATE2 owner=%s sell=%d/%d rate=%d/%d/%d/%d\n",

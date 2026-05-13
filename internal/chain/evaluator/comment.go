@@ -74,10 +74,11 @@ var (
 type commentEvaluator struct{}
 
 func (commentEvaluator) Apply(ctx *Context, o op.Operation) error {
-	cp, ok := o.(*op.Comment)
+	cv, ok := o.(op.Comment)
 	if !ok {
 		return fmt.Errorf("commentEvaluator: unexpected op type %T", o)
 	}
+	cp := &cv
 	c := *cp
 	// The author must exist.
 	authorAcct, err := objects.GetAccount(ctx.DB, c.Author)
@@ -440,10 +441,11 @@ func (commentOptionsEvaluator) Apply(ctx *Context, o op.Operation) error {
 type voteEvaluator struct{}
 
 func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
-	v, ok := o.(*op.Vote)
+	vv, ok := o.(op.Vote)
 	if !ok {
 		return fmt.Errorf("voteEvaluator: unexpected op type %T", o)
 	}
+	v := &vv
 	// Dual GetComment/GetCommentRef path: under !UndoEnabled (replay)
 	// c aliases the in-place CommentStore slot — read/write through
 	// the pointer with no value-copy on Get and no PutComment at the

@@ -27,13 +27,13 @@ func main() {
 			if err != nil { break }
 			hasPow := false
 			for _, o := range txRes.SignedTx.Operations {
-				if _, ok := o.(op.Pow2); ok { hasPow = true; break }
-				if _, ok := o.(op.Pow); ok { hasPow = true; break }
+				if _, ok := o.Operation().(op.Pow2); ok { hasPow = true; break }
+				if _, ok := o.Operation().(op.Pow); ok { hasPow = true; break }
 			}
 			if hasPow {
 				fmt.Printf("block=%d tx=%d ops=%d:", n, i, len(txRes.SignedTx.Operations))
 				for _, o := range txRes.SignedTx.Operations {
-					fmt.Printf(" %s", o.OpTag().Name())
+					fmt.Printf(" %s", o.Tag.Name())
 				}
 				fmt.Println()
 			}

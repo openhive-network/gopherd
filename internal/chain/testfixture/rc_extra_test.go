@@ -168,10 +168,10 @@ func TestRCCostNotChargedPreHF20(t *testing.T) {
 func TestRequiredAuthoritiesByLevel(t *testing.T) {
 	signedTx := tx.SignedTransaction{
 		Transaction: tx.Transaction{
-			Operations: []op.Operation{
+			Operations: op.Ops(
 				op.Transfer{From: "alice", To: "carol", Amount: HIVE(10)},
 				op.Vote{Voter: "bob", Author: "alice", Permlink: "p", Weight: 10000},
-			},
+			),
 		},
 	}
 	auths := chain.RequiredAuthorities(&signedTx)

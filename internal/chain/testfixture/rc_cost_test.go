@@ -12,9 +12,9 @@ import (
 func TestComputeRCCostPreHF20Zero(t *testing.T) {
 	signedTx := tx.SignedTransaction{
 		Transaction: tx.Transaction{
-			Operations: []op.Operation{
+			Operations: op.Ops(
 				op.Transfer{From: "alice", To: "bob", Amount: HIVE(10)},
-			},
+			),
 		},
 	}
 	got := chain.ComputeRCCost(&signedTx, 1) // pre-HF20 block
@@ -28,16 +28,16 @@ func TestComputeRCCostOrdering(t *testing.T) {
 	const blockNum = 70_000_000 // post-HF20
 	transferTx := tx.SignedTransaction{
 		Transaction: tx.Transaction{
-			Operations: []op.Operation{
+			Operations: op.Ops(
 				op.Transfer{From: "alice", To: "bob", Amount: HIVE(10)},
-			},
+			),
 		},
 	}
 	commentTx := tx.SignedTransaction{
 		Transaction: tx.Transaction{
-			Operations: []op.Operation{
+			Operations: op.Ops(
 				op.Comment{Author: "alice", Permlink: "p", Body: "hi"},
-			},
+			),
 		},
 	}
 	t1 := chain.ComputeRCCost(&transferTx, blockNum)
@@ -60,24 +60,24 @@ func TestComputeRCCostFillOrKillCheaper(t *testing.T) {
 	hive := HIVE(1)
 	persistTx := tx.SignedTransaction{
 		Transaction: tx.Transaction{
-			Operations: []op.Operation{
+			Operations: op.Ops(
 				op.LimitOrderCreate{
 					Owner: "alice", OrderID: 1,
 					AmountToSell: hbd, MinToReceive: hive,
 					FillOrKill: false,
 				},
-			},
+			),
 		},
 	}
 	fokTx := tx.SignedTransaction{
 		Transaction: tx.Transaction{
-			Operations: []op.Operation{
+			Operations: op.Ops(
 				op.LimitOrderCreate{
 					Owner: "alice", OrderID: 1,
 					AmountToSell: hbd, MinToReceive: hive,
 					FillOrKill: true,
 				},
-			},
+			),
 		},
 	}
 	cPersist := chain.ComputeRCCost(&persistTx, blockNum)

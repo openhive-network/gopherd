@@ -42,7 +42,7 @@ type Transaction struct {
 	RefBlockNum    uint16
 	RefBlockPrefix uint32
 	Expiration     uint32 // time_point_sec
-	Operations     []op.Operation
+	Operations     []op.Op
 	Extensions     []byte
 }
 
@@ -66,7 +66,7 @@ func AppendTransactionBody(dst []byte, t *Transaction) []byte {
 	dst = binary.LittleEndian.AppendUint32(dst, t.Expiration)
 	dst = fcraw.AppendVarUint(dst, uint32(len(t.Operations)))
 	for _, o := range t.Operations {
-		dst = op.AppendOperation(dst, o)
+		dst = op.AppendOp(dst, o)
 	}
 	if len(t.Extensions) > 0 {
 		return append(dst, t.Extensions...)
@@ -161,9 +161,9 @@ func readTransactionBody(r *fcraw.Reader) (Transaction, error) {
 	if err != nil {
 		return t, fmt.Errorf("tx.operations count: %w", err)
 	}
-	t.Operations = make([]op.Operation, 0, count)
+	t.Operations = make([]op.Op, 0, count)
 	for i := uint32(0); i < count; i++ {
-		o, err := op.ReadOperation(r)
+		o, err := op.ReadOp(r)
 		if err != nil {
 			return t, fmt.Errorf("tx.operations[%d]: %w", i, err)
 		}

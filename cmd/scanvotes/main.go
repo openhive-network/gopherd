@@ -36,7 +36,7 @@ func main() {
 				continue
 			}
 			for _, o := range txRes.SignedTx.Operations {
-				if v, ok := o.(op.Vote); ok && string(v.Voter) == voter {
+				if v, ok := o.Operation().(op.Vote); ok && string(v.Voter) == voter {
 					fmt.Printf("block %d vote: voter=%s author=%s permlink=%s weight=%d\n",
 						n, v.Voter, v.Author, v.Permlink, v.Weight)
 				}

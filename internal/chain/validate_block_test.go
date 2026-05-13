@@ -29,7 +29,7 @@ func TestValidateBlockChainContinuity(t *testing.T) {
 
 	// Apply block 1 cleanly.
 	st := tx.SignedTransaction{Transaction: tx.Transaction{
-		Operations: []op.Operation{op.Custom{ID: 1, RequiredAuths: []string{"initminer"}, Data: []byte{0}}},
+		Operations: op.Ops(op.Custom{ID: 1, RequiredAuths: []string{"initminer"}, Data: []byte{0}}),
 		Expiration: network.GenesisTimeUnix + 60,
 	}}
 	raw1 := buildBlock(t, 1, "initminer", network.GenesisTimeUnix+3, []tx.SignedTransaction{st})
@@ -75,7 +75,7 @@ func TestValidateBlockMerkleRootMismatch(t *testing.T) {
 
 	// Build a valid block then corrupt the header's merkle root.
 	st := tx.SignedTransaction{Transaction: tx.Transaction{
-		Operations: []op.Operation{op.Custom{ID: 1, RequiredAuths: []string{"initminer"}, Data: []byte{0}}},
+		Operations: op.Ops(op.Custom{ID: 1, RequiredAuths: []string{"initminer"}, Data: []byte{0}}),
 		Expiration: network.GenesisTimeUnix + 60,
 	}}
 	raw := buildBlock(t, 1, "initminer", network.GenesisTimeUnix+3, []tx.SignedTransaction{st})
@@ -124,11 +124,11 @@ func TestValidateBlockSizeLimit(t *testing.T) {
 
 	// A block with a custom op + JSON metadata easily exceeds 100 bytes.
 	st := tx.SignedTransaction{Transaction: tx.Transaction{
-		Operations: []op.Operation{op.CustomJSON{
+		Operations: op.Ops(op.CustomJSON{
 			ID:                   "test",
 			JSON:                 `{"some":"large enough json metadata payload to exceed our 100-byte cap easily"}`,
 			RequiredPostingAuths: []string{"initminer"},
-		}},
+		}),
 		Expiration: network.GenesisTimeUnix + 60,
 	}}
 	raw := buildBlock(t, 1, "initminer", network.GenesisTimeUnix+3, []tx.SignedTransaction{st})

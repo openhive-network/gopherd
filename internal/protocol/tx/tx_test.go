@@ -62,7 +62,7 @@ func TestTransactionWithOpsAndSignatures(t *testing.T) {
 			RefBlockNum:    7,
 			RefBlockPrefix: 0xbeefcafe,
 			Expiration:     2_000_000,
-			Operations:     []op.Operation{transferOp, voteOp},
+			Operations:     op.Ops(transferOp, voteOp),
 		},
 		Signatures: [][SignatureSize]byte{sig1, sig2},
 	}

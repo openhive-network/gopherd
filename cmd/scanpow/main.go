@@ -28,7 +28,7 @@ func main() {
 			txRes, err := tx.ReadSignedTransaction(rdr)
 			if err != nil { break }
 			for _, o := range txRes.SignedTx.Operations {
-				if pw, ok := o.(op.Pow2); ok {
+				if pw, ok := o.Operation().(op.Pow2); ok {
 					var worker string
 					var prev string
 					var summary uint32

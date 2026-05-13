@@ -34,8 +34,9 @@ func RequiredAuthorities(signedTx *tx.SignedTransaction) map[AuthorityLevel]map[
 		AuthorityPosting: make(map[string]struct{}),
 	}
 	for _, o := range signedTx.Operations {
-		level := authorityLevelFor(o)
-		acct := PayerOf(o)
+		oo := o.Operation()
+		level := authorityLevelFor(oo)
+		acct := PayerOf(oo)
 		if acct == "" {
 			continue
 		}

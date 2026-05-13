@@ -57,7 +57,7 @@ func main() {
 				if mentions(o, *target) {
 					fmt.Printf("block %d tx %d op %d: %T %+v\n", n, i, oIdx, o, o)
 				}
-				switch o.(type) {
+				switch o.Operation().(type) {
 				case op.Pow, op.Pow2:
 					powCount++
 				}

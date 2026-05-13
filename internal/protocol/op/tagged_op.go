@@ -31,6 +31,21 @@ type Op struct {
 	ptr unsafe.Pointer
 }
 
+// OpTag returns the tag of this Op. Provided as a method (in addition to
+// the Tag field) so callers can write `o.OpTag()` interchangeably with
+// the Operation interface during migration. Inlines to a field load.
+func (o Op) OpTag() Tag { return o.Tag }
+
+// AppendFCBody encodes the operation body to dst. Bridges to the boxed
+// Operation form so Op satisfies the Operation interface while
+// consumers are still on the iface API.
+func (o Op) AppendFCBody(dst []byte) []byte {
+	if o.ptr == nil {
+		return dst
+	}
+	return o.Operation().AppendFCBody(dst)
+}
+
 // FromOperation wraps an Operation iface into an Op. The concrete value
 // stays heap-boxed via the iface; this constructor is used as a bridge
 // during the iface→struct migration. Once all readers populate Op
@@ -68,6 +83,18 @@ func (o Op) Operation() Operation {
 	// The fact that we know the concrete type from Tag lets us cast
 	// without a runtime lookup. The dispatch table makes it explicit.
 	return opAsIface[o.Tag](o.ptr)
+}
+
+// Ops is a variadic constructor for a []Op from Operation literals.
+// Useful in tests that previously wrote []op.Operation{op.Vote{...}, ...}
+// — they can now write op.Ops(op.Vote{...}, ...) and the call site
+// stays terse. Each Operation is wrapped via FromOperation.
+func Ops(ops ...Operation) []Op {
+	out := make([]Op, len(ops))
+	for i, o := range ops {
+		out[i] = FromOperation(o)
+	}
+	return out
 }
 
 // opAsIface is the per-tag conversion table: given a concrete-struct

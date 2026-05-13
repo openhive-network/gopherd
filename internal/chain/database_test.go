@@ -95,7 +95,7 @@ func TestApplyBlockWithTransfer(t *testing.T) {
 	// Expiration must lie inside [head_block_time, +1h]; for block 1
 	// dgpo.Time is genesis_time, so any value within that hour works.
 	st := tx.SignedTransaction{Transaction: tx.Transaction{
-		Operations: []op.Operation{transferOp},
+		Operations: op.Ops(transferOp),
 		Expiration: network.GenesisTimeUnix + 60,
 	}}
 	raw := buildBlock(t, 1, "initminer", network.GenesisTimeUnix+3, []tx.SignedTransaction{st})
@@ -131,7 +131,7 @@ func TestApplyBlockStubsRunWithoutError(t *testing.T) {
 		JSON:                 `{"k":1}`,
 	}
 	st := tx.SignedTransaction{Transaction: tx.Transaction{
-		Operations: []op.Operation{customOp},
+		Operations: op.Ops(customOp),
 		Expiration: network.GenesisTimeUnix + 60,
 	}}
 	raw := buildBlock(t, 1, "initminer", network.GenesisTimeUnix+3, []tx.SignedTransaction{st})

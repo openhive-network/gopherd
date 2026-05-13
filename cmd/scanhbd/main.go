@@ -25,7 +25,7 @@ func main() {
       txRes, err := tx.ReadSignedTransaction(rd)
       if err != nil { continue }
       for _, o := range txRes.SignedTx.Operations {
-        switch v := o.(type) {
+        switch v := o.Operation().(type) {
         case op.Transfer:
           if string(v.From) == target || string(v.To) == target {
             fmt.Printf("block %d Transfer from=%s to=%s amount=%d sym=%x memo=%q\n", n, v.From, v.To, v.Amount.Amount, v.Amount.Symbol, v.Memo)

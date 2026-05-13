@@ -36,7 +36,7 @@ func main() {
 				continue
 			}
 			for opIdx, o := range txRes.SignedTx.Operations {
-				switch o2 := o.(type) {
+				switch o2 := o.Operation().(type) {
 				case op.LimitOrderCreate:
 					if string(o2.Owner) == owner && uint64(o2.OrderID) == orderID {
 						fmt.Printf("block %d tx %d op %d LIMIT_ORDER_CREATE owner=%s orderid=%d sell=%d/%d recv=%d/%d exp=%d nops=%d\n",

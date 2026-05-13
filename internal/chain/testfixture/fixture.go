@@ -87,7 +87,7 @@ type Fixture struct {
 	Chain    *chain.Database
 	BlockNum uint32 // last applied block number
 	prevID   block.ID
-	pending  []op.Operation
+	pending  []op.Op
 
 	// curBlockTime tracks the timestamp of the next block to be
 	// generated. Starts at network.GenesisTimeUnix + BlockInterval.
@@ -179,12 +179,14 @@ func applyHardforkInTest(t *testing.T, s *state.Session, id hardfork.ID) {
 // PushOp adds an operation to the pending queue. The next
 // GenerateBlock call bundles them into a single transaction.
 func (f *Fixture) PushOp(o op.Operation) {
-	f.pending = append(f.pending, o)
+	f.pending = append(f.pending, op.FromOperation(o))
 }
 
 // PushOps adds multiple operations.
 func (f *Fixture) PushOps(ops ...op.Operation) {
-	f.pending = append(f.pending, ops...)
+	for _, o := range ops {
+		f.pending = append(f.pending, op.FromOperation(o))
+	}
 }
 
 // GenerateBlock packs all pending ops into one transaction, builds a
@@ -548,7 +550,7 @@ func (f *Fixture) DGPO() objects.DynamicGlobalProperty {
 // to pick the producer for this block — matching hived's
 // generate_block path which always asks the schedule who's next.
 // Falls back to initminer if the schedule is empty.
-func (f *Fixture) buildBlock(ops []op.Operation, blockTime uint32) []byte {
+func (f *Fixture) buildBlock(ops []op.Op, blockTime uint32) []byte {
 	witness := f.scheduledWitness()
 	hdr := block.Header{
 		Previous:   f.prevID,

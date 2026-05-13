@@ -43,7 +43,7 @@ func main() {
 				continue
 			}
 			for _, o := range txRes.SignedTx.Operations {
-				switch o := o.(type) {
+				switch o := o.Operation().(type) {
 				case op.Transfer:
 					if string(o.From) == acct || string(o.To) == acct {
 						fmt.Printf("block %d TRANSFER from=%s to=%s amount=%d sym=%d\n",

@@ -25,7 +25,7 @@ func main() {
       txRes, err := tx.ReadSignedTransaction(rd)
       if err != nil { continue }
       for _, o := range txRes.SignedTx.Operations {
-        if fp, ok := o.(op.FeedPublish); ok && string(fp.Publisher) == target {
+        if fp, ok := o.Operation().(op.FeedPublish); ok && string(fp.Publisher) == target {
           count++
           if count <= 5 || count % 50 == 0 {
             fmt.Printf("block %d feed_publish: %s rate=%d/%d\n", n, fp.Publisher, fp.ExchangeRate.Base.Amount, fp.ExchangeRate.Quote.Amount)

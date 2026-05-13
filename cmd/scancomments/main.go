@@ -36,7 +36,7 @@ func main() {
 				continue
 			}
 			for _, o := range txRes.SignedTx.Operations {
-				switch op2 := o.(type) {
+				switch op2 := o.Operation().(type) {
 				case op.Comment:
 					if string(op2.Author) == author && op2.Permlink == permlink {
 						fmt.Printf("block %d COMMENT author=%s permlink=%s parent=%s/%s\n", n, op2.Author, op2.Permlink, op2.ParentAuthor, op2.ParentPermlink)
