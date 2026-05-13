@@ -70,7 +70,8 @@ func updateGovernanceVoteExpirationTs(a *objects.Account, voteTime uint32) {
 // always charged the fee. We mirror the post-HF6 semantics for now.
 type witnessUpdateEvaluator struct{}
 
-func (witnessUpdateEvaluator) Apply(ctx *Context, o op.Operation) error {
+func (witnessUpdateEvaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	wu, ok := o.(op.WitnessUpdate)
 	if !ok {
 		return fmt.Errorf("witnessUpdateEvaluator: unexpected op type %T", o)
@@ -214,7 +215,8 @@ func (c *Context) witnessScheduleVirtualTimeBytes() [16]byte {
 // throughout — the first present wins.
 type witnessSetPropertiesEvaluator struct{}
 
-func (witnessSetPropertiesEvaluator) Apply(ctx *Context, o op.Operation) error {
+func (witnessSetPropertiesEvaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	wsp, ok := o.(op.WitnessSetProperties)
 	if !ok {
 		return fmt.Errorf("witnessSetPropertiesEvaluator: unexpected op type %T", o)
@@ -342,7 +344,8 @@ func decodeFCString(buf []byte) (string, error) {
 // accountWitnessVoteEvaluator implements account_witness_vote.
 type accountWitnessVoteEvaluator struct{}
 
-func (accountWitnessVoteEvaluator) Apply(ctx *Context, o op.Operation) error {
+func (accountWitnessVoteEvaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	wv, ok := o.(op.AccountWitnessVote)
 	if !ok {
 		return fmt.Errorf("accountWitnessVoteEvaluator: unexpected op type %T", o)
@@ -491,7 +494,8 @@ func applyWitnessVoteDelta(ctx *Context, voter *objects.Account, w *objects.Witn
 // adjust each proxy's per-depth slot.
 type accountWitnessProxyEvaluator struct{}
 
-func (accountWitnessProxyEvaluator) Apply(ctx *Context, o op.Operation) error {
+func (accountWitnessProxyEvaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	pr, ok := o.(op.AccountWitnessProxy)
 	if !ok {
 		return fmt.Errorf("accountWitnessProxyEvaluator: unexpected op type %T", o)

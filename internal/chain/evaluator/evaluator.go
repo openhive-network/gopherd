@@ -54,13 +54,13 @@ type Evaluator interface {
 	// Apply mutates state per the operation's semantics. Return nil on
 	// success, or an error describing why the op cannot apply (insufficient
 	// balance, missing account, hardfork-gated, etc.).
-	Apply(ctx *Context, o op.Operation) error
+	Apply(ctx *Context, o op.Op) error
 }
 
 // EvaluatorFunc adapts a plain function to the Evaluator interface.
-type EvaluatorFunc func(ctx *Context, o op.Operation) error
+type EvaluatorFunc func(ctx *Context, o op.Op) error
 
-func (f EvaluatorFunc) Apply(ctx *Context, o op.Operation) error { return f(ctx, o) }
+func (f EvaluatorFunc) Apply(ctx *Context, o op.Op) error { return f(ctx, o) }
 
 // dispatch maps op.Tag to the evaluator that handles it. Populated via
 // init() in per-op evaluator files.
@@ -84,27 +84,18 @@ func register(tag op.Tag, e Evaluator) {
 // hard error during replay so we know to fill in coverage; in P1 final
 // state every regular op should have an evaluator.
 func Apply(ctx *Context, o op.Operation) error {
-	tag := o.OpTag()
-	if int(tag) >= len(dispatch) || dispatch[tag] == nil {
-		return fmt.Errorf("%w: tag %d (%s)", ErrNotImplemented, tag, tag.Name())
-	}
-	if err := dispatch[tag].Apply(ctx, o); err != nil {
-		return fmt.Errorf("%s: %w", tag.Name(), err)
-	}
-	return nil
+	return ApplyOp(ctx, op.FromOperation(o))
 }
 
 // ApplyOp dispatches a tagged Op to the registered evaluator. Reads the
-// tag directly from the struct (no OpTag() iface call) and bridges to
-// the Operation form only when entering the evaluator. Once individual
-// evaluators are migrated to take op.Op natively, the inner conversion
-// goes away and the entire dispatch is iface-free.
+// tag directly from the struct (no OpTag() iface call) and dispatches
+// directly to the evaluator's Apply(ctx, op.Op).
 func ApplyOp(ctx *Context, o op.Op) error {
 	tag := o.Tag
 	if int(tag) >= len(dispatch) || dispatch[tag] == nil {
 		return fmt.Errorf("%w: tag %d (%s)", ErrNotImplemented, tag, tag.Name())
 	}
-	if err := dispatch[tag].Apply(ctx, o.Operation()); err != nil {
+	if err := dispatch[tag].Apply(ctx, o); err != nil {
 		return fmt.Errorf("%s: %w", tag.Name(), err)
 	}
 	return nil

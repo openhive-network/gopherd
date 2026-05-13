@@ -55,7 +55,8 @@ const (
 	oneDaySeconds                     = 86400
 )
 
-func (createProposalEvaluator) Apply(ctx *Context, o op.Operation) error {
+func (createProposalEvaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	cp, ok := o.(op.CreateProposal)
 	if !ok {
 		return fmt.Errorf("createProposalEvaluator: unexpected op type %T", o)
@@ -146,7 +147,8 @@ func (createProposalEvaluator) Apply(ctx *Context, o op.Operation) error {
 
 type updateProposalVotesEvaluator struct{}
 
-func (updateProposalVotesEvaluator) Apply(ctx *Context, o op.Operation) error {
+func (updateProposalVotesEvaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	uv, ok := o.(op.UpdateProposalVotes)
 	if !ok {
 		return fmt.Errorf("updateProposalVotesEvaluator: unexpected op type %T", o)
@@ -197,7 +199,8 @@ func (updateProposalVotesEvaluator) Apply(ctx *Context, o op.Operation) error {
 
 type removeProposalEvaluator struct{}
 
-func (removeProposalEvaluator) Apply(ctx *Context, o op.Operation) error {
+func (removeProposalEvaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	rp, ok := o.(op.RemoveProposal)
 	if !ok {
 		return fmt.Errorf("removeProposalEvaluator: unexpected op type %T", o)
@@ -226,7 +229,8 @@ func (removeProposalEvaluator) Apply(ctx *Context, o op.Operation) error {
 
 type updateProposalEvaluator struct{}
 
-func (updateProposalEvaluator) Apply(ctx *Context, o op.Operation) error {
+func (updateProposalEvaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	up, ok := o.(op.UpdateProposal)
 	if !ok {
 		return fmt.Errorf("updateProposalEvaluator: unexpected op type %T", o)

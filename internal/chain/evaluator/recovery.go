@@ -17,7 +17,8 @@ const changeRecoveryEffectiveDelaySec uint32 = 60 * 60 * 24 * 30
 
 type requestAccountRecoveryEvaluator struct{}
 
-func (requestAccountRecoveryEvaluator) Apply(ctx *Context, o op.Operation) error {
+func (requestAccountRecoveryEvaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	rr, ok := o.(op.RequestAccountRecovery)
 	if !ok {
 		return fmt.Errorf("requestAccountRecoveryEvaluator: unexpected op type %T", o)
@@ -37,7 +38,8 @@ func (requestAccountRecoveryEvaluator) Apply(ctx *Context, o op.Operation) error
 
 type recoverAccountEvaluator struct{}
 
-func (recoverAccountEvaluator) Apply(ctx *Context, o op.Operation) error {
+func (recoverAccountEvaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	r, ok := o.(op.RecoverAccount)
 	if !ok {
 		return fmt.Errorf("recoverAccountEvaluator: unexpected op type %T", o)
@@ -81,7 +83,8 @@ func (recoverAccountEvaluator) Apply(ctx *Context, o op.Operation) error {
 
 type changeRecoveryAccountEvaluator struct{}
 
-func (changeRecoveryAccountEvaluator) Apply(ctx *Context, o op.Operation) error {
+func (changeRecoveryAccountEvaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	cr, ok := o.(op.ChangeRecoveryAccount)
 	if !ok {
 		return fmt.Errorf("changeRecoveryAccountEvaluator: unexpected op type %T", o)

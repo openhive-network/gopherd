@@ -16,7 +16,8 @@ import (
 // json_metadata fields.
 type accountUpdateEvaluator struct{}
 
-func (accountUpdateEvaluator) Apply(ctx *Context, o op.Operation) error {
+func (accountUpdateEvaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	au, ok := o.(op.AccountUpdate)
 	if !ok {
 		return fmt.Errorf("accountUpdateEvaluator: unexpected op type %T", o)
@@ -110,7 +111,8 @@ func (accountUpdateEvaluator) Apply(ctx *Context, o op.Operation) error {
 // account_update but with optional fields and posting_json_metadata.
 type accountUpdate2Evaluator struct{}
 
-func (accountUpdate2Evaluator) Apply(ctx *Context, o op.Operation) error {
+func (accountUpdate2Evaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	au, ok := o.(op.AccountUpdate2)
 	if !ok {
 		return fmt.Errorf("accountUpdate2Evaluator: unexpected op type %T", o)

@@ -73,7 +73,8 @@ var (
 // last_post / last_root_post field on Account).
 type commentEvaluator struct{}
 
-func (commentEvaluator) Apply(ctx *Context, o op.Operation) error {
+func (commentEvaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	cv, ok := o.(op.Comment)
 	if !ok {
 		return fmt.Errorf("commentEvaluator: unexpected op type %T", o)
@@ -256,7 +257,8 @@ func (commentEvaluator) Apply(ctx *Context, o op.Operation) error {
 //     sentinel) is a hard error post-HF19.
 type deleteCommentEvaluator struct{}
 
-func (deleteCommentEvaluator) Apply(ctx *Context, o op.Operation) error {
+func (deleteCommentEvaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	dc, ok := o.(op.DeleteComment)
 	if !ok {
 		return fmt.Errorf("deleteCommentEvaluator: unexpected op type %T", o)
@@ -336,7 +338,8 @@ func deleteAllCommentVotes(s *state.Session, author, permlink string) {
 //     votes on the comment.
 type commentOptionsEvaluator struct{}
 
-func (commentOptionsEvaluator) Apply(ctx *Context, o op.Operation) error {
+func (commentOptionsEvaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	co, ok := o.(op.CommentOptions)
 	if !ok {
 		return fmt.Errorf("commentOptionsEvaluator: unexpected op type %T", o)
@@ -440,7 +443,8 @@ func (commentOptionsEvaluator) Apply(ctx *Context, o op.Operation) error {
 // Mana decay and exact rshares math land with the curation work.
 type voteEvaluator struct{}
 
-func (voteEvaluator) Apply(ctx *Context, o op.Operation) error {
+func (voteEvaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	vv, ok := o.(op.Vote)
 	if !ok {
 		return fmt.Errorf("voteEvaluator: unexpected op type %T", o)

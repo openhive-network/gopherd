@@ -29,7 +29,8 @@ import (
 // encapsulated in CreateVesting.
 type transferToVestingEvaluator struct{}
 
-func (transferToVestingEvaluator) Apply(ctx *Context, o op.Operation) error {
+func (transferToVestingEvaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	tv, ok := o.(op.TransferToVesting)
 	if !ok {
 		return fmt.Errorf("transferToVestingEvaluator: unexpected op type %T", o)

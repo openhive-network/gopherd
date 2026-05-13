@@ -18,7 +18,8 @@ import (
 // Mirrors libraries/chain/hive_evaluator.cpp:605.
 type feedPublishEvaluator struct{}
 
-func (feedPublishEvaluator) Apply(ctx *Context, o op.Operation) error {
+func (feedPublishEvaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	fp, ok := o.(op.FeedPublish)
 	if !ok {
 		return fmt.Errorf("feedPublishEvaluator: unexpected op type %T", o)
@@ -52,7 +53,8 @@ const ownerAuthRecoveryPeriodSec uint32 = 60 * 60 * 24 * 30
 //   - decline=true: create request with effective_date = now + 30d
 //   - decline=false: cancel pending request (if any)
 // process_decline_voting_rights fires once the effective date passes.
-func (declineVotingRightsEvaluator) Apply(ctx *Context, o op.Operation) error {
+func (declineVotingRightsEvaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	dv, ok := o.(op.DeclineVotingRights)
 	if !ok {
 		return fmt.Errorf("declineVotingRightsEvaluator: unexpected op type %T", o)

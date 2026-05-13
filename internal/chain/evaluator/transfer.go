@@ -74,7 +74,8 @@ var (
 // those land with their respective evaluators.
 type transferEvaluator struct{}
 
-func (transferEvaluator) Apply(ctx *Context, o op.Operation) error {
+func (transferEvaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	tx, ok := o.(op.Transfer)
 	if !ok {
 		return fmt.Errorf("transferEvaluator: unexpected op type %T", o)

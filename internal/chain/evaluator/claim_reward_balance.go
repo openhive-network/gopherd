@@ -17,7 +17,8 @@ import (
 // at zero.
 type claimRewardBalanceEvaluator struct{}
 
-func (claimRewardBalanceEvaluator) Apply(ctx *Context, o op.Operation) error {
+func (claimRewardBalanceEvaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	cr, ok := o.(op.ClaimRewardBalance)
 	if !ok {
 		return fmt.Errorf("claimRewardBalanceEvaluator: unexpected op type %T", o)

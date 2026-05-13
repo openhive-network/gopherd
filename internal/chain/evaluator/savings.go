@@ -24,7 +24,8 @@ var (
 // transferToSavingsEvaluator implements transfer_to_savings.
 type transferToSavingsEvaluator struct{}
 
-func (transferToSavingsEvaluator) Apply(ctx *Context, o op.Operation) error {
+func (transferToSavingsEvaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	t, ok := o.(op.TransferToSavings)
 	if !ok {
 		return fmt.Errorf("transferToSavingsEvaluator: unexpected op type %T", o)
@@ -81,7 +82,8 @@ func (transferToSavingsEvaluator) Apply(ctx *Context, o op.Operation) error {
 // the funds to land in `to` after savingsWithdrawTimeSec elapses.
 type transferFromSavingsEvaluator struct{}
 
-func (transferFromSavingsEvaluator) Apply(ctx *Context, o op.Operation) error {
+func (transferFromSavingsEvaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	t, ok := o.(op.TransferFromSavings)
 	if !ok {
 		return fmt.Errorf("transferFromSavingsEvaluator: unexpected op type %T", o)
@@ -146,7 +148,8 @@ func (transferFromSavingsEvaluator) Apply(ctx *Context, o op.Operation) error {
 // cancelTransferFromSavingsEvaluator implements cancel_transfer_from_savings.
 type cancelTransferFromSavingsEvaluator struct{}
 
-func (cancelTransferFromSavingsEvaluator) Apply(ctx *Context, o op.Operation) error {
+func (cancelTransferFromSavingsEvaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	c, ok := o.(op.CancelTransferFromSavings)
 	if !ok {
 		return fmt.Errorf("cancelTransferFromSavingsEvaluator: unexpected op type %T", o)

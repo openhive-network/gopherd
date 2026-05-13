@@ -24,7 +24,8 @@ import (
 // libraries/protocol/include/hive/protocol/hive_custom_operations.hpp.
 type customJSONEvaluator struct{}
 
-func (customJSONEvaluator) Apply(ctx *Context, o op.Operation) error {
+func (customJSONEvaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	cj, ok := o.(op.CustomJSON)
 	if !ok {
 		return fmt.Errorf("customJSONEvaluator: unexpected op type %T", o)

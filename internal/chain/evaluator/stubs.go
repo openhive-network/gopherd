@@ -24,9 +24,9 @@ import (
 )
 
 func stub(name string, validate func(op.Operation) error) Evaluator {
-	return EvaluatorFunc(func(ctx *Context, o op.Operation) error {
+	return EvaluatorFunc(func(ctx *Context, opArg op.Op) error {
 		if validate != nil {
-			if err := validate(o); err != nil {
+			if err := validate(opArg.Operation()); err != nil {
 				return fmt.Errorf("%s (stub): %w", name, err)
 			}
 		}

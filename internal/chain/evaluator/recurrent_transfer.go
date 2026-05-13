@@ -64,7 +64,8 @@ func extractRecurrentTransferPairID(raw []byte) uint8 {
 //
 // pair_id (HF26+) lets one (from, to) pair carry multiple parallel
 // schedules, parsed from the extensions field.
-func (recurrentTransferEvaluator) Apply(ctx *Context, o op.Operation) error {
+func (recurrentTransferEvaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	rt, ok := o.(op.RecurrentTransfer)
 	if !ok {
 		return fmt.Errorf("recurrentTransferEvaluator: unexpected op type %T", o)

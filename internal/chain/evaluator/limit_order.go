@@ -114,7 +114,8 @@ var (
 //   - if fill_or_kill and the new order didn't fully fill, the op fails
 type limitOrderCreateEvaluator struct{}
 
-func (limitOrderCreateEvaluator) Apply(ctx *Context, o op.Operation) error {
+func (limitOrderCreateEvaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	lo, ok := o.(op.LimitOrderCreate)
 	if !ok {
 		return fmt.Errorf("limitOrderCreateEvaluator: unexpected op type %T", o)
@@ -142,7 +143,8 @@ func (limitOrderCreateEvaluator) Apply(ctx *Context, o op.Operation) error {
 
 type limitOrderCreate2Evaluator struct{}
 
-func (limitOrderCreate2Evaluator) Apply(ctx *Context, o op.Operation) error {
+func (limitOrderCreate2Evaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	lo, ok := o.(op.LimitOrderCreate2)
 	if !ok {
 		return fmt.Errorf("limitOrderCreate2Evaluator: unexpected op type %T", o)
@@ -300,7 +302,8 @@ func applyLimitOrderCreate(ctx *Context, owner string, orderID uint32, amountToS
 // limitOrderCancelEvaluator implements limit_order_cancel.
 type limitOrderCancelEvaluator struct{}
 
-func (limitOrderCancelEvaluator) Apply(ctx *Context, o op.Operation) error {
+func (limitOrderCancelEvaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	lo, ok := o.(op.LimitOrderCancel)
 	if !ok {
 		return fmt.Errorf("limitOrderCancelEvaluator: unexpected op type %T", o)

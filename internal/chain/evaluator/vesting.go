@@ -30,7 +30,8 @@ const (
 // Setting vesting_shares=0 cancels an existing power-down.
 type withdrawVestingEvaluator struct{}
 
-func (withdrawVestingEvaluator) Apply(ctx *Context, o op.Operation) error {
+func (withdrawVestingEvaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	w, ok := o.(op.WithdrawVesting)
 	if !ok {
 		return fmt.Errorf("withdrawVestingEvaluator: unexpected op type %T", o)
@@ -103,7 +104,8 @@ func (withdrawVestingEvaluator) Apply(ctx *Context, o op.Operation) error {
 // setWithdrawVestingRouteEvaluator implements set_withdraw_vesting_route.
 type setWithdrawVestingRouteEvaluator struct{}
 
-func (setWithdrawVestingRouteEvaluator) Apply(ctx *Context, o op.Operation) error {
+func (setWithdrawVestingRouteEvaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	r, ok := o.(op.SetWithdrawVestingRoute)
 	if !ok {
 		return fmt.Errorf("setWithdrawVestingRouteEvaluator: unexpected op type %T", o)
@@ -154,7 +156,8 @@ func (setWithdrawVestingRouteEvaluator) Apply(ctx *Context, o op.Operation) erro
 // delegateVestingSharesEvaluator implements delegate_vesting_shares.
 type delegateVestingSharesEvaluator struct{}
 
-func (delegateVestingSharesEvaluator) Apply(ctx *Context, o op.Operation) error {
+func (delegateVestingSharesEvaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	d, ok := o.(op.DelegateVestingShares)
 	if !ok {
 		return fmt.Errorf("delegateVestingSharesEvaluator: unexpected op type %T", o)

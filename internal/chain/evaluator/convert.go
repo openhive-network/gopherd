@@ -32,7 +32,8 @@ var (
 
 type convertEvaluator struct{}
 
-func (convertEvaluator) Apply(ctx *Context, o op.Operation) error {
+func (convertEvaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	c, ok := o.(op.Convert)
 	if !ok {
 		return fmt.Errorf("convertEvaluator: unexpected op type %T", o)
@@ -71,7 +72,8 @@ func (convertEvaluator) Apply(ctx *Context, o op.Operation) error {
 
 type collateralizedConvertEvaluator struct{}
 
-func (collateralizedConvertEvaluator) Apply(ctx *Context, o op.Operation) error {
+func (collateralizedConvertEvaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	c, ok := o.(op.CollateralizedConvert)
 	if !ok {
 		return fmt.Errorf("collateralizedConvertEvaluator: unexpected op type %T", o)

@@ -61,7 +61,8 @@ func powPercentRewardPerRound(virtualSupply, aprPercent int64) int64 {
 //   - PoW hash validation.
 type powEvaluator struct{}
 
-func (powEvaluator) Apply(ctx *Context, o op.Operation) error {
+func (powEvaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	pw, ok := o.(op.Pow)
 	if !ok {
 		return fmt.Errorf("powEvaluator: unexpected op type %T", o)
@@ -81,7 +82,8 @@ func (powEvaluator) Apply(ctx *Context, o op.Operation) error {
 // scope as powEvaluator: create the worker account if absent.
 type pow2Evaluator struct{}
 
-func (pow2Evaluator) Apply(ctx *Context, o op.Operation) error {
+func (pow2Evaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	pw, ok := o.(op.Pow2)
 	if !ok {
 		return fmt.Errorf("pow2Evaluator: unexpected op type %T", o)

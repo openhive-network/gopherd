@@ -26,7 +26,8 @@ var (
 // long as it covers a non-negative HIVE amount.
 type claimAccountEvaluator struct{}
 
-func (claimAccountEvaluator) Apply(ctx *Context, o op.Operation) error {
+func (claimAccountEvaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	ca, ok := o.(op.ClaimAccount)
 	if !ok {
 		return fmt.Errorf("claimAccountEvaluator: unexpected op type %T", o)
@@ -90,7 +91,8 @@ func (claimAccountEvaluator) Apply(ctx *Context, o op.Operation) error {
 // new account with no fee.
 type createClaimedAccountEvaluator struct{}
 
-func (createClaimedAccountEvaluator) Apply(ctx *Context, o op.Operation) error {
+func (createClaimedAccountEvaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	cc, ok := o.(op.CreateClaimedAccount)
 	if !ok {
 		return fmt.Errorf("createClaimedAccountEvaluator: unexpected op type %T", o)
@@ -147,7 +149,8 @@ func (createClaimedAccountEvaluator) Apply(ctx *Context, o op.Operation) error {
 // and records the VESTS delegation from creator to newcomer.
 type accountCreateWithDelegationEvaluator struct{}
 
-func (accountCreateWithDelegationEvaluator) Apply(ctx *Context, o op.Operation) error {
+func (accountCreateWithDelegationEvaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	ac, ok := o.(op.AccountCreateWithDelegation)
 	if !ok {
 		return fmt.Errorf("accountCreateWithDelegationEvaluator: unexpected op type %T", o)

@@ -23,7 +23,8 @@ var (
 
 type escrowTransferEvaluator struct{}
 
-func (escrowTransferEvaluator) Apply(ctx *Context, o op.Operation) error {
+func (escrowTransferEvaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	e, ok := o.(op.EscrowTransfer)
 	if !ok {
 		return fmt.Errorf("escrowTransferEvaluator: unexpected op type %T", o)
@@ -106,7 +107,8 @@ func (escrowTransferEvaluator) Apply(ctx *Context, o op.Operation) error {
 
 type escrowApproveEvaluator struct{}
 
-func (escrowApproveEvaluator) Apply(ctx *Context, o op.Operation) error {
+func (escrowApproveEvaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	a, ok := o.(op.EscrowApprove)
 	if !ok {
 		return fmt.Errorf("escrowApproveEvaluator: unexpected op type %T", o)
@@ -186,7 +188,8 @@ func (escrowApproveEvaluator) Apply(ctx *Context, o op.Operation) error {
 
 type escrowDisputeEvaluator struct{}
 
-func (escrowDisputeEvaluator) Apply(ctx *Context, o op.Operation) error {
+func (escrowDisputeEvaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	d, ok := o.(op.EscrowDispute)
 	if !ok {
 		return fmt.Errorf("escrowDisputeEvaluator: unexpected op type %T", o)
@@ -228,7 +231,8 @@ func (escrowDisputeEvaluator) Apply(ctx *Context, o op.Operation) error {
 
 type escrowReleaseEvaluator struct{}
 
-func (escrowReleaseEvaluator) Apply(ctx *Context, o op.Operation) error {
+func (escrowReleaseEvaluator) Apply(ctx *Context, opArg op.Op) error {
+	o := opArg.Operation()
 	r, ok := o.(op.EscrowRelease)
 	if !ok {
 		return fmt.Errorf("escrowReleaseEvaluator: unexpected op type %T", o)
