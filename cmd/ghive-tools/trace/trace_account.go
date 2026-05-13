@@ -77,8 +77,10 @@ func main() {
 	}
 }
 
-func mentions(o op.Operation, target string) bool {
-	v := reflect.ValueOf(o)
+func mentions(o op.Op, target string) bool {
+	// reflection-based string scan still needs an iface; bridge via
+	// o.Operation() so reflect can introspect the concrete struct.
+	v := reflect.ValueOf(o.Operation())
 	if v.Kind() == reflect.Ptr {
 		v = v.Elem()
 	}

@@ -59,44 +59,44 @@ func contains(s, sub string) bool {
 	return false
 }
 
-func opSummary(o op.Operation) string {
-	switch v := o.(type) {
-	case op.AccountWitnessVote:
+func opSummary(o op.Op) string {
+	switch o.Tag {
+	case op.TagAccountWitnessVote:
 		approve := "-"
-		if v.Approve {
+		if o.AsAccountWitnessVote().Approve {
 			approve = "+"
 		}
-		return fmt.Sprintf("witness_vote\t%s\t%s%s", v.Account, approve, v.Witness)
-	case op.AccountWitnessProxy:
-		return fmt.Sprintf("witness_proxy\t%s\tproxy=%q", v.Account, v.Proxy)
-	case op.TransferToVesting:
-		return fmt.Sprintf("transfer_to_vesting\tfrom=%s\tto=%s\tamt=%d", v.From, v.To, v.Amount.Amount)
-	case op.WithdrawVesting:
-		return fmt.Sprintf("withdraw_vesting\tacct=%s\tamt=%d", v.Account, v.VestingShares.Amount)
-	case op.Transfer:
-		return fmt.Sprintf("transfer\tfrom=%s\tto=%s\tamt=%d", v.From, v.To, v.Amount.Amount)
-	case op.AccountCreate:
-		return fmt.Sprintf("account_create\tcreator=%s\tnew=%s\tfee=%d", v.Creator, v.NewAccountName, v.Fee.Amount)
-	case op.Pow:
-		return fmt.Sprintf("pow\tworker=%s", v.WorkerAccount)
-	case op.Pow2:
+		return fmt.Sprintf("witness_vote\t%s\t%s%s", o.AsAccountWitnessVote().Account, approve, o.AsAccountWitnessVote().Witness)
+	case op.TagAccountWitnessProxy:
+		return fmt.Sprintf("witness_proxy\t%s\tproxy=%q", o.AsAccountWitnessProxy().Account, o.AsAccountWitnessProxy().Proxy)
+	case op.TagTransferToVesting:
+		return fmt.Sprintf("transfer_to_vesting\tfrom=%s\tto=%s\tamt=%d", o.AsTransferToVesting().From, o.AsTransferToVesting().To, o.AsTransferToVesting().Amount.Amount)
+	case op.TagWithdrawVesting:
+		return fmt.Sprintf("withdraw_vesting\tacct=%s\tamt=%d", o.AsWithdrawVesting().Account, o.AsWithdrawVesting().VestingShares.Amount)
+	case op.TagTransfer:
+		return fmt.Sprintf("transfer\tfrom=%s\tto=%s\tamt=%d", o.AsTransfer().From, o.AsTransfer().To, o.AsTransfer().Amount.Amount)
+	case op.TagAccountCreate:
+		return fmt.Sprintf("account_create\tcreator=%s\tnew=%s\tfee=%d", o.AsAccountCreate().Creator, o.AsAccountCreate().NewAccountName, o.AsAccountCreate().Fee.Amount)
+	case op.TagPow:
+		return fmt.Sprintf("pow\tworker=%s", o.AsPow().WorkerAccount)
+	case op.TagPow2:
 		w := ""
-		if v.WorkVariantTag == 0 {
-			w = v.PowInput.WorkerAccount
-		} else if v.WorkVariantTag == 1 {
-			w = v.EquihashWork.Input.WorkerAccount
+		if o.AsPow2().WorkVariantTag == 0 {
+			w = o.AsPow2().PowInput.WorkerAccount
+		} else if o.AsPow2().WorkVariantTag == 1 {
+			w = o.AsPow2().EquihashWork.Input.WorkerAccount
 		}
 		return fmt.Sprintf("pow2\tworker=%s", w)
-	case op.Comment:
-		return fmt.Sprintf("comment\tauthor=%s\tparent=%s/%s\tperm=%s", v.Author, v.ParentAuthor, v.ParentPermlink, v.Permlink)
-	case op.CommentOptions:
-		return fmt.Sprintf("comment_options\tauthor=%s\tperm=%s\tmax_payout=%d\tpercent_hbd=%d", v.Author, v.Permlink, v.MaxAcceptedPayout.Amount, v.PercentHbd)
-	case op.Vote:
-		return fmt.Sprintf("vote\tvoter=%s\tauthor=%s\tperm=%s\tweight=%d", v.Voter, v.Author, v.Permlink, v.Weight)
-	case op.LimitOrderCreate:
-		return fmt.Sprintf("limit_order_create\towner=%s\tsell=%d\tmin_recv=%d", v.Owner, v.AmountToSell.Amount, v.MinToReceive.Amount)
-	case op.LimitOrderCancel:
-		return fmt.Sprintf("limit_order_cancel\towner=%s\torder_id=%d", v.Owner, v.OrderID)
+	case op.TagComment:
+		return fmt.Sprintf("comment\tauthor=%s\tparent=%s/%s\tperm=%s", o.AsComment().Author, o.AsComment().ParentAuthor, o.AsComment().ParentPermlink, o.AsComment().Permlink)
+	case op.TagCommentOptions:
+		return fmt.Sprintf("comment_options\tauthor=%s\tperm=%s\tmax_payout=%d\tpercent_hbd=%d", o.AsCommentOptions().Author, o.AsCommentOptions().Permlink, o.AsCommentOptions().MaxAcceptedPayout.Amount, o.AsCommentOptions().PercentHbd)
+	case op.TagVote:
+		return fmt.Sprintf("vote\tvoter=%s\tauthor=%s\tperm=%s\tweight=%d", o.AsVote().Voter, o.AsVote().Author, o.AsVote().Permlink, o.AsVote().Weight)
+	case op.TagLimitOrderCreate:
+		return fmt.Sprintf("limit_order_create\towner=%s\tsell=%d\tmin_recv=%d", o.AsLimitOrderCreate().Owner, o.AsLimitOrderCreate().AmountToSell.Amount, o.AsLimitOrderCreate().MinToReceive.Amount)
+	case op.TagLimitOrderCancel:
+		return fmt.Sprintf("limit_order_cancel\towner=%s\torder_id=%d", o.AsLimitOrderCancel().Owner, o.AsLimitOrderCancel().OrderID)
 	default:
 		return fmt.Sprintf("op_%T", o)
 	}
