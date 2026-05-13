@@ -60,8 +60,11 @@ func TestRecurrentTransferPairIDBasic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetRecurrentTransfer pair_id=0: %v", err)
 	}
-	if rt0.Memo != "test1" || rt0.Amount != 10_000 || rt0.Executions != 5 {
-		t.Errorf("pair_id=0: got memo=%q amount=%d execs=%d, want test1/10000/5",
+	// The first firing happens in the same apply block (Trigger =
+	// head_block_time at create, processRecurrentTransfers fires before
+	// commit), so remaining_executions = N - 1.
+	if rt0.Memo != "test1" || rt0.Amount != 10_000 || rt0.Executions != 4 {
+		t.Errorf("pair_id=0: got memo=%q amount=%d execs=%d, want test1/10000/4",
 			rt0.Memo, rt0.Amount, rt0.Executions)
 	}
 
@@ -69,8 +72,8 @@ func TestRecurrentTransferPairIDBasic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetRecurrentTransfer pair_id=1: %v", err)
 	}
-	if rt1.Memo != "test2" || rt1.Amount != 20_000 || rt1.Executions != 3 {
-		t.Errorf("pair_id=1: got memo=%q amount=%d execs=%d, want test2/20000/3",
+	if rt1.Memo != "test2" || rt1.Amount != 20_000 || rt1.Executions != 2 {
+		t.Errorf("pair_id=1: got memo=%q amount=%d execs=%d, want test2/20000/2",
 			rt1.Memo, rt1.Amount, rt1.Executions)
 	}
 }

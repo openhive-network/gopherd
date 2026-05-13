@@ -107,15 +107,6 @@ func (recurrentTransferEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		return fmt.Errorf("%w: to=%q", ErrAccountNotFound, rt.To)
 	}
 
-	// Duration cap: recurrence × executions ≤ HIVE_MAX_RECURRENT_TRANSFER_END_DATE.
-	// recurrence is in hours, executions is the count. Hived computes
-	// final_trigger_date = head + recurrence_hours × executions × 3600
-	// (hive_evaluator_transfer.cpp:970).
-	totalSec := uint64(rt.Recurrence) * uint64(rt.Executions) * 3600
-	if totalSec > uint64(recurrentTransferMaxEndSec) {
-		return fmt.Errorf("recurrent_transfer: schedule duration exceeds 24-month cap")
-	}
-
 	// First-execution balance check (hive_evaluator_transfer.cpp:957) —
 	// only the first transfer has to be funded; subsequent ones can fail
 	// silently.
@@ -130,16 +121,54 @@ func (recurrentTransferEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		}
 	}
 
+	// Look up any existing schedule for (from, to, pair_id) to preserve
+	// its trigger_date semantics on update (mirrors C++
+	// recurrent_transfer_object::set_recurrence_trigger_date: trigger_date
+	// only resets when recurrence changes; otherwise it stays put across
+	// edits). On a fresh create, hived's constructor sets trigger_date =
+	// head_block_time, so the very first firing happens in the block
+	// containing the operation (see
+	// hive_evaluator_transfer.cpp:969 + recurrent_transfer_object.hpp:18).
+	var newTrigger uint32
+	existing, existingErr := objects.GetRecurrentTransfer(ctx.DB, rt.From, rt.To, pairID)
+	hasExisting := existingErr == nil
+	switch {
+	case !hasExisting:
+		newTrigger = ctx.HeadBlockTime
+	case existing.Recurrence == rt.Recurrence:
+		newTrigger = existing.Trigger
+	default:
+		newTrigger = ctx.HeadBlockTime + uint32(rt.Recurrence)*3600
+	}
+
+	// Duration cap: get_final_trigger_date() <= head + HIVE_MAX_RECURRENT_TRANSFER_END_DATE.
+	// get_final_trigger_date = trigger_date + recurrence_hours * (executions - 1).
+	// See recurrent_transfer_object.hpp::get_final_trigger_date and
+	// hive_evaluator_transfer.cpp:970.
+	if rt.Executions > 0 {
+		final := uint64(newTrigger) + uint64(rt.Recurrence)*uint64(rt.Executions-1)*3600
+		cap := uint64(ctx.HeadBlockTime) + uint64(recurrentTransferMaxEndSec)
+		if final > cap {
+			return fmt.Errorf("recurrent_transfer: schedule duration exceeds 24-month cap (too long)")
+		}
+	}
+
+	var consecFailures uint8
+	if hasExisting {
+		consecFailures = existing.ConsecutiveFailures
+	}
+
 	objects.PutRecurrentTransfer(ctx.DB, &objects.RecurrentTransfer{
-		From:       rt.From,
-		To:         rt.To,
-		PairID:     pairID,
-		Amount:     rt.Amount.Amount,
-		Symbol:     uint32(rt.Amount.Symbol.Num),
-		Memo:       rt.Memo,
-		Recurrence: rt.Recurrence,
-		Executions: rt.Executions,
-		Trigger:    ctx.HeadBlockTime + uint32(rt.Recurrence)*3600,
+		From:                rt.From,
+		To:                  rt.To,
+		PairID:              pairID,
+		Amount:              rt.Amount.Amount,
+		Symbol:              uint32(rt.Amount.Symbol.Num),
+		Memo:                rt.Memo,
+		Recurrence:          rt.Recurrence,
+		Executions:          rt.Executions,
+		Trigger:             newTrigger,
+		ConsecutiveFailures: consecFailures,
 	})
 	_ = state.ErrNotFound // keep import
 	return nil

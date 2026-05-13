@@ -93,8 +93,15 @@ func processRecurrentTransfers(s *state.Session, blockTime, blockNum uint32) {
 			rt.Trigger += uint32(rt.Recurrence) * 3600
 			objects.PutRecurrentTransfer(s, &rt)
 		} else {
+			// Mirror hived's database_dhf.cpp:99-127 failure branch — every
+			// firing attempt (success or failure) consumes one execution.
+			// The schedule is removed when remaining_executions reaches 0
+			// OR the consecutive failure threshold is hit.
 			rt.ConsecutiveFailures++
-			if rt.ConsecutiveFailures >= maxConsecutiveFailures {
+			if rt.Executions > 0 {
+				rt.Executions--
+			}
+			if rt.ConsecutiveFailures >= maxConsecutiveFailures || rt.Executions == 0 {
 				objects.DeleteRecurrentTransfer(s, f.from, f.to, f.pairID)
 				continue
 			}
