@@ -6,6 +6,7 @@ import (
 
 	"hived-go/internal/fcraw"
 	"hived-go/internal/protocol/asset"
+	"hived-go/internal/protocol/auth"
 	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/op"
 	"hived-go/internal/state"
@@ -508,6 +509,38 @@ func (accountWitnessProxyEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	}
 	if !a.CanVote() {
 		return fmt.Errorf("account_witness_proxy: %q has declined voting rights", pr.Account)
+	}
+	// hive_evaluator.cpp:218-232 — when SETTING a new proxy, walk the
+	// chain above new_proxy looking for loops AND enforcing
+	// proxy_chain.size() <= HIVE_MAX_PROXY_RECURSION_DEPTH (4).
+	if pr.Proxy != "" {
+		newProxy, err := objects.GetAccount(ctx.DB, pr.Proxy)
+		if err != nil {
+			if err == state.ErrNotFound {
+				return fmt.Errorf("%w: proxy=%q", ErrAccountNotFound, pr.Proxy)
+			}
+			return err
+		}
+		// proxy_chain starts {account, new_proxy} → size 2.
+		chain := map[auth.AccountName]struct{}{
+			pr.Account: {},
+			pr.Proxy:   {},
+		}
+		cur := newProxy
+		for cur.Proxy != "" {
+			if _, dup := chain[cur.Proxy]; dup {
+				return fmt.Errorf("account_witness_proxy: %q would create a proxy loop", pr.Account)
+			}
+			chain[cur.Proxy] = struct{}{}
+			if len(chain) > objects.MaxProxyRecursionDepth {
+				return fmt.Errorf("account_witness_proxy: proxy_chain.size() <= HIVE_MAX_PROXY_RECURSION_DEPTH")
+			}
+			next, err := objects.GetAccount(ctx.DB, cur.Proxy)
+			if err != nil {
+				break
+			}
+			cur = next
+		}
 	}
 	// hive_evaluator.cpp:214 — refresh governance vote expiration
 	// unconditionally before propagating proxy changes. Mutate locally

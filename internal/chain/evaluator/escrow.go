@@ -21,6 +21,12 @@ var (
 	ErrEscrowAlreadyApproved = errors.New("escrow already approved by this party")
 )
 
+// MaxPendingTransfers mirrors HIVE_MAX_PENDING_TRANSFERS from
+// libraries/protocol/include/hive/protocol/config.hpp:240 — the maximum
+// number of simultaneously-open escrow_transfer rows a single from
+// account may originate.
+const MaxPendingTransfers = 255
+
 type escrowTransferEvaluator struct{}
 
 func (escrowTransferEvaluator) Apply(ctx *Context, opArg op.Op) error {
@@ -84,6 +90,18 @@ func (escrowTransferEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		return err
 	} else if has {
 		return fmt.Errorf("%w: %q/%d", ErrEscrowExists, e.From, e.EscrowID)
+	}
+	// hive_evaluator_transfer.cpp:86 — enforce HIVE_MAX_PENDING_TRANSFERS
+	// (255) per from-account; the C++ side persists a uint8
+	// pending_escrow_transfers counter on account_object. We instead
+	// count rows directly in the escrow_object primary index, which
+	// avoids extending the account schema.
+	n, err := objects.CountEscrowsByFrom(ctx.DB, e.From)
+	if err != nil {
+		return err
+	}
+	if n >= MaxPendingTransfers {
+		return fmt.Errorf("escrow_transfer: %q already has the maximum (%d) open escrows", e.From, MaxPendingTransfers)
 	}
 
 	from.Balance -= hiveSpent

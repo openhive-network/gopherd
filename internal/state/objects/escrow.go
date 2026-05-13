@@ -155,6 +155,20 @@ func HasEscrow(s *state.Session, from auth.AccountName, escrowID uint32) (bool, 
 	return s.Has(EscrowTable, state.PrimaryIndex, escrowKey(from, escrowID))
 }
 
+// CountEscrowsByFrom returns the count of active escrow_object rows
+// originated by `from`. Mirrors hived's pending_escrow_transfers
+// per-account counter used to enforce HIVE_MAX_PENDING_TRANSFERS (255)
+// at escrow_transfer time.
+func CountEscrowsByFrom(s *state.Session, from auth.AccountName) (int, error) {
+	prefix := state.AppendAccountName(nil, from)
+	count := 0
+	err := s.Range(EscrowTable, state.PrimaryIndex, prefix, func(body, _ []byte) (bool, error) {
+		count++
+		return true, nil
+	})
+	return count, err
+}
+
 func DeleteEscrow(s *state.Session, from auth.AccountName, escrowID uint32) {
 	s.Delete(EscrowTable, state.PrimaryIndex, escrowKey(from, escrowID))
 }
