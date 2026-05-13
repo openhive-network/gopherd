@@ -153,6 +153,88 @@ func TestSetWithdrawVestingRouteApply(t *testing.T) {
 	}
 }
 
+// Port of operation_time_tests.cpp::vesting_withdraw_route.
+//
+// alice powers down, then routes 50% of each withdraw chunk to bob as
+// VESTS (auto_vest=true) and 30% to sam as HIVE (auto_vest=false). The
+// remaining 20% stays with alice as HIVE. After one weekly chunk:
+//   - alice.vesting_shares decreases by the per-chunk rate
+//   - alice.hive_balance += 20% × rate priced through dgpo
+//   - bob.vesting_shares += 50% × rate (auto_vest=true preserves VESTS)
+//   - sam.hive_balance += 30% × rate priced through dgpo
+func TestVestingWithdrawRoute(t *testing.T) {
+	f := New(t)
+	f.HardforksUpTo(hardfork.HF16) // post-HF16 → 13-week schedule
+	f.Actors("alice", "bob", "sam")
+	f.GenerateBlock()
+	f.FundVesting("alice", 1_040_000)
+	f.GenerateBlock()
+
+	startVests := f.Vests("alice")
+	if startVests == 0 {
+		t.Fatal("alice should have VESTS after FundVesting")
+	}
+
+	// Power down all of alice's VESTS.
+	if err := f.ApplyOp(op.WithdrawVesting{
+		Account:       "alice",
+		VestingShares: VESTS(startVests),
+	}); err != nil {
+		t.Fatalf("withdraw: %v", err)
+	}
+	a := f.Account_("alice")
+	rate := a.VestingWithdrawRate
+	if rate <= 0 {
+		t.Fatalf("VestingWithdrawRate should be set, got %d", rate)
+	}
+
+	// Two routes: bob 50% auto_vest, sam 30% liquid.
+	if err := f.ApplyOp(op.SetWithdrawVestingRoute{
+		FromAccount: "alice", ToAccount: "bob", Percent: 5000, AutoVest: true,
+	}); err != nil {
+		t.Fatalf("route bob: %v", err)
+	}
+	if err := f.ApplyOp(op.SetWithdrawVestingRoute{
+		FromAccount: "alice", ToAccount: "sam", Percent: 3000, AutoVest: false,
+	}); err != nil {
+		t.Fatalf("route sam: %v", err)
+	}
+
+	oldAliceVests := f.Vests("alice")
+	oldAliceBalance := f.Balance("alice")
+	oldBobVests := f.Vests("bob")
+	oldSamBalance := f.Balance("sam")
+
+	// Skip to the first withdrawal date.
+	f.SkipSeconds(60*60*24*7 + 60)
+
+	// alice.vesting_shares should drop by exactly rate (the chunk).
+	if got := oldAliceVests - f.Vests("alice"); got != rate {
+		t.Fatalf("alice VESTS delta: got %d, want %d", got, rate)
+	}
+	// bob.vesting_shares should rise by 50% of rate.
+	bobDelta := f.Vests("bob") - oldBobVests
+	want := rate * 5000 / 10000
+	if bobDelta != want {
+		t.Fatalf("bob VESTS delta: got %d, want %d (50%% of rate)", bobDelta, want)
+	}
+	// sam.balance should rise (30% × rate → priced HIVE).
+	samDelta := f.Balance("sam") - oldSamBalance
+	if samDelta <= 0 {
+		t.Fatalf("sam HIVE delta: got %d, want > 0", samDelta)
+	}
+	// alice.balance should rise (20% × rate → priced HIVE).
+	aliceDelta := f.Balance("alice") - oldAliceBalance
+	if aliceDelta <= 0 {
+		t.Fatalf("alice HIVE delta: got %d, want > 0 (20%% to self)", aliceDelta)
+	}
+	// And sam should get the bigger share (30% > 20%).
+	if samDelta <= aliceDelta {
+		t.Fatalf("sam HIVE %d should exceed alice HIVE %d (30%% > 20%%)",
+			samDelta, aliceDelta)
+	}
+}
+
 // Port of operation_tests.cpp::collateralized_convert_apply (HF25+, subset).
 func TestCollateralizedConvertApply(t *testing.T) {
 	f := New(t)
