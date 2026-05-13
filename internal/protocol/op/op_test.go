@@ -62,6 +62,76 @@ func TestTransferRoundTrip(t *testing.T) {
 	}
 }
 
+// TestEscrowTransferRoundTrip guards the FC_REFLECT field wire order for
+// escrow_transfer_operation. The fields in the C++ source
+// (libraries/protocol/include/hive/protocol/hive_operations.hpp:1223
+// FC_REFLECT) are:
+//
+//	(from)(to)(hbd_amount)(hive_amount)(escrow_id)(agent)(fee)
+//	(json_meta)(ratification_deadline)(escrow_expiration)
+//
+// The Go struct's source-order is DIFFERENT (it groups account names
+// first). A regression here desynchronises Go's wire decoder from
+// hived's: the parse runs N bytes past the op's own footprint and into
+// the next tx's bytes, surfacing several txs later as a bogus
+// `tx.extensions[0]: unsupported variant tag X` error. See commit
+// 5f87589 — block 9,284,729 was the first mainnet tx hitting this in
+// our test corpus.
+func TestEscrowTransferRoundTrip(t *testing.T) {
+	hbd := asset.Asset{Amount: 250, Symbol: asset.Symbol{Num: asset.HbdSymbol, WasLegacyEncoded: true}}
+	hive := asset.Asset{Amount: 5000, Symbol: asset.Symbol{Num: asset.HiveSymbol, WasLegacyEncoded: true}}
+	fee := asset.Asset{Amount: 10, Symbol: asset.Symbol{Num: asset.HiveSymbol, WasLegacyEncoded: true}}
+	o := EscrowTransfer{
+		From:                 "alice",
+		To:                   "bob",
+		Agent:                "trent",
+		EscrowID:             0xDEADBEEF,
+		HbdAmount:            hbd,
+		HiveAmount:           hive,
+		Fee:                  fee,
+		RatificationDeadline: 1_700_000_000,
+		EscrowExpiration:     1_700_500_000,
+		JSONMeta:             `{"note":"contract-42"}`,
+	}
+	wire := AppendOperation(nil, o)
+	got, err := ReadOperation(fcraw.NewReader(wire))
+	if err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+	if got.OpTag() != TagEscrowTransfer {
+		t.Fatalf("tag = %d, want %d", got.OpTag(), TagEscrowTransfer)
+	}
+	o2 := got.(EscrowTransfer)
+	if o2.From != o.From || o2.To != o.To || o2.Agent != o.Agent ||
+		o2.EscrowID != o.EscrowID ||
+		o2.HbdAmount.Amount != o.HbdAmount.Amount ||
+		o2.HiveAmount.Amount != o.HiveAmount.Amount ||
+		o2.Fee.Amount != o.Fee.Amount ||
+		o2.RatificationDeadline != o.RatificationDeadline ||
+		o2.EscrowExpiration != o.EscrowExpiration ||
+		o2.JSONMeta != o.JSONMeta {
+		t.Fatalf("round-trip mismatch:\n got %+v\nwant %+v", o2, o)
+	}
+	wire2 := AppendOperation(nil, o2)
+	if !bytes.Equal(wire, wire2) {
+		t.Fatalf("re-marshal differs:\n got %x\nwant %x", wire2, wire)
+	}
+
+	// Explicitly pin the wire byte order so a future change to the
+	// Go struct field order (without updating AppendFCBody) fails
+	// here, not in production. The first byte is the op tag varint
+	// (27 = escrow_transfer), the rest is `from` length-prefixed
+	// string, etc.
+	wantHead := []byte{
+		byte(TagEscrowTransfer),
+		5, 'a', 'l', 'i', 'c', 'e', // from
+		3, 'b', 'o', 'b', // to
+	}
+	if !bytes.Equal(wire[:len(wantHead)], wantHead) {
+		t.Fatalf("wire-head mismatch:\n got %x\nwant %x", wire[:len(wantHead)], wantHead)
+	}
+}
+
 func TestCommentOptionsWithBeneficiariesRoundTrip(t *testing.T) {
 	o := CommentOptions{
 		Author:               "alice",
