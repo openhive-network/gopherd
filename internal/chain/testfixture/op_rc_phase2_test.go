@@ -5,6 +5,7 @@ import (
 
 	"hived-go/internal/protocol/auth"
 	"hived-go/internal/protocol/hardfork"
+	"hived-go/internal/protocol/op"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
 )
@@ -355,6 +356,68 @@ func TestRCUpdateOutdelOverflowDelegateePerformanceStub(t *testing.T) {
 // TestRCUsageBucketsAdvancedStub — rc_tests.cpp::rc_usage_buckets full
 // case with actual ops driving usage; basic rotation is tested in
 // TestRCUsageBucketRotation above.
+//
+// Phase 5 port: apply 5 transfers across one block, then check the
+// active bucket's Used array picked up nonzero history/market/state/
+// execution counts (mirroring the C++ check_eq(active_bucket.usage,
+// pool.usage) shape, but reduced to per-resource > 0 since the
+// pool-side recompute math depends on Phase 4 — set_pool_params).
 func TestRCUsageBucketsAdvancedStub(t *testing.T) {
-	t.Skip("Phase 5: rc_usage_buckets per-op cost accounting requires Phase 5")
+	f := New(t)
+	f.HardforksUpTo(hardfork.HF26)
+	f.Actors("alice", "bob", "sam")
+	f.FundVesting("alice", 1_000_000)
+	f.FundLiquid("alice", 100_000)
+	f.GenerateBlock()
+
+	// Drive 5 transfers in one block.
+	for i := 0; i < 5; i++ {
+		if err := f.ApplyOp(rcAdvancedTransferOp("alice", "bob", i)); err != nil {
+			t.Fatalf("transfer %d: %v", i, err)
+		}
+	}
+
+	// After the block(s), the newest bucket's Used array must reflect
+	// the per-op resource usage.
+	s := state.NewSession(f.State)
+	maxSeqno := uint32(0)
+	var used [objects.RCNumResources]int64
+	_ = s.Range(objects.RCUsageBucketTable, state.PrimaryIndex, nil,
+		func(_, val []byte) (bool, error) {
+			b, _ := objects.ReadRCUsageBucket(val)
+			if b.BucketSeqno > maxSeqno {
+				maxSeqno = b.BucketSeqno
+				used = b.Used
+			}
+			return true, nil
+		})
+	// history_bytes, market_bytes, state_bytes, execution_time should
+	// all have grown. (new_accounts stays at 0 — transfers don't claim
+	// account tokens.)
+	for _, idx := range []int{
+		int(objects.RCHistoryBytes),
+		int(objects.RCMarketBytes),
+		int(objects.RCStateBytes),
+		int(objects.RCExecutionTime),
+	} {
+		if used[idx] <= 0 {
+			t.Fatalf("active bucket Used[%d] should be > 0 after 5 transfers, got %d",
+				idx, used[idx])
+		}
+	}
+	if used[objects.RCNewAccounts] != 0 {
+		t.Fatalf("active bucket Used[new_accounts] should be 0 for transfers, got %d",
+			used[objects.RCNewAccounts])
+	}
+}
+
+// rcAdvancedTransferOp builds a unique transfer op with a memo derived
+// from the index — keeps the tx hashes distinct for the dedup window.
+func rcAdvancedTransferOp(from, to string, idx int) op.Operation {
+	return op.Transfer{
+		From:   auth.AccountName(from),
+		To:     auth.AccountName(to),
+		Amount: HIVE(1),
+		Memo:   "rc-advanced-" + string(rune('0'+idx%10)),
+	}
 }

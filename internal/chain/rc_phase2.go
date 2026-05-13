@@ -482,9 +482,11 @@ func HandleVestingWithdrawalRCImpactForTest(s *state.Session, a *objects.Account
 // existing pre-HF20 fast-skip).
 func rcFinalizeBlockPhase2(s *state.Session, blockNum, blockTime uint32) {
 	processRCExpiredDelegations(s, blockTime)
-	// Bucket rotation + pool recompute land HF26+ (matches delegate_rc
-	// activation); pre-HF26 the rc tables aren't populated yet.
+	// Phase 5 bridge: flush rc_pending_data.PendingUsage into the
+	// active rc_usage_bucket BEFORE rotation, so the data the block's
+	// txs accumulated lands in the pre-rotation newest bucket.
 	if hardfork.SetForBlock(blockNum).Has(hardfork.HF26) {
+		flushRCPendingToBucket(s)
 		rotateRCUsageBuckets(s, blockTime)
 		updateRCPool(s, blockTime)
 	}

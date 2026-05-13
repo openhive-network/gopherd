@@ -342,6 +342,12 @@ type ApplyOptions struct {
 	// the cheap account-authority lookup against state.Session in the
 	// per-tx critical section.
 	PreRecoveredTxKeys [][]crypto.PublicKey
+	// EnforceRC, when true, rejects any tx whose payer has insufficient
+	// RC mana (HF20+). Mirrors hived's `rc-skip-reject-not-enough-rc=0`
+	// path. Replay leaves it false — historical blocks always validated
+	// at the producing node and replay against canonical block_log is
+	// monotonically forward, never re-enforcing.
+	EnforceRC bool
 }
 
 // Stats accumulates per-pipeline-run counters. Pass a non-nil pointer to
@@ -711,18 +717,26 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 				}
 			}
 		}
-		// HF20+: charge RC for the entire transaction. Use a stub
-		// per-op cost; subtract from the first op's payer's manabar.
-		// Replay never enforces — current_mana can go negative.
+		// HF20+: charge RC for the entire transaction.
+		//
+		// Phase 5 implementation:
+		//   1. count_resources(tx) — per-op resource accumulator.
+		//   2. compute total cost via existing ComputeRCCost (sums
+		//      state_bytes + execution_time + per-tx base).
+		//   3. Accumulate (usage, cost) into rc_pending_data — the
+		//      per-block pending totals are flushed to the active
+		//      rc_usage_bucket at finalize.
+		//   4. Charge the payer's manabar (regen, subtract, saturate
+		//      at HIVE_RC_MAX_NEGATIVE_PERCENT).
+		//   5. Enforce insufficient-RC error when EnforceRC is on (live
+		//      sync); replay leaves it false and lets mana go negative.
 		if !txFailed && hardfork.SetForBlock(blockNum).Has(hardfork.HF20) && len(txRes.SignedTx.Operations) > 0 {
-			cost := ComputeRCCost(&txRes.SignedTx, blockNum)
-			payer := PayerOf(txRes.SignedTx.Operations[0])
-			if cost > 0 && payer != "" {
-				if a, err := objects.GetAccount(session, payer); err == nil {
-					objects.RegenerateRCMana(&a, hdr.Timestamp)
-					a.RCManaCurrent = objects.UseMana(a.RCManaCurrent, cost, -a.LastMaxRC)
-					objects.PutAccount(session, &a)
-				}
+			rcErr := applyRCForTx(session, &txRes.SignedTx, blockNum, hdr.Timestamp,
+				int64(txRes.SignedEnd-txRes.UnsignedStart), opts.EnforceRC)
+			if rcErr != nil {
+				txFailed = true
+				failOp = "tx-insufficient-rc"
+				failErr = rcErr
 			}
 		}
 		if txFailed {

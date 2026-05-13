@@ -235,7 +235,7 @@ func TestDirectRCNegativeRegenerationBug(t *testing.T) {
 //   2. Phase 5 per-tx RC cost deduction so the exact equality on
 //      current_mana = creation_rc + N - cost(op) holds.
 func TestDirectRCDelegationVestingWithdrawal(t *testing.T) {
-	t.Skip("MISSING: RC Phase 4 (wire handleVestingWithdrawalRCImpact into processOneWithdrawal) + Phase 5 (per-tx cost)")
+	t.Skip("MISSING: handleVestingWithdrawalRCImpact wiring into processOneWithdrawal (Phase 4 — explicitly deferred per RC roadmap); Phase 5 cost-deduction core is in place. C++ test pins exact-numbered counts through 13 withdrawal intervals using max_rc_creation_adjustment.")
 }
 
 // TestDirectRCDelegationVestingWithdrawalRoutes scaffolds the
@@ -243,7 +243,7 @@ func TestDirectRCDelegationVestingWithdrawal(t *testing.T) {
 // auto_vest=true route path must propagate its VESTS deposit through
 // the recipient's max_rc before the per-chunk clip runs.
 func TestDirectRCDelegationVestingWithdrawalRoutes(t *testing.T) {
-	t.Skip("MISSING: RC Phase 4 + Phase 5 (see TestDirectRCDelegationVestingWithdrawal)")
+	t.Skip("MISSING: handleVestingWithdrawalRCImpact wiring + auto_vest withdraw_route propagation into RC max (Phase 4). Phase 5 cost-deduction core is in place.")
 }
 
 // TestUpdateOutdelOverflowDelegatee scaffolds the case where the
@@ -255,7 +255,7 @@ func TestDirectRCDelegationVestingWithdrawalRoutes(t *testing.T) {
 // Needs Phase 4 (chained vesting/delegate_vesting → RC impact hook)
 // + Phase 5 (cost-precise asserts on the creation_rc adjustments).
 func TestUpdateOutdelOverflowDelegatee(t *testing.T) {
-	t.Skip("MISSING: RC Phase 4 + Phase 5 — cascaded vesting/RC clip on delegatee")
+	t.Skip("MISSING: delegate_vesting_shares → RC max recompute chain on delegatee (Phase 4 — handleVestingWithdrawalRCImpact equivalent for delegatee-side vest changes). Phase 5 cost-deduction core is in place.")
 }
 
 // TestUpdateOutdelOverflowDelegateePerformance scaffolds the 100k-
@@ -263,5 +263,5 @@ func TestUpdateOutdelOverflowDelegatee(t *testing.T) {
 // the C++ test asserts a wall-clock budget that needs the rc_account
 // secondary index in shape — skip until the subsystem fills out.
 func TestUpdateOutdelOverflowDelegateePerformance(t *testing.T) {
-	t.Skip("MISSING: RC Phase 4 + Phase 5 (perf variant of TestUpdateOutdelOverflowDelegatee)")
+	t.Skip("MISSING: delegate_vesting_shares → RC max recompute (Phase 4) + 100k-account by_to secondary index walk perf budget. Phase 5 cost-deduction core is in place.")
 }

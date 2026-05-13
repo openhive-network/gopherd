@@ -92,6 +92,11 @@ type Fixture struct {
 	// curBlockTime tracks the timestamp of the next block to be
 	// generated. Starts at network.GenesisTimeUnix + BlockInterval.
 	curBlockTime uint32
+
+	// EnforceRC, when true, enables ApplyOptions.EnforceRC on every
+	// ApplyBlock call. Tests opt in to mirror hived's
+	// rc-skip-reject-not-enough-rc=0 path (default-off in replay).
+	EnforceRC bool
 }
 
 // New initializes an empty database with the genesis state and returns
@@ -204,6 +209,7 @@ func (f *Fixture) GenerateBlock() uint32 {
 		TolerateFailingOps:        false,
 		SkipTransactionSignatures: true,
 		SkipBlockSignature:        true,
+		EnforceRC:                 f.EnforceRC,
 	}, &stats)
 	if err != nil {
 		f.t.Fatalf("testfixture: ApplyBlock %d: %v", blockNum, err)
@@ -425,6 +431,7 @@ func (f *Fixture) tryGenerateBlock() error {
 		TolerateFailingOps:        false,
 		SkipTransactionSignatures: true,
 		SkipBlockSignature:        true,
+		EnforceRC:                 f.EnforceRC,
 	}, &stats)
 	if err != nil {
 		// Increment the block counter even on failure so the next call
