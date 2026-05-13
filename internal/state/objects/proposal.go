@@ -146,3 +146,33 @@ func DeleteProposalVote(s *state.Session, id int64, voter auth.AccountName) {
 func HasProposalVote(s *state.Session, id int64, voter auth.AccountName) (bool, error) {
 	return s.Has(ProposalVoteTable, state.PrimaryIndex, proposalVoteKey(id, voter))
 }
+
+// DeleteAllProposalVotesForProposal removes every ProposalVote row
+// attached to `id`. Mirrors the C++ database_dhf.cpp::on_proposal_remove
+// cascade: the proposal_vote_idx is iterated by proposal_id and each
+// row erased. The proposal_vote primary key encoding is
+// (int64BE(id), account_name) so an 8-byte prefix Range yields exactly
+// the voter rows for `id`.
+func DeleteAllProposalVotesForProposal(s *state.Session, id int64) {
+	prefix := state.AppendInt64BE(nil, id)
+	// Two-pass: collect the voter sub-keys first so the mutation of the
+	// overlay during deletion doesn't disturb the iterator.
+	var voters []auth.AccountName
+	_ = s.Range(ProposalVoteTable, state.PrimaryIndex, prefix,
+		func(body, _ []byte) (bool, error) {
+			// body layout: [int64BE id (8)][account_name (16, NUL padded)]
+			if len(body) < 8+state.AccountNameKeyLen {
+				return true, nil
+			}
+			nameBytes := body[8 : 8+state.AccountNameKeyLen]
+			n := state.AccountNameKeyLen
+			for n > 0 && nameBytes[n-1] == 0 {
+				n--
+			}
+			voters = append(voters, auth.AccountName(string(nameBytes[:n])))
+			return true, nil
+		})
+	for _, v := range voters {
+		DeleteProposalVote(s, id, v)
+	}
+}

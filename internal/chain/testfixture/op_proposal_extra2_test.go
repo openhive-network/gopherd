@@ -276,7 +276,6 @@ func TestInactiveProposalsHaveVotes002_cpp(t *testing.T) {
 // against the immediate-delete evaluator: it confirms that
 // DeleteProposalFull cleans up both the proposal row AND its votes.
 func TestProposalsCountAfterRemoveWithVotes_cpp(t *testing.T) {
-	t.Skip("MISSING: Go's remove_proposal evaluator deletes the proposal row but leaves stale ProposalVote rows. C++ cascades the delete to votes via on_proposal_remove in database_dhf.cpp")
 	f := dhfFixture(t, "carol", "dan")
 	f.FundVesting("carol", 1_000_000)
 	f.FundVesting("dan", 1_000_000)
@@ -362,7 +361,6 @@ func TestProposalsCountAfterRemoveWithVotes_cpp(t *testing.T) {
 // gated on HF25. We exercise just the "tick past the expiration; the
 // sweep removes the votes" axis here.
 func TestProposalDbRemoveExpiredGovernanceVotes000_cpp(t *testing.T) {
-	t.Skip("MISSING: per-block expire-governance-vote hook doesn't clear stale witness votes after HIVE_GOVERNANCE_VOTE_EXPIRATION_PERIOD; Go's remove_expired_governance_votes is a no-op")
 	f := New(t)
 	f.HardforksUpTo(hardfork.HF25)
 	f.Actors("alice", "bob", "carol", "accw")

@@ -27,11 +27,12 @@ func removeExpiredGovernanceVotes(s *state.Session, blockTime, blockNum uint32) 
 	if !hf.Has(hardfork.HF25) {
 		return
 	}
-	// Only run once per HIVE_PROPOSAL_MAINTENANCE_PERIOD (1h) to bound
-	// the cost.
-	if blockTime%proposalMaintenancePeriodSec != 0 {
-		return
-	}
+	// C++ database.cpp:3628 — runs every block once HF25 is active. The
+	// by_governance_vote_expiration_ts index lets hived short-circuit
+	// when the earliest row is still in the future; we don't yet have
+	// that secondary index, so we scan all accounts. The total cost is
+	// bounded by Account.RangePrimary which is O(n_accounts) per block.
+	// TODO(perf): build a by-expiration index if this dominates.
 
 	type expired struct {
 		name string

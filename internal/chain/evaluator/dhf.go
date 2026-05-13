@@ -219,6 +219,12 @@ func (removeProposalEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		if p.Creator != rp.ProposalOwner {
 			return fmt.Errorf("%w: id=%d", ErrProposalNotOwnedByYou, id)
 		}
+		// C++ on_proposal_remove (database_dhf.cpp) cascades the delete
+		// to every ProposalVote row for the removed proposal_id. The
+		// proposal_vote primary key is (int64BE(id), account_name), so a
+		// prefix Range over the id half enumerates exactly the voter
+		// rows attached to this proposal.
+		objects.DeleteAllProposalVotesForProposal(ctx.DB, id)
 		objects.DeleteProposalFull(ctx.DB, &p)
 	}
 	return nil
