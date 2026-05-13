@@ -68,6 +68,10 @@ func rcFinalizeBlock(s *state.Session, blockNum, blockTime uint32) {
 	}
 	rcHandleExpiredDelegations(s, blockTime)
 	rcSetPoolParams(s, blockNum, blockTime)
+	// Phase 2 hooks: expired-delegation drain, bucket rotation, pool
+	// recompute, stats archival. These are inert pre-HF20 (the early
+	// fast-skip above handles that) and become meaningful HF26+.
+	rcFinalizeBlockPhase2(s, blockNum, blockTime)
 }
 
 // rcHandleExpiredDelegations sweeps rc_delegation_expiration_object rows
