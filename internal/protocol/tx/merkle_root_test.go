@@ -91,11 +91,48 @@ func TestMerkleRootIncrementalGrowth(t *testing.T) {
 		t.Errorf("6-tx merkle: got %x, want %x", got, c(dM))
 	}
 
-	// 8 tx — fully balanced 3-deep tree.
-	dD := d(leaves[6], leaves[7])
+	// 7 tx — odd at level 2, carry-through:
+	// level 1: d(0,1), d(2,3), d(4,5), 6
+	// level 2: d(d(0,1), d(2,3)), d(d(4,5), 6)
+	// level 3: d(.,.) → root.
+	dD := leaves[6]
 	dJ := d(dC, dD)
+	dM = d(dI, dJ)
+	if got := MerkleRoot(leaves[:7]); got != c(dM) {
+		t.Errorf("7-tx merkle: got %x, want %x", got, c(dM))
+	}
+
+	// 8 tx — fully balanced 3-deep tree.
+	dD = d(leaves[6], leaves[7])
+	dJ = d(dC, dD)
 	dM = d(dI, dJ)
 	if got := MerkleRoot(leaves[:8]); got != c(dM) {
 		t.Errorf("8-tx merkle: got %x, want %x", got, c(dM))
+	}
+
+	// 9 tx — leaf 8 carries through three levels:
+	// level 1: d(0,1), d(2,3), d(4,5), d(6,7), 8
+	// level 2: d(d(0,1), d(2,3)), d(d(4,5), d(6,7)), 8 (8 carries)
+	// level 3: d(.,.), 8           (8 still carries)
+	// level 4: d(., 8)             → root.
+	dE := leaves[8]
+	dK := dE
+	dN := dK
+	dO := d(dM, dN)
+	if got := MerkleRoot(leaves[:9]); got != c(dO) {
+		t.Errorf("9-tx merkle: got %x, want %x", got, c(dO))
+	}
+
+	// 10 tx — odd at level 2 only:
+	// level 1: d(0,1), d(2,3), d(4,5), d(6,7), d(8,9)
+	// level 2: d(d(0,1), d(2,3)), d(d(4,5), d(6,7)), d(8,9) (last carries)
+	// level 3: d(.,.), d(8,9)      (carries)
+	// level 4: d(., d(8,9))        → root.
+	dE = d(leaves[8], leaves[9])
+	dK = dE
+	dN = dK
+	dO = d(dM, dN)
+	if got := MerkleRoot(leaves[:10]); got != c(dO) {
+		t.Errorf("10-tx merkle: got %x, want %x", got, c(dO))
 	}
 }

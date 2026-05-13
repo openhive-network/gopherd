@@ -17,9 +17,10 @@ import "testing"
 //   - fc_uint128_to_string,
 //     uint128_approx_sqrt portions  → internal/math128/math128_test.go
 //   - valid_name_test               → internal/protocol/auth/account_name_test.go
-//   - merkle_root                   → already covered by block-hashing tests
-//     in internal/blocklog/*_test.go (Merkle root is exercised every
-//     block ingest in replay).
+//   - merkle_root                   → internal/protocol/tx/merkle_root_test.go
+//     (full 1-..-10-tx incremental growth port matching the C++ tree
+//     diagrams). Also exercised every block ingest in replay via
+//     internal/blocklog/*_test.go.
 
 // TestSkippedFixedStringVerification — fixed_string_verification:
 // exercises C++'s fixed_string<N> truncation toggle
