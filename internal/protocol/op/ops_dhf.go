@@ -1,6 +1,8 @@
 package op
 
 import (
+	"unsafe"
+
 	"encoding/binary"
 	"fmt"
 
@@ -60,34 +62,34 @@ func (o CreateProposal) AppendFCBody(dst []byte) []byte {
 	return appendRawExtensions(dst, o.Extensions)
 }
 
-func readCreateProposal(r *fcraw.Reader) (Operation, error) {
+func readCreateProposal(r *fcraw.Reader) (Op, error) {
 	var o CreateProposal
 	var err error
 	if o.Creator, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Receiver, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.StartDate, err = r.ReadUint32(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.EndDate, err = r.ReadUint32(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.DailyPay, err = asset.ReadAsset(r); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Subject, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Permlink, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Extensions, err = readExtensionsRaw(r, "create_proposal.extensions", futureExtensionsTags); err != nil {
-		return nil, err
+		return Op{}, err
 	}
-	return o, nil
+	return OpFromPtr(TagCreateProposal, unsafe.Pointer(&o)), nil
 }
 
 // ---- 45 update_proposal_votes -------------------------------------------
@@ -111,22 +113,22 @@ func (o UpdateProposalVotes) AppendFCBody(dst []byte) []byte {
 	return appendRawExtensions(dst, o.Extensions)
 }
 
-func readUpdateProposalVotes(r *fcraw.Reader) (Operation, error) {
+func readUpdateProposalVotes(r *fcraw.Reader) (Op, error) {
 	var o UpdateProposalVotes
 	var err error
 	if o.Voter, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.ProposalIDs, err = readSortedInt64Set(r, "update_proposal_votes.proposal_ids"); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Approve, err = r.ReadBool(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Extensions, err = readExtensionsRaw(r, "update_proposal_votes.extensions", futureExtensionsTags); err != nil {
-		return nil, err
+		return Op{}, err
 	}
-	return o, nil
+	return OpFromPtr(TagUpdateProposalVotes, unsafe.Pointer(&o)), nil
 }
 
 // ---- 46 remove_proposal -------------------------------------------------
@@ -144,19 +146,19 @@ func (o RemoveProposal) AppendFCBody(dst []byte) []byte {
 	return appendRawExtensions(dst, o.Extensions)
 }
 
-func readRemoveProposal(r *fcraw.Reader) (Operation, error) {
+func readRemoveProposal(r *fcraw.Reader) (Op, error) {
 	var o RemoveProposal
 	var err error
 	if o.ProposalOwner, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.ProposalIDs, err = readSortedInt64Set(r, "remove_proposal.proposal_ids"); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Extensions, err = readExtensionsRaw(r, "remove_proposal.extensions", futureExtensionsTags); err != nil {
-		return nil, err
+		return Op{}, err
 	}
-	return o, nil
+	return OpFromPtr(TagRemoveProposal, unsafe.Pointer(&o)), nil
 }
 
 // ---- 47 update_proposal -------------------------------------------------
@@ -186,28 +188,28 @@ func (o UpdateProposal) AppendFCBody(dst []byte) []byte {
 	return appendRawExtensions(dst, o.Extensions)
 }
 
-func readUpdateProposal(r *fcraw.Reader) (Operation, error) {
+func readUpdateProposal(r *fcraw.Reader) (Op, error) {
 	var o UpdateProposal
 	var err error
 	if o.ProposalID, err = r.ReadInt64(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Creator, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.DailyPay, err = asset.ReadAsset(r); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Subject, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Permlink, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Extensions, err = readExtensionsRaw(r, "update_proposal.extensions", updateProposalExtTags); err != nil {
-		return nil, err
+		return Op{}, err
 	}
-	return o, nil
+	return OpFromPtr(TagUpdateProposal, unsafe.Pointer(&o)), nil
 }
 
 func init() {

@@ -1,6 +1,8 @@
 package op
 
 import (
+	"unsafe"
+
 	"encoding/binary"
 	"fmt"
 
@@ -99,24 +101,24 @@ func (s *opSlabs) nextComment() *Comment {
 	return &s.comments[s.commentN-1]
 }
 
-func readVote(r *fcraw.Reader) (Operation, error) {
+func readVote(r *fcraw.Reader) (Op, error) {
 	o := ensureOpSlabs(r).nextVote()
 	var err error
 	if o.Voter, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Author, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Permlink, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	w, err := r.ReadUint16()
 	if err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	o.Weight = int16(w)
-	return o, nil
+	return OpFromPtr(TagVote, unsafe.Pointer(o)), nil
 }
 
 // ---- 2 transfer ---------------------------------------------------------
@@ -136,22 +138,22 @@ func (o Transfer) AppendFCBody(dst []byte) []byte {
 	return appendString(dst, o.Memo)
 }
 
-func readTransfer(r *fcraw.Reader) (Operation, error) {
+func readTransfer(r *fcraw.Reader) (Op, error) {
 	var o Transfer
 	var err error
 	if o.From, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.To, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Amount, err = asset.ReadAsset(r); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Memo, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
-	return o, nil
+	return OpFromPtr(TagTransfer, unsafe.Pointer(&o)), nil
 }
 
 // ---- 3 transfer_to_vesting ----------------------------------------------
@@ -169,19 +171,19 @@ func (o TransferToVesting) AppendFCBody(dst []byte) []byte {
 	return asset.AppendAsset(dst, o.Amount)
 }
 
-func readTransferToVesting(r *fcraw.Reader) (Operation, error) {
+func readTransferToVesting(r *fcraw.Reader) (Op, error) {
 	var o TransferToVesting
 	var err error
 	if o.From, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.To, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Amount, err = asset.ReadAsset(r); err != nil {
-		return nil, err
+		return Op{}, err
 	}
-	return o, nil
+	return OpFromPtr(TagTransferToVesting, unsafe.Pointer(&o)), nil
 }
 
 // ---- 4 withdraw_vesting -------------------------------------------------
@@ -197,16 +199,16 @@ func (o WithdrawVesting) AppendFCBody(dst []byte) []byte {
 	return asset.AppendAsset(dst, o.VestingShares)
 }
 
-func readWithdrawVesting(r *fcraw.Reader) (Operation, error) {
+func readWithdrawVesting(r *fcraw.Reader) (Op, error) {
 	var o WithdrawVesting
 	var err error
 	if o.Account, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.VestingShares, err = asset.ReadAsset(r); err != nil {
-		return nil, err
+		return Op{}, err
 	}
-	return o, nil
+	return OpFromPtr(TagWithdrawVesting, unsafe.Pointer(&o)), nil
 }
 
 // ---- 6 limit_order_cancel -----------------------------------------------
@@ -222,16 +224,16 @@ func (o LimitOrderCancel) AppendFCBody(dst []byte) []byte {
 	return binary.LittleEndian.AppendUint32(dst, o.OrderID)
 }
 
-func readLimitOrderCancel(r *fcraw.Reader) (Operation, error) {
+func readLimitOrderCancel(r *fcraw.Reader) (Op, error) {
 	var o LimitOrderCancel
 	var err error
 	if o.Owner, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.OrderID, err = r.ReadUint32(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
-	return o, nil
+	return OpFromPtr(TagLimitOrderCancel, unsafe.Pointer(&o)), nil
 }
 
 // ---- 7 feed_publish -----------------------------------------------------
@@ -247,16 +249,16 @@ func (o FeedPublish) AppendFCBody(dst []byte) []byte {
 	return asset.AppendPrice(dst, o.ExchangeRate)
 }
 
-func readFeedPublish(r *fcraw.Reader) (Operation, error) {
+func readFeedPublish(r *fcraw.Reader) (Op, error) {
 	var o FeedPublish
 	var err error
 	if o.Publisher, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.ExchangeRate, err = asset.ReadPrice(r); err != nil {
-		return nil, err
+		return Op{}, err
 	}
-	return o, nil
+	return OpFromPtr(TagFeedPublish, unsafe.Pointer(&o)), nil
 }
 
 // ---- 8 convert ----------------------------------------------------------
@@ -274,19 +276,19 @@ func (o Convert) AppendFCBody(dst []byte) []byte {
 	return asset.AppendAsset(dst, o.Amount)
 }
 
-func readConvert(r *fcraw.Reader) (Operation, error) {
+func readConvert(r *fcraw.Reader) (Op, error) {
 	var o Convert
 	var err error
 	if o.Owner, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.RequestID, err = r.ReadUint32(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Amount, err = asset.ReadAsset(r); err != nil {
-		return nil, err
+		return Op{}, err
 	}
-	return o, nil
+	return OpFromPtr(TagConvert, unsafe.Pointer(&o)), nil
 }
 
 // ---- 12 account_witness_vote --------------------------------------------
@@ -307,19 +309,19 @@ func (o AccountWitnessVote) AppendFCBody(dst []byte) []byte {
 	return append(dst, 0)
 }
 
-func readAccountWitnessVote(r *fcraw.Reader) (Operation, error) {
+func readAccountWitnessVote(r *fcraw.Reader) (Op, error) {
 	var o AccountWitnessVote
 	var err error
 	if o.Account, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Witness, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Approve, err = r.ReadBool(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
-	return o, nil
+	return OpFromPtr(TagAccountWitnessVote, unsafe.Pointer(&o)), nil
 }
 
 // ---- 13 account_witness_proxy -------------------------------------------
@@ -335,16 +337,16 @@ func (o AccountWitnessProxy) AppendFCBody(dst []byte) []byte {
 	return appendString(dst, o.Proxy)
 }
 
-func readAccountWitnessProxy(r *fcraw.Reader) (Operation, error) {
+func readAccountWitnessProxy(r *fcraw.Reader) (Op, error) {
 	var o AccountWitnessProxy
 	var err error
 	if o.Account, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Proxy, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
-	return o, nil
+	return OpFromPtr(TagAccountWitnessProxy, unsafe.Pointer(&o)), nil
 }
 
 // ---- 16 witness_block_approve -------------------------------------------
@@ -360,16 +362,16 @@ func (o WitnessBlockApprove) AppendFCBody(dst []byte) []byte {
 	return append(dst, o.BlockID[:]...)
 }
 
-func readWitnessBlockApprove(r *fcraw.Reader) (Operation, error) {
+func readWitnessBlockApprove(r *fcraw.Reader) (Op, error) {
 	var o WitnessBlockApprove
 	var err error
 	if o.Witness, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if err = r.ReadInto(o.BlockID[:]); err != nil {
-		return nil, err
+		return Op{}, err
 	}
-	return o, nil
+	return OpFromPtr(TagWitnessBlockApprove, unsafe.Pointer(&o)), nil
 }
 
 // ---- 17 delete_comment --------------------------------------------------
@@ -385,16 +387,16 @@ func (o DeleteComment) AppendFCBody(dst []byte) []byte {
 	return appendString(dst, o.Permlink)
 }
 
-func readDeleteComment(r *fcraw.Reader) (Operation, error) {
+func readDeleteComment(r *fcraw.Reader) (Op, error) {
 	var o DeleteComment
 	var err error
 	if o.Author, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Permlink, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
-	return o, nil
+	return OpFromPtr(TagDeleteComment, unsafe.Pointer(&o)), nil
 }
 
 // ---- 20 set_withdraw_vesting_route --------------------------------------
@@ -417,22 +419,22 @@ func (o SetWithdrawVestingRoute) AppendFCBody(dst []byte) []byte {
 	return append(dst, 0)
 }
 
-func readSetWithdrawVestingRoute(r *fcraw.Reader) (Operation, error) {
+func readSetWithdrawVestingRoute(r *fcraw.Reader) (Op, error) {
 	var o SetWithdrawVestingRoute
 	var err error
 	if o.FromAccount, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.ToAccount, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Percent, err = r.ReadUint16(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.AutoVest, err = r.ReadBool(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
-	return o, nil
+	return OpFromPtr(TagSetWithdrawVestingRoute, unsafe.Pointer(&o)), nil
 }
 
 // ---- 22 claim_account ---------------------------------------------------
@@ -450,19 +452,19 @@ func (o ClaimAccount) AppendFCBody(dst []byte) []byte {
 	return appendRawExtensions(dst, o.Extensions)
 }
 
-func readClaimAccount(r *fcraw.Reader) (Operation, error) {
+func readClaimAccount(r *fcraw.Reader) (Op, error) {
 	var o ClaimAccount
 	var err error
 	if o.Creator, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Fee, err = asset.ReadAsset(r); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Extensions, err = readExtensionsRaw(r, "extensions", futureExtensionsTags); err != nil {
-		return nil, err
+		return Op{}, err
 	}
-	return o, nil
+	return OpFromPtr(TagClaimAccount, unsafe.Pointer(&o)), nil
 }
 
 // ---- 28 escrow_dispute --------------------------------------------------
@@ -481,7 +483,7 @@ func (o EscrowDispute) AppendFCBody(dst []byte) []byte {
 	return binary.LittleEndian.AppendUint32(dst, o.EscrowID)
 }
 
-func readEscrowDispute(r *fcraw.Reader) (Operation, error) {
+func readEscrowDispute(r *fcraw.Reader) (Op, error) {
 	var o EscrowDispute
 	o.From, _ = r.ReadString()
 	o.To, _ = r.ReadString()
@@ -489,14 +491,14 @@ func readEscrowDispute(r *fcraw.Reader) (Operation, error) {
 	if v, err := r.ReadString(); err == nil {
 		o.Who = v
 	} else {
-		return nil, err
+		return Op{}, err
 	}
 	id, err := r.ReadUint32()
 	if err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	o.EscrowID = id
-	return o, nil
+	return OpFromPtr(TagEscrowDispute, unsafe.Pointer(&o)), nil
 }
 
 // ---- 31 escrow_approve --------------------------------------------------
@@ -520,21 +522,21 @@ func (o EscrowApprove) AppendFCBody(dst []byte) []byte {
 	return append(dst, 0)
 }
 
-func readEscrowApprove(r *fcraw.Reader) (Operation, error) {
+func readEscrowApprove(r *fcraw.Reader) (Op, error) {
 	var o EscrowApprove
 	var err error
 	for _, dst := range []*string{&o.From, &o.To, &o.Agent, &o.Who} {
 		if *dst, err = r.ReadString(); err != nil {
-			return nil, err
+			return Op{}, err
 		}
 	}
 	if o.EscrowID, err = r.ReadUint32(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Approve, err = r.ReadBool(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
-	return o, nil
+	return OpFromPtr(TagEscrowApprove, unsafe.Pointer(&o)), nil
 }
 
 // ---- 32 transfer_to_savings ---------------------------------------------
@@ -554,22 +556,22 @@ func (o TransferToSavings) AppendFCBody(dst []byte) []byte {
 	return appendString(dst, o.Memo)
 }
 
-func readTransferToSavings(r *fcraw.Reader) (Operation, error) {
+func readTransferToSavings(r *fcraw.Reader) (Op, error) {
 	var o TransferToSavings
 	var err error
 	if o.From, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.To, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Amount, err = asset.ReadAsset(r); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Memo, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
-	return o, nil
+	return OpFromPtr(TagTransferToSavings, unsafe.Pointer(&o)), nil
 }
 
 // ---- 33 transfer_from_savings -------------------------------------------
@@ -591,25 +593,25 @@ func (o TransferFromSavings) AppendFCBody(dst []byte) []byte {
 	return appendString(dst, o.Memo)
 }
 
-func readTransferFromSavings(r *fcraw.Reader) (Operation, error) {
+func readTransferFromSavings(r *fcraw.Reader) (Op, error) {
 	var o TransferFromSavings
 	var err error
 	if o.From, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.RequestID, err = r.ReadUint32(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.To, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Amount, err = asset.ReadAsset(r); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Memo, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
-	return o, nil
+	return OpFromPtr(TagTransferFromSavings, unsafe.Pointer(&o)), nil
 }
 
 // ---- 34 cancel_transfer_from_savings ------------------------------------
@@ -625,16 +627,16 @@ func (o CancelTransferFromSavings) AppendFCBody(dst []byte) []byte {
 	return binary.LittleEndian.AppendUint32(dst, o.RequestID)
 }
 
-func readCancelTransferFromSavings(r *fcraw.Reader) (Operation, error) {
+func readCancelTransferFromSavings(r *fcraw.Reader) (Op, error) {
 	var o CancelTransferFromSavings
 	var err error
 	if o.From, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.RequestID, err = r.ReadUint32(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
-	return o, nil
+	return OpFromPtr(TagCancelTransferFromSavings, unsafe.Pointer(&o)), nil
 }
 
 // ---- 36 decline_voting_rights -------------------------------------------
@@ -653,16 +655,16 @@ func (o DeclineVotingRights) AppendFCBody(dst []byte) []byte {
 	return append(dst, 0)
 }
 
-func readDeclineVotingRights(r *fcraw.Reader) (Operation, error) {
+func readDeclineVotingRights(r *fcraw.Reader) (Op, error) {
 	var o DeclineVotingRights
 	var err error
 	if o.Account, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Decline, err = r.ReadBool(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
-	return o, nil
+	return OpFromPtr(TagDeclineVotingRights, unsafe.Pointer(&o)), nil
 }
 
 // ---- 37 reset_account ---------------------------------------------------
@@ -680,19 +682,19 @@ func (o ResetAccount) AppendFCBody(dst []byte) []byte {
 	return auth.AppendAuthority(dst, o.NewOwnerAuthority)
 }
 
-func readResetAccount(r *fcraw.Reader) (Operation, error) {
+func readResetAccount(r *fcraw.Reader) (Op, error) {
 	var o ResetAccount
 	var err error
 	if o.ResetAccount, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.AccountToReset, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.NewOwnerAuthority, err = auth.ReadAuthority(r); err != nil {
-		return nil, err
+		return Op{}, err
 	}
-	return o, nil
+	return OpFromPtr(TagResetAccount, unsafe.Pointer(&o)), nil
 }
 
 // ---- 38 set_reset_account -----------------------------------------------
@@ -710,19 +712,19 @@ func (o SetResetAccount) AppendFCBody(dst []byte) []byte {
 	return appendString(dst, o.ResetAccount)
 }
 
-func readSetResetAccount(r *fcraw.Reader) (Operation, error) {
+func readSetResetAccount(r *fcraw.Reader) (Op, error) {
 	var o SetResetAccount
 	var err error
 	if o.Account, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.CurrentResetAccount, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.ResetAccount, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
-	return o, nil
+	return OpFromPtr(TagSetResetAccount, unsafe.Pointer(&o)), nil
 }
 
 // ---- 39 claim_reward_balance --------------------------------------------
@@ -742,22 +744,22 @@ func (o ClaimRewardBalance) AppendFCBody(dst []byte) []byte {
 	return asset.AppendAsset(dst, o.RewardVests)
 }
 
-func readClaimRewardBalance(r *fcraw.Reader) (Operation, error) {
+func readClaimRewardBalance(r *fcraw.Reader) (Op, error) {
 	var o ClaimRewardBalance
 	var err error
 	if o.Account, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.RewardHive, err = asset.ReadAsset(r); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.RewardHbd, err = asset.ReadAsset(r); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.RewardVests, err = asset.ReadAsset(r); err != nil {
-		return nil, err
+		return Op{}, err
 	}
-	return o, nil
+	return OpFromPtr(TagClaimRewardBalance, unsafe.Pointer(&o)), nil
 }
 
 // ---- 40 delegate_vesting_shares -----------------------------------------
@@ -775,19 +777,19 @@ func (o DelegateVestingShares) AppendFCBody(dst []byte) []byte {
 	return asset.AppendAsset(dst, o.VestingShares)
 }
 
-func readDelegateVestingShares(r *fcraw.Reader) (Operation, error) {
+func readDelegateVestingShares(r *fcraw.Reader) (Op, error) {
 	var o DelegateVestingShares
 	var err error
 	if o.Delegator, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Delegatee, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.VestingShares, err = asset.ReadAsset(r); err != nil {
-		return nil, err
+		return Op{}, err
 	}
-	return o, nil
+	return OpFromPtr(TagDelegateVestingShares, unsafe.Pointer(&o)), nil
 }
 
 // ---- 48 collateralized_convert ------------------------------------------
@@ -805,19 +807,19 @@ func (o CollateralizedConvert) AppendFCBody(dst []byte) []byte {
 	return asset.AppendAsset(dst, o.Amount)
 }
 
-func readCollateralizedConvert(r *fcraw.Reader) (Operation, error) {
+func readCollateralizedConvert(r *fcraw.Reader) (Op, error) {
 	var o CollateralizedConvert
 	var err error
 	if o.Owner, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.RequestID, err = r.ReadUint32(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Amount, err = asset.ReadAsset(r); err != nil {
-		return nil, err
+		return Op{}, err
 	}
-	return o, nil
+	return OpFromPtr(TagCollateralizedConvert, unsafe.Pointer(&o)), nil
 }
 
 // shared helper for length-prefixed strings with no allocation surprises.

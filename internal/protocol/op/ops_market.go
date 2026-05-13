@@ -1,6 +1,8 @@
 package op
 
 import (
+	"unsafe"
+
 	"encoding/binary"
 
 	"hived-go/internal/fcraw"
@@ -33,28 +35,28 @@ func (o LimitOrderCreate) AppendFCBody(dst []byte) []byte {
 	return binary.LittleEndian.AppendUint32(dst, o.Expiration)
 }
 
-func readLimitOrderCreate(r *fcraw.Reader) (Operation, error) {
+func readLimitOrderCreate(r *fcraw.Reader) (Op, error) {
 	var o LimitOrderCreate
 	var err error
 	if o.Owner, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.OrderID, err = r.ReadUint32(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.AmountToSell, err = asset.ReadAsset(r); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.MinToReceive, err = asset.ReadAsset(r); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.FillOrKill, err = r.ReadBool(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Expiration, err = r.ReadUint32(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
-	return o, nil
+	return OpFromPtr(TagLimitOrderCreate, unsafe.Pointer(&o)), nil
 }
 
 // ---- 21 limit_order_create2 ---------------------------------------------
@@ -82,28 +84,28 @@ func (o LimitOrderCreate2) AppendFCBody(dst []byte) []byte {
 	return binary.LittleEndian.AppendUint32(dst, o.Expiration)
 }
 
-func readLimitOrderCreate2(r *fcraw.Reader) (Operation, error) {
+func readLimitOrderCreate2(r *fcraw.Reader) (Op, error) {
 	var o LimitOrderCreate2
 	var err error
 	if o.Owner, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.OrderID, err = r.ReadUint32(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.AmountToSell, err = asset.ReadAsset(r); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.FillOrKill, err = r.ReadBool(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.ExchangeRate, err = asset.ReadPrice(r); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Expiration, err = r.ReadUint32(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
-	return o, nil
+	return OpFromPtr(TagLimitOrderCreate2, unsafe.Pointer(&o)), nil
 }
 
 func init() {

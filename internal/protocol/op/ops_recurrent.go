@@ -1,6 +1,8 @@
 package op
 
 import (
+	"unsafe"
+
 	"encoding/binary"
 
 	"hived-go/internal/fcraw"
@@ -37,31 +39,31 @@ func (o RecurrentTransfer) AppendFCBody(dst []byte) []byte {
 	return appendRawExtensions(dst, o.Extensions)
 }
 
-func readRecurrentTransfer(r *fcraw.Reader) (Operation, error) {
+func readRecurrentTransfer(r *fcraw.Reader) (Op, error) {
 	var o RecurrentTransfer
 	var err error
 	if o.From, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.To, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Amount, err = asset.ReadAsset(r); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Memo, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Recurrence, err = r.ReadUint16(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Executions, err = r.ReadUint16(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Extensions, err = readExtensionsRaw(r, "recurrent_transfer.extensions", recurrentTransferExtTags); err != nil {
-		return nil, err
+		return Op{}, err
 	}
-	return o, nil
+	return OpFromPtr(TagRecurrentTransfer, unsafe.Pointer(&o)), nil
 }
 
 func init() {

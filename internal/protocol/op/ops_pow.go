@@ -1,6 +1,8 @@
 package op
 
 import (
+	"unsafe"
+
 	"encoding/binary"
 	"fmt"
 
@@ -46,34 +48,34 @@ func (o Pow) AppendFCBody(dst []byte) []byte {
 	return appendLegacyChainProperties(dst, o.Props)
 }
 
-func readPow(r *fcraw.Reader) (Operation, error) {
+func readPow(r *fcraw.Reader) (Op, error) {
 	var o Pow
 	var err error
 	if o.WorkerAccount, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if err := r.ReadInto(o.BlockID[:]); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Nonce, err = r.ReadUint64(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if err := r.ReadInto(o.Work.Worker[:]); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if err := r.ReadInto(o.Work.Input[:]); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if err := r.ReadInto(o.Work.Signature[:]); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if err := r.ReadInto(o.Work.Work[:]); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Props, err = readLegacyChainProperties(r); err != nil {
-		return nil, err
+		return Op{}, err
 	}
-	return o, nil
+	return OpFromPtr(TagPow, unsafe.Pointer(&o)), nil
 }
 
 // ---- 30 pow2 ------------------------------------------------------------
@@ -213,38 +215,38 @@ func readEquihashProof(r *fcraw.Reader) (EquihashProof, error) {
 	return p, nil
 }
 
-func readPow2(r *fcraw.Reader) (Operation, error) {
+func readPow2(r *fcraw.Reader) (Op, error) {
 	var o Pow2
 	tag, err := r.ReadVarUint()
 	if err != nil {
-		return nil, fmt.Errorf("pow2.work tag: %w", err)
+		return Op{}, fmt.Errorf("pow2.work tag: %w", err)
 	}
 	o.WorkVariantTag = uint8(tag)
 	switch tag {
 	case 0:
 		if o.PowInput, err = readPow2Input(r); err != nil {
-			return nil, err
+			return Op{}, err
 		}
 		if o.PowSummary, err = r.ReadUint32(); err != nil {
-			return nil, err
+			return Op{}, err
 		}
 	case 1:
 		var ep EquihashPow
 		if ep.Input, err = readPow2Input(r); err != nil {
-			return nil, fmt.Errorf("equihash_pow.input: %w", err)
+			return Op{}, fmt.Errorf("equihash_pow.input: %w", err)
 		}
 		if ep.Proof, err = readEquihashProof(r); err != nil {
-			return nil, err
+			return Op{}, err
 		}
 		if err := r.ReadInto(ep.PrevBlock[:]); err != nil {
-			return nil, fmt.Errorf("equihash_pow.prev_block: %w", err)
+			return Op{}, fmt.Errorf("equihash_pow.prev_block: %w", err)
 		}
 		if ep.PowSummary, err = r.ReadUint32(); err != nil {
-			return nil, fmt.Errorf("equihash_pow.pow_summary: %w", err)
+			return Op{}, fmt.Errorf("equihash_pow.pow_summary: %w", err)
 		}
 		o.EquihashWork = ep
 	default:
-		return nil, fmt.Errorf("pow2.work: unknown variant tag %d", tag)
+		return Op{}, fmt.Errorf("pow2.work: unknown variant tag %d", tag)
 	}
 	if o.NewOwnerKey, err = readOptional(r, func(r *fcraw.Reader) (crypto.PublicKey, error) {
 		var k crypto.PublicKey
@@ -253,12 +255,12 @@ func readPow2(r *fcraw.Reader) (Operation, error) {
 		}
 		return k, nil
 	}); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Props, err = readLegacyChainProperties(r); err != nil {
-		return nil, err
+		return Op{}, err
 	}
-	return o, nil
+	return OpFromPtr(TagPow2, unsafe.Pointer(&o)), nil
 }
 
 func init() {

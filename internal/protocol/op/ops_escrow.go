@@ -1,6 +1,8 @@
 package op
 
 import (
+	"unsafe"
+
 	"encoding/binary"
 
 	"hived-go/internal/fcraw"
@@ -46,40 +48,40 @@ func (o EscrowTransfer) AppendFCBody(dst []byte) []byte {
 }
 
 // readEscrowTransfer mirrors the AppendFCBody order above.
-func readEscrowTransfer(r *fcraw.Reader) (Operation, error) {
+func readEscrowTransfer(r *fcraw.Reader) (Op, error) {
 	var o EscrowTransfer
 	var err error
 	if o.From, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.To, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.HbdAmount, err = asset.ReadAsset(r); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.HiveAmount, err = asset.ReadAsset(r); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.EscrowID, err = r.ReadUint32(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Agent, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Fee, err = asset.ReadAsset(r); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.JSONMeta, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.RatificationDeadline, err = r.ReadUint32(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.EscrowExpiration, err = r.ReadUint32(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
-	return o, nil
+	return OpFromPtr(TagEscrowTransfer, unsafe.Pointer(&o)), nil
 }
 
 // ---- 29 escrow_release --------------------------------------------------
@@ -103,24 +105,24 @@ func (o EscrowRelease) AppendFCBody(dst []byte) []byte {
 	return asset.AppendAsset(dst, o.HiveAmount)
 }
 
-func readEscrowRelease(r *fcraw.Reader) (Operation, error) {
+func readEscrowRelease(r *fcraw.Reader) (Op, error) {
 	var o EscrowRelease
 	var err error
 	for _, dst := range []*string{&o.From, &o.To, &o.Agent, &o.Who, &o.Receiver} {
 		if *dst, err = r.ReadString(); err != nil {
-			return nil, err
+			return Op{}, err
 		}
 	}
 	if o.EscrowID, err = r.ReadUint32(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.HbdAmount, err = asset.ReadAsset(r); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.HiveAmount, err = asset.ReadAsset(r); err != nil {
-		return nil, err
+		return Op{}, err
 	}
-	return o, nil
+	return OpFromPtr(TagEscrowRelease, unsafe.Pointer(&o)), nil
 }
 
 func init() {

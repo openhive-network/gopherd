@@ -101,17 +101,10 @@ func Ops(ops ...Operation) []Op {
 // pointer for that tag, return the boxed Operation. Populated by init().
 var opAsIface [TagFirstVirtual]func(unsafe.Pointer) Operation
 
-// ReadOp parses a single tagged operation from r and returns it as Op.
-// Bridge wrapper around ReadOperation during the iface→struct migration:
-// uses the existing readers (which already populate slab-pooled storage
-// where applicable) and then wraps in Op via FromOperation so callers
-// no longer touch the Operation interface directly.
+// ReadOp parses a single tagged operation from r and returns it as Op
+// directly — no iface roundtrip. Readers populate Op via OpFromPtr.
 func ReadOp(r *fcraw.Reader) (Op, error) {
-	o, err := ReadOperation(r)
-	if err != nil {
-		return Op{}, err
-	}
-	return FromOperation(o), nil
+	return readOpBody(r)
 }
 
 // AppendOp writes a tagged operation as varint(tag) || body using the

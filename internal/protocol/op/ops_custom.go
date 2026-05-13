@@ -1,6 +1,8 @@
 package op
 
 import (
+	"unsafe"
+
 	"encoding/binary"
 	"fmt"
 
@@ -50,19 +52,19 @@ func (o Custom) AppendFCBody(dst []byte) []byte {
 	return append(dst, o.Data...)
 }
 
-func readCustom(r *fcraw.Reader) (Operation, error) {
+func readCustom(r *fcraw.Reader) (Op, error) {
 	var o Custom
 	var err error
 	if o.RequiredAuths, err = readSortedAccountSet(r, "custom.required_auths"); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.ID, err = r.ReadUint16(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Data, err = r.ReadBytes(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
-	return o, nil
+	return OpFromPtr(TagCustom, unsafe.Pointer(&o)), nil
 }
 
 // ---- 18 custom_json -----------------------------------------------------
@@ -82,22 +84,22 @@ func (o CustomJSON) AppendFCBody(dst []byte) []byte {
 	return appendString(dst, o.JSON)
 }
 
-func readCustomJSON(r *fcraw.Reader) (Operation, error) {
+func readCustomJSON(r *fcraw.Reader) (Op, error) {
 	var o CustomJSON
 	var err error
 	if o.RequiredAuths, err = readSortedAccountSet(r, "custom_json.required_auths"); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.RequiredPostingAuths, err = readSortedAccountSet(r, "custom_json.required_posting_auths"); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.ID, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.JSON, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
-	return o, nil
+	return OpFromPtr(TagCustomJSON, unsafe.Pointer(&o)), nil
 }
 
 // ---- 35 custom_binary ---------------------------------------------------
@@ -122,28 +124,28 @@ func (o CustomBinary) AppendFCBody(dst []byte) []byte {
 	return append(dst, o.Data...)
 }
 
-func readCustomBinary(r *fcraw.Reader) (Operation, error) {
+func readCustomBinary(r *fcraw.Reader) (Op, error) {
 	var o CustomBinary
 	var err error
 	if o.RequiredOwnerAuths, err = readSortedAccountSet(r, "custom_binary.required_owner_auths"); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.RequiredActiveAuths, err = readSortedAccountSet(r, "custom_binary.required_active_auths"); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.RequiredPostingAuths, err = readSortedAccountSet(r, "custom_binary.required_posting_auths"); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.RequiredAuths, err = readAuthoritySlice(r, "custom_binary.required_auths"); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.ID, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Data, err = r.ReadBytes(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
-	return o, nil
+	return OpFromPtr(TagCustomBinary, unsafe.Pointer(&o)), nil
 }
 
 func init() {

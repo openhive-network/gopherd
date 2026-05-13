@@ -1,6 +1,8 @@
 package op
 
 import (
+	"unsafe"
+
 	"encoding/binary"
 	"fmt"
 
@@ -29,25 +31,25 @@ func (o WitnessUpdate) AppendFCBody(dst []byte) []byte {
 	return asset.AppendAsset(dst, o.Fee)
 }
 
-func readWitnessUpdate(r *fcraw.Reader) (Operation, error) {
+func readWitnessUpdate(r *fcraw.Reader) (Op, error) {
 	var o WitnessUpdate
 	var err error
 	if o.Owner, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.URL, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if err := r.ReadInto(o.BlockSigningKey[:]); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Props, err = readLegacyChainProperties(r); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Fee, err = asset.ReadAsset(r); err != nil {
-		return nil, err
+		return Op{}, err
 	}
-	return o, nil
+	return OpFromPtr(TagWitnessUpdate, unsafe.Pointer(&o)), nil
 }
 
 // ---- 42 witness_set_properties ------------------------------------------
@@ -79,31 +81,31 @@ func (o WitnessSetProperties) AppendFCBody(dst []byte) []byte {
 	return appendRawExtensions(dst, o.Extensions)
 }
 
-func readWitnessSetProperties(r *fcraw.Reader) (Operation, error) {
+func readWitnessSetProperties(r *fcraw.Reader) (Op, error) {
 	var o WitnessSetProperties
 	var err error
 	if o.Owner, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	count, err := r.ReadVarUint()
 	if err != nil {
-		return nil, fmt.Errorf("witness_set_properties.props count: %w", err)
+		return Op{}, fmt.Errorf("witness_set_properties.props count: %w", err)
 	}
 	for i := uint32(0); i < count; i++ {
 		k, err := r.ReadString()
 		if err != nil {
-			return nil, fmt.Errorf("witness_set_properties.props[%d].key: %w", i, err)
+			return Op{}, fmt.Errorf("witness_set_properties.props[%d].key: %w", i, err)
 		}
 		v, err := r.ReadBytes()
 		if err != nil {
-			return nil, fmt.Errorf("witness_set_properties.props[%d].value: %w", i, err)
+			return Op{}, fmt.Errorf("witness_set_properties.props[%d].value: %w", i, err)
 		}
 		o.Props = append(o.Props, WitnessProperty{Key: k, Value: v})
 	}
 	if o.Extensions, err = readExtensionsRaw(r, "witness_set_properties.extensions", futureExtensionsTags); err != nil {
-		return nil, err
+		return Op{}, err
 	}
-	return o, nil
+	return OpFromPtr(TagWitnessSetProperties, unsafe.Pointer(&o)), nil
 }
 
 func init() {

@@ -1,6 +1,8 @@
 package op
 
 import (
+	"unsafe"
+
 	"encoding/binary"
 	"fmt"
 
@@ -32,20 +34,20 @@ func (o Comment) AppendFCBody(dst []byte) []byte {
 	return appendString(dst, o.JSONMetadata)
 }
 
-func readComment(r *fcraw.Reader) (Operation, error) {
+func readComment(r *fcraw.Reader) (Op, error) {
 	o := ensureOpSlabs(r).nextComment()
 	var err error
 	if o.ParentAuthor, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.ParentPermlink, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Author, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Permlink, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	// Title / Body / JSONMetadata are never inspected by chain logic and
 	// never survive into the typed CommentStore (it doesn't carry these
@@ -54,15 +56,15 @@ func readComment(r *fcraw.Reader) (Operation, error) {
 	// block's evaluator.Apply, before the next BlockReuse reuses the
 	// buffer.
 	if o.Title, err = r.ReadStringAlias(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Body, err = r.ReadStringAlias(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.JSONMetadata, err = r.ReadStringAlias(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
-	return o, nil
+	return OpFromPtr(TagComment, unsafe.Pointer(o)), nil
 }
 
 // ---- 19 comment_options -------------------------------------------------
@@ -129,26 +131,26 @@ func (o CommentOptions) AppendFCBody(dst []byte) []byte {
 	return dst
 }
 
-func readCommentOptions(r *fcraw.Reader) (Operation, error) {
+func readCommentOptions(r *fcraw.Reader) (Op, error) {
 	var o CommentOptions
 	var err error
 	if o.Author, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.Permlink, err = r.ReadString(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.MaxAcceptedPayout, err = asset.ReadAsset(r); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.PercentHbd, err = r.ReadUint16(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.AllowVotes, err = r.ReadBool(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 	if o.AllowCurationRewards, err = r.ReadBool(); err != nil {
-		return nil, err
+		return Op{}, err
 	}
 
 	// Extensions: flat_set<comment_options_extension>.
@@ -158,39 +160,39 @@ func readCommentOptions(r *fcraw.Reader) (Operation, error) {
 	extStart := r.Pos()
 	count, err := r.ReadVarUint()
 	if err != nil {
-		return nil, fmt.Errorf("comment_options.extensions count: %w", err)
+		return Op{}, fmt.Errorf("comment_options.extensions count: %w", err)
 	}
 	for i := uint32(0); i < count; i++ {
 		tag, err := r.ReadVarUint()
 		if err != nil {
-			return nil, fmt.Errorf("comment_options.extensions[%d] tag: %w", i, err)
+			return Op{}, fmt.Errorf("comment_options.extensions[%d] tag: %w", i, err)
 		}
 		switch tag {
 		case 0:
 			// comment_payout_beneficiaries
 			n, err := r.ReadVarUint()
 			if err != nil {
-				return nil, fmt.Errorf("beneficiaries count: %w", err)
+				return Op{}, fmt.Errorf("beneficiaries count: %w", err)
 			}
 			for j := uint32(0); j < n; j++ {
 				name, err := r.ReadString()
 				if err != nil {
-					return nil, fmt.Errorf("beneficiary[%d] account: %w", j, err)
+					return Op{}, fmt.Errorf("beneficiary[%d] account: %w", j, err)
 				}
 				w, err := r.ReadUint16()
 				if err != nil {
-					return nil, fmt.Errorf("beneficiary[%d] weight: %w", j, err)
+					return Op{}, fmt.Errorf("beneficiary[%d] weight: %w", j, err)
 				}
 				o.Beneficiaries = append(o.Beneficiaries, CommentBeneficiary{Account: name, Weight: w})
 			}
 		default:
-			return nil, fmt.Errorf("comment_options.extensions[%d]: unknown variant tag %d", i, tag)
+			return Op{}, fmt.Errorf("comment_options.extensions[%d]: unknown variant tag %d", i, tag)
 		}
 	}
 	extEnd := r.Pos()
 	o.RawExtensions = append([]byte(nil), r.SourceRange(extStart, extEnd)...)
 
-	return o, nil
+	return OpFromPtr(TagCommentOptions, unsafe.Pointer(&o)), nil
 }
 
 func init() {

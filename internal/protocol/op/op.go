@@ -102,8 +102,8 @@ func AppendOperation(dst []byte, op Operation) []byte {
 }
 
 // readerFn decodes the body of one operation (the bytes following the tag
-// varint). It returns the constructed Operation or an error.
-type readerFn func(*fcraw.Reader) (Operation, error)
+// varint). It returns the constructed Op or an error.
+type readerFn func(*fcraw.Reader) (Op, error)
 
 // readers maps Tag → body decoder. Populated by init() in ops_*.go.
 var readers [TagFirstVirtual]readerFn
@@ -120,27 +120,37 @@ func register(tag Tag, fn readerFn) {
 	readers[tag] = fn
 }
 
-// ReadOperation parses a single tagged operation from r: varint(tag) || body.
-// Unknown tags produce a clear error so callers can identify gaps in
-// coverage.
-func ReadOperation(r *fcraw.Reader) (Operation, error) {
+// readOpBody parses the body of one operation (after the tag varint).
+// Shared by ReadOp and ReadOperation.
+func readOpBody(r *fcraw.Reader) (Op, error) {
 	tagVal, err := r.ReadVarUint()
 	if err != nil {
-		return nil, fmt.Errorf("op.ReadOperation tag: %w", err)
+		return Op{}, fmt.Errorf("op.ReadOperation tag: %w", err)
 	}
 	if tagVal >= uint32(TagFirstVirtual) {
-		return nil, fmt.Errorf("op.ReadOperation: virtual op tag %d cannot appear in a transaction", tagVal)
+		return Op{}, fmt.Errorf("op.ReadOperation: virtual op tag %d cannot appear in a transaction", tagVal)
 	}
 	tag := Tag(tagVal)
 	fn := readers[tag]
 	if fn == nil {
-		return nil, fmt.Errorf("op.ReadOperation: tag %d (%s) not yet implemented", tag, tag.Name())
+		return Op{}, fmt.Errorf("op.ReadOperation: tag %d (%s) not yet implemented", tag, tag.Name())
 	}
-	op, err := fn(r)
+	o, err := fn(r)
 	if err != nil {
-		return nil, fmt.Errorf("op.ReadOperation tag %d (%s): %w", tag, tag.Name(), err)
+		return Op{}, fmt.Errorf("op.ReadOperation tag %d (%s): %w", tag, tag.Name(), err)
 	}
-	return op, nil
+	return o, nil
+}
+
+// ReadOperation parses a single tagged operation from r: varint(tag) || body.
+// Returns the boxed Operation iface for the legacy API. Unknown tags
+// produce a clear error so callers can identify gaps in coverage.
+func ReadOperation(r *fcraw.Reader) (Operation, error) {
+	o, err := readOpBody(r)
+	if err != nil {
+		return nil, err
+	}
+	return o.Operation(), nil
 }
 
 // Name returns the canonical name of t, or "unknown(N)".
