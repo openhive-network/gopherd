@@ -56,9 +56,9 @@ func TestAccountSetIntersects(t *testing.T) {
 
 func TestTouchSetConflict_TransfersSameAccount(t *testing.T) {
 	t1 := TouchSet{}
-	Extract(&t1, op.Transfer{From: "alice", To: "bob"})
+	Extract(&t1, op.FromOperation(op.Transfer{From: "alice", To: "bob"}))
 	t2 := TouchSet{}
-	Extract(&t2, op.Transfer{From: "alice", To: "carol"})
+	Extract(&t2, op.FromOperation(op.Transfer{From: "alice", To: "carol"}))
 	// Both transfers touch alice (and DGPO funds) — must conflict.
 	if !t1.ConflictsWith(&t2) {
 		t.Fatalf("transfers from same account should conflict")
@@ -67,9 +67,9 @@ func TestTouchSetConflict_TransfersSameAccount(t *testing.T) {
 
 func TestTouchSetConflict_VotesAlwaysConflict(t *testing.T) {
 	t1 := TouchSet{}
-	Extract(&t1, op.Vote{Voter: "alice", Author: "a", Permlink: "p1"})
+	Extract(&t1, op.FromOperation(op.Vote{Voter: "alice", Author: "a", Permlink: "p1"}))
 	t2 := TouchSet{}
-	Extract(&t2, op.Vote{Voter: "bob", Author: "b", Permlink: "p2"})
+	Extract(&t2, op.FromOperation(op.Vote{Voter: "bob", Author: "b", Permlink: "p2"}))
 	// Conservative: any two votes conflict via CommentTouched (the
 	// detector lacks per-comment_id granularity at the parse layer).
 	if !t1.ConflictsWith(&t2) {
@@ -85,9 +85,9 @@ func TestTouchSetConflict_WitnessVotesAlwaysConflict(t *testing.T) {
 	// different voters + different witnesses still conflict via the
 	// FundsTouched flag to keep parallel-apply ordering sound.
 	t1 := TouchSet{}
-	Extract(&t1, op.AccountWitnessVote{Account: "alice", Witness: "w1"})
+	Extract(&t1, op.FromOperation(op.AccountWitnessVote{Account: "alice", Witness: "w1"}))
 	t2 := TouchSet{}
-	Extract(&t2, op.AccountWitnessVote{Account: "bob", Witness: "w2"})
+	Extract(&t2, op.FromOperation(op.AccountWitnessVote{Account: "bob", Witness: "w2"}))
 	if !t1.ConflictsWith(&t2) {
 		t.Fatalf("AccountWitnessVote should be FundsTouched-conservative")
 	}
@@ -95,9 +95,9 @@ func TestTouchSetConflict_WitnessVotesAlwaysConflict(t *testing.T) {
 
 func TestTouchSetConflict_SameWitness(t *testing.T) {
 	t1 := TouchSet{}
-	Extract(&t1, op.AccountWitnessVote{Account: "alice", Witness: "w1"})
+	Extract(&t1, op.FromOperation(op.AccountWitnessVote{Account: "alice", Witness: "w1"}))
 	t2 := TouchSet{}
-	Extract(&t2, op.AccountWitnessVote{Account: "bob", Witness: "w1"})
+	Extract(&t2, op.FromOperation(op.AccountWitnessVote{Account: "bob", Witness: "w1"}))
 	if !t1.ConflictsWith(&t2) {
 		t.Fatalf("votes for the same witness should conflict")
 	}
@@ -105,7 +105,7 @@ func TestTouchSetConflict_SameWitness(t *testing.T) {
 
 func TestTouchSetReset(t *testing.T) {
 	t1 := TouchSet{}
-	Extract(&t1, op.Vote{Voter: "alice"})
+	Extract(&t1, op.FromOperation(op.Vote{Voter: "alice"}))
 	if !t1.CommentTouched {
 		t.Fatalf("setup: CommentTouched should be set")
 	}

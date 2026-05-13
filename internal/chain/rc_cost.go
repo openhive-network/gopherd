@@ -137,61 +137,61 @@ const verifyAuthorityTimeNS int64 = 94165
 //
 // Mirrors the count_operation_visitor methods in
 // libraries/chain/rc/resource_count.cpp.
-func stateBytesForOp(o op.Operation) int64 {
-	switch v := o.(type) {
-	case op.AccountCreate:
+func stateBytesForOp(o op.Op) int64 {
+	switch o.Tag {
+	case op.TagAccountCreate:
 		// account_create_base_size ≈ 760 × persistent + authority_dynamic
 		base := accountIndexNodeSize * persistentStateByte
-		base += authorityDynamicSize(v.Owner)
-		base += authorityDynamicSize(v.Active)
-		base += authorityDynamicSize(v.Posting)
+		base += authorityDynamicSize(o.AsAccountCreate().Owner)
+		base += authorityDynamicSize(o.AsAccountCreate().Active)
+		base += authorityDynamicSize(o.AsAccountCreate().Posting)
 		return base
-	case op.AccountCreateWithDelegation:
+	case op.TagAccountCreateWithDelegation:
 		base := accountIndexNodeSize * persistentStateByte
-		base += authorityDynamicSize(v.Owner)
-		base += authorityDynamicSize(v.Active)
-		base += authorityDynamicSize(v.Posting)
+		base += authorityDynamicSize(o.AsAccountCreateWithDelegation().Owner)
+		base += authorityDynamicSize(o.AsAccountCreateWithDelegation().Active)
+		base += authorityDynamicSize(o.AsAccountCreateWithDelegation().Posting)
 		base += vestingDelegationNodeSize * lastingStateByte
 		return base
-	case op.CreateClaimedAccount:
+	case op.TagCreateClaimedAccount:
 		base := accountIndexNodeSize * persistentStateByte
-		base += authorityDynamicSize(v.Owner)
-		base += authorityDynamicSize(v.Active)
-		base += authorityDynamicSize(v.Posting)
+		base += authorityDynamicSize(o.AsCreateClaimedAccount().Owner)
+		base += authorityDynamicSize(o.AsCreateClaimedAccount().Active)
+		base += authorityDynamicSize(o.AsCreateClaimedAccount().Posting)
 		return base
-	case op.AccountUpdate:
+	case op.TagAccountUpdate:
 		var s int64
-		if v.Owner != nil {
-			s += authorityDynamicSize(*v.Owner)
+		if o.AsAccountUpdate().Owner != nil {
+			s += authorityDynamicSize(*o.AsAccountUpdate().Owner)
 			s += ownerAuthHistoryObjectSize * persistentStateByte
 		}
-		if v.Active != nil {
-			s += authorityDynamicSize(*v.Active)
+		if o.AsAccountUpdate().Active != nil {
+			s += authorityDynamicSize(*o.AsAccountUpdate().Active)
 		}
-		if v.Posting != nil {
-			s += authorityDynamicSize(*v.Posting)
+		if o.AsAccountUpdate().Posting != nil {
+			s += authorityDynamicSize(*o.AsAccountUpdate().Posting)
 		}
 		return s
-	case op.AccountWitnessVote:
-		if !v.Approve {
+	case op.TagAccountWitnessVote:
+		if !o.AsAccountWitnessVote().Approve {
 			return 0
 		}
 		return witnessVoteIndexNodeSize * temporaryStateByte * witnessVoteLifetimeHours
-	case op.Comment:
+	case op.TagComment:
 		return commentIndexNodeSize*temporaryStateByte +
-			commentPermlinkCharSize*int64(len(v.Permlink))
-	case op.CommentOptions:
-		return commentBeneficiariesMemberSize * int64(len(v.Beneficiaries))
-	case op.Convert:
+			commentPermlinkCharSize*int64(len(o.AsComment().Permlink))
+	case op.TagCommentOptions:
+		return commentBeneficiariesMemberSize * int64(len(o.AsCommentOptions().Beneficiaries))
+	case op.TagConvert:
 		return convertIndexNodeSize * temporaryStateByte * 7 * 12 * 24 // 3.5 days
-	case op.CollateralizedConvert:
+	case op.TagCollateralizedConvert:
 		return collateralConvertNodeSize * temporaryStateByte * collateralConvertLifetimeHours
-	case op.DeclineVotingRights:
-		if !v.Decline {
+	case op.TagDeclineVotingRights:
+		if !o.AsDeclineVotingRights().Decline {
 			return 0
 		}
 		return declineVotingRightsNodeSize * temporaryStateByte * declineVotingLifetimeHours
-	case op.DelegateVestingShares:
+	case op.TagDelegateVestingShares:
 		// max(vesting_delegation_object, vesting_delegation_expiration_object)
 		a := vestingDelegationNodeSize * lastingStateByte
 		b := vestingDelegationExpNodeSize * temporaryStateByte * vestingDelegationExpHours
@@ -199,57 +199,57 @@ func stateBytesForOp(o op.Operation) int64 {
 			return a
 		}
 		return b
-	case op.EscrowTransfer:
+	case op.TagEscrowTransfer:
 		return escrowIndexNodeSize * lastingStateByte
-	case op.LimitOrderCreate:
+	case op.TagLimitOrderCreate:
 		// FillOrKill orders don't persist (they fill or cancel immediately).
-		if v.FillOrKill {
+		if o.AsLimitOrderCreate().FillOrKill {
 			return 0
 		}
 		return limitOrderIndexNodeSize * temporaryStateByte * limitOrderLifetimeHours
-	case op.LimitOrderCreate2:
-		if v.FillOrKill {
+	case op.TagLimitOrderCreate2:
+		if o.AsLimitOrderCreate2().FillOrKill {
 			return 0
 		}
 		return limitOrderIndexNodeSize * temporaryStateByte * limitOrderLifetimeHours
-	case op.SetWithdrawVestingRoute:
-		if v.Percent == 0 {
+	case op.TagSetWithdrawVestingRoute:
+		if o.AsSetWithdrawVestingRoute().Percent == 0 {
 			return 0
 		}
 		return withdrawVestingRouteNodeSize * lastingStateByte
-	case op.WitnessUpdate:
+	case op.TagWitnessUpdate:
 		return witnessIndexNodeSize*persistentStateByte +
-			witnessUpdateURLCharSize*int64(len(v.URL))
-	case op.TransferToVesting:
+			witnessUpdateURLCharSize*int64(len(o.AsWitnessUpdate().URL))
+	case op.TagTransferToVesting:
 		// transfer_to_vesting_size — noted as 0 in resource_sizes.cpp
 		// (no new state created; only existing balances mutated).
 		return 0
-	case op.TransferFromSavings:
+	case op.TagTransferFromSavings:
 		return savingsWithdrawIndexNodeSize * temporaryStateByte * savingsWithdrawLifetimeHours
-	case op.RequestAccountRecovery:
+	case op.TagRequestAccountRecovery:
 		// new_owner_authority weight_threshold == 0 cancels — no state.
 		// We don't have the field on our op type yet; conservative
 		// estimate the full size.
 		return 200 * temporaryStateByte * declineVotingLifetimeHours
-	case op.Vote:
+	case op.TagVote:
 		return commentIndexNodeSize * temporaryStateByte // approx vote_size
-	case op.RecurrentTransfer:
+	case op.TagRecurrentTransfer:
 		base := recurrentTransferIndexNodeSize * temporaryStateByte
-		base += recurrentTransferMemoCharSize * int64(len(v.Memo))
+		base += recurrentTransferMemoCharSize * int64(len(o.AsRecurrentTransfer().Memo))
 		// hived multiplies by actual lifetime; we approximate.
-		return base * 24 * int64(v.Recurrence)
-	case op.CreateProposal:
+		return base * 24 * int64(o.AsRecurrentTransfer().Recurrence)
+	case op.TagCreateProposal:
 		base := proposalIndexNodeSize * temporaryStateByte
-		base += createProposalSubjectCharSize * int64(len(v.Subject)+len(v.Permlink))
+		base += createProposalSubjectCharSize * int64(len(o.AsCreateProposal().Subject)+len(o.AsCreateProposal().Permlink))
 		// Multiply by actual lifetime: end - start, in hours.
-		lifetimeHours := int64(v.EndDate-v.StartDate) / 3600
+		lifetimeHours := int64(o.AsCreateProposal().EndDate-o.AsCreateProposal().StartDate) / 3600
 		if lifetimeHours <= 0 {
 			lifetimeHours = 1
 		}
 		return base * lifetimeHours
-	case op.UpdateProposalVotes:
+	case op.TagUpdateProposalVotes:
 		return proposalVoteIndexNodeSize * temporaryStateByte * proposalVoteLifetimeHours *
-			int64(len(v.ProposalIDs))
+			int64(len(o.AsUpdateProposalVotes().ProposalIDs))
 	}
 	return 0
 }
@@ -280,7 +280,7 @@ func ComputeRCCost(signedTx *tx.SignedTransaction, blockNum uint32) int64 {
 	}
 	cost := transactionExecTimeNS
 	for _, o := range signedTx.Operations {
-		cost += stateBytesForOp(o.Operation())
+		cost += stateBytesForOp(o)
 		if t, ok := execTimeNS[o.Tag]; ok {
 			cost += t
 		}
@@ -292,78 +292,78 @@ func ComputeRCCost(signedTx *tx.SignedTransaction, blockNum uint32) int64 {
 // Mirrors hived's logic: the first required-active or required-posting
 // authority. We use the canonical "from / account / owner / voter /
 // creator" field of the op.
-func PayerOf(o op.Operation) string {
-	switch v := o.(type) {
-	case op.Transfer:
-		return string(v.From)
-	case op.TransferToVesting:
-		return string(v.From)
-	case op.WithdrawVesting:
-		return string(v.Account)
-	case op.Vote:
-		return string(v.Voter)
-	case op.Comment:
-		return string(v.Author)
-	case op.LimitOrderCreate:
-		return string(v.Owner)
-	case op.LimitOrderCreate2:
-		return string(v.Owner)
-	case op.LimitOrderCancel:
-		return string(v.Owner)
-	case op.FeedPublish:
-		return string(v.Publisher)
-	case op.Convert:
-		return string(v.Owner)
-	case op.AccountCreate:
-		return string(v.Creator)
-	case op.AccountCreateWithDelegation:
-		return string(v.Creator)
-	case op.AccountUpdate:
-		return string(v.Account)
-	case op.WitnessUpdate:
-		return string(v.Owner)
-	case op.AccountWitnessVote:
-		return string(v.Account)
-	case op.AccountWitnessProxy:
-		return string(v.Account)
-	case op.DeleteComment:
-		return string(v.Author)
-	case op.CommentOptions:
-		return string(v.Author)
-	case op.SetWithdrawVestingRoute:
-		return string(v.FromAccount)
-	case op.ClaimAccount:
-		return string(v.Creator)
-	case op.CreateClaimedAccount:
-		return string(v.Creator)
-	case op.DelegateVestingShares:
-		return string(v.Delegator)
-	case op.TransferToSavings:
-		return string(v.From)
-	case op.TransferFromSavings:
-		return string(v.From)
-	case op.CancelTransferFromSavings:
-		return string(v.From)
-	case op.RecurrentTransfer:
-		return string(v.From)
-	case op.ClaimRewardBalance:
-		return string(v.Account)
-	case op.DeclineVotingRights:
-		return string(v.Account)
-	case op.CreateProposal:
-		return string(v.Creator)
-	case op.UpdateProposalVotes:
-		return string(v.Voter)
-	case op.RemoveProposal:
-		return string(v.ProposalOwner)
-	case op.UpdateProposal:
-		return string(v.Creator)
-	case op.CustomJSON:
-		if len(v.RequiredPostingAuths) > 0 {
-			return string(v.RequiredPostingAuths[0])
+func PayerOf(o op.Op) string {
+	switch o.Tag {
+	case op.TagTransfer:
+		return string(o.AsTransfer().From)
+	case op.TagTransferToVesting:
+		return string(o.AsTransferToVesting().From)
+	case op.TagWithdrawVesting:
+		return string(o.AsWithdrawVesting().Account)
+	case op.TagVote:
+		return string(o.AsVote().Voter)
+	case op.TagComment:
+		return string(o.AsComment().Author)
+	case op.TagLimitOrderCreate:
+		return string(o.AsLimitOrderCreate().Owner)
+	case op.TagLimitOrderCreate2:
+		return string(o.AsLimitOrderCreate2().Owner)
+	case op.TagLimitOrderCancel:
+		return string(o.AsLimitOrderCancel().Owner)
+	case op.TagFeedPublish:
+		return string(o.AsFeedPublish().Publisher)
+	case op.TagConvert:
+		return string(o.AsConvert().Owner)
+	case op.TagAccountCreate:
+		return string(o.AsAccountCreate().Creator)
+	case op.TagAccountCreateWithDelegation:
+		return string(o.AsAccountCreateWithDelegation().Creator)
+	case op.TagAccountUpdate:
+		return string(o.AsAccountUpdate().Account)
+	case op.TagWitnessUpdate:
+		return string(o.AsWitnessUpdate().Owner)
+	case op.TagAccountWitnessVote:
+		return string(o.AsAccountWitnessVote().Account)
+	case op.TagAccountWitnessProxy:
+		return string(o.AsAccountWitnessProxy().Account)
+	case op.TagDeleteComment:
+		return string(o.AsDeleteComment().Author)
+	case op.TagCommentOptions:
+		return string(o.AsCommentOptions().Author)
+	case op.TagSetWithdrawVestingRoute:
+		return string(o.AsSetWithdrawVestingRoute().FromAccount)
+	case op.TagClaimAccount:
+		return string(o.AsClaimAccount().Creator)
+	case op.TagCreateClaimedAccount:
+		return string(o.AsCreateClaimedAccount().Creator)
+	case op.TagDelegateVestingShares:
+		return string(o.AsDelegateVestingShares().Delegator)
+	case op.TagTransferToSavings:
+		return string(o.AsTransferToSavings().From)
+	case op.TagTransferFromSavings:
+		return string(o.AsTransferFromSavings().From)
+	case op.TagCancelTransferFromSavings:
+		return string(o.AsCancelTransferFromSavings().From)
+	case op.TagRecurrentTransfer:
+		return string(o.AsRecurrentTransfer().From)
+	case op.TagClaimRewardBalance:
+		return string(o.AsClaimRewardBalance().Account)
+	case op.TagDeclineVotingRights:
+		return string(o.AsDeclineVotingRights().Account)
+	case op.TagCreateProposal:
+		return string(o.AsCreateProposal().Creator)
+	case op.TagUpdateProposalVotes:
+		return string(o.AsUpdateProposalVotes().Voter)
+	case op.TagRemoveProposal:
+		return string(o.AsRemoveProposal().ProposalOwner)
+	case op.TagUpdateProposal:
+		return string(o.AsUpdateProposal().Creator)
+	case op.TagCustomJSON:
+		if len(o.AsCustomJSON().RequiredPostingAuths) > 0 {
+			return string(o.AsCustomJSON().RequiredPostingAuths[0])
 		}
-		if len(v.RequiredAuths) > 0 {
-			return string(v.RequiredAuths[0])
+		if len(o.AsCustomJSON().RequiredAuths) > 0 {
+			return string(o.AsCustomJSON().RequiredAuths[0])
 		}
 	}
 	return ""

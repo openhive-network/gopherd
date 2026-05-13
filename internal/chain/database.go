@@ -627,7 +627,7 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 		// Replay never enforces — current_mana can go negative.
 		if !txFailed && hardfork.SetForBlock(blockNum).Has(hardfork.HF20) && len(txRes.SignedTx.Operations) > 0 {
 			cost := ComputeRCCost(&txRes.SignedTx, blockNum)
-			payer := PayerOf(txRes.SignedTx.Operations[0].Operation())
+			payer := PayerOf(txRes.SignedTx.Operations[0])
 			if cost > 0 && payer != "" {
 				if a, err := objects.GetAccount(session, payer); err == nil {
 					objects.RegenerateRCMana(&a, hdr.Timestamp)

@@ -9,7 +9,7 @@ import (
 func makeTouch(ops ...op.Operation) TouchSet {
 	var t TouchSet
 	for _, o := range ops {
-		Extract(&t, o)
+		Extract(&t, op.FromOperation(o))
 	}
 	return t
 }

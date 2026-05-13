@@ -34,9 +34,8 @@ func RequiredAuthorities(signedTx *tx.SignedTransaction) map[AuthorityLevel]map[
 		AuthorityPosting: make(map[string]struct{}),
 	}
 	for _, o := range signedTx.Operations {
-		oo := o.Operation()
-		level := authorityLevelFor(oo)
-		acct := PayerOf(oo)
+		level := authorityLevelFor(o)
+		acct := PayerOf(o)
 		if acct == "" {
 			continue
 		}
@@ -48,15 +47,15 @@ func RequiredAuthorities(signedTx *tx.SignedTransaction) map[AuthorityLevel]map[
 // authorityLevelFor classifies an op into the authority level required
 // to sign it. The mapping matches hived's per-op
 // get_required_*_authorities methods.
-func authorityLevelFor(o op.Operation) AuthorityLevel {
-	switch o.(type) {
-	case op.Vote, op.Comment, op.CommentOptions, op.DeleteComment:
+func authorityLevelFor(o op.Op) AuthorityLevel {
+	switch o.Tag {
+	case op.TagVote, op.TagComment, op.TagCommentOptions, op.TagDeleteComment:
 		return AuthorityPosting
-	case op.AccountUpdate, op.AccountUpdate2:
+	case op.TagAccountUpdate, op.TagAccountUpdate2:
 		// account_update touching the owner authority requires owner;
 		// we coarsely classify all account_updates as active here.
 		return AuthorityActive
-	case op.RecoverAccount, op.ChangeRecoveryAccount:
+	case op.TagRecoverAccount, op.TagChangeRecoveryAccount:
 		return AuthorityOwner
 	}
 	// All others (transfer, transfer_to_vesting, witness_update,

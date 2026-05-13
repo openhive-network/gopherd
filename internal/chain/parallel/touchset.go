@@ -166,64 +166,64 @@ func (t *TouchSet) ConflictsWith(o *TouchSet) bool {
 // unsure whether a field maps to an Account / Witness / Comment /
 // Funds touch, opt into the larger set. The detector then errs on
 // the side of serializing — never falsely permits a parallel apply.
-func Extract(t *TouchSet, o op.Operation) {
-	switch v := o.(type) {
+func Extract(t *TouchSet, o op.Op) {
+	switch o.Tag {
 	// ---- account-mutating ops ----
-	case op.Transfer:
-		t.Accounts.Add(v.From)
-		t.Accounts.Add(v.To)
+	case op.TagTransfer:
+		t.Accounts.Add(o.AsTransfer().From)
+		t.Accounts.Add(o.AsTransfer().To)
 		t.FundsTouched = true // current_supply tracked when treasury hops fire
-	case op.TransferToVesting:
-		t.Accounts.Add(v.From)
-		t.Accounts.Add(v.To)
+	case op.TagTransferToVesting:
+		t.Accounts.Add(o.AsTransferToVesting().From)
+		t.Accounts.Add(o.AsTransferToVesting().To)
 		t.FundsTouched = true // total_vesting_fund_hive + total_vesting_shares
-	case op.WithdrawVesting:
-		t.Accounts.Add(v.Account)
+	case op.TagWithdrawVesting:
+		t.Accounts.Add(o.AsWithdrawVesting().Account)
 		t.FundsTouched = true
-	case op.TransferToSavings:
-		t.Accounts.Add(v.From)
-		t.Accounts.Add(v.To)
+	case op.TagTransferToSavings:
+		t.Accounts.Add(o.AsTransferToSavings().From)
+		t.Accounts.Add(o.AsTransferToSavings().To)
 		t.FundsTouched = true
-	case op.TransferFromSavings:
-		t.Accounts.Add(v.From)
-		t.Accounts.Add(v.To)
+	case op.TagTransferFromSavings:
+		t.Accounts.Add(o.AsTransferFromSavings().From)
+		t.Accounts.Add(o.AsTransferFromSavings().To)
 		t.FundsTouched = true
-	case op.CancelTransferFromSavings:
-		t.Accounts.Add(v.From)
+	case op.TagCancelTransferFromSavings:
+		t.Accounts.Add(o.AsCancelTransferFromSavings().From)
 		t.FundsTouched = true
-	case op.ClaimRewardBalance:
-		t.Accounts.Add(v.Account)
+	case op.TagClaimRewardBalance:
+		t.Accounts.Add(o.AsClaimRewardBalance().Account)
 		t.FundsTouched = true
-	case op.AccountCreate:
-		t.Accounts.Add(v.Creator)
-		t.Accounts.Add(v.NewAccountName)
+	case op.TagAccountCreate:
+		t.Accounts.Add(o.AsAccountCreate().Creator)
+		t.Accounts.Add(o.AsAccountCreate().NewAccountName)
 		t.FundsTouched = true // creator pays the fee
-	case op.AccountUpdate:
-		t.Accounts.Add(v.Account)
-	case op.SetWithdrawVestingRoute:
-		t.Accounts.Add(v.FromAccount)
-		t.Accounts.Add(v.ToAccount)
-	case op.DeclineVotingRights:
-		t.Accounts.Add(v.Account)
-	case op.RequestAccountRecovery:
-		t.Accounts.Add(v.AccountToRecover)
-		t.Accounts.Add(v.RecoveryAccount)
-	case op.RecoverAccount:
-		t.Accounts.Add(v.AccountToRecover)
-	case op.ChangeRecoveryAccount:
-		t.Accounts.Add(v.AccountToRecover)
-		t.Accounts.Add(v.NewRecoveryAccount)
-	case op.ResetAccount:
-		t.Accounts.Add(v.AccountToReset)
-	case op.ClaimAccount:
-		t.Accounts.Add(v.Creator)
+	case op.TagAccountUpdate:
+		t.Accounts.Add(o.AsAccountUpdate().Account)
+	case op.TagSetWithdrawVestingRoute:
+		t.Accounts.Add(o.AsSetWithdrawVestingRoute().FromAccount)
+		t.Accounts.Add(o.AsSetWithdrawVestingRoute().ToAccount)
+	case op.TagDeclineVotingRights:
+		t.Accounts.Add(o.AsDeclineVotingRights().Account)
+	case op.TagRequestAccountRecovery:
+		t.Accounts.Add(o.AsRequestAccountRecovery().AccountToRecover)
+		t.Accounts.Add(o.AsRequestAccountRecovery().RecoveryAccount)
+	case op.TagRecoverAccount:
+		t.Accounts.Add(o.AsRecoverAccount().AccountToRecover)
+	case op.TagChangeRecoveryAccount:
+		t.Accounts.Add(o.AsChangeRecoveryAccount().AccountToRecover)
+		t.Accounts.Add(o.AsChangeRecoveryAccount().NewRecoveryAccount)
+	case op.TagResetAccount:
+		t.Accounts.Add(o.AsResetAccount().AccountToReset)
+	case op.TagClaimAccount:
+		t.Accounts.Add(o.AsClaimAccount().Creator)
 		t.FundsTouched = true
 	// ---- witness-mutating ops ----
-	case op.WitnessUpdate:
-		t.Witnesses.Add(v.Owner)
-	case op.WitnessSetProperties:
-		t.Witnesses.Add(v.Owner)
-	case op.AccountWitnessVote:
+	case op.TagWitnessUpdate:
+		t.Witnesses.Add(o.AsWitnessUpdate().Owner)
+	case op.TagWitnessSetProperties:
+		t.Witnesses.Add(o.AsWitnessSetProperties().Owner)
+	case op.TagAccountWitnessVote:
 		// Voter's proxy state + the witness's vote count. The HF2 path
 		// of applyWitnessVoteDelta calls AdjustProxiedWitnessVotes
 		// which mutates EVERY witness the voter currently votes for —
@@ -231,19 +231,19 @@ func Extract(t *TouchSet, o op.Operation) {
 		// AWV serializes with any other op that touches vest /
 		// witness-vote propagation state. Loses parallelism for AWV
 		// (~rare on mainnet) but keeps correctness sound.
-		t.Accounts.Add(v.Account)
-		t.Witnesses.Add(v.Witness)
+		t.Accounts.Add(o.AsAccountWitnessVote().Account)
+		t.Witnesses.Add(o.AsAccountWitnessVote().Witness)
 		t.FundsTouched = true
-	case op.AccountWitnessProxy:
+	case op.TagAccountWitnessProxy:
 		// Setting/clearing proxy walks the proxy chain and adjusts
 		// every witness vested-vote total at each level. The full
 		// touch set is determined by current state — mark
 		// FundsTouched conservatively.
-		t.Accounts.Add(v.Account)
-		t.Witnesses.Add(v.Proxy)
+		t.Accounts.Add(o.AsAccountWitnessProxy().Account)
+		t.Witnesses.Add(o.AsAccountWitnessProxy().Proxy)
 		t.FundsTouched = true
-	case op.FeedPublish:
-		t.Witnesses.Add(v.Publisher)
+	case op.TagFeedPublish:
+		t.Witnesses.Add(o.AsFeedPublish().Publisher)
 	// ---- market ----
 	// Limit-order ops share the order book — a create by Alice may
 	// match against Bob's existing sell-side order, mutating both
@@ -251,65 +251,65 @@ func Extract(t *TouchSet, o op.Operation) {
 	// (Owner, OrderID) op fields alone, so all market ops are
 	// FundsTouched (serialize with each other + with anything else
 	// that mutates DGPO / balances).
-	case op.LimitOrderCreate:
-		t.Accounts.Add(v.Owner)
+	case op.TagLimitOrderCreate:
+		t.Accounts.Add(o.AsLimitOrderCreate().Owner)
 		t.FundsTouched = true
-	case op.LimitOrderCreate2:
-		t.Accounts.Add(v.Owner)
+	case op.TagLimitOrderCreate2:
+		t.Accounts.Add(o.AsLimitOrderCreate2().Owner)
 		t.FundsTouched = true
-	case op.LimitOrderCancel:
-		t.Accounts.Add(v.Owner)
+	case op.TagLimitOrderCancel:
+		t.Accounts.Add(o.AsLimitOrderCancel().Owner)
 		t.FundsTouched = true
 	// ---- escrow ----
-	case op.EscrowApprove:
-		t.Accounts.Add(v.From)
-		t.Accounts.Add(v.To)
-		t.Accounts.Add(v.Agent)
-		t.Accounts.Add(v.Who)
-	case op.EscrowDispute:
-		t.Accounts.Add(v.From)
-		t.Accounts.Add(v.To)
-		t.Accounts.Add(v.Agent)
-		t.Accounts.Add(v.Who)
+	case op.TagEscrowApprove:
+		t.Accounts.Add(o.AsEscrowApprove().From)
+		t.Accounts.Add(o.AsEscrowApprove().To)
+		t.Accounts.Add(o.AsEscrowApprove().Agent)
+		t.Accounts.Add(o.AsEscrowApprove().Who)
+	case op.TagEscrowDispute:
+		t.Accounts.Add(o.AsEscrowDispute().From)
+		t.Accounts.Add(o.AsEscrowDispute().To)
+		t.Accounts.Add(o.AsEscrowDispute().Agent)
+		t.Accounts.Add(o.AsEscrowDispute().Who)
 	// ---- conversions ----
-	case op.Convert:
-		t.Accounts.Add(v.Owner)
+	case op.TagConvert:
+		t.Accounts.Add(o.AsConvert().Owner)
 		t.FundsTouched = true
 	// ---- comment/vote ----
-	case op.Vote:
-		t.Accounts.Add(v.Voter)
+	case op.TagVote:
+		t.Accounts.Add(o.AsVote().Voter)
 		t.CommentTouched = true
-	case op.Comment:
-		t.Accounts.Add(v.Author)
+	case op.TagComment:
+		t.Accounts.Add(o.AsComment().Author)
 		t.CommentTouched = true
-	case op.CommentOptions:
-		t.Accounts.Add(v.Author)
+	case op.TagCommentOptions:
+		t.Accounts.Add(o.AsCommentOptions().Author)
 		t.CommentTouched = true
-	case op.DeleteComment:
-		t.Accounts.Add(v.Author)
+	case op.TagDeleteComment:
+		t.Accounts.Add(o.AsDeleteComment().Author)
 		t.CommentTouched = true
 	// ---- recurrent transfer ----
-	case op.RecurrentTransfer:
-		t.Accounts.Add(v.From)
-		t.Accounts.Add(v.To)
+	case op.TagRecurrentTransfer:
+		t.Accounts.Add(o.AsRecurrentTransfer().From)
+		t.Accounts.Add(o.AsRecurrentTransfer().To)
 		t.FundsTouched = true
 	// ---- pow (pre-HF13 only) ----
-	case op.Pow:
-		t.Witnesses.Add(v.WorkerAccount)
+	case op.TagPow:
+		t.Witnesses.Add(o.AsPow().WorkerAccount)
 		t.FundsTouched = true
-	case op.Pow2:
+	case op.TagPow2:
 		// Touched witness extractable from work; conservative widen.
 		t.FundsTouched = true
 	// ---- custom_json / custom: opaque payloads, conservative widen ----
-	case op.CustomJSON:
+	case op.TagCustomJSON:
 		// Custom_json can reach into arbitrary state via the rc_custom
 		// plugin etc. Mark everything to force serial apply.
 		t.CommentTouched = true
 		t.FundsTouched = true
-		for _, name := range v.RequiredPostingAuths {
+		for _, name := range o.AsCustomJSON().RequiredPostingAuths {
 			t.Accounts.Add(name)
 		}
-		for _, name := range v.RequiredAuths {
+		for _, name := range o.AsCustomJSON().RequiredAuths {
 			t.Accounts.Add(name)
 		}
 	// Unknown / not-yet-classified op kinds: assume the worst.
