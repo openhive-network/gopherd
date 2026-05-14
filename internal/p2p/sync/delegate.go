@@ -76,7 +76,15 @@ const (
 	// we drop the highest-num entries — those will be re-fetched via INV
 	// once the gap closes. Without this guardrail an adversarial peer
 	// streaming far-future block IDs could OOM us.
-	DefaultMaxPendingReorder = 1024
+	//
+	// 1024 turned out too small for sustained historical catch-up: peers
+	// deliver compressed blocks faster than the single-writer applyLoop
+	// chews them, the buffer fills, and every further block is evicted
+	// then RE-FETCHED — burning bandwidth and capping throughput at
+	// roughly the apply-rate × (1 - re-fetch overhead). Bumped to 16384
+	// (=MaxOutstandingTotal) so the buffer can absorb a full
+	// in-flight wave without dropping.
+	DefaultMaxPendingReorder = 16384
 
 	// DefaultMaxOutstandingTotal caps the total number of blocks we have
 	// in flight (fetched but not yet applied) across all peers. Together
