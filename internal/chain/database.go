@@ -152,6 +152,13 @@ type Database struct {
 	// block_log replay the two are equivalent. Reset at the top of
 	// ApplyBlock; mutated inside the tx loop by enforceCustomOpBlockLimit.
 	customOpCountByAccount map[auth.AccountName]uint8
+
+	// vops is the per-block virtual-operation buffer used to surface
+	// fill_recurrent_transfer / failed_recurrent_transfer vops to tests
+	// (the Go chain doesn't have a full virtual-op pipeline yet — see
+	// block_vops.go). Reset at the top of every ApplyBlock; readers grab
+	// it via LastBlockVOps() under the applyMu RLock.
+	vops []BlockVOp
 }
 
 // New wraps an opened state.Database for block application.
@@ -592,6 +599,8 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	for k := range d.customOpCountByAccount {
 		delete(d.customOpCountByAccount, k)
 	}
+	// Truncate the per-block virtual-op buffer (see block_vops.go).
+	d.resetVOps()
 	var skippedThisBlock uint64
 	for i := uint32(0); i < txCount; i++ {
 		var txRes tx.ReadResult
@@ -971,7 +980,7 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	processProposals(session, hdr.Timestamp, blockNum)
 	processDelayedVoting(session, hdr.Timestamp, blockNum)
 	removeExpiredGovernanceVotes(session, hdr.Timestamp, blockNum)
-	processRecurrentTransfers(session, hdr.Timestamp, blockNum)
+	processRecurrentTransfers(session, hdr.Timestamp, blockNum, d)
 	processHardforks(session, blockNum)
 
 	{

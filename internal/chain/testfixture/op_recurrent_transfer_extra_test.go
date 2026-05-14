@@ -1,9 +1,11 @@
 package testfixture
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
+	"hived-go/internal/chain"
 	"hived-go/internal/protocol/asset"
 	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/op"
@@ -30,12 +32,10 @@ import (
 //   - recurrent_transfer_exact_max
 //   - recurrent_transfer_edit_overextended
 //   - recurrent_transfer_full_edit_overextended
-//   - recurrent_transfer_max_transfer_processed_per_block (SKIPPED — Go
-//     processor doesn't enforce HIVE_MAX_RECURRENT_TRANSFERS_PER_BLOCK
-//     and the C++ test creates 251 actors which is heavy)
+//   - recurrent_transfer_max_transfer_processed_per_block (cap=1000)
 //   - extensions_in_virtual_operations_generated_after_recurrent_transfer
-//     (SKIPPED — Go doesn't emit fill_recurrent_transfer /
-//     failed_recurrent_transfer virtual ops yet)
+//     (fill_recurrent_transfer / failed_recurrent_transfer vops carry
+//     pair_id, observed via chain.Database.LastBlockVOps)
 
 const recurrentTransferMaxEndDays = 730 // HIVE_MAX_RECURRENT_TRANSFER_END_DATE
 const recurrentTransferMaxRecurrenceH = recurrentTransferMaxEndDays * 24
@@ -136,12 +136,88 @@ func TestRecurrentTransferFailedRecurrentTransfer(t *testing.T) {
 	})
 }
 
-// TestRecurrentTransferExtensionsInVirtualOps would port
-// extensions_in_virtual_operations_generated_after_recurrent_transfer
-// but Go doesn't yet emit fill_recurrent_transfer /
-// failed_recurrent_transfer virtual ops. Skip with a marker.
+// TestRecurrentTransferExtensionsInVirtualOps ports
+// operation_tests.cpp::extensions_in_virtual_operations_generated_after_recurrent_transfer.
+//
+// Verifies that the per-block virtual ops (fill_recurrent_transfer /
+// failed_recurrent_transfer) carry the same pair_id as the originating
+// recurrent_transfer_operation. Hived's C++ test pulls them off the
+// last-operations queue; Go records them on Database.vops (see
+// block_vops.go) and exposes them via LastBlockVOps().
+//
+// C++ uses recurrence=1 (with a config-data override). Go's validator
+// hardcodes the 24-hour minimum, so we use recurrence=24 and advance
+// the test clock by 24h between the success and failure firings —
+// the schedule semantics are identical.
 func TestRecurrentTransferExtensionsInVirtualOps(t *testing.T) {
-	t.Skip("MISSING: fill_recurrent_transfer / failed_recurrent_transfer virtual ops are not yet emitted by the Go processor; cannot inspect their pair_id extensions")
+	f := New(t)
+	f.Actors("alice", "bob")
+	f.FundLiquidHBD("alice", 7_000)
+	f.GenerateBlock()
+	f.HardforksUpTo(hardfork.HF25)
+
+	const pairIDValue uint8 = 78
+
+	if err := f.ApplyOp(op.RecurrentTransfer{
+		From:       "alice",
+		To:         "bob",
+		Amount:     HBD(6_000),
+		Memo:       "test ok",
+		Recurrence: 24,
+		Executions: 2,
+		Extensions: recurrentTransferPairIDExt(pairIDValue),
+	}); err != nil {
+		t.Fatalf("recurrent_transfer create: %v", err)
+	}
+
+	// First firing happens inside the create block (Trigger=head_block_time).
+	// LastBlockVOps should contain exactly one fill_recurrent_transfer
+	// vop carrying pair_id = 78.
+	vops := f.Chain.LastBlockVOps()
+	if len(vops) != 1 {
+		t.Fatalf("after first fire: vops count = %d, want 1; got %+v", len(vops), vops)
+	}
+	if vops[0].Kind != chain.BlockVOpFillRecurrentTransfer {
+		t.Errorf("after first fire: vop.Kind = %d, want BlockVOpFillRecurrentTransfer", vops[0].Kind)
+	}
+	if vops[0].PairID != pairIDValue {
+		t.Errorf("after first fire: vop.PairID = %d, want %d", vops[0].PairID, pairIDValue)
+	}
+	if vops[0].From != "alice" || vops[0].To != "bob" {
+		t.Errorf("after first fire: from=%q to=%q, want alice/bob", vops[0].From, vops[0].To)
+	}
+	if vops[0].Amount.Amount != 6_000 || vops[0].Amount.Symbol.Num != asset.HbdSymbol {
+		t.Errorf("after first fire: amount = %+v, want 6000 HBD", vops[0].Amount)
+	}
+	if vops[0].RemainingExecutions != 1 {
+		t.Errorf("after first fire: remaining = %d, want 1", vops[0].RemainingExecutions)
+	}
+
+	// Advance one recurrence — second firing fails (alice now has only
+	// 1_000 HBD, can't transfer 6_000). Should produce one
+	// failed_recurrent_transfer vop with the same pair_id.
+	f.SkipSeconds(24 * 3600)
+	vops = f.Chain.LastBlockVOps()
+	if len(vops) != 1 {
+		t.Fatalf("after second fire: vops count = %d, want 1; got %+v", len(vops), vops)
+	}
+	if vops[0].Kind != chain.BlockVOpFailedRecurrentTransfer {
+		t.Errorf("after second fire: vop.Kind = %d, want BlockVOpFailedRecurrentTransfer", vops[0].Kind)
+	}
+	if vops[0].PairID != pairIDValue {
+		t.Errorf("after second fire: vop.PairID = %d, want %d", vops[0].PairID, pairIDValue)
+	}
+	if vops[0].ConsecutiveFailures != 1 {
+		t.Errorf("after second fire: consec_failures = %d, want 1", vops[0].ConsecutiveFailures)
+	}
+	// executions was 1 before this fire, so remaining = 0; that puts the
+	// schedule into the deleted-on-failure branch.
+	if vops[0].RemainingExecutions != 0 {
+		t.Errorf("after second fire: remaining = %d, want 0", vops[0].RemainingExecutions)
+	}
+	if !vops[0].Deleted {
+		t.Errorf("after second fire: vop.Deleted = false, want true (executions reached 0)")
+	}
 }
 
 // TestRecurrentTransferExactMax ports operation_tests.cpp::recurrent_transfer_exact_max.
@@ -325,14 +401,109 @@ func TestRecurrentTransferFullEditOverextended(t *testing.T) {
 // TestRecurrentTransferMaxPerBlockProcessed ports
 // operation_tests.cpp::recurrent_transfer_max_transfer_processed_per_block.
 //
-// The C++ test creates 251 actors and 4 senders, schedules 1004
-// recurrent transfers, then verifies the first 1000 fire in one block
-// and the last 4 in the next. Go's processor currently does not
-// enforce HIVE_MAX_RECURRENT_TRANSFERS_PER_BLOCK = 1000, so the
-// staggered-block behavior is not observable, and creating 251 actors
-// is heavy. Skipped with a marker.
+// Hived caps process_recurrent_transfers at
+// HIVE_MAX_RECURRENT_TRANSFERS_PER_BLOCK = 1000 due rows per block.
+// Excess rows defer to the next block. The C++ test creates 251 actors
+// + 4 senders + 1004 schedules, generates one block (expects 1000 fires)
+// then another (expects the remaining 4 fires).
+//
+// The Go port mirrors the setup but doesn't depend on hived's row-id
+// tie-break — it just asserts the global invariant:
+//
+//   - exactly 1000 schedules have fired in block 1
+//   - exactly 1004 schedules have fired by the end of block 2
+//     (i.e. the 4 deferred ones caught up)
 func TestRecurrentTransferMaxPerBlockProcessed(t *testing.T) {
-	t.Skip("MISSING: Go processor does not yet enforce HIVE_MAX_RECURRENT_TRANSFERS_PER_BLOCK=1000 cap; processes all due rows in a single block")
+	if testing.Short() {
+		t.Skip("creates 255 actors + 1004 recurrent_transfers; too slow for -short")
+	}
+
+	f := New(t)
+	f.Actors("alice", "bob", "eve", "martin")
+	// 251 receivers: actor0..actor250.
+	receivers := make([]string, 251)
+	for i := 0; i < 251; i++ {
+		receivers[i] = fmt.Sprintf("actor%d", i)
+	}
+	f.Actors(receivers...)
+	for _, sender := range []string{"alice", "bob", "eve", "martin"} {
+		f.FundLiquid(sender, 1_000_000) // 1000.000 HIVE
+	}
+	f.GenerateBlock()
+	f.HardforksUpTo(hardfork.HF25)
+
+	const initialExecutions uint16 = 25
+
+	// 1000 schedules: each of 4 senders × actor0..actor249, amount = 1 HIVE.
+	for _, sender := range []string{"alice", "bob", "eve", "martin"} {
+		for i := 0; i < 250; i++ {
+			f.PushOp(op.RecurrentTransfer{
+				From:       sender,
+				To:         receivers[i],
+				Amount:     HIVE(1_000),
+				Memo:       "test",
+				Recurrence: 24,
+				Executions: initialExecutions,
+			})
+		}
+	}
+	// 4 extra schedules: each sender → actor250, amount = 3 HIVE.
+	// Total = 1004, cap = 1000 → 4 deferred to block 2.
+	for _, sender := range []string{"alice", "bob", "eve", "martin"} {
+		f.PushOp(op.RecurrentTransfer{
+			From:       sender,
+			To:         receivers[250],
+			Amount:     HIVE(3_000),
+			Memo:       "test",
+			Recurrence: 24,
+			Executions: initialExecutions,
+		})
+	}
+	f.GenerateBlock()
+
+	// Count schedules where Executions has dropped from initial (=
+	// fired at least once) vs still equals initial (= not yet fired).
+	// Total rows = 1004; cap = 1000 → expect 1000 fired, 4 untouched.
+	fired1, pending1 := countByExecutions(t, f, initialExecutions)
+	if fired1 != 1000 {
+		t.Errorf("after block 1: fired = %d, want 1000 (cap)", fired1)
+	}
+	if pending1 != 4 {
+		t.Errorf("after block 1: pending = %d, want 4 (excess deferred)", pending1)
+	}
+
+	// Block 2 (3s later, far less than 24h recurrence) — the deferred
+	// 4 rows still have trigger <= head_block_time, so they fire now.
+	f.GenerateBlock()
+	fired2, pending2 := countByExecutions(t, f, initialExecutions)
+	if fired2 != 1004 {
+		t.Errorf("after block 2: fired = %d, want 1004 (all rows fired exactly once)", fired2)
+	}
+	if pending2 != 0 {
+		t.Errorf("after block 2: pending = %d, want 0", pending2)
+	}
+}
+
+// countByExecutions buckets rows by whether Executions has dropped from
+// initial (= fired at least once) or still equals initial (= never
+// fired). Returns (fired, pending).
+func countByExecutions(t *testing.T, f *Fixture, initial uint16) (fired, pending int) {
+	t.Helper()
+	s := state.NewSession(f.State)
+	_ = s.Range(objects.RecurrentTransferTable, state.PrimaryIndex, nil,
+		func(_, value []byte) (bool, error) {
+			rt, err := objects.ReadRecurrentTransfer(value)
+			if err != nil {
+				return true, nil
+			}
+			if rt.Executions == initial {
+				pending++
+			} else {
+				fired++
+			}
+			return true, nil
+		})
+	return fired, pending
 }
 
 // TestRecurrentTransferPairIDCRUDFull ports the full
