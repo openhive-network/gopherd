@@ -232,9 +232,28 @@ func (d *Delegate) applyLoop() {
 				return
 			}
 			delete(pending, next)
+			// Historical catch-up matches hived's default replay behavior
+			// (chain_plugin.cpp:1232-1239): skip transaction signatures
+			// and authority checks for blocks below the head's checkpoint
+			// horizon. Mainnet has txs (e.g., block 5,435,426 tx 2 on
+			// `jesus2`) that historically failed sig verification — they
+			// only entered the canonical block_log because witnesses
+			// accepted them, and hived itself never re-validates them on
+			// replay. We approximate the "old block" check by wall-clock
+			// staleness: any block whose timestamp is >5 minutes behind
+			// real time is treated as historical. Once we catch up to
+			// the network tip, sigs are validated again.
+			//
+			// Block signature (validate_block_header) is still verified —
+			// that's the cryptographic gate that ties the block to the
+			// scheduled witness's BlockSigningKey on chain.
+			skipTxSigs := false
+			if ts := blockTimestamp(job.rawBlock); ts != 0 && uint32(time.Now().Unix())-ts > 5*60 {
+				skipTxSigs = true
+			}
 			if _, err := d.chain.ApplyBlock(job.rawBlock, job.blockNum, chain.ApplyOptions{
 				Sync:                      false,
-				SkipTransactionSignatures: false,
+				SkipTransactionSignatures: skipTxSigs,
 				SkipBlockSignature:        false,
 				PreVerifiedBlockSigner:    job.preVerifiedSigner,
 				PreRecoveredTxKeys:        job.preRecoveredTxKeys,
@@ -301,4 +320,20 @@ func (d *Delegate) applyLoop() {
 			tryApply()
 		}
 	}
+}
+
+// blockTimestamp peeks at the timestamp field of a raw block payload
+// (signed_block_header). Returns 0 if the buffer is too short to hold
+// the fixed-size header prefix where Timestamp lives. The signed header
+// layout is: prev_id(20) + timestamp(4) + witness(varuint+ascii) +
+// transaction_merkle_root(20) + extensions(...) + sig(65). Timestamp
+// sits at byte offset 20.
+func blockTimestamp(rawBlock []byte) uint32 {
+	if len(rawBlock) < 24 {
+		return 0
+	}
+	return uint32(rawBlock[20]) |
+		uint32(rawBlock[21])<<8 |
+		uint32(rawBlock[22])<<16 |
+		uint32(rawBlock[23])<<24
 }
