@@ -1,9 +1,6 @@
 package chain
 
 import (
-	"fmt"
-	"os"
-
 	"hived-go/internal/protocol/auth"
 	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/state"
@@ -56,19 +53,10 @@ func removeExpiredGovernanceVotes(s *state.Session, blockTime, blockNum uint32, 
 		return true, nil
 	})
 
-	if os.Getenv("GHIVEDBG_SWEEP") != "" && len(due) > 0 {
-		fmt.Fprintf(os.Stderr, "SWEEP blockTime=%d due=%d\n", blockTime, len(due))
-		for _, e := range due {
-			fmt.Fprintf(os.Stderr, "  due: %s\n", e.name)
-		}
-	}
 	for _, e := range due {
 		a, err := objects.GetAccount(s, e.name)
 		if err != nil {
 			continue
-		}
-		if os.Getenv("GHIVEDBG_SWEEP") != "" {
-			fmt.Fprintf(os.Stderr, "  processing %s\n", e.name)
 		}
 		// C++ database.cpp:3633-3634 — nullify proxied votes BEFORE
 		// clearing direct votes, so accumulated proxied_vsf_votes drain
@@ -81,10 +69,6 @@ func removeExpiredGovernanceVotes(s *state.Session, blockTime, blockNum uint32, 
 			}
 		}
 		objects.NullifyProxiedWitnessVotes(s, &a, directPower)
-		// Drop all proposal votes by this account.
-		if os.Getenv("GHIVEDBG_SWEEP") != "" {
-			fmt.Fprintf(os.Stderr, "  clearProposalVotesForVoter(%s)\n", e.name)
-		}
 		clearProposalVotesForVoter(s, e.name)
 		// Drop direct witness votes. Pass 0 because Nullify above
 		// already removed the propagation-array contribution for the
@@ -143,12 +127,6 @@ func clearProposalVotesForVoter(s *state.Session, voter string) {
 			}
 			return true, nil
 		})
-	if os.Getenv("GHIVEDBG_SWEEP") != "" {
-		fmt.Fprintf(os.Stderr, "    clearProposalVotesForVoter(%s) -> %d rows\n", voter, len(toDelete))
-		for _, p := range toDelete {
-			fmt.Fprintf(os.Stderr, "      delete (pid=%d, voter=%s)\n", p.proposalID, p.voter)
-		}
-	}
 	for _, p := range toDelete {
 		objects.DeleteProposalVote(s, p.proposalID, p.voter)
 	}

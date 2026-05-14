@@ -96,6 +96,13 @@ func applyHardfork(s *state.Session, id hardfork.ID) {
 		// HF8 calls retally_witness_vote_counts(true) — repairs every
 		// account by re-walking the witness_vote table.
 		retallyWitnessVoteCounts(s)
+	case hardfork.HF9:
+		// HF9 mass-rotates 150 compromised-account owner/active/posting
+		// authorities to a hived-controlled key and records the prior
+		// authorities in owner_authority_history so subsequent
+		// recover_account ops can succeed. Mirrors
+		// database_hardfork.cpp:212-229 + hardfork.d/0_9.hf:19-169.
+		applyHardfork9CompromisedAccounts(s)
 	case hardfork.HF10:
 		// HF10 calls retally_liquidity_weight() — recomputes every
 		// liquidity_reward_balance row's weight using the
