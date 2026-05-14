@@ -440,30 +440,6 @@ func TestHF24TreasuryDebtRatioExcluded(t *testing.T) {
 // chain.clearAccounts / chain.restoreAccounts, both package-private with
 // no public test entrypoint. Skipped uniformly here.
 
-func TestHF23SavingsTest01(t *testing.T) {
-	t.Skip("savings_test_01: requires public db->clear_account() hook; chain.clearAccounts is package-private (see internal/chain/hardfork_accounts.go).")
-}
-
-func TestHF23SavingsTest02(t *testing.T) {
-	t.Skip("savings_test_02: requires public db->clear_account() hook; chain.clearAccounts is package-private.")
-}
-
-func TestHF23HBDTest01(t *testing.T) {
-	t.Skip("hbd_test_01: requires public db->clear_account() hook; chain.clearAccounts is package-private.")
-}
-
-func TestHF23HBDTest02(t *testing.T) {
-	t.Skip("hbd_test_02: requires public db->clear_account() hook AND get_last_operations virtual-op trail; both are out-of-scope for testfixture today.")
-}
-
-func TestHF23BasicTest01(t *testing.T) {
-	t.Skip("basic_test_01..06: all six exercise db->clear_account() against various delegation/vesting setups; chain.clearAccounts is package-private.")
-}
-
-func TestHF23SaveTest(t *testing.T) {
-	t.Skip("save_test_01/02: rely on db->gather_balance() and inspection of hardfork_property_object.h23_balances — neither is exposed in Go (no h23_balances snapshot is taken, see restoreAccounts no-op in internal/chain/hardfork_accounts.go).")
-}
-
-func TestHF23RestoreAccounts(t *testing.T) {
-	t.Skip("restore_accounts_01/02: chain.restoreAccounts is an intentional no-op in Go (no pre-clear snapshot is taken), see comment in internal/chain/hardfork_accounts.go:102.")
-}
+// The HF23 clear_account / restore_accounts / gather_balance ports
+// landed in hf23_parity_test.go (TestHF23SavingsTest01 etc.). Skips
+// previously parked here have been removed.

@@ -159,6 +159,14 @@ type DynamicGlobalProperty struct {
 	// which propagated into divergent schedules and the +1 NumPow
 	// cascade past block 5,148,675).
 	CurrentAslot uint64
+	// NextDailyMaintenanceTime — time_point_sec of the next daily
+	// HIVE→HBD treasury conversion tick (sps_processor::convert_funds,
+	// active from HF24+). Activated lazily on first hit: when zero, we
+	// initialize it to HeadBlockTime + HIVE_DAILY_PROPOSAL_MAINTENANCE_PERIOD
+	// (1 day). On each tick we advance by 1 day and convert
+	// HIVE_PROPOSAL_CONVERSION_RATE (5 basis points) of the treasury's
+	// HIVE balance into HBD at the current median feed price.
+	NextDailyMaintenanceTime uint32
 }
 
 // AppendDGPO serializes p to dst.
@@ -193,6 +201,7 @@ func AppendDGPO(dst []byte, p *DynamicGlobalProperty) []byte {
 	dst = appendU64LE(dst, p.TotalPow)
 	dst = appendI64LE(dst, p.DHFIntervalLedger)
 	dst = appendU64LE(dst, p.CurrentAslot)
+	dst = appendU32LE(dst, p.NextDailyMaintenanceTime)
 	return dst
 }
 
@@ -338,6 +347,13 @@ func ReadDGPO(src []byte) (DynamicGlobalProperty, error) {
 	}
 	if p.CurrentAslot, err = r.ReadUint64(); err != nil {
 		return p, fmt.Errorf("dgpo.current_aslot: %w", err)
+	}
+	// NextDailyMaintenanceTime is a later schema addition; tolerate EOF.
+	if r.AtEnd() {
+		return p, nil
+	}
+	if p.NextDailyMaintenanceTime, err = r.ReadUint32(); err != nil {
+		return p, fmt.Errorf("dgpo.next_daily_maintenance_time: %w", err)
 	}
 	if !r.AtEnd() {
 		return p, errors.New("dgpo: trailing bytes after decode (schema mismatch?)")

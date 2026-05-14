@@ -178,6 +178,14 @@ func (updateProposalVotesEvaluator) Apply(ctx *Context, opArg op.Op) error {
 			}
 			return err
 		}
+		// dhf_evaluator.cpp:169 — voting on a proposal whose end_date is
+		// already past is rejected (only for approve=true; un-approving
+		// an existing vote on an expired proposal is silently a no-op,
+		// matching the C++ silent-no-op path).
+		if uv.Approve && p.EndDate <= ctx.HeadBlockTime {
+			return fmt.Errorf("update_proposal_votes: proposal %d has expired (end_date=%d, head=%d)",
+				id, p.EndDate, ctx.HeadBlockTime)
+		}
 		had, _ := objects.HasProposalVote(ctx.DB, id, uv.Voter)
 		if uv.Approve && !had {
 			objects.PutProposalVote(ctx.DB, id, uv.Voter)

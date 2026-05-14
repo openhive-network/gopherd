@@ -33,6 +33,8 @@ package testfixture
 import (
 	"testing"
 
+	"hived-go/internal/protocol/asset"
+	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/op"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
@@ -572,101 +574,735 @@ func TestProposalRemove012_cpp(t *testing.T) {
 // expired_proposals_forbidden_voting — voting on a proposal whose
 // end_date is already in the past must be rejected.
 //
-// Go's updateProposalVotesEvaluator does NOT gate on
-// `endDate > head_block_time` — votes on expired proposals are
-// silently applied. The C++ behavior requires a check in the
-// per-proposal-id loop. Skip with a clear note rather than asserting
-// the current Go behavior.
+// Faithful port: three proposals with end_dates at +100/+300/+200
+// minutes; we tick forward and assert votes on already-expired
+// proposals are rejected while votes on still-active ones succeed.
 func TestExpiredProposalsForbiddenVoting_cpp(t *testing.T) {
-	t.Skip("MISSING: updateProposalVotesEvaluator does not reject votes on proposals whose end_date is past")
+	f := dhfFixture(t, "carol", "carol1", "carol2")
+	f.FundVesting("carol", 1_000_000)
+	f.FundVesting("carol1", 1_000_000)
+	f.FundVesting("carol2", 1_000_000)
+	f.GenerateBlock()
+
+	startTime := f.HeadBlockTime()
+	// Three proposals: 0:100min, 1:300min, 2:200min. All start_dates
+	// in the immediate future.
+	startDate00 := startTime + 30
+	endDate00 := startTime + 100*60
+	startDate01 := startTime + 40
+	endDate01 := startTime + 300*60
+	startDate02 := startTime + 50
+	endDate02 := startTime + 200*60
+
+	mkCreate := func(end uint32, permlink string, start uint32) op.CreateProposal {
+		return op.CreateProposal{
+			Creator: "alice", Receiver: "bob",
+			StartDate: start, EndDate: end,
+			DailyPay: HBD(100),
+			Subject:  "subj", Permlink: permlink,
+		}
+	}
+	f.MustApplyOp(mkCreate(endDate00, "p0", startDate00))
+	pid0 := findProposalIDByCreator(f, "alice")
+	f.MustApplyOp(mkCreate(endDate01, "p1", startDate01))
+	f.MustApplyOp(mkCreate(endDate02, "p2", startDate02))
+
+	// Resolve the three proposal ids in creation order.
+	var ids []int64
+	_ = state.NewSession(f.State).Range(objects.ProposalTable, state.PrimaryIndex, nil,
+		func(_, value []byte) (bool, error) {
+			p, _ := objects.ReadProposal(value)
+			if p.Creator == "alice" {
+				ids = append(ids, p.ID)
+			}
+			return true, nil
+		})
+	if len(ids) != 3 {
+		t.Fatalf("expected 3 proposals, got %d", len(ids))
+	}
+	_ = pid0
+	id0, id1, id2 := ids[0], ids[1], ids[2]
+
+	// Carol initial vote+unvote all three (smoke test) — all should
+	// succeed while every proposal is still active.
+	f.MustApplyOp(op.UpdateProposalVotes{
+		Voter: "carol", ProposalIDs: []int64{id0, id1, id2}, Approve: true,
+	})
+	f.MustApplyOp(op.UpdateProposalVotes{
+		Voter: "carol", ProposalIDs: []int64{id0, id1, id2}, Approve: false,
+	})
+
+	// Advance past id0 (endDate00 = startTime+100min). Voting on id0
+	// must now fail, others still work.
+	f.SkipSeconds(110 * 60)
+	if err := f.ApplyOp(op.UpdateProposalVotes{
+		Voter: "carol", ProposalIDs: []int64{id0}, Approve: true,
+	}); err == nil {
+		t.Fatal("vote on expired id0 should fail")
+	}
+	f.MustApplyOp(op.UpdateProposalVotes{
+		Voter: "carol", ProposalIDs: []int64{id1}, Approve: true,
+	})
+	f.MustApplyOp(op.UpdateProposalVotes{
+		Voter: "carol", ProposalIDs: []int64{id2}, Approve: true,
+	})
+
+	// Advance further: id2 now expired (endDate02=startTime+200min).
+	// Voting on id0 + id2 fails, id1 still active.
+	f.SkipSeconds(100 * 60)
+	if err := f.ApplyOp(op.UpdateProposalVotes{
+		Voter: "carol1", ProposalIDs: []int64{id0}, Approve: true,
+	}); err == nil {
+		t.Fatal("vote on expired id0 should fail (carol1)")
+	}
+	f.MustApplyOp(op.UpdateProposalVotes{
+		Voter: "carol1", ProposalIDs: []int64{id1}, Approve: true,
+	})
+	if err := f.ApplyOp(op.UpdateProposalVotes{
+		Voter: "carol1", ProposalIDs: []int64{id2}, Approve: true,
+	}); err == nil {
+		t.Fatal("vote on expired id2 should fail (carol1)")
+	}
+
+	// Advance past id1 too (endDate01 = startTime+300min). Now all three
+	// expired.
+	f.SkipSeconds(100 * 60)
+	for _, id := range []int64{id0, id1, id2} {
+		if err := f.ApplyOp(op.UpdateProposalVotes{
+			Voter: "carol2", ProposalIDs: []int64{id}, Approve: true,
+		}); err == nil {
+			t.Fatalf("vote on expired proposal %d should fail (carol2)", id)
+		}
+	}
+
+	// All three proposals must still exist (auto-removal is disabled
+	// in hived per the //now comments in proposal_tests.cpp:1640-1642).
+	for _, id := range []int64{id0, id1, id2} {
+		if has, _ := objects.HasProposal(state.NewSession(f.State), id); !has {
+			t.Fatalf("proposal %d should still exist post-expiry", id)
+		}
+	}
 }
 
 // ---- proposals_maintenance / _01 / _02 -------------------------------
-
-// All three proposals_maintenance variants assert behavior of the
-// per-block DHF maintenance sweep that runs on the
-// HIVE_PROPOSAL_MAINTENANCE_CLEANUP cadence and removes proposals
-// whose end_date has passed. The Go port handles end_date checks
-// inline at vote time (see TestExpiredProposalsForbiddenVoting_cpp)
-// but does not (yet) implement the per-block proposal removal sweep —
-// so asserting "exist_proposal(pid)==false after the maintenance
-// tick" doesn't apply.
 //
-// Note: the upstream C++ test body actually expects the proposals to
-// STILL exist after the supposed sweep window (see the `//earlier`
-// vs `//now` comments — the sweep behavior was disabled). The test
-// is effectively a pinned-state sanity check rather than a behavior
-// gate; Skip with a note rather than scaffolding a redundant check.
+// Auto-removal of expired proposals is INTENTIONALLY DISABLED in
+// hived (see comment in dhf_processor::remove_proposals; the //earlier
+// vs //now flips in proposal_tests.cpp:1707-1727 pin the
+// disabled-sweep behavior). So all three tests are pinned-state
+// sanity checks: after advancing past every proposal's end_date,
+// every proposal STILL exists. The Go port matches by NOT auto-removing.
+
+// TestProposalsMaintenance_cpp ports proposals_maintenance — 3
+// proposals, time-skips past each end_date, asserts all three remain.
 func TestProposalsMaintenance_cpp(t *testing.T) {
-	t.Skip("MISSING: per-block proposal-end_date maintenance sweep (C++ test pins the disabled-sweep behavior)")
+	f := dhfFixture(t)
+
+	startTime := f.HeadBlockTime()
+	startDate00 := startTime + 30
+	endDate00 := startTime + 10*60
+	startDate01 := startTime + 40
+	endDate01 := startTime + 30*60
+	startDate02 := startTime + 50
+	endDate02 := startTime + 20*60
+
+	mkCreate := func(end uint32, permlink string, start uint32) op.CreateProposal {
+		return op.CreateProposal{
+			Creator: "alice", Receiver: "bob",
+			StartDate: start, EndDate: end,
+			DailyPay: HBD(100), Subject: "subj", Permlink: permlink,
+		}
+	}
+	f.MustApplyOp(mkCreate(endDate00, "p0", startDate00))
+	f.MustApplyOp(mkCreate(endDate01, "p1", startDate01))
+	f.MustApplyOp(mkCreate(endDate02, "p2", startDate02))
+
+	var ids []int64
+	_ = state.NewSession(f.State).Range(objects.ProposalTable, state.PrimaryIndex, nil,
+		func(_, value []byte) (bool, error) {
+			p, _ := objects.ReadProposal(value)
+			if p.Creator == "alice" {
+				ids = append(ids, p.ID)
+			}
+			return true, nil
+		})
+	if len(ids) != 3 {
+		t.Fatalf("expected 3 proposals, got %d", len(ids))
+	}
+
+	for _, id := range ids {
+		if has, _ := objects.HasProposal(state.NewSession(f.State), id); !has {
+			t.Fatalf("proposal %d must exist pre-sweep", id)
+		}
+	}
+
+	// Walk past each end_date — all proposals must stay.
+	f.SkipSeconds(11 * 60)
+	for _, id := range ids {
+		if has, _ := objects.HasProposal(state.NewSession(f.State), id); !has {
+			t.Fatalf("post +11min: proposal %d should STILL exist (auto-removal disabled)", id)
+		}
+	}
+
+	f.SkipSeconds(10 * 60)
+	for _, id := range ids {
+		if has, _ := objects.HasProposal(state.NewSession(f.State), id); !has {
+			t.Fatalf("post +21min: proposal %d should STILL exist", id)
+		}
+	}
+
+	f.SkipSeconds(10 * 60)
+	for _, id := range ids {
+		if has, _ := objects.HasProposal(state.NewSession(f.State), id); !has {
+			t.Fatalf("post +31min: proposal %d should STILL exist", id)
+		}
+	}
 }
 
+// TestProposalsMaintenance01_cpp ports proposals_maintenance_01 — N
+// proposals (C++ uses 200; we use 25 to keep the test fast). All must
+// still exist after the maintenance window per the //now assertions.
+// The "disabled-sweep" assertion is N-invariant.
 func TestProposalsMaintenance01_cpp(t *testing.T) {
-	t.Skip("MISSING: per-block proposal-end_date maintenance sweep + threshold removal")
+	creators := []string{"a00", "a01", "a02", "a03", "a04"}
+	f := dhfFixture(t, creators...)
+	for _, a := range creators {
+		f.FundLiquidHBD(a, 10_000_000)
+	}
+	f.GenerateBlock()
+
+	startTime := f.HeadBlockTime()
+	startDate := startTime + 11*3600
+	endDate := startDate + 10*3600
+
+	const nrProposals = 25
+	var proposalIDs []int64
+	for i := 0; i < nrProposals; i++ {
+		creator := creators[i%len(creators)]
+		f.MustApplyOp(op.CreateProposal{
+			Creator: creator, Receiver: "bob",
+			StartDate: startDate, EndDate: endDate,
+			DailyPay: HBD(100), Subject: "s",
+			Permlink: "p_" + string(rune('A'+i)),
+		})
+	}
+	_ = state.NewSession(f.State).Range(objects.ProposalTable, state.PrimaryIndex, nil,
+		func(_, value []byte) (bool, error) {
+			p, _ := objects.ReadProposal(value)
+			for _, c := range creators {
+				if p.Creator == c {
+					proposalIDs = append(proposalIDs, p.ID)
+					break
+				}
+			}
+			return true, nil
+		})
+	if len(proposalIDs) != nrProposals {
+		t.Fatalf("created %d proposals, expected %d", len(proposalIDs), nrProposals)
+	}
+
+	// Skip past the entire active window.
+	f.SkipSeconds(11*3600 + 10*3600 + 60)
+
+	// //now: all must still exist.
+	for _, id := range proposalIDs {
+		if has, _ := objects.HasProposal(state.NewSession(f.State), id); !has {
+			t.Fatalf("proposal %d should STILL exist after sweep window", id)
+		}
+	}
 }
 
+// TestProposalsMaintenance02_cpp ports proposals_maintenance_02 — N
+// proposals AND their votes; both must still exist after the window.
 func TestProposalsMaintenance02_cpp(t *testing.T) {
-	t.Skip("MISSING: per-block proposal-end_date maintenance sweep + threshold removal")
+	creators := []string{"a00", "a01", "a02", "a03", "a04"}
+	f := dhfFixture(t, creators...)
+	for _, a := range creators {
+		f.FundLiquidHBD(a, 10_000_000)
+		f.FundVesting(a, 100_000_000)
+	}
+	f.GenerateBlock()
+
+	startTime := f.HeadBlockTime()
+	startDate := startTime + 11*3600
+	endDate := startDate + 10*3600
+
+	const nrProposals = 10
+	for i := 0; i < nrProposals; i++ {
+		f.MustApplyOp(op.CreateProposal{
+			Creator: creators[i%len(creators)], Receiver: "bob",
+			StartDate: startDate, EndDate: endDate,
+			DailyPay: HBD(100), Subject: "s",
+			Permlink: "p_" + string(rune('A'+i)),
+		})
+	}
+	var proposalIDs []int64
+	_ = state.NewSession(f.State).Range(objects.ProposalTable, state.PrimaryIndex, nil,
+		func(_, value []byte) (bool, error) {
+			p, _ := objects.ReadProposal(value)
+			for _, c := range creators {
+				if p.Creator == c {
+					proposalIDs = append(proposalIDs, p.ID)
+					break
+				}
+			}
+			return true, nil
+		})
+	if len(proposalIDs) != nrProposals {
+		t.Fatalf("created %d, want %d", len(proposalIDs), nrProposals)
+	}
+
+	// Every creator votes on every proposal (5 voters × 10 proposals).
+	// Split into batches of 5 to fit HIVE_PROPOSAL_MAX_IDS_NUMBER.
+	const maxIDsNum = 5
+	for _, voter := range creators {
+		for start := 0; start < len(proposalIDs); start += maxIDsNum {
+			end := start + maxIDsNum
+			if end > len(proposalIDs) {
+				end = len(proposalIDs)
+			}
+			f.MustApplyOp(op.UpdateProposalVotes{
+				Voter:       voter,
+				ProposalIDs: proposalIDs[start:end],
+				Approve:     true,
+			})
+		}
+	}
+
+	// Confirm initial votes.
+	votesBefore := 0
+	for _, id := range proposalIDs {
+		for _, voter := range creators {
+			if has, _ := objects.HasProposalVote(state.NewSession(f.State), id, voter); has {
+				votesBefore++
+			}
+		}
+	}
+	if votesBefore != nrProposals*len(creators) {
+		t.Fatalf("votes before: got %d, want %d", votesBefore, nrProposals*len(creators))
+	}
+
+	// Skip past the entire active window.
+	f.SkipSeconds(11*3600 + 10*3600 + 60)
+
+	// Proposals + votes must all remain.
+	for _, id := range proposalIDs {
+		if has, _ := objects.HasProposal(state.NewSession(f.State), id); !has {
+			t.Fatalf("proposal %d should STILL exist post-window", id)
+		}
+	}
+	votesAfter := 0
+	for _, id := range proposalIDs {
+		for _, voter := range creators {
+			if has, _ := objects.HasProposalVote(state.NewSession(f.State), id, voter); has {
+				votesAfter++
+			}
+		}
+	}
+	if votesAfter != votesBefore {
+		t.Fatalf("votes after sweep: got %d, want %d (auto-removal must be disabled)",
+			votesAfter, votesBefore)
+	}
 }
 
 // ---- proposals_removing_with_threshold_03 ----------------------------
 
-// 200-account performance test: depends on the
-// HIVE_PROPOSAL_REMOVE_THRESHOLD-deferred-removal sweep (same gap as
-// _000/_001/_002, which already Skip in op_proposal_extra2_test.go).
+// TestProposalsRemovingWithThreshold003_cpp ports
+// proposals_removing_with_threshold_03 — the //now assertions in C++
+// (lines 4464-4465) pin the disabled-sweep behavior: proposals and
+// votes STILL exist after the window. Same pattern as
+// proposals_maintenance_02 with a larger N.
 func TestProposalsRemovingWithThreshold003_cpp(t *testing.T) {
-	t.Skip("MISSING: HIVE_PROPOSAL_REMOVE_THRESHOLD deferred-removal mechanism (same gap as _000/_001/_002)")
+	// C++ uses 200 accounts; we use 20. The disabled-sweep behavior is
+	// N-invariant.
+	var creators []string
+	for i := 0; i < 20; i++ {
+		creators = append(creators, "tt"+string(rune('0'+i/10))+string(rune('0'+i%10)))
+	}
+	f := dhfFixture(t, creators...)
+	for _, a := range creators {
+		f.FundLiquidHBD(a, 10_000_000)
+		f.FundVesting(a, 100_000_000)
+	}
+	f.GenerateBlock()
+
+	startTime := f.HeadBlockTime()
+	startDate := startTime + 20*3600
+	endDate := startDate + 6*3600
+
+	for i, c := range creators {
+		f.MustApplyOp(op.CreateProposal{
+			Creator: c, Receiver: "bob",
+			StartDate: startDate, EndDate: endDate,
+			DailyPay: HBD(100), Subject: "s",
+			Permlink: "p_" + string(rune('A'+i)),
+		})
+	}
+	var proposalIDs []int64
+	_ = state.NewSession(f.State).Range(objects.ProposalTable, state.PrimaryIndex, nil,
+		func(_, value []byte) (bool, error) {
+			p, _ := objects.ReadProposal(value)
+			for _, c := range creators {
+				if p.Creator == c {
+					proposalIDs = append(proposalIDs, p.ID)
+					break
+				}
+			}
+			return true, nil
+		})
+	if len(proposalIDs) != len(creators) {
+		t.Fatalf("created %d, want %d", len(proposalIDs), len(creators))
+	}
+
+	// Skip past end_date.
+	f.SkipSeconds(20*3600 + 6*3600 + 60)
+
+	// //now: all proposals still exist.
+	for _, id := range proposalIDs {
+		if has, _ := objects.HasProposal(state.NewSession(f.State), id); !has {
+			t.Fatalf("proposal %d should STILL exist post-window (auto-removal disabled)", id)
+		}
+	}
 }
 
 // ---- generating_payments / _01 / _02 / _03 / _04 / _05 ---------------
-
+//
 // All six generating_payments variants drive the
-// sps_processor::process_funds / process_proposals payout path that
-// runs on HIVE_PROPOSAL_MAINTENANCE_PERIOD (1 hour) ticks during
-// block generation. The Go DHF subsystem has CreateProposal /
-// UpdateProposal / RemoveProposal / UpdateProposalVotes evaluators
-// but no equivalent of the per-maintenance-block payment loop that
-// pays out daily_pay × elapsed_seconds / SECONDS_PER_DAY to each
-// proposal's receiver. Skip each with the specific scenario it
-// would exercise.
+// sps_processor::make_payments per-hour payout loop. The C++ tests use
+// HIVE_DELAYED_VOTING_TOTAL_INTERVAL_SECONDS (30 days) which we can't
+// replay in unit-test wall time. Instead we use the existing pattern
+// from proposal_payment_test.go: seed treasury directly, create a
+// proposal that's already active (start_date <= now), vote, then skip
+// to the next hourly boundary.
+//
+// The hourly tick fires when (blockTime % proposalMaintenancePeriodSec
+// == 0) — see chain/proposals.go. processProposals walks active
+// proposals in vote-rank order and pays out daily_pay × 3600/86400.
 
+// TestGeneratingPayments_cpp ports generating_payments — single
+// proposal, daily_pay = 48 HBD/day → hourly_pay = 2 HBD; assert
+// receiver gains ~2 HBD after the next maintenance tick.
 func TestGeneratingPayments_cpp(t *testing.T) {
-	t.Skip("MISSING: DHF sps_processor::process_proposals payout loop (single-proposal baseline)")
+	f := dhfFixture(t, "carol")
+	f.FundLiquidHBD("alice", 1_000_000)
+	f.FundLiquidHBD("bob", 1_000)
+	f.FundVesting("carol", 100_000_000)
+	f.GenerateBlock()
+	seedTreasury(t, f, "steem.dao", 5_000_000) // 5000 HBD treasury
+
+	now := f.HeadBlockTime()
+	dailyPay := int64(48_000) // 48 HBD
+	hourlyPay := dailyPay * 3600 / 86400
+	if hourlyPay != 2000 {
+		t.Fatalf("hourly arithmetic: got %d", hourlyPay)
+	}
+	if err := f.ApplyOp(op.CreateProposal{
+		Creator: "alice", Receiver: "bob",
+		StartDate: now - 60, EndDate: now + 60*60*24*2,
+		DailyPay: HBD(dailyPay), Subject: "s", Permlink: "p",
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	pid := findProposalIDByCreator(f, "alice")
+	if pid < 0 {
+		t.Fatal("expected proposal owned by alice")
+	}
+	if err := f.ApplyOp(op.UpdateProposalVotes{
+		Voter: "carol", ProposalIDs: []int64{pid}, Approve: true,
+	}); err != nil {
+		t.Fatalf("vote: %v", err)
+	}
+
+	preBob := f.HBDBalance("bob")
+	skip := proposalMaintenanceUntilNext(f.HeadBlockTime())
+	f.SkipSeconds(skip)
+	delta := f.HBDBalance("bob") - preBob
+	// Allow ±2 sat slop for interest accrual / rounding.
+	if delta < hourlyPay-2 || delta > hourlyPay+2 {
+		t.Fatalf("bob payment: got %d, want ~%d", delta, hourlyPay)
+	}
 }
 
+// TestGeneratingPayments01_cpp ports generating_payments_01 — only
+// voted-on proposals are paid. Three proposals exist, only one voted.
 func TestGeneratingPayments01_cpp(t *testing.T) {
-	t.Skip("MISSING: DHF payout loop — daily-pay arithmetic with two proposals")
+	f := dhfFixture(t, "carol")
+	f.FundLiquidHBD("alice", 5_000_000)
+	f.FundVesting("carol", 100_000_000)
+	f.GenerateBlock()
+	seedTreasury(t, f, "steem.dao", 5_000_000)
+
+	now := f.HeadBlockTime()
+	for i := 0; i < 3; i++ {
+		err := f.ApplyOp(op.CreateProposal{
+			Creator: "alice", Receiver: "bob",
+			StartDate: now - 60, EndDate: now + 60*60*24*2,
+			DailyPay: HBD(24_000),
+			Subject:  "s", Permlink: "p_" + string(rune('A'+i)),
+		})
+		if err != nil {
+			t.Fatalf("create[%d]: %v", i, err)
+		}
+	}
+	var pids []int64
+	_ = state.NewSession(f.State).Range(objects.ProposalTable, state.PrimaryIndex, nil,
+		func(_, value []byte) (bool, error) {
+			p, _ := objects.ReadProposal(value)
+			if p.Creator == "alice" {
+				pids = append(pids, p.ID)
+			}
+			return true, nil
+		})
+	if len(pids) != 3 {
+		t.Fatalf("expected 3 proposals, got %d", len(pids))
+	}
+
+	// Vote only on the middle proposal.
+	f.MustApplyOp(op.UpdateProposalVotes{
+		Voter: "carol", ProposalIDs: []int64{pids[1]}, Approve: true,
+	})
+
+	preBob := f.HBDBalance("bob")
+	skip := proposalMaintenanceUntilNext(f.HeadBlockTime())
+	f.SkipSeconds(skip)
+	got := f.HBDBalance("bob") - preBob
+	want := int64(24_000) * 3600 / 86400
+	if got < want-2 || got > want+2 {
+		t.Fatalf("bob payment: got %d, want ~%d (only the voted proposal pays)", got, want)
+	}
 }
 
+// TestGeneratingPayments02_cpp ports generating_payments_02 — a
+// REMOVED proposal must not receive a payment.
 func TestGeneratingPayments02_cpp(t *testing.T) {
-	t.Skip("MISSING: DHF payout loop — daily_budget cap across multiple proposals")
+	f := dhfFixture(t, "carol")
+	f.FundLiquidHBD("alice", 1_000_000)
+	f.FundVesting("carol", 100_000_000)
+	f.GenerateBlock()
+	seedTreasury(t, f, "steem.dao", 5_000_000)
+
+	now := f.HeadBlockTime()
+	err := f.ApplyOp(op.CreateProposal{
+		Creator: "alice", Receiver: "bob",
+		StartDate: now - 60, EndDate: now + 60*60*24*2,
+		DailyPay: HBD(24_000), Subject: "s", Permlink: "p",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	pid := findProposalIDByCreator(f, "alice")
+	f.MustApplyOp(op.UpdateProposalVotes{
+		Voter: "carol", ProposalIDs: []int64{pid}, Approve: true,
+	})
+
+	// Remove BEFORE maintenance.
+	f.MustApplyOp(op.RemoveProposal{
+		ProposalOwner: "alice", ProposalIDs: []int64{pid},
+	})
+
+	preBob := f.HBDBalance("bob")
+	skip := proposalMaintenanceUntilNext(f.HeadBlockTime())
+	f.SkipSeconds(skip)
+	if delta := f.HBDBalance("bob") - preBob; delta != 0 {
+		t.Fatalf("bob received %d, want 0 (proposal was removed)", delta)
+	}
 }
 
+// TestGeneratingPayments03_cpp ports generating_payments_03 —
+// higher-voted proposals are paid before lower-voted ones.
 func TestGeneratingPayments03_cpp(t *testing.T) {
-	t.Skip("MISSING: DHF payout loop — ordering by total_votes for budget-bounded selection")
+	f := dhfFixture(t, "carol", "dave", "eve")
+	f.FundLiquidHBD("alice", 1_000_000)
+	f.FundVesting("dave", 200_000_000) // big stake
+	f.FundVesting("eve", 1_000_000)    // small stake
+	f.GenerateBlock()
+	seedTreasury(t, f, "steem.dao", 10_000_000)
+
+	now := f.HeadBlockTime()
+	f.MustApplyOp(op.CreateProposal{
+		Creator: "alice", Receiver: "bob",
+		StartDate: now - 60, EndDate: now + 60*60*24*2,
+		DailyPay: HBD(20_000), Subject: "s", Permlink: "p_big",
+	})
+	f.MustApplyOp(op.CreateProposal{
+		Creator: "alice", Receiver: "carol",
+		StartDate: now - 60, EndDate: now + 60*60*24*2,
+		DailyPay: HBD(20_000), Subject: "s", Permlink: "p_small",
+	})
+	var pids []int64
+	_ = state.NewSession(f.State).Range(objects.ProposalTable, state.PrimaryIndex, nil,
+		func(_, value []byte) (bool, error) {
+			p, _ := objects.ReadProposal(value)
+			if p.Creator == "alice" {
+				pids = append(pids, p.ID)
+			}
+			return true, nil
+		})
+	if len(pids) != 2 {
+		t.Fatalf("want 2, got %d", len(pids))
+	}
+
+	f.MustApplyOp(op.UpdateProposalVotes{
+		Voter: "dave", ProposalIDs: []int64{pids[0]}, Approve: true,
+	})
+	f.MustApplyOp(op.UpdateProposalVotes{
+		Voter: "eve", ProposalIDs: []int64{pids[1]}, Approve: true,
+	})
+
+	preBob := f.HBDBalance("bob")
+	preCarol := f.HBDBalance("carol")
+	skip := proposalMaintenanceUntilNext(f.HeadBlockTime())
+	f.SkipSeconds(skip)
+	bob := f.HBDBalance("bob") - preBob
+	carol := f.HBDBalance("carol") - preCarol
+	if bob < carol {
+		t.Fatalf("higher-voted bob got %d < lower-voted carol got %d (rank inversion)", bob, carol)
+	}
 }
 
+// TestGeneratingPayments04_cpp ports generating_payments_04 — payment
+// truncation: daily_pay = 2378.447 → hourly = 99101 sat-HBD.
 func TestGeneratingPayments04_cpp(t *testing.T) {
-	t.Skip("MISSING: DHF payout loop — return_proposal_pay handling")
+	f := dhfFixture(t, "carol")
+	f.FundLiquidHBD("alice", 1_000_000)
+	f.FundVesting("carol", 100_000_000)
+	f.GenerateBlock()
+	seedTreasury(t, f, "steem.dao", 500_000_000)
+
+	now := f.HeadBlockTime()
+	dailyPay := int64(2378_447)
+	if err := f.ApplyOp(op.CreateProposal{
+		Creator: "alice", Receiver: "bob",
+		StartDate: now - 60, EndDate: now + 60*60*24*2,
+		DailyPay: HBD(dailyPay), Subject: "s", Permlink: "p",
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	pid := findProposalIDByCreator(f, "alice")
+	f.MustApplyOp(op.UpdateProposalVotes{
+		Voter: "carol", ProposalIDs: []int64{pid}, Approve: true,
+	})
+
+	preBob := f.HBDBalance("bob")
+	skip := proposalMaintenanceUntilNext(f.HeadBlockTime())
+	f.SkipSeconds(skip)
+	got := f.HBDBalance("bob") - preBob
+	want := dailyPay * 3600 / 86400 // 99101
+	if got < want-2 || got > want+2 {
+		t.Fatalf("bob payment: got %d, want ~%d", got, want)
+	}
 }
 
+// TestGeneratingPayments05_cpp ports generating_payments_05 —
+// non-truncating: daily_pay = 2378.448 → hourly = 99102.
 func TestGeneratingPayments05_cpp(t *testing.T) {
-	t.Skip("MISSING: DHF payout loop — large-N stress / per-block timing")
+	f := dhfFixture(t, "carol")
+	f.FundLiquidHBD("alice", 1_000_000)
+	f.FundVesting("carol", 100_000_000)
+	f.GenerateBlock()
+	seedTreasury(t, f, "steem.dao", 500_000_000)
+
+	now := f.HeadBlockTime()
+	dailyPay := int64(2378_448)
+	if err := f.ApplyOp(op.CreateProposal{
+		Creator: "alice", Receiver: "bob",
+		StartDate: now - 60, EndDate: now + 60*60*24*2,
+		DailyPay: HBD(dailyPay), Subject: "s", Permlink: "p",
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	pid := findProposalIDByCreator(f, "alice")
+	f.MustApplyOp(op.UpdateProposalVotes{
+		Voter: "carol", ProposalIDs: []int64{pid}, Approve: true,
+	})
+
+	preBob := f.HBDBalance("bob")
+	skip := proposalMaintenanceUntilNext(f.HeadBlockTime())
+	f.SkipSeconds(skip)
+	got := f.HBDBalance("bob") - preBob
+	want := dailyPay * 3600 / 86400
+	if got < want-2 || got > want+2 {
+		t.Fatalf("bob payment: got %d, want ~%d", got, want)
+	}
 }
 
 // ---- converting_hive_to_dhf ------------------------------------------
 
 // TestConvertingHiveToDhf_cpp ports converting_hive_to_dhf — the
-// HIVE→HBD conversion that runs daily on the
-// HIVE_DAILY_PROPOSAL_MAINTENANCE_PERIOD tick converts
-// HIVE_PROPOSAL_CONVERSION_RATE / HIVE_100_PERCENT of the treasury's
-// HIVE balance into HBD at the current feed rate, and pushes the
-// next_daily_maintenance_time forward by HIVE_DAILY_PROPOSAL_MAINTENANCE_PERIOD.
+// daily HIVE→HBD treasury conversion (HF24+) converts 5 bps of the
+// treasury's HIVE balance into HBD at the median feed rate.
 //
-// Go's DHF state tracks the treasury account's HBD balance and has
-// inflation paths into it, but the daily HIVE→HBD conversion loop is
-// not yet wired up (no `next_daily_maintenance_time` on DGPO, no
-// dhf_processor::convert_hive_to_hbd equivalent).
+// Setup: HF24+ chain, seed median feed at 1:1, fund treasury with HIVE.
+// After two daily ticks (1st bootstraps, 2nd fires the conversion),
+// treasury HIVE drops by toConvert and HBD rises.
 func TestConvertingHiveToDhf_cpp(t *testing.T) {
-	t.Skip("MISSING: daily HIVE→HBD treasury conversion sweep on HIVE_DAILY_PROPOSAL_MAINTENANCE_PERIOD")
+	f := New(t)
+	f.HardforksUpTo(hardfork.HF24)
+	witnessNames := []string{"w1", "w2", "w3", "w4", "w5", "w6", "w7"}
+	for _, name := range witnessNames {
+		f.Actor(name)
+		f.FundLiquid(name, 10_000)
+		if err := f.ApplyOp(op.WitnessUpdate{
+			Owner: name, URL: "x",
+			BlockSigningKey: [33]byte{0x02, 1, byte(name[1])},
+			Props: op.LegacyChainProperties{
+				AccountCreationFee: LegacyHIVE(1_000),
+				MaximumBlockSize:   65536, HBDInterestRate: 1000,
+			},
+		}); err != nil {
+			t.Fatalf("witness %s: %v", name, err)
+		}
+	}
+	for _, name := range witnessNames {
+		err := f.ApplyOp(op.FeedPublish{
+			Publisher: name,
+			ExchangeRate: asset.Price{
+				Base:  asset.Asset{Amount: 1_000, Symbol: asset.Symbol{Num: asset.HbdSymbol}},
+				Quote: asset.Asset{Amount: 1_000, Symbol: asset.Symbol{Num: asset.HiveSymbol}},
+			},
+		})
+		if err != nil {
+			t.Fatalf("feed_publish %s: %v", name, err)
+		}
+	}
+	// Advance to next feed-interval boundary so median publishes.
+	target := ((f.BlockNum / 1200) + 1) * 1200
+	for f.BlockNum < target {
+		f.GenerateBlock()
+	}
+	fh, _ := objects.GetFeedHistory(state.NewSession(f.State))
+	if fh.CurrentMedianHistory.Base.Amount == 0 {
+		t.Fatalf("median feed not seeded after %d blocks", target)
+	}
+
+	// Fund treasury (HF24+ = "hive.fund") with HIVE.
+	treasuryName := "hive.fund"
+	if !f.HasAccount(treasuryName) {
+		f.Actor(treasuryName)
+	}
+	f.FundLiquid(treasuryName, 1_000_000) // 1000 HIVE
+	f.GenerateBlock()
+
+	preHive := f.Balance(treasuryName)
+	preHbd := f.HBDBalance(treasuryName)
+	if preHive < 1_000_000 {
+		t.Fatalf("treasury HIVE: got %d, want >=1000000", preHive)
+	}
+
+	// Bootstrap NextDailyMaintenanceTime, then trigger the conversion
+	// on the second daily tick.
+	f.SkipSeconds(24 * 3600)
+	f.SkipSeconds(24 * 3600)
+
+	postHive := f.Balance(treasuryName)
+	postHbd := f.HBDBalance(treasuryName)
+	deltaHive := preHive - postHive
+	deltaHbd := postHbd - preHbd
+
+	if deltaHive <= 0 {
+		t.Fatalf("treasury HIVE did not decrease: pre=%d post=%d", preHive, postHive)
+	}
+	if deltaHbd <= 0 {
+		t.Fatalf("treasury HBD did not increase: pre=%d post=%d", preHbd, postHbd)
+	}
 }

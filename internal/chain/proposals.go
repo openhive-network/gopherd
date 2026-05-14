@@ -3,6 +3,7 @@ package chain
 import (
 	"sort"
 
+	"hived-go/internal/protocol/asset"
 	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
@@ -11,6 +12,22 @@ import (
 // HIVE_PROPOSAL_MAINTENANCE_PERIOD — 1 hour. process_proposals only
 // runs at this cadence; in between blocks we accumulate dhf_interval_ledger.
 const proposalMaintenancePeriodSec uint32 = 60 * 60
+
+// HIVE_DAILY_PROPOSAL_MAINTENANCE_PERIOD — 24 hours. The HIVE→HBD
+// conversion in the treasury fires on this cadence (HF24+ only).
+// Mirrors libraries/protocol/include/hive/protocol/config.hpp:128.
+const dailyMaintenancePeriodSec uint32 = 24 * 60 * 60
+
+// HIVE_PROPOSAL_CONVERSION_RATE — 5 basis points (0.05%) of the
+// treasury's HIVE balance is converted to HBD every daily tick (HF24+).
+// HIVE_100_PERCENT = 10000; HIVE_1_BASIS_POINT = 1 → conversion rate is
+// 5/10000. Mirrors config.hpp:440.
+const proposalConversionRateBP int64 = 5
+const proposal100PercentBP int64 = 10000
+
+// HIVE_MIN_PAYOUT_HBD — 0.020 HBD (20 satoshi). Conversions resulting
+// in less than this amount are skipped (sps_processor::convert_funds).
+const proposalMinPayoutHbdSats int64 = 20
 
 // totalAmountDivider — proposal daily budget = treasury / this. Matches
 // hived's dhf_processor::total_amount_divider = 100, i.e. treasury can
@@ -34,22 +51,12 @@ const dailySecondsConst int64 = 24 * 60 * 60
 // processProposals mirrors database::process_proposals
 // (libraries/chain/database.cpp:1645) → dhf_processor::run.
 //
-// Once per HIVE_PROPOSAL_MAINTENANCE_PERIOD (1h):
+// Two cadences run here:
 //
-//  1. Walk all proposals; remove any whose `Removed` flag is set
-//     (set by remove_proposal_operation).
-//  2. Find active proposals (start_date ≤ head_time ≤ end_date).
-//  3. Recalculate total_votes for each — sum of voter
-//     governance_vote_power = vesting_shares - sum_delayed_votes
-//     (post-HF24) for non-proxied voters.
-//  4. Sort active proposals by total_votes desc (id asc tiebreak).
-//  5. Compute the per-period budget:
-//        budget = treasury_hbd / 100 × elapsed / day
-//     where elapsed = head_time - last_budget_time (capped at the
-//     maintenance period for our simpler model).
-//  6. Pay each proposal in rank order:
-//        pay = daily_pay × elapsed / day, capped by remaining budget.
-//     Skip proposals with total_votes == 0.
+//  1. Hourly maintenance — process_proposals payout loop
+//     (sps_processor::make_payments).
+//  2. Daily maintenance — HIVE→HBD treasury conversion
+//     (sps_processor::convert_funds, HF24+ only).
 //
 // Pre-HF21 this hook is a no-op.
 func processProposals(s *state.Session, blockTime uint32, blockNum uint32) {
@@ -57,6 +64,10 @@ func processProposals(s *state.Session, blockTime uint32, blockNum uint32) {
 	if !hf.Has(hardfork.HF21) {
 		return
 	}
+	// Daily HIVE→HBD treasury conversion (HF24+) runs first; matches
+	// the C++ order: convert_funds() → make_payments() inside
+	// sps_processor::run().
+	convertProposalFunds(s, blockTime, hf)
 	if blockTime%proposalMaintenancePeriodSec != 0 {
 		return
 	}
@@ -155,6 +166,78 @@ func processProposals(s *state.Session, blockTime uint32, blockNum uint32) {
 		budget -= periodPay
 	}
 	objects.PutAccount(s, &treasury)
+}
+
+// convertProposalFunds mirrors sps_processor::convert_funds — once per
+// HIVE_DAILY_PROPOSAL_MAINTENANCE_PERIOD (24h) post-HF24 it converts
+// HIVE_PROPOSAL_CONVERSION_RATE (5 bps) of the treasury's HIVE balance
+// into HBD at the current median feed.
+//
+// On first hit, DGPO.NextDailyMaintenanceTime is 0 — we initialize it
+// to blockTime + 1 day and DON'T convert (matches the C++ behavior
+// where dgpo.next_daily_maintenance_time starts at genesis_time + 1d
+// from feed_history bootstrap). On subsequent ticks, we advance by
+// 1 day and convert.
+func convertProposalFunds(s *state.Session, blockTime uint32, hf hardfork.Set) {
+	if !hf.Has(hardfork.HF24) {
+		return
+	}
+	dgpo, err := objects.GetDGPO(s)
+	if err != nil {
+		return
+	}
+	// Bootstrap the next_daily_maintenance_time the first time the hook
+	// fires after HF24. After bootstrap we wait for it to come due.
+	if dgpo.NextDailyMaintenanceTime == 0 {
+		dgpo.NextDailyMaintenanceTime = blockTime + dailyMaintenancePeriodSec
+		objects.PutDGPO(s, &dgpo)
+		return
+	}
+	if dgpo.NextDailyMaintenanceTime > blockTime {
+		return
+	}
+	// Advance the schedule first (matches C++'s "shift from current
+	// time" pattern in sps_processor::convert_funds).
+	dgpo.NextDailyMaintenanceTime = blockTime + dailyMaintenancePeriodSec
+
+	// Resolve treasury account.
+	treasuryName := "hive.fund"
+	treasury, terr := objects.GetAccount(s, treasuryName)
+	if terr != nil {
+		objects.PutDGPO(s, &dgpo)
+		return
+	}
+	if treasury.Balance <= 0 {
+		objects.PutDGPO(s, &dgpo)
+		return
+	}
+	// to_convert = HIVE_PROPOSAL_CONVERSION_RATE × balance / HIVE_100_PERCENT.
+	toConvert := proposalConversionRateBP * treasury.Balance / proposal100PercentBP
+	if toConvert <= 0 {
+		objects.PutDGPO(s, &dgpo)
+		return
+	}
+	// Apply the median feed (HBD/HIVE).
+	fh, ferr := objects.GetFeedHistory(s)
+	if ferr != nil || priceIsZero(fh.CurrentMedianHistory) {
+		objects.PutDGPO(s, &dgpo)
+		return
+	}
+	convertedHbd := convertHiveToHBD(toConvert, fh.CurrentMedianHistory)
+	if convertedHbd < proposalMinPayoutHbdSats {
+		objects.PutDGPO(s, &dgpo)
+		return
+	}
+	// Apply to treasury: -HIVE +HBD.
+	treasury.Balance -= toConvert
+	objects.AdjustHBDBalance(s, &treasury, blockTime, convertedHbd)
+	objects.PutAccount(s, &treasury)
+	// Adjust supplies: HIVE goes down, HBD goes up. adjustSupplyHbd
+	// performs the virtual_supply recompute internally.
+	adjustSupplyHive(s, &dgpo, -toConvert)
+	adjustSupplyHbd(s, &dgpo, convertedHbd)
+	objects.PutDGPO(s, &dgpo)
+	_ = asset.HiveSymbol // keep asset import in case future expansion needs it
 }
 
 // recalculateProposalVotes walks every proposal_vote row for `pid` and
