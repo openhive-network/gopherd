@@ -47,6 +47,15 @@ type Context struct {
 	// looking at dgpo.current_witness sees this account. We carry it on
 	// Context to avoid having to mutate DGPO at the apply-loop top.
 	Witness string
+
+	// EmitVOp is a callback the chain.Database supplies for evaluators
+	// to push a virtual operation onto the per-block vop buffer. It is
+	// untyped here to avoid importing the chain package (which would
+	// create a cycle); chain.Database wires it as a closure that casts
+	// the payload into chain.BlockVOp. Evaluators should pass a value
+	// of type chain.BlockVOp (caller side it's exposed as `any`). May
+	// be nil — emit callers must guard.
+	EmitVOp func(any)
 }
 
 // Evaluator applies a single operation to ctx.DB.

@@ -141,6 +141,9 @@ func (createProposalEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	objects.PutAccount(ctx.DB, &creator)
 	objects.PutAccount(ctx.DB, &treasury)
 
+	// hived dhf_evaluator.cpp:97 — push proposal_fee_operation virtual op.
+	ctx.EmitProposalFee(cp.Creator, treasuryName, id, feeHBD)
+
 	return nil
 }
 

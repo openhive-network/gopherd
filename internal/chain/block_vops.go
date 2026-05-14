@@ -1,6 +1,7 @@
 package chain
 
 import (
+	"hived-go/internal/chain/evaluator"
 	"hived-go/internal/protocol/asset"
 	"hived-go/internal/protocol/auth"
 )
@@ -20,6 +21,8 @@ type BlockVOpKind uint8
 const (
 	BlockVOpFillRecurrentTransfer BlockVOpKind = iota + 1
 	BlockVOpFailedRecurrentTransfer
+	BlockVOpProposalFee
+	BlockVOpProxyCleared
 )
 
 // BlockVOp is the union record. Only the fields relevant to the kind
@@ -28,10 +31,20 @@ const (
 //	From, To, Memo, Amount, RemainingExecutions, PairID are always set.
 //	ConsecutiveFailures + Deleted are set on Failed*.
 //
+// For ProposalFee:
+//
+//	Creator, Treasury, ProposalID, Fee.
+//
+// For ProxyCleared:
+//
+//	Account, Proxy (the old proxy that was cleared).
+//
 // Mirrors hived's:
 //
 //	fill_recurrent_transfer_operation(from, to, amount, memo, remaining_executions)
 //	failed_recurrent_transfer_operation(from, to, amount, consecutive_failures, memo, remaining_executions, deleted)
+//	proposal_fee_operation(creator, treasury, proposal_id, fee)
+//	proxy_cleared_operation(account, proxy)
 type BlockVOp struct {
 	Kind                BlockVOpKind
 	From                auth.AccountName
@@ -42,6 +55,16 @@ type BlockVOp struct {
 	ConsecutiveFailures uint8
 	Deleted             bool
 	PairID              uint8
+
+	// ProposalFee
+	Creator    auth.AccountName
+	Treasury   auth.AccountName
+	ProposalID int64
+	Fee        int64
+
+	// ProxyCleared
+	Account auth.AccountName
+	Proxy   auth.AccountName
 }
 
 // LastBlockVOps returns a copy of the virtual ops emitted during the
@@ -67,4 +90,29 @@ func (d *Database) pushVOp(v BlockVOp) {
 // resetVOps truncates the per-block vop buffer at the top of ApplyBlock.
 func (d *Database) resetVOps() {
 	d.vops = d.vops[:0]
+}
+
+// emitVOpClosure returns the function the evaluator package's Context
+// invokes when an op wants to push a virtual op. It type-asserts the
+// payload (currently evaluator.ProposalFeeVOp / evaluator.ProxyClearedVOp)
+// into the chain.BlockVOp union and appends.
+func (d *Database) emitVOpClosure() func(any) {
+	return func(payload any) {
+		switch p := payload.(type) {
+		case evaluator.ProposalFeeVOp:
+			d.pushVOp(BlockVOp{
+				Kind:       BlockVOpProposalFee,
+				Creator:    auth.AccountName(p.Creator),
+				Treasury:   auth.AccountName(p.Treasury),
+				ProposalID: p.ProposalID,
+				Fee:        p.Fee,
+			})
+		case evaluator.ProxyClearedVOp:
+			d.pushVOp(BlockVOp{
+				Kind:    BlockVOpProxyCleared,
+				Account: auth.AccountName(p.Account),
+				Proxy:   auth.AccountName(p.Proxy),
+			})
+		}
+	}
 }

@@ -590,6 +590,14 @@ func (accountWitnessProxyEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	// receiving this account's vest), then either sets a new proxy and
 	// re-propagates, or clears the field.
 	directPower := directGovernanceVotePower(ctx, &a)
+	// hived hive_evaluator.cpp — emit proxy_cleared_operation virtual op
+	// whenever the account currently HAS a proxy and (a) the new proxy
+	// differs or (b) the new proxy is empty. Both code paths leave the
+	// old proxy detached, hence "cleared".
+	oldProxy := a.Proxy
+	if oldProxy != "" && string(oldProxy) != pr.Proxy {
+		ctx.EmitProxyCleared(pr.Account, string(oldProxy))
+	}
 	objects.NullifyProxiedWitnessVotes(ctx.DB, &a, directPower)
 	if pr.Proxy != "" {
 		// Setting a new proxy: also drop all direct witness votes

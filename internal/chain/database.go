@@ -566,6 +566,7 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 		BlockTime:     hdr.Timestamp,
 		HeadBlockTime: headBlockTime,
 		Witness:       hdr.Witness,
+		EmitVOp:       d.emitVOpClosure(),
 	}
 
 	// Mirror C++ database.cpp:2374-2376 — set dgp.current_witness BEFORE
