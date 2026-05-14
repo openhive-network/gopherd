@@ -63,16 +63,50 @@ func validateBlock(s *state.Session, hdr *block.SignedHeader, rawBlock []byte, h
 		return err
 	}
 
-	// 4) HF5+: running_version assert.
-	if hf.Has(hardfork.HF5) && wsErr == nil && ws.MajorityVersion > 0 {
-		if w, err := objects.GetWitness(s, hdr.Witness); err == nil {
-			if w.RunningVersion < ws.MajorityVersion {
-				return fmt.Errorf("validate_block %d: witness %q running_version %d < majority %d",
-					blockNum, hdr.Witness, w.RunningVersion, ws.MajorityVersion)
-			}
-		}
-	}
+	// HF5+ running_version assert is intentionally deferred to AFTER
+	// process_header_extensions has run (see ApplyBlock). Mirrors hived
+	// database.cpp:2266-2275 where the FC_ASSERT fires after the block's
+	// version-vote extension updates witness.running_version. Doing the
+	// check here would see the witness's STALE running_version and
+	// reject the very block that contains the witness's update. The
+	// comparand is also `hardfork_property.current_hardfork_version`,
+	// not `witness_schedule.majority_version` — see assertWitnessVersion
+	// below.
+	_ = ws
+	_ = wsErr
 
+	return nil
+}
+
+// assertWitnessVersion mirrors C++ database.cpp:2272 — after
+// process_header_extensions has updated the producing witness's
+// running_version from the block's HF-version-vote extension, the
+// witness must be running at least the current hardfork's version.
+// Pre-HF5__54 the assert is a no-op.
+func assertWitnessVersion(s *state.Session, hdr *block.SignedHeader, blockNum uint32, hf hardfork.Set) error {
+	if !hf.Has(hardfork.HF5) {
+		return nil
+	}
+	hpo, err := objects.GetHardforkPropertyObject(s)
+	if err != nil {
+		return nil
+	}
+	if hpo.CurrentHardforkVersion == 0 {
+		return nil
+	}
+	w, err := objects.GetWitness(s, hdr.Witness)
+	if err != nil {
+		return nil
+	}
+	// witness.RunningVersion of 0 means the witness has never reported
+	// a version; C++ tolerates that until the witness produces a block
+	// (at which point process_header_extensions writes the reported
+	// version into the witness record). After that update, RunningVersion
+	// must satisfy the gate.
+	if w.RunningVersion < hpo.CurrentHardforkVersion {
+		return fmt.Errorf("validate_block %d: witness %q running_version %d < current_hardfork_version %d",
+			blockNum, hdr.Witness, w.RunningVersion, hpo.CurrentHardforkVersion)
+	}
 	return nil
 }
 

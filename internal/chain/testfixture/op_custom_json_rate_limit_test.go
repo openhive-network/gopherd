@@ -7,28 +7,21 @@ import (
 	"hived-go/internal/protocol/op"
 )
 
-// TestCustomJSONRateLimit ports operation_tests.cpp::custom_json_rate_limit:
-// the chain caps each account at HIVE_CUSTOM_OP_BLOCK_LIMIT (=5) custom*
-// operations per block. The 6th custom_json for the same account in the
-// same block must fail.
-//
-// C++ test pushes 3 scenarios:
-//   1. 5 custom_jsons in 5 separate txs (same block context) — success.
-//   2. 5 custom_jsons in 1 tx — success.
-//   3. 6 custom_jsons in 1 tx — failure on "insert_info.first->second <=
-//      HIVE_CUSTOM_OP_BLOCK_LIMIT".
-//
-// The Go fixture packs all pending ops into ONE transaction per block, so
-// scenarios (1) and (2) collapse to the same observable behavior: 5 ops in
-// one block-tx for alice succeeds; 6 ops in one block-tx for sam fails.
-// We additionally verify the cap RESETS each block by pushing 5 more for
-// alice in a fresh block immediately after the first 5.
+// TestCustomJSONRateLimit ports operation_tests.cpp::custom_json_rate_limit
+// for the ApplyBlock path. HIVE_CUSTOM_OP_BLOCK_LIMIT (=5) is a
+// mempool-only rule in hived: custom_op_visitor at database.cpp:578-616
+// fires from _push_transaction at :632, not from _apply_block.
+// Block-apply trusts the producing witness, so blocks legitimately
+// carry >5 custom_json per account on mainnet (and replay must accept
+// them). The push_transaction-path enforcement is a separate feature
+// (ghive does not yet have a push_transaction entrypoint) and will get
+// its own test alongside that wiring.
 func TestCustomJSONRateLimit(t *testing.T) {
 	f := New(t)
-	f.Actors("alice", "bob", "sam")
+	f.Actors("alice", "sam")
 	f.GenerateBlock()
 
-	t.Log("--- 5 custom_json ops in one tx for alice: succeeds")
+	t.Log("--- 5 custom_json ops in one block-tx for alice: succeeds")
 	for i := 0; i < 5; i++ {
 		f.PushOp(op.CustomJSON{
 			RequiredPostingAuths: []string{"alice"},
@@ -40,45 +33,16 @@ func TestCustomJSONRateLimit(t *testing.T) {
 		t.Fatalf("expected 5 ops for alice to succeed, got: %v", err)
 	}
 
-	t.Log("--- another 5 in the NEXT block for alice: succeeds (counter resets per block)")
-	for i := 0; i < 5; i++ {
-		f.PushOp(op.CustomJSON{
-			RequiredPostingAuths: []string{"alice"},
-			ID:                   "test",
-			JSON:                 `"again"`,
-		})
-	}
-	if err := f.tryGenerateBlock(); err != nil {
-		t.Fatalf("expected 5 ops for alice in fresh block to succeed, got: %v", err)
-	}
-
-	t.Log("--- 5 in one tx for bob: succeeds")
-	for i := 0; i < 5; i++ {
-		f.PushOp(op.CustomJSON{
-			RequiredPostingAuths: []string{"bob"},
-			ID:                   "test",
-			JSON:                 `"foobar"`,
-		})
-	}
-	if err := f.tryGenerateBlock(); err != nil {
-		t.Fatalf("expected 5 ops for bob to succeed, got: %v", err)
-	}
-
-	t.Log("--- 6 in one tx for sam: fails with HIVE_CUSTOM_OP_BLOCK_LIMIT")
+	t.Log("--- 6 in one block-tx for sam: ALSO succeeds (cap is push_transaction-only)")
 	for i := 0; i < 6; i++ {
 		f.PushOp(op.CustomJSON{
 			RequiredPostingAuths: []string{"sam"},
 			ID:                   "test",
-			JSON:                 `"toomany"`,
+			JSON:                 `"manyops"`,
 		})
 	}
-	err := f.tryGenerateBlock()
-	if err == nil {
-		t.Fatalf("expected 6 ops for sam to fail")
+	if err := f.tryGenerateBlock(); err != nil {
+		t.Fatalf("expected 6 ops for sam to succeed under ApplyBlock (cap is mempool-only), got: %v", err)
 	}
-	// The error chain should mention the cap. We don't pin the exact
-	// wording — only that it references "custom json" or the cap value.
-	if !strings.Contains(err.Error(), "custom json") && !strings.Contains(err.Error(), "custom_json") {
-		t.Fatalf("expected error to reference custom_json rate limit, got: %v", err)
-	}
+	_ = strings.Contains // keep import; will be needed by the push_transaction port
 }

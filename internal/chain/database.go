@@ -495,7 +495,7 @@ func (d *Database) enforceCustomOpBlockLimit(signed *tx.SignedTransaction) error
 // rawBlock is the FC-binary block payload as decompressed by blocklog
 // (signed_block_header + transactions vector). blockNum is the 1-indexed
 // block number. stats may be nil.
-func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOptions, stats *Stats) (objects.DynamicGlobalProperty, error) {
+func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOptions, stats *Stats) (dgpoOut objects.DynamicGlobalProperty, retErr error) {
 	d.applyMu.Lock()
 	defer d.applyMu.Unlock()
 
@@ -505,6 +505,23 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	}
 
 	session := d.session
+
+	// Block-level savepoint: hived's apply_block is wrapped in a
+	// `_pending_tx_session` that is undone on ANY failure (header,
+	// tx, post-tx hook). Without this, a successful tx N's dedup
+	// PutTransactionRecord (or DGPO mutation, or vop emission) would
+	// stick after a subsequent tx fails, and the next p2p retry of
+	// the same block would see "duplicate transaction" forever.
+	// Skipped under SkipTxSavepoints (canonical block_log replay
+	// where the producing network already validated the block).
+	if !opts.SkipTxSavepoints {
+		blockSnap := session.Snapshot()
+		defer func() {
+			if retErr != nil {
+				session.Restore(blockSnap)
+			}
+		}()
+	}
 	hf := hardfork.SetForBlock(blockNum)
 	// hived's head_block_time() during transactions returns dgpo.time,
 	// which is the PREVIOUS block's timestamp — update_global_dynamic_data
@@ -585,6 +602,14 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	// witness-version assertion read them.
 	if err := processHeaderExtensions(session, &hdr); err != nil {
 		return objects.DynamicGlobalProperty{}, fmt.Errorf("apply_block %d header_extensions: %w", blockNum, err)
+	}
+	// HF5+ running-version check fires AFTER the extension has had a
+	// chance to update the witness's running_version from this block's
+	// hardfork_version_vote. Mirrors hived database.cpp:2266-2275.
+	if !opts.SkipBlockSignature {
+		if err := assertWitnessVersion(session, &hdr, blockNum, hf); err != nil {
+			return objects.DynamicGlobalProperty{}, err
+		}
 	}
 
 	d.txReader.Reset(rawBlock[hdrLen:])
@@ -703,17 +728,12 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 				return objects.DynamicGlobalProperty{}, fmt.Errorf("apply_block %d tx %d: %w", blockNum, i, failErr)
 			}
 		}
-		// HIVE_CUSTOM_OP_BLOCK_LIMIT (=5) — enforce BEFORE op apply to
-		// mirror database.cpp::_push_transaction lines 631-634 (the
-		// custom_op_visitor runs over the tx's ops and FC_ASSERTs the
-		// per-account cap; only on success do the per-tx counts get
-		// merged into the block-wide counter). On overflow the entire
-		// tx is rejected.
-		if cErr := d.enforceCustomOpBlockLimit(&txRes.SignedTx); cErr != nil {
-			txFailed = true
-			failOp = "tx-custom-op-limit"
-			failErr = cErr
-		}
+		// HIVE_CUSTOM_OP_BLOCK_LIMIT (=5) is a mempool-only rule in
+		// hived (custom_op_visitor at database.cpp:578-616 fires from
+		// _push_transaction at :632, NOT from _apply_block). Block
+		// apply trusts the producing witness, so legitimate mainnet
+		// blocks can carry >5 custom_json per account. The cap will be
+		// re-applied when ghive grows a push_transaction entrypoint.
 		if !txFailed {
 			// Phase 5.1 pre-apply tx hook: reset per-tx differential
 			// usage accumulator before any op fires. HF20+ only.
