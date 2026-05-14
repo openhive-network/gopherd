@@ -510,9 +510,12 @@ func (voteEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	prev, prevExists := objects.GetCommentVoteRef(ctx.DB, v.Voter, v.Author, v.Permlink)
 	isNew := !prevExists
 
-	// hived only enforces "weight != 0" on FIRST cast; recasts may set
-	// weight to 0 to remove the vote (libraries/chain/hive_evaluator_social.cpp:456).
-	if isNew && v.Weight == 0 {
+	// hived only enforces "weight != 0" on FIRST cast post-HF20.
+	// The HF20 vote evaluator at hive_evaluator_social.cpp:638 has
+	// the assert; the pre-HF20 evaluator at :314+ does not — pre-HF20
+	// a zero-weight first-cast just falls through (with the
+	// abs_rshares dust check exempting it at :369).
+	if isNew && v.Weight == 0 && ctx.Hardforks.Has(hardfork.HF20) {
 		return ErrVoteWeightZero
 	}
 	// HF6+ rejects recasts with the same percent as the prior vote

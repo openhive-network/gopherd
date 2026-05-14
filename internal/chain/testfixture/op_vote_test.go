@@ -206,7 +206,12 @@ func TestVoteApplyNonexistentComment(t *testing.T) {
 // Voting with weight=0 on a never-voted comment should fail (hived
 // asserts `o.weight != 0` for first-cast).
 func TestVoteApplyZeroWeightFirstCast(t *testing.T) {
+	// HF20+ enforces "weight != 0 on first cast" (hf20_vote_evaluator
+	// at hive_evaluator_social.cpp:638). Pre-HF20 the evaluator at :314
+	// has no such assert; mainnet block 3,334,962 carries a zero-weight
+	// first-cast vote that hived accepts.
 	f := New(t)
+	f.HardforksUpTo(hardfork.HF20)
 	f.Actor("alice")
 	f.Actor("bob")
 	f.FundVesting("bob", 100_000_000)
@@ -220,7 +225,7 @@ func TestVoteApplyZeroWeightFirstCast(t *testing.T) {
 		Voter: "bob", Author: "alice", Permlink: "p", Weight: 0,
 	})
 	if err == nil {
-		t.Fatal("expected zero-weight first vote to fail")
+		t.Fatal("expected zero-weight first vote post-HF20 to fail")
 	}
 }
 
