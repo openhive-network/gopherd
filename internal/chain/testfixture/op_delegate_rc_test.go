@@ -467,20 +467,18 @@ func TestRCDelegationRemovalNoRC(t *testing.T) {
 	}
 }
 
-// TestDelegateRC_PhaseDeferredCases lists the 8 C++ tests in the same
-// file that depend on Phase 2+ work and are skipped here.
+// TestDelegateRC_PhaseDeferredCases tracks the C++ direct_rc_delegation.cpp
+// cases that still depend on later RC phases. The other six cases
+// (regeneration, negative_regeneration_bug, vesting_withdrawal,
+// vesting_withdrawal_routes, update_outdel_overflow_delegatee,
+// update_outdel_overflow_delegatee_performance) are fully ported in
+// op_direct_rc_delegation_parity_test.go and no longer belong here.
 func TestDelegateRC_PhaseDeferredCases(t *testing.T) {
 	cases := []struct {
 		name, reason string
 	}{
 		{"update_outdel_overflow", "Phase 2: expired_delegation overflow queue"},
 		{"update_outdel_overflow_many_accounts", "Phase 2: expired_delegation overflow sweep"},
-		{"direct_rc_delegation_vesting_withdrawal", "Phase 2: vesting_withdrawal interaction"},
-		{"direct_rc_delegation_vesting_withdrawal_routes", "Phase 2: vesting_withdrawal routes interaction"},
-		{"rc_delegation_regeneration", "Phase 5: cost-deduction during replay"},
-		{"rc_negative_regeneration_bug", "Phase 2+5: combined drain + overflow"},
-		{"update_outdel_overflow_delegatee", "Phase 2: expired_delegation overflow"},
-		{"update_outdel_overflow_delegatee_performance", "Phase 2/perf"},
 	}
 	for _, c := range cases {
 		c := c

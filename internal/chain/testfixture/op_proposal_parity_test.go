@@ -1306,3 +1306,19 @@ func TestConvertingHiveToDhf_cpp(t *testing.T) {
 		t.Fatalf("treasury HBD did not increase: pre=%d post=%d", preHbd, postHbd)
 	}
 }
+
+// TestSkippedGeneratingPaymentsPerformance_cpp is a documented skip stub
+// for the SECOND `generating_payments` BOOST_AUTO_TEST_CASE in
+// proposal_tests.cpp (around line 4615) — a stress-test variant that
+// spawns 30 000 accounts and drives the SPS payout loop at scale.
+//
+// We intentionally do NOT port the performance variant: it would multiply
+// the testfixture's wall-clock cost by orders of magnitude without
+// covering any consensus behavior that the functional variant doesn't
+// already exercise. The functional `generating_payments` case at C++
+// line 1074 is ported as TestGeneratingPayments_cpp above.
+//
+// Listed here as a skip so the parity audit can locate it by name.
+func TestSkippedGeneratingPaymentsPerformance_cpp(t *testing.T) {
+	t.Skip("intentional non-port: generating_payments performance variant (30k accounts); functional variant covered by TestGeneratingPayments_cpp")
+}

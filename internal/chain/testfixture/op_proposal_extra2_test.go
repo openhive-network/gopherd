@@ -524,3 +524,165 @@ func TestProposalDbRemoveExpiredGovernanceVotes001_cpp(t *testing.T) {
 		t.Fatal("witness vote for accw2 should be cleared after exp2")
 	}
 }
+
+// TestProposalDbRemoveExpiredGovernanceVotesWithProxy_cpp ports
+// db_remove_expired_governance_votes_with_proxy — when an account
+// proxies its governance weight, the proxy's own governance ops carry
+// the proxied vests up the chain. Once the proxy account's expiration
+// passes, the per-block sweep clears its witness votes (which removes
+// both the proxy's direct AND the proxied account's contribution from
+// the witness) and proposal votes, and resets its expiration to "max"
+// (0 in Go).
+//
+// We assert:
+//   - witness2.TotalVotesVests == bobproxy.Vests + carol.Vests after proxy+witness_vote
+//   - alice & bobproxy expirations are non-zero after their ops
+//   - after the sweep tick, both witnesses' votes go to 0 AND both
+//     accounts' proposal votes survive (Go updates p.TotalVotes eagerly
+//     and proposal votes themselves get cleared with the account)
+//   - alice & bobproxy expirations reset to 0
+func TestProposalDbRemoveExpiredGovernanceVotesWithProxy_cpp(t *testing.T) {
+	f := New(t)
+	f.HardforksUpTo(hardfork.HF25)
+	f.Actors("witness", "witness2", "propcreator", "propcreator2", "alice", "bobproxy", "carol")
+	f.FundVesting("witness", 1_000)
+	f.FundVesting("witness2", 1_000)
+	f.FundVesting("propcreator", 3_000)
+	f.FundVesting("propcreator2", 3_000)
+	f.FundVesting("alice", 5_000)
+	f.FundVesting("bobproxy", 5_000)
+	f.FundVesting("carol", 5_000)
+	f.GenerateBlock()
+
+	// carol proxies to bobproxy — carol's direct vests now propagate to
+	// bobproxy's slot 0, and any witness vote by bobproxy carries
+	// (bobproxy.vests + carol.vests).
+	f.MustApplyOp(op.AccountWitnessProxy{Account: "carol", Proxy: "bobproxy"})
+
+	// Fund proposal creators with HBD for treasury fees.
+	f.FundLiquidHBD("propcreator", 10_000_000)
+	f.FundLiquidHBD("propcreator2", 10_000_000)
+
+	// Create two proposals.
+	start := f.HeadBlockTime()
+	end := start + 60*60*24*100 // 100 days, easily long enough
+	f.MustApplyOp(op.CreateProposal{
+		Creator: "propcreator", Receiver: "propcreator",
+		StartDate: start, EndDate: end,
+		DailyPay: HBD(100), Subject: "s", Permlink: "p0",
+	})
+	f.MustApplyOp(op.CreateProposal{
+		Creator: "propcreator2", Receiver: "propcreator2",
+		StartDate: start, EndDate: end,
+		DailyPay: HBD(101), Subject: "s", Permlink: "p1",
+	})
+	pid0 := findProposalIDByCreator(f, "propcreator")
+	pid1 := findProposalIDByCreator(f, "propcreator2")
+	if pid0 < 0 || pid1 < 0 {
+		t.Fatalf("expected both proposals; got pid0=%d pid1=%d", pid0, pid1)
+	}
+
+	// Register both witnesses.
+	for _, w := range []string{"witness", "witness2"} {
+		f.MustApplyOp(op.WitnessUpdate{
+			Owner: w, URL: "http://something.com",
+			BlockSigningKey: [33]byte{0x02, w[len(w)-1]},
+			Props: op.LegacyChainProperties{
+				AccountCreationFee: LegacyHIVE(1_000),
+				MaximumBlockSize:   65536,
+				HBDInterestRate:    1000,
+			},
+			Fee: HIVE(0),
+		})
+	}
+	f.GenerateBlock()
+
+	// alice → witness; bobproxy → witness2.
+	f.MustApplyOp(op.AccountWitnessVote{Account: "alice", Witness: "witness", Approve: true})
+	f.MustApplyOp(op.AccountWitnessVote{Account: "bobproxy", Witness: "witness2", Approve: true})
+
+	// proposal votes.
+	f.MustApplyOp(op.UpdateProposalVotes{Voter: "alice", ProposalIDs: []int64{pid0}, Approve: true})
+	f.MustApplyOp(op.UpdateProposalVotes{Voter: "bobproxy", ProposalIDs: []int64{pid1}, Approve: true})
+
+	alice := f.Account_("alice")
+	bob := f.Account_("bobproxy")
+	carol := f.Account_("carol")
+
+	// witness has alice's direct vests.
+	if got, want := f.Witness("witness").TotalVotesVests, alice.VestingShares; got != want {
+		t.Fatalf("witness votes: got %d, want %d", got, want)
+	}
+	// witness2 has bobproxy.vests + carol.vests (carol proxied to bobproxy).
+	if got, want := f.Witness("witness2").TotalVotesVests, bob.VestingShares+carol.VestingShares; got != want {
+		t.Fatalf("witness2 votes: got %d, want %d (bob=%d carol=%d)", got, want, bob.VestingShares, carol.VestingShares)
+	}
+
+	if alice.GovernanceVoteExpiration == 0 {
+		t.Fatal("alice.GovernanceVoteExpiration should be set after governance ops")
+	}
+	if bob.GovernanceVoteExpiration == 0 {
+		t.Fatal("bobproxy.GovernanceVoteExpiration should be set after governance ops")
+	}
+
+	// Roll past the latest expiration; the sweep clears both accounts.
+	latest := alice.GovernanceVoteExpiration
+	if bob.GovernanceVoteExpiration > latest {
+		latest = bob.GovernanceVoteExpiration
+	}
+	delta := latest - f.HeadBlockTime() + 60*60
+	f.SkipSeconds(delta)
+
+	// witness/witness2 votes should be 0 (alice's direct vote gone;
+	// bobproxy's direct AND carol's proxied vote gone).
+	if got := f.Witness("witness").TotalVotesVests; got != 0 {
+		t.Fatalf("witness votes after sweep: got %d, want 0", got)
+	}
+	if got := f.Witness("witness2").TotalVotesVests; got != 0 {
+		t.Fatalf("witness2 votes after sweep: got %d, want 0", got)
+	}
+	if f.HasWitnessVote("alice", "witness") {
+		t.Fatal("alice's witness vote should be cleared")
+	}
+	if f.HasWitnessVote("bobproxy", "witness2") {
+		t.Fatal("bobproxy's witness vote should be cleared")
+	}
+	// Proposal votes by alice + bobproxy should be cleared.
+	s := state.NewSession(f.State)
+	if has, _ := objects.HasProposalVote(s, pid0, "alice"); has {
+		t.Fatal("alice's proposal vote should be cleared after sweep")
+	}
+	if has, _ := objects.HasProposalVote(s, pid1, "bobproxy"); has {
+		t.Fatal("bobproxy's proposal vote should be cleared after sweep")
+	}
+
+	postAlice := f.Account_("alice")
+	postBob := f.Account_("bobproxy")
+	if postAlice.GovernanceVoteExpiration != 0 {
+		t.Fatalf("alice.GovernanceVoteExpiration after sweep: got %d, want 0", postAlice.GovernanceVoteExpiration)
+	}
+	if postBob.GovernanceVoteExpiration != 0 {
+		t.Fatalf("bobproxy.GovernanceVoteExpiration after sweep: got %d, want 0", postBob.GovernanceVoteExpiration)
+	}
+}
+
+// TestProposalDbRemoveExpiredGovernanceVotesThresholdExceeded_cpp ports
+// db_remove_expired_governance_votes_threshold_exceeded — the C++ sweep
+// processes at most HIVE_PROPOSAL_REMOVE_THRESHOLD (= 20) proposal-vote
+// removals per block, deferring the remainder to subsequent blocks. The
+// test asserts the per-block sweep cadence: at each block one user's
+// witness votes (≤30) AND a slice of their proposal votes get removed,
+// with the remaining proposal-vote rows held over until the next block.
+//
+// Go's removeExpiredGovernanceVotes (chain/governance_votes.go) does
+// NOT implement this threshold — it processes ALL due accounts in a
+// single block, immediately clearing every proposal_vote / witness_vote
+// row and resetting GovernanceVoteExpiration to 0. The whole point of
+// this C++ test (per-block accounting of remaining-votes/remaining-
+// witness-votes/remaining-expirations across many blocks) doesn't apply
+// to the Go semantics.
+//
+// Skip with a clear note so the gap is visible.
+func TestProposalDbRemoveExpiredGovernanceVotesThresholdExceeded_cpp(t *testing.T) {
+	t.Skip("missing: HIVE_PROPOSAL_REMOVE_THRESHOLD per-block governance-sweep throttling (Go clears all due accounts in one block)")
+}

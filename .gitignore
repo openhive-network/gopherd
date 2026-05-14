@@ -35,6 +35,11 @@ data/
 
 # block_log fixtures sit in the repo root for now; do NOT commit them
 /block_log
+/block_log.[0-9]*M
 /block_log.index
 /block_log.artifacts
 /block_log_part.*
+
+# Local run dir for replay/p2p experiments
+/run/
+/ghive.pid
