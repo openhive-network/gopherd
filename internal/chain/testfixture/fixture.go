@@ -29,11 +29,13 @@
 package testfixture
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"testing"
 
 	"hived-go/internal/chain"
 	"hived-go/internal/chain/evaluator"
+	"hived-go/internal/crypto"
 	"hived-go/internal/protocol/asset"
 	"hived-go/internal/protocol/auth"
 	"hived-go/internal/protocol/block"
@@ -83,11 +85,12 @@ func LegacyHIVE(amount int64) asset.LegacyHiveAsset {
 type Fixture struct {
 	t *testing.T
 
-	State    *state.Database
-	Chain    *chain.Database
-	BlockNum uint32 // last applied block number
-	prevID   block.ID
-	pending  []op.Op
+	State            *state.Database
+	Chain            *chain.Database
+	BlockNum         uint32 // last applied block number
+	prevID           block.ID
+	pending          []op.Op
+	pendingSignedTxs []tx.SignedTransaction
 
 	// curBlockTime tracks the timestamp of the next block to be
 	// generated. Starts at network.GenesisTimeUnix + BlockInterval.
@@ -97,6 +100,21 @@ type Fixture struct {
 	// ApplyBlock call. Tests opt in to mirror hived's
 	// rc-skip-reject-not-enough-rc=0 path (default-off in replay).
 	EnforceRC bool
+
+	// RequireSignatures, when true, flips ApplyOptions.SkipTransactionSignatures
+	// to false on every ApplyBlock call (replay mode is opt-in OFF by
+	// default to keep MustApplyOp's synthetic-tx convenience working).
+	// Tests that want to exercise tx_missing_active_auth /
+	// tx_duplicate_sig / tx_irrelevant_sig parity flip this to true and
+	// use BuildSignedTx + PushSignedTx (which sign properly) instead of
+	// PushOp/MustApplyOp.
+	RequireSignatures bool
+
+	// actorKeys is the per-actor PrivateKey cache keyed by name. Filled
+	// lazily by Actor() so tests calling f.ActorKey("alice") get a stable
+	// key even when RequireSignatures is off. Mirrors hived's
+	// ACTORS(...) macro which seeds `alice_private_key = generate_private_key("alice")`.
+	actorKeys map[string]*crypto.PrivateKey
 }
 
 // New initializes an empty database with the genesis state and returns
@@ -207,7 +225,7 @@ func (f *Fixture) GenerateBlock() uint32 {
 		Sync:                      false,
 		SkipUnknownOps:            false,
 		TolerateFailingOps:        false,
-		SkipTransactionSignatures: true,
+		SkipTransactionSignatures: !f.RequireSignatures,
 		SkipBlockSignature:        true,
 		EnforceRC:                 f.EnforceRC,
 	}, &stats)
@@ -318,6 +336,13 @@ func (f *Fixture) HeadBlockTimeForApply() uint32 {
 // non-empty memo key. We bypass account_create_operation (and its
 // fee) by writing the row directly — same shortcut as hived's
 // account_create() helper which forwards to db_plugin->debug_update.
+//
+// Also seeds an AccountAuthority row with owner/active/posting all
+// satisfied by sha256("<name>") — the same convention as hived's
+// generate_private_key("<name>") in db_fixture. The posting variant
+// uses sha256("<name>_post"). This lets tests retrieve a stable key
+// via f.ActorKey(name) / f.ActorPostingKey(name) and build signed
+// transactions when RequireSignatures is on.
 func (f *Fixture) Actor(name string) {
 	f.t.Helper()
 	s := state.NewSession(f.State)
@@ -330,9 +355,84 @@ func (f *Fixture) Actor(name string) {
 		VotingManaCurrent:    10000,
 		VotingManaLastUpdate: f.HeadBlockTime(),
 	})
+	// Seed AccountAuthority so VerifyAuthority can resolve the row when
+	// RequireSignatures is on. The active key is sha256("<name>") and
+	// the posting key is sha256("<name>_post") — same convention used
+	// by hived's database_fixture::generate_private_key.
+	activeKey := f.actorKey(name).PublicKey()
+	postingKey := f.actorPostingKey(name).PublicKey()
+	objects.PutAccountAuthority(s, &objects.AccountAuthority{
+		Account: name,
+		Owner: auth.Authority{
+			WeightThreshold: 1,
+			KeyAuths:        []auth.KeyAuth{{Key: activeKey, Weight: 1}},
+		},
+		Active: auth.Authority{
+			WeightThreshold: 1,
+			KeyAuths:        []auth.KeyAuth{{Key: activeKey, Weight: 1}},
+		},
+		Posting: auth.Authority{
+			WeightThreshold: 1,
+			KeyAuths:        []auth.KeyAuth{{Key: postingKey, Weight: 1}},
+		},
+	})
 	if err := s.Commit(false); err != nil {
 		f.t.Fatalf("testfixture: actor %q: %v", name, err)
 	}
+}
+
+// ActorKey returns the deterministic active/owner private key for
+// `name` — sha256("<name>"), matching hived's generate_private_key.
+// The key is also bound to the account's Active and Owner authority
+// rows (see Actor), so signing with it satisfies any active-or-owner
+// authority requirement.
+func (f *Fixture) ActorKey(name string) *crypto.PrivateKey {
+	f.t.Helper()
+	return f.actorKey(name)
+}
+
+// ActorPostingKey returns the deterministic posting-authority private
+// key for `name` — sha256("<name>_post").
+func (f *Fixture) ActorPostingKey(name string) *crypto.PrivateKey {
+	f.t.Helper()
+	return f.actorPostingKey(name)
+}
+
+func (f *Fixture) actorKey(name string) *crypto.PrivateKey {
+	if f.actorKeys == nil {
+		f.actorKeys = make(map[string]*crypto.PrivateKey, 4)
+	}
+	if k, ok := f.actorKeys[name]; ok {
+		return k
+	}
+	k := derivePrivateKey(f.t, name)
+	f.actorKeys[name] = k
+	return k
+}
+
+func (f *Fixture) actorPostingKey(name string) *crypto.PrivateKey {
+	postingName := name + "_post"
+	if f.actorKeys == nil {
+		f.actorKeys = make(map[string]*crypto.PrivateKey, 4)
+	}
+	if k, ok := f.actorKeys[postingName]; ok {
+		return k
+	}
+	k := derivePrivateKey(f.t, postingName)
+	f.actorKeys[postingName] = k
+	return k
+}
+
+// derivePrivateKey returns sha256(seed)-derived PrivateKey, mirroring
+// hived's generate_private_key seed convention.
+func derivePrivateKey(t *testing.T, seed string) *crypto.PrivateKey {
+	t.Helper()
+	digest := sha256.Sum256([]byte(seed))
+	k, err := crypto.PrivateKeyFromBytes(digest[:])
+	if err != nil {
+		t.Fatalf("testfixture: derive private key for %q: %v", seed, err)
+	}
+	return k
 }
 
 // Actors creates multiple accounts in one shot.
@@ -429,7 +529,7 @@ func (f *Fixture) tryGenerateBlock() error {
 		Sync:                      false,
 		SkipUnknownOps:            false,
 		TolerateFailingOps:        false,
-		SkipTransactionSignatures: true,
+		SkipTransactionSignatures: !f.RequireSignatures,
 		SkipBlockSignature:        true,
 		EnforceRC:                 f.EnforceRC,
 	}, &stats)
@@ -549,7 +649,76 @@ func (f *Fixture) DGPO() objects.DynamicGlobalProperty {
 	return dgpo
 }
 
+// BuildSignedTx assembles a signed_transaction from `ops` and signs it
+// with each of `keys`. Returns the assembled transaction. Mirrors
+// hived's `push_transaction(tx, {keys...})` test helper.
+//
+// The chain ID prefix used in the sig digest follows the active
+// hardfork — pre-HF24 = network.OldChainID (zero), HF24+ = network.ChainID.
+func (f *Fixture) BuildSignedTx(ops []op.Operation, keys ...*crypto.PrivateKey) tx.SignedTransaction {
+	f.t.Helper()
+	body := tx.Transaction{
+		RefBlockNum:    uint16(f.BlockNum & 0xFFFF),
+		RefBlockPrefix: 0,
+		Expiration:     f.curBlockTime + 60,
+		Extensions:     nil,
+	}
+	body.Operations = make([]op.Op, 0, len(ops))
+	for _, o := range ops {
+		body.Operations = append(body.Operations, op.FromOperation(o))
+	}
+	chainID := f.activeChainID()
+	unsigned := tx.AppendTransactionBody(nil, &body)
+	digest := crypto.SHA256Of2(chainID[:], unsigned)
+	stx := tx.SignedTransaction{Transaction: body}
+	for _, k := range keys {
+		sig, err := crypto.SignCompact(k, digest)
+		if err != nil {
+			f.t.Fatalf("testfixture: SignCompact: %v", err)
+		}
+		stx.Signatures = append(stx.Signatures, sig)
+	}
+	return stx
+}
+
+// activeChainID returns network.ChainID if HF24 has fired on the
+// current chain, else network.OldChainID. Reads HardforkPropertyObject
+// from a fresh session.
+func (f *Fixture) activeChainID() network.Hash32 {
+	s := state.NewSession(f.State)
+	if hp, err := objects.GetHardforkPropertyObject(s); err == nil {
+		if hp.LastHardfork >= uint32(hardfork.HF24) {
+			return network.ChainID
+		}
+	}
+	return network.OldChainID
+}
+
+// PushSignedTx queues a pre-built signed_transaction for the next
+// GenerateBlock. Mirrors hived's push_transaction in tests that build
+// custom signature sets to exercise tx_missing_*_auth / tx_duplicate_sig
+// / tx_irrelevant_sig.
+func (f *Fixture) PushSignedTx(stx tx.SignedTransaction) {
+	f.pendingSignedTxs = append(f.pendingSignedTxs, stx)
+}
+
+// ApplySignedTx queues `stx` and immediately generates a 1-tx block.
+// Returns the apply error (nil on success).
+func (f *Fixture) ApplySignedTx(stx tx.SignedTransaction) error {
+	f.PushSignedTx(stx)
+	return f.tryGenerateBlock()
+}
+
+// ApplyOpAs is sugar for "build a signed_transaction around `o`, sign
+// it with `key`, and apply". Useful when the test only cares about the
+// happy path.
+func (f *Fixture) ApplyOpAs(o op.Operation, key *crypto.PrivateKey) error {
+	stx := f.BuildSignedTx([]op.Operation{o}, key)
+	return f.ApplySignedTx(stx)
+}
+
 // buildBlock packs `ops` into a single signed_transaction (if any),
+// plus any pre-built signed transactions queued via PushSignedTx,
 // computes the merkle root, and serializes a complete signed_block
 // with empty witness signature. Returns the raw block bytes.
 //
@@ -580,10 +749,16 @@ func (f *Fixture) buildBlock(ops []op.Op, blockTime uint32) []byte {
 			},
 		}
 		signedBytes := tx.AppendSignedTransaction(nil, &signedTx)
-		txBytes = signedBytes
+		txBytes = append(txBytes, signedBytes...)
 		// merkle uses the SIGNED tx digest (sha256 of signed bytes).
-		digests = []tx.Digest{tx.MerkleDigestFromBytes(signedBytes)}
+		digests = append(digests, tx.MerkleDigestFromBytes(signedBytes))
 	}
+	for i := range f.pendingSignedTxs {
+		signedBytes := tx.AppendSignedTransaction(nil, &f.pendingSignedTxs[i])
+		txBytes = append(txBytes, signedBytes...)
+		digests = append(digests, tx.MerkleDigestFromBytes(signedBytes))
+	}
+	f.pendingSignedTxs = nil
 	hdr.TransactionMerkleRoot = tx.MerkleRoot(digests)
 
 	// Header → bytes; signed header = header || 65-byte zero signature.

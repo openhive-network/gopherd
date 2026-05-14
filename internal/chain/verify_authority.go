@@ -87,6 +87,18 @@ func VerifyAuthority(s *state.Session, signedTx *tx.SignedTransaction, unsignedB
 	return VerifyAuthorityWithKeys(s, signedTx, keys)
 }
 
+// ErrDuplicateSig is returned when two signatures recover the same
+// public key. Mirrors hived's tx_duplicate_sig exception
+// (libraries/protocol/transaction.cpp:108, FC_ASSERT in
+// get_signature_keys).
+var ErrDuplicateSig = fmt.Errorf("verify_authority: duplicate signature included")
+
+// ErrIrrelevantSig is returned when a tx carries one or more signatures
+// that were not needed to satisfy any required authority. Mirrors
+// hived's tx_irrelevant_sig exception (libraries/protocol/
+// transaction_util.cpp:51, FC_ASSERT on !remove_unused_signatures()).
+var ErrIrrelevantSig = fmt.Errorf("verify_authority: unnecessary signature(s) detected (irrelevant)")
+
 // RecoverTxSignerKeys recovers the public keys behind each tx.Signatures
 // entry. Pure CPU work — no state access — so callers may run it in
 // parallel across goroutines (the apply pipeline fans this out before
@@ -94,9 +106,14 @@ func VerifyAuthority(s *state.Session, signedTx *tx.SignedTransaction, unsignedB
 //
 // chainID is the prefix mixed into the sig digest (zero pre-HF24,
 // network.ChainID HF24+).
+//
+// Returns ErrDuplicateSig if two distinct signatures recover the same
+// public key — mirrors hived's `flat_set::insert(...).second` assertion
+// in signed_transaction::get_signature_keys.
 func RecoverTxSignerKeys(signedTx *tx.SignedTransaction, unsignedBytes []byte, chainID network.Hash32) ([]crypto.PublicKey, error) {
 	digest := crypto.SHA256Of2(chainID[:], unsignedBytes)
 	keys := make([]crypto.PublicKey, 0, len(signedTx.Signatures))
+	seen := make(map[crypto.PublicKey]struct{}, len(signedTx.Signatures))
 	for i, sig := range signedTx.Signatures {
 		var compact crypto.CompactSignature
 		copy(compact[:], sig[:])
@@ -107,6 +124,10 @@ func RecoverTxSignerKeys(signedTx *tx.SignedTransaction, unsignedBytes []byte, c
 		if err != nil {
 			return nil, fmt.Errorf("verify_authority: recover signature %d: %w", i, err)
 		}
+		if _, dup := seen[k]; dup {
+			return nil, ErrDuplicateSig
+		}
+		seen[k] = struct{}{}
 		keys = append(keys, k)
 	}
 	return keys, nil
@@ -162,6 +183,15 @@ func VerifyAuthorityWithKeys(s *state.Session, signedTx *tx.SignedTransaction, k
 				!state.checkAuthority(AuthorityOwner, name, 0) {
 				return fmt.Errorf("verify_authority: missing posting authority for %q", name)
 			}
+		}
+	}
+	// Mirrors hived's `!s.remove_unused_signatures()` final assert in
+	// libraries/protocol/transaction_util.cpp:102 — every signature
+	// supplied must have been consumed by at least one satisfied
+	// authority. Extras are surfaced as tx_irrelevant_sig.
+	for _, k := range keys {
+		if !state.usedKeys[k] {
+			return ErrIrrelevantSig
 		}
 	}
 	return nil
