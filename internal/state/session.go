@@ -310,6 +310,13 @@ func (s *Session) Put(table TableID, index IndexID, body, value []byte) {
 	}
 	if !hadEntry {
 		s.overlayKeys.Set(fullKey)
+		// Growing the overlay btree invalidates any cached IterG snapshot:
+		// IterG returns a structural snapshot of the btree at Iter() time,
+		// so a later Seek wouldn't observe a key inserted afterward. This
+		// surfaced as a "phantom empty" Range when a per-block hook did
+		// Put/Delete between two Range calls (e.g. governance sweep
+		// clearing proposal_vote rows account-by-account).
+		s.overlayItrCacheHas = false
 	}
 	if s.snapshotDepth > 0 {
 		s.undoLog = append(s.undoLog, sessionUndoEntry{key: fullKey, prev: existing, had: hadEntry})
@@ -336,6 +343,9 @@ func (s *Session) Delete(table TableID, index IndexID, body []byte) {
 	prev, exists := s.overlay[fullKey]
 	if !exists {
 		s.overlayKeys.Set(fullKey)
+		// See the matching note in Put: growing overlayKeys invalidates
+		// the cached IterG snapshot.
+		s.overlayItrCacheHas = false
 	}
 	if s.snapshotDepth > 0 {
 		s.undoLog = append(s.undoLog, sessionUndoEntry{key: fullKey, prev: prev, had: exists})
@@ -443,6 +453,18 @@ func (s *Session) Commit(sync bool) error {
 	s.mistrustDBAux = false
 	s.snapshotGen = 0
 	s.db.commitAll()
+	// Drop the cached pebble/mem iter: Pebble iterators take a snapshot at
+	// creation time and SetBounds re-positions WITHIN that snapshot — they
+	// don't observe writes committed to the backend after creation. Reusing
+	// the iter across blocks silently hides newly-committed rows from any
+	// per-block hook that does a Range over a sparse table (e.g. the
+	// governance-vote sweep ranging proposal_vote rows). memIter doesn't
+	// have this issue, but always-close-on-Commit keeps the contract
+	// uniform across backends. The next Range allocates a fresh iter.
+	if s.iter != nil {
+		_ = s.iter.Close()
+		s.iter = nil
+	}
 	return nil
 }
 
@@ -697,6 +719,12 @@ func (s *Session) Range(table TableID, index IndexID, prefix []byte, fn func(bod
 	}
 	iter.First()
 	rangeErr := s.rangeMerge(iter, &s.overlayItrCache, &overlayValid, upperStr, emit)
+	// IterG snapshots the btree at Iter() time; after a full iteration it
+	// has consumed its internal cursor and a subsequent Seek can fail to
+	// reposition (the failure mode that caused governance sweep to skip
+	// rows on the 2nd account it processed). Invalidate so the next
+	// Range builds a fresh IterG.
+	s.overlayItrCacheHas = false
 	return rangeErr
 }
 
