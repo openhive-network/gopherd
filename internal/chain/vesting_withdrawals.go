@@ -138,8 +138,8 @@ func processOneWithdrawal(s *state.Session, accountName string, scheduledTime ui
 	// HIVE for auto_vest=false entries (priced via the dynamic ratio).
 	// The remainder is paid to the account itself in HIVE.
 	var depositedVests int64
-	depositedVests += processWithdrawRoutes(s, accountName, toWithdraw, true)
-	depositedVests += processWithdrawRoutes(s, accountName, toWithdraw, false)
+	depositedVests += processWithdrawRoutes(s, accountName, toWithdraw, true, scheduledTime)
+	depositedVests += processWithdrawRoutes(s, accountName, toWithdraw, false, scheduledTime)
 
 	// Re-read account in case routing modified it (specifically, if a
 	// route loops back to the source account or shares the dgpo).
@@ -204,9 +204,14 @@ func processOneWithdrawal(s *state.Session, accountName string, scheduledTime ui
 		a.NextVestingWithdrawal = scheduledTime + vestingWithdrawIntervalForBlock(dgpoNow.HeadBlockNumber)
 		objects.PutVestingWithdrawalSchedule(s, a.NextVestingWithdrawal, accountName)
 	}
-	// HF20+: power-down decreased effective_vests → refresh RC cap.
+	// HF20+: power-down decreased effective_vests → refresh RC cap +
+	// clip any RC delegations now exceeding the new max. This mirrors
+	// rc_plugin.cpp post_apply_operation_visitor for
+	// fill_vesting_withdraw_operation, which calls
+	// update_after_vest_change(from_account, fill_new_mana=true,
+	// check_for_rc_delegation_overflow=true).
 	if dgpoNow, _ := objects.GetDGPO(s); hardfork.SetForBlock(dgpoNow.HeadBlockNumber).Has(hardfork.HF20) {
-		objects.RegenerateRCMana(&a, scheduledTime)
+		handleVestingWithdrawalRCImpact(s, &a, scheduledTime)
 	}
 	objects.PutAccount(s, &a)
 
@@ -219,7 +224,7 @@ func processOneWithdrawal(s *state.Session, accountName string, scheduledTime ui
 // for one account's withdrawal chunk. autoVest controls which pass we're
 // running — VESTS routes first (preserve precision), HIVE routes second.
 // Returns the total VESTS-satoshi diverted in this pass.
-func processWithdrawRoutes(s *state.Session, fromAccount string, toWithdraw int64, autoVest bool) int64 {
+func processWithdrawRoutes(s *state.Session, fromAccount string, toWithdraw int64, autoVest bool, now uint32) int64 {
 	var deposited int64
 	prefix := state.AppendAccountName(nil, fromAccount)
 	_ = s.Range(objects.WithdrawRouteTable, state.PrimaryIndex, prefix,
@@ -250,6 +255,26 @@ func processWithdrawRoutes(s *state.Session, fromAccount string, toWithdraw int6
 				if !hardfork.SetForBlock(dgpoNow.HeadBlockNumber).Has(hardfork.HF24) {
 					if fresh, ferr := objects.GetAccount(s, route.To); ferr == nil {
 						objects.AdjustProxiedWitnessVotes(s, &fresh, toDeposit)
+					}
+				}
+				// HF20+: route recipient's effective_vests increased →
+				// refresh their RC cap. C++ post_apply on
+				// fill_vesting_withdraw calls update_after_vest_change(
+				// op.to_account) with fill_new_mana=true, no overflow
+				// check (receiver gained vests, can't be over-delegated).
+				if hardfork.SetForBlock(dgpoNow.HeadBlockNumber).Has(hardfork.HF20) {
+					if fresh, ferr := objects.GetAccount(s, route.To); ferr == nil {
+						freshNow := fresh
+						eff := freshNow.VestingShares - freshNow.DelegatedVestingShares + freshNow.ReceivedVestingShares
+						if eff < 0 {
+							eff = 0
+						}
+						freshNow.LastMaxRC = eff - freshNow.DelegatedRCOut + freshNow.DelegatedRCIn
+						if freshNow.LastMaxRC < 0 {
+							freshNow.LastMaxRC = 0
+						}
+						objects.RegenerateRCMana(&freshNow, now)
+						objects.PutAccount(s, &freshNow)
 					}
 				}
 			} else {

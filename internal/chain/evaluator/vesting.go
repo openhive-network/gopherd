@@ -245,10 +245,18 @@ func (delegateVestingSharesEvaluator) Apply(ctx *Context, opArg op.Op) error {
 			Expiration:    expiration,
 		})
 	}
-	// HF20+: both sides' effective_vests changed → refresh RC caps.
+	// HF20+: both sides' effective_vests changed → refresh RC caps +
+	// clip any RC delegations now exceeding the new max. Mirrors C++
+	// rc_plugin.cpp post_apply on delegate_vesting_shares_operation,
+	// which calls update_after_vest_change(delegator, true, true) and
+	// update_after_vest_change(delegatee, true, true). Both sides need
+	// the overflow check because (a) the delegator's DelegatedVestingShares
+	// just rose (lowering their effective_vests), and (b) the delegatee's
+	// ReceivedVestingShares may have fallen back to 0 (lowering their
+	// effective_vests if they redelegated as RC).
 	if ctx.Hardforks.Has(hardfork.HF20) {
-		objects.RegenerateRCMana(&delegator, ctx.HeadBlockTime)
-		objects.RegenerateRCMana(&delegatee, ctx.HeadBlockTime)
+		objects.HandleVestingWithdrawalRCImpact(ctx.DB, &delegator, ctx.HeadBlockTime)
+		objects.HandleVestingWithdrawalRCImpact(ctx.DB, &delegatee, ctx.HeadBlockTime)
 	}
 	objects.PutAccount(ctx.DB, &delegator)
 	objects.PutAccount(ctx.DB, &delegatee)

@@ -828,6 +828,131 @@ func DeleteRCUsageBucket(s *state.Session, seqno uint32) {
 }
 
 // -----------------------------------------------------------------------------
+// Vesting → RC impact hook.
+// -----------------------------------------------------------------------------
+
+// RCDelegationReturnPeriodSec — HIVE_RC_DIRECT_DELEGATION_RETURN_PERIOD
+// = 5 days. Mirrors the regen time; the expired-row queue drains over
+// this window so over-delegated receivers can spend their bumped mana
+// before it's reclaimed.
+const RCDelegationReturnPeriodSec uint32 = 5 * 24 * 60 * 60
+
+// HandleVestingWithdrawalRCImpact is called when an account's effective
+// vesting decreases (vesting-withdrawal chunk, vesting-delegation
+// reduction, etc.). It recomputes the account's max_rc; if outgoing
+// delegations now exceed the new max, the surplus is "expired" — an
+// RCExpiredDelegation row is created (or extended) and the account's
+// DelegatedRCOut is reduced. Affected rc_direct_delegation rows are
+// clipped oldest-first. Each receiver's DelegatedRCIn and current mana
+// are also reduced to mirror the lost delegation.
+//
+// Caller responsibility: invoke this AFTER mutating VestingShares (or
+// ReceivedVestingShares / DelegatedVestingShares) and BEFORE PutAccount.
+// The account's LastMaxRC + RCManaCurrent are updated in place.
+//
+// Mirrors C++ rc_plugin::update_after_vest_change(account, true, true)
+// = (fill_new_mana=true, check_for_rc_delegation_overflow=true), the
+// post_apply visitor invokes on fill_vesting_withdraw_operation and
+// delegate_vesting_shares_operation.
+func HandleVestingWithdrawalRCImpact(s *state.Session, a *Account, now uint32) {
+	// effective_delegable_rc = effective_vesting - DelegatedRCOut
+	eff := a.VestingShares - a.DelegatedVestingShares + a.ReceivedVestingShares
+	if eff < 0 {
+		eff = 0
+	}
+	a.LastMaxRC = eff - a.DelegatedRCOut + a.DelegatedRCIn
+	if a.LastMaxRC < 0 {
+		a.LastMaxRC = 0
+	}
+	RegenerateRCMana(a, now)
+
+	// Over-delegated? Only when DelegatedRCOut > eff.
+	if a.DelegatedRCOut <= eff {
+		return
+	}
+	overflow := a.DelegatedRCOut - eff
+
+	type clip struct {
+		to     auth.AccountName
+		amount int64
+	}
+	var clips []clip
+	remaining := overflow
+	_ = s.Range(RCDirectDelegationTable, state.PrimaryIndex,
+		state.AppendAccountName(nil, a.Name),
+		func(_, val []byte) (bool, error) {
+			if remaining <= 0 {
+				return false, nil
+			}
+			d, err := ReadRCDirectDelegation(val)
+			if err != nil {
+				return true, nil
+			}
+			if d.From != a.Name {
+				return false, nil
+			}
+			take := int64(d.DelegatedRC)
+			if take > remaining {
+				take = remaining
+			}
+			clips = append(clips, clip{to: d.To, amount: take})
+			remaining -= take
+			return true, nil
+		})
+
+	totalExpired := int64(0)
+	for _, c := range clips {
+		row, err := GetRCDirectDelegation(s, a.Name, c.to)
+		if err != nil {
+			continue
+		}
+		newAmt := int64(row.DelegatedRC) - c.amount
+		if newAmt <= 0 {
+			DeleteRCDirectDelegationFull(s, a.Name, c.to)
+		} else {
+			row.DelegatedRC = uint64(newAmt)
+			PutRCDirectDelegationFull(s, &row)
+		}
+		to, err := GetAccount(s, c.to)
+		if err == nil {
+			to.DelegatedRCIn -= c.amount
+			if to.DelegatedRCIn < 0 {
+				to.DelegatedRCIn = 0
+			}
+			to.RCManaCurrent -= c.amount
+			if to.RCManaCurrent < 0 {
+				to.RCManaCurrent = 0
+			}
+			toEff := to.VestingShares - to.DelegatedVestingShares + to.ReceivedVestingShares
+			to.LastMaxRC = toEff - to.DelegatedRCOut + to.DelegatedRCIn
+			if to.LastMaxRC < 0 {
+				to.LastMaxRC = 0
+			}
+			PutAccount(s, &to)
+		}
+		totalExpired += c.amount
+	}
+
+	a.DelegatedRCOut -= totalExpired
+	if a.DelegatedRCOut < 0 {
+		a.DelegatedRCOut = 0
+	}
+	a.LastMaxRC = eff - a.DelegatedRCOut + a.DelegatedRCIn
+	if a.LastMaxRC < 0 {
+		a.LastMaxRC = 0
+	}
+
+	if totalExpired > 0 {
+		prev, _ := GetRCExpiredDelegation(s, a.Name)
+		PutRCExpiredDelegation(s, &RCExpiredDelegation{
+			From:             a.Name,
+			RemainingExpired: prev.RemainingExpired + totalExpired,
+			ExpiryTime:       now + RCDelegationReturnPeriodSec,
+		})
+	}
+}
+
+// -----------------------------------------------------------------------------
 // Local serialization helpers (uint32/uint16/int32 LE — others reused
 // from dgpo.go / witness.go).
 // -----------------------------------------------------------------------------

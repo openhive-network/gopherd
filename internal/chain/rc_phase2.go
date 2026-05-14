@@ -37,7 +37,6 @@
 package chain
 
 import (
-	"hived-go/internal/protocol/auth"
 	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
@@ -334,115 +333,10 @@ func finalizeRCStats(s *state.Session, blockNum uint32) {
 // moved into the rc_expired_delegation_object and the direct_delegation
 // rows are clipped (oldest-first or proportionally).
 func handleVestingWithdrawalRCImpact(s *state.Session, a *objects.Account, now uint32) {
-	// effective_delegable_rc = effective_vesting - DelegatedRCOut
-	eff := a.VestingShares - a.DelegatedVestingShares + a.ReceivedVestingShares
-	if eff < 0 {
-		eff = 0
-	}
-	a.LastMaxRC = eff - a.DelegatedRCOut + a.DelegatedRCIn
-	if a.LastMaxRC < 0 {
-		a.LastMaxRC = 0
-	}
-	objects.RegenerateRCMana(a, now)
-
-	// Over-delegated? Only when DelegatedRCOut > eff.
-	if a.DelegatedRCOut <= eff {
-		return
-	}
-	overflow := a.DelegatedRCOut - eff
-
-	// Clip outgoing direct_delegation rows oldest-first until we've
-	// reclaimed `overflow`. We scan the by_from primary index.
-	type clip struct {
-		to     auth.AccountName
-		amount int64
-	}
-	var clips []clip
-	remaining := overflow
-	// Use a closure over remaining for the scan.
-	_ = s.Range(objects.RCDirectDelegationTable, state.PrimaryIndex,
-		state.AppendAccountName(nil, a.Name),
-		func(_, val []byte) (bool, error) {
-			if remaining <= 0 {
-				return false, nil
-			}
-			d, err := objects.ReadRCDirectDelegation(val)
-			if err != nil {
-				return true, nil
-			}
-			if d.From != a.Name {
-				// Scan walked past our prefix (defensive — the prefix
-				// arg should constrain this, but a row whose name is
-				// a strict-prefix shouldn't be matched).
-				return false, nil
-			}
-			take := int64(d.DelegatedRC)
-			if take > remaining {
-				take = remaining
-			}
-			clips = append(clips, clip{to: d.To, amount: take})
-			remaining -= take
-			return true, nil
-		})
-
-	// Apply clips: reduce / delete each row, reduce recipient's
-	// DelegatedRCIn, and accumulate into the expired row.
-	totalExpired := int64(0)
-	for _, c := range clips {
-		row, err := objects.GetRCDirectDelegation(s, a.Name, c.to)
-		if err != nil {
-			continue
-		}
-		newAmt := int64(row.DelegatedRC) - c.amount
-		if newAmt <= 0 {
-			objects.DeleteRCDirectDelegationFull(s, a.Name, c.to)
-		} else {
-			row.DelegatedRC = uint64(newAmt)
-			objects.PutRCDirectDelegationFull(s, &row)
-		}
-		// Reduce the recipient's DelegatedRCIn + mana.
-		to, err := objects.GetAccount(s, c.to)
-		if err == nil {
-			to.DelegatedRCIn -= c.amount
-			if to.DelegatedRCIn < 0 {
-				to.DelegatedRCIn = 0
-			}
-			to.RCManaCurrent -= c.amount
-			if to.RCManaCurrent < 0 {
-				to.RCManaCurrent = 0
-			}
-			// Recompute LastMaxRC.
-			toEff := to.VestingShares - to.DelegatedVestingShares + to.ReceivedVestingShares
-			to.LastMaxRC = toEff - to.DelegatedRCOut + to.DelegatedRCIn
-			if to.LastMaxRC < 0 {
-				to.LastMaxRC = 0
-			}
-			objects.PutAccount(s, &to)
-		}
-		totalExpired += c.amount
-	}
-
-	// Reduce the delegator's DelegatedRCOut by what we just reclaimed.
-	a.DelegatedRCOut -= totalExpired
-	if a.DelegatedRCOut < 0 {
-		a.DelegatedRCOut = 0
-	}
-	a.LastMaxRC = eff - a.DelegatedRCOut + a.DelegatedRCIn
-	if a.LastMaxRC < 0 {
-		a.LastMaxRC = 0
-	}
-
-	// Queue an RCExpiredDelegation row so the receiver-side regen
-	// pauses long enough for delegatees to spend down their bumped
-	// mana. The row accumulates if one already exists.
-	if totalExpired > 0 {
-		prev, _ := objects.GetRCExpiredDelegation(s, a.Name)
-		objects.PutRCExpiredDelegation(s, &objects.RCExpiredDelegation{
-			From:             a.Name,
-			RemainingExpired: prev.RemainingExpired + totalExpired,
-			ExpiryTime:       now + rcDelegationReturnPeriodSec,
-		})
-	}
+	// Delegates to the canonical implementation in state/objects so the
+	// evaluator package (which can't import chain) can call it via the
+	// same path. See objects.HandleVestingWithdrawalRCImpact.
+	objects.HandleVestingWithdrawalRCImpact(s, a, now)
 }
 
 // Exported wrappers for test-only access from sibling packages
