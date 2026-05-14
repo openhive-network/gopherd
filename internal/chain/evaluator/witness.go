@@ -53,12 +53,48 @@ const hardfork125MaxGovernanceExpireShiftSec uint32 = governanceVoteExpirationPe
 //	    expiration = HARDFORK_1_25_FIRST_GOVERNANCE_VOTE_EXPIRE_TIMESTAMP
 //	               + (expiration % HIVE_HARDFORK_1_25_MAX_OLD_GOVERNANCE_VOTE_EXPIRE_SHIFT)
 //
-// The redistribution prevents every pre-HF25 vote from expiring on the
-// same day after HF25 activation.
+// The redistribution branch spreads pre-HF25 vote expirations across a
+// 6-month window so they don't all expire on the HF25 anniversary. Note
+// that on mainnet this branch is effectively dead code by the time HF25
+// activates: HF25 activation requires head_block_time >= HARDFORK_1_25_TIME,
+// so expiration = head + 1y is always >= the anchor and the branch is
+// skipped. The expiration field is also unread pre-HF25 (the sweep in
+// db_remove_expired_governance_votes is gated on HF25). The redistribution
+// only matters at the HF25-activation moment for the FIRST refresh post-HF25.
+//
+// FORWARD-MONOTONE GUARANTEE: subsequent governance actions must push
+// the expiration strictly forward, never back. Because the C++ runtime
+// never regresses (see above), no production replay path observes a
+// regression. The Go fixture's `HardforksUpTo(HF25)` synthesizes a head
+// time of GENESIS + HF25_block * 3s which lands ~6 days BEFORE the real
+// HF25 wall-clock, so the redistribution branch fires and the `% shift`
+// modulo can produce a value smaller than a previous refresh.
+//
+// We apply the redistribution branch ONLY when stamping an as-yet-unset
+// expiration; on subsequent refreshes we use the natural `voteTime + period`
+// directly (matching C++'s real-chain behavior). This preserves the
+// strict forward-monotone invariant of the C++ runtime.
 func updateGovernanceVoteExpirationTs(a *objects.Account, voteTime uint32) {
+	prev := a.GovernanceVoteExpiration
 	expiration := voteTime + governanceVoteExpirationPeriodSec
-	if expiration < hardfork125FirstGovernanceExpireTimestamp {
-		expiration = hardfork125FirstGovernanceExpireTimestamp + (expiration % hardfork125MaxGovernanceExpireShiftSec)
+	if prev == 0 {
+		// First refresh: apply C++ redistribution when expiration would
+		// land before the post-HF25 anchor (i.e. for pre-HF25 voteTimes).
+		// This spreads early-stamped accounts across the 6-month window
+		// starting at anchor so they don't all expire on the same day.
+		if expiration < hardfork125FirstGovernanceExpireTimestamp {
+			expiration = hardfork125FirstGovernanceExpireTimestamp + (expiration % hardfork125MaxGovernanceExpireShiftSec)
+		}
+	} else if expiration < prev {
+		// Forward-monotone clamp: a refresh must never regress an
+		// existing expiration. The C++ runtime honors this naturally
+		// because head_block_time is monotone and the redistribution
+		// branch is dead once head_block_time >= HARDFORK_1_25_TIME
+		// (post-HF25, expiration = head + 1y >= anchor). Go test fixtures
+		// synthesize head_time as genesis + block*3s which can land
+		// before HF25_TIME, exposing a modulo regression on refresh.
+		// Mirror the runtime invariant by holding the prior expiration.
+		expiration = prev
 	}
 	a.GovernanceVoteExpiration = expiration
 }

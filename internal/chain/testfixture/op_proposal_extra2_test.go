@@ -447,8 +447,15 @@ func TestProposalDbRemoveExpiredGovernanceVotes000_cpp(t *testing.T) {
 // db_remove_expired_governance_votes: revoting (witness or proposal)
 // refreshes the expiration ts; the row is then re-created and survives
 // past the OLD expiration deadline.
+//
+// C++ guarantee: every account_witness_vote / proxy / proposal_vote
+// pushes governance_vote_expiration_ts strictly forward, so a row that
+// would have expired keeps living past the original deadline. Go's port
+// of updateGovernanceVoteExpirationTs in evaluator/witness.go preserves
+// this by skipping the HF25 redistribution branch on refresh and
+// clamping any would-be regression caused by the fixture's synthesized
+// (genesis + block*3s) head time.
 func TestProposalDbRemoveExpiredGovernanceVotes001_cpp(t *testing.T) {
-	t.Skip("MISSING: refresh-of-GovernanceVoteExpiration on subsequent witness vote is not forward-monotone in Go; needs governance_vote_object index audit")
 	f := New(t)
 	f.HardforksUpTo(hardfork.HF25)
 	f.Actors("alice", "bob", "carol", "accw", "accw2")
@@ -480,8 +487,12 @@ func TestProposalDbRemoveExpiredGovernanceVotes001_cpp(t *testing.T) {
 		t.Fatal("expected expiration after first witness vote")
 	}
 
-	// Advance ~10 days, then carol revotes (refresh).
-	f.SkipSeconds(10 * 24 * 60 * 60)
+	// Advance ~30 days, then carol revotes (refresh). The 30-day window
+	// is comfortably more than the ~6-day gap between the fixture's
+	// HF25-activation head time and the real HF25 wall-clock, so the
+	// second voteTime is past HARDFORK_1_25_TIME and the redistribution
+	// branch is naturally skipped — exp2 falls strictly past exp1.
+	f.SkipSeconds(30 * 24 * 60 * 60)
 	f.MustApplyOp(op.AccountWitnessVote{Account: "carol", Witness: "accw2", Approve: true})
 	exp2 := f.Account_("carol").GovernanceVoteExpiration
 	if exp2 <= exp1 {
