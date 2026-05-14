@@ -92,77 +92,107 @@ import (
 )
 
 // cgoDecoder wraps a single libzstd DCtx for a specific dict number.
-// DCtx is NOT thread-safe, so the mutex serializes ZSTD_decompressDCtx
-// calls across goroutines (the p2p compressed_block_message handler
-// runs decompress concurrently from N peer goroutines, while replay
-// uses a single goroutine — both share the same Decompressor).
+// DCtx is NOT thread-safe, but each cgoDecoder is acquired from a
+// per-dict sync.Pool and used by exactly one goroutine at a time,
+// then returned. So no mutex is needed at this level — the pool
+// itself provides the exclusion.
 type cgoDecoder struct {
-	mu       sync.Mutex
 	dctx     *C.ZSTD_DCtx
 	dictKeep []byte // pinned dict bytes (held to satisfy by-reference load)
 }
 
 // cgoDecoderPool holds a per-Decompressor cache of cgoDecoders.
-// Single-goroutine replay holds applyMu, so no per-decoder locking is
-// needed — the encoder's existing mutex on Decompressor.mu already
-// serializes access during creation.
+// Keyed by dict number; each slot is a sync.Pool of DCtxs so multiple
+// peer goroutines can decompress with the same dictionary concurrently
+// instead of serialising through a single per-dict mutex. DCtxs are
+// returned to the pool after each call and reused.
 type cgoDecoderPool struct {
-	mu       sync.Mutex
-	decoders map[uint8]*cgoDecoder
+	mu    sync.Mutex
+	pools map[uint8]*cgoDictPool
+}
+
+// cgoDictPool is the per-dict shard. It uses a sync.Pool so idle
+// DCtxs get reaped over time, and dictKeep stays alive on the parent
+// so DCtxs that hold a by-reference dict pointer remain valid.
+type cgoDictPool struct {
+	num      uint8
+	dictKeep []byte
+	pool     sync.Pool
 }
 
 func newCGODecoderPool() *cgoDecoderPool {
-	return &cgoDecoderPool{decoders: map[uint8]*cgoDecoder{}}
+	return &cgoDecoderPool{pools: map[uint8]*cgoDictPool{}}
 }
 
 func (p *cgoDecoderPool) close() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	for k, d := range p.decoders {
-		C.go_free_dctx(d.dctx)
-		delete(p.decoders, k)
+	for k, dp := range p.pools {
+		for {
+			v := dp.pool.Get()
+			if v == nil {
+				break
+			}
+			C.go_free_dctx(v.(*cgoDecoder).dctx)
+		}
+		delete(p.pools, k)
 	}
 }
 
 func (p *cgoDecoderPool) decoderFor(num uint8) (*cgoDecoder, error) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	if d, ok := p.decoders[num]; ok {
-		return d, nil
+	dp, ok := p.pools[num]
+	if !ok {
+		var dictKeep []byte
+		if num != noDictKey {
+			raw, err := getDecompressedDict(num)
+			if err != nil {
+				p.mu.Unlock()
+				return nil, err
+			}
+			dictKeep = append([]byte(nil), raw...)
+		}
+		dp = &cgoDictPool{num: num, dictKeep: dictKeep}
+		p.pools[num] = dp
 	}
+	p.mu.Unlock()
 
+	if v := dp.pool.Get(); v != nil {
+		return v.(*cgoDecoder), nil
+	}
+	// Pool empty — create a fresh DCtx.
 	var dictData unsafe.Pointer
 	var dictSize C.size_t
-	var dictKeep []byte
-	if num != noDictKey {
-		raw, err := getDecompressedDict(num)
-		if err != nil {
-			return nil, err
-		}
-		// Keep a stable copy pinned on the cgoDecoder so the C side's
-		// by-reference dict pointer remains valid for the DCtx's life.
-		dictKeep = append([]byte(nil), raw...)
-		dictData = unsafe.Pointer(&dictKeep[0])
-		dictSize = C.size_t(len(dictKeep))
+	if len(dp.dictKeep) > 0 {
+		dictData = unsafe.Pointer(&dp.dictKeep[0])
+		dictSize = C.size_t(len(dp.dictKeep))
 	}
-
 	var errCode C.size_t
 	dctx := C.go_make_dctx(dictData, dictSize, &errCode)
 	if dctx == nil {
 		return nil, fmt.Errorf("blocklog/zstd: ZSTD_createDCtx (dict %d): %s",
 			num, C.GoString(C.go_zstd_err_name(errCode)))
 	}
-	d := &cgoDecoder{dctx: dctx, dictKeep: dictKeep}
-	p.decoders[num] = d
-	return d, nil
+	return &cgoDecoder{dctx: dctx, dictKeep: dp.dictKeep}, nil
+}
+
+// release returns a decoder to its per-dict pool for reuse. Called by
+// decompress on every successful (or error) return.
+func (p *cgoDecoderPool) release(num uint8, d *cgoDecoder) {
+	p.mu.Lock()
+	dp, ok := p.pools[num]
+	p.mu.Unlock()
+	if !ok {
+		C.go_free_dctx(d.dctx)
+		return
+	}
+	dp.pool.Put(d)
 }
 
 // decompress runs ZSTD_decompressDCtx on a magicless payload. dst is
 // the caller-supplied output buffer (a fresh slice or pooled). On
 // dst capacity overflow, retry with a doubled buffer.
 func (d *cgoDecoder) decompress(payload []byte, dst []byte) ([]byte, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
 	if cap(dst) < 8192 {
 		dst = make([]byte, 0, 65536)
 	}

@@ -302,6 +302,7 @@ func (d *Decompressor) Decompress(payload []byte, dictNum uint8, dst []byte) ([]
 		return nil, fmt.Errorf("blocklog/zstd: cgo decoderFor(dict %d): %w", dictNum, err)
 	}
 	out, err := cdec.decompress(payload, dst)
+	d.cgo.release(dictNum, cdec)
 	if err != nil {
 		return nil, fmt.Errorf("blocklog/zstd: decode block (dict %d, %d compressed bytes): %w", dictNum, len(payload), err)
 	}
@@ -317,7 +318,9 @@ func (d *Decompressor) DecompressNoDict(payload, dst []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("blocklog/zstd: cgo decoderFor(no-dict): %w", err)
 	}
-	return cdec.decompress(payload, dst)
+	out, err := cdec.decompress(payload, dst)
+	d.cgo.release(noDictKey, cdec)
+	return out, err
 }
 
 const noDictKey uint8 = 255 // sentinel for the "no dictionary" decoder slot
