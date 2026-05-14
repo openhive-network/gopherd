@@ -37,6 +37,8 @@
 package gossip
 
 import (
+	"time"
+
 	"hived-go/internal/chain"
 	"hived-go/internal/crypto"
 	p2pnode "hived-go/internal/p2p/node"
@@ -142,6 +144,16 @@ func (s *Service) BroadcastBlock(rawBlock []byte, blockNum uint32) {
 // usually already broadcast it; this call short-circuits via the
 // seenBlk dedup).
 func (s *Service) BroadcastAppliedBlock(rawBlock []byte, blockNum uint32, source *p2pnode.Peer) {
+	// Skip the re-broadcast for historical-catch-up blocks (header
+	// timestamp >5 minutes stale). Hived peers reject unsolicited
+	// blocks they didn't ask for and immediately disconnect — over a
+	// long catch-up we observed THOUSANDS of "You sent me a block
+	// that I didn't ask for" drops, churning the peer set and
+	// crippling sync throughput. Once we're at the live tip, gossip
+	// re-broadcast is back on.
+	if ts := blockTimestampHeader(rawBlock); ts != 0 && uint32(time.Now().Unix())-ts > 5*60 {
+		return
+	}
 	id, ok := blockIDFromHeader(rawBlock, blockNum)
 	if !ok {
 		s.logger.Logf("gossip: re-broadcast block %d — header parse failed", blockNum)
@@ -154,6 +166,19 @@ func (s *Service) BroadcastAppliedBlock(rawBlock []byte, blockNum uint32, source
 	}
 	body := buildBlockMessageBody(rawBlock, id)
 	s.cfg.Node.Broadcast(proto.BlockMessageType, body, source)
+}
+
+// blockTimestampHeader extracts the timestamp field (offset 20, 4 bytes
+// LE) from a signed_block_header prefix. Returns 0 if the buffer is
+// too short. Used as a cheap "is this block historical?" gate.
+func blockTimestampHeader(rawBlock []byte) uint32 {
+	if len(rawBlock) < 24 {
+		return 0
+	}
+	return uint32(rawBlock[20]) |
+		uint32(rawBlock[21])<<8 |
+		uint32(rawBlock[22])<<16 |
+		uint32(rawBlock[23])<<24
 }
 
 // blockIDFromHeader derives the canonical 20-byte block_id from the

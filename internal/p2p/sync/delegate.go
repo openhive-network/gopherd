@@ -566,9 +566,13 @@ func newWithChain(cfg Config, c Chain) *Delegate {
 
 // recentCompressedCap bounds the in-flight dedup ring for
 // compressed_block_message arrivals. Sized well above
-// MaxOutstandingPerPeer * a handful of peers so a peer fan-out of the
-// same compressed block during catch-up can't thrash the ring.
-const recentCompressedCap = 256
+// MaxOutstandingPerPeer (default 2048) × the typical 8 peers so a
+// peer fan-out of the same compressed block during catch-up can't
+// thrash the ring. 256 was too small — under sustained catch-up with
+// multiple peers each holding ~2k blocks in flight, the ring evicted
+// before all peers' duplicates could be filtered, defeating the
+// dedup and re-paying decompression for the same block.
+const recentCompressedCap = 8192
 
 // Start launches the background goroutines: the INV broadcaster, the
 // single-consumer block applier, and the catch-up kicker.
