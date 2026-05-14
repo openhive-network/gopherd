@@ -380,6 +380,31 @@ func (d *Delegate) handleFetchItems(p *node.Peer, body []byte) {
 		d.logf("fetch_items decode: %v", err)
 		return
 	}
+	// Serve fetch_items only when at the live tip — refuse during
+	// historical catch-up. Our recent-block cache contains blocks we
+	// just applied; peers ahead of us asking for those blocks then
+	// try to push them onto chains that may already be much further
+	// along, often rejecting with "deemed invalid" and disconnecting.
+	// Replying with item_not_available to every fetched item costs
+	// us nothing (peers fetch from someone else), and keeps the peer
+	// set stable during catch-up. The hint is the same staleness
+	// gate used elsewhere: our head's wall-clock age >5 min = still
+	// catching up.
+	if myHead := d.headBlockHint.Load(); myHead != 0 {
+		if raw := d.chain.RecentBlockBytes(myHead); len(raw) >= 24 {
+			t := blockTimestamp(raw)
+			if t != 0 && uint32(time.Now().Unix())-t > 5*60 {
+				for _, h := range msg.ItemsToFetch {
+					notAvail := proto.ItemNotAvailableMessage{
+						RequestedItem: proto.ItemID{ItemType: msg.ItemType, ItemHash: h},
+					}
+					enc, _ := notAvail.Marshal()
+					_ = p.Send(proto.ItemNotAvailableMessageType, enc)
+				}
+				return
+			}
+		}
+	}
 	for _, h := range msg.ItemsToFetch {
 		switch msg.ItemType {
 		case proto.ItemTypeBlock, proto.ItemTypeBlockCompressed:
