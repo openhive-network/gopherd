@@ -714,7 +714,15 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 			failErr = cErr
 		}
 		if !txFailed {
+			// Phase 5.1 pre-apply tx hook: reset per-tx differential
+			// usage accumulator before any op fires. HF20+ only.
+			resetRCDifferentialForTx(session, blockNum)
 			for j, o := range txRes.SignedTx.Operations {
+				// Phase 5.1 pre-apply op hook: accumulate the (negative)
+				// differential state-bytes for this op into
+				// rc_pending_data BEFORE the op mutates the existing
+				// state. HF20+ only.
+				applyRCDifferentialForOp(session, o, blockNum)
 				if err := evaluator.ApplyOp(ctx, o); err != nil {
 					txFailed = true
 					failOp = o.Tag.Name()

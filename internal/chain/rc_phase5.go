@@ -26,10 +26,14 @@
 //   * pending_data singleton accumulation + per-block flush to bucket.
 //   * EnforceRC opt-in error path for live sync (insufficient_rc).
 //
-// Deferred (left at the "advanced tests" scope — kept as t.Skip with
-// VERY specific markers):
-//   * per-op differential_usage visitor (account_update / witness_update
-//     / recover_account / delegate_rc).
+// Phase 5.1 landed (this file + rc_differential.go):
+//   * per-op differential_usage visitor (account_update /
+//     account_update2 / witness_update / recover_account / delegate_rc).
+//   * pre-apply tx hook resets differential; pre-apply OP hook
+//     accumulates; post-apply tx hook (applyRCForTx) seeds CountResources
+//     with the accumulated differential so the net is (new − old).
+//
+// Deferred (left at the "advanced tests" scope):
 //   * rc_stats live aggregation (add_stats per tx into the pending row).
 //   * multisig signature-cost factor.
 
@@ -40,6 +44,7 @@ import (
 	"fmt"
 
 	"hived-go/internal/protocol/hardfork"
+	"hived-go/internal/protocol/op"
 	"hived-go/internal/protocol/tx"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
@@ -74,19 +79,17 @@ func applyRCForTx(s *state.Session, stx *tx.SignedTransaction, blockNum, blockTi
 		return nil
 	}
 
-	// Pre-apply tx hook: clear differential_usage. We co-locate this
-	// with the apply path since the pre-apply hook for diff usage runs
-	// per-op in C++ but our Phase 5 core uses a single per-tx reset
-	// (no per-op differential visitor yet). The reset is harmless if
-	// no diff usage was accumulated.
+	// Phase 5.1: load pending. DifferentialUsage was reset at pre-apply
+	// tx and accumulated negatively across per-op visitors in the apply
+	// loop (see applyRCDifferentialForOp). We initialize the count_resources
+	// result FROM the accumulated differential — when CountResources
+	// then adds the new full state_bytes, the net is (new − old).
 	pending := objects.GetRCPendingData(s)
-	pending.ResetDifferentialUsage()
 
 	// 1. Count resources. Initialize result with the (negative)
-	// differential_usage — the per-tx state-bytes delta from any
-	// state-shrinking ops. Phase 5's minimum-viable visitor starts at
-	// zero, so this is equivalent to a fresh count.
-	var usage [objects.RCNumResources]int64
+	// differential_usage from the per-op visitor pass — CountResources
+	// will add the new state_bytes on top.
+	usage := pending.DifferentialUsage
 	CountResources(stx, txSize, &usage)
 
 	// 2. Compute the total cost.
@@ -193,4 +196,54 @@ func ResetRCPendingDataForBlockForTest(s *state.Session) {
 // ApplyRCForTxForTest exposes applyRCForTx.
 func ApplyRCForTxForTest(s *state.Session, stx *tx.SignedTransaction, blockNum, blockTime uint32, txSize int64, enforce bool) error {
 	return applyRCForTx(s, stx, blockNum, blockTime, txSize, enforce)
+}
+
+// resetRCDifferentialForTx is the pre-apply tx hook (HF20+). Clears the
+// per-tx differential_usage accumulator before any op fires its
+// pre-apply-op visitor. Mirrors rc_plugin_impl::on_pre_apply_transaction
+// (rc_plugin.cpp:346-355).
+func resetRCDifferentialForTx(s *state.Session, blockNum uint32) {
+	if !hardfork.SetForBlock(blockNum).Has(hardfork.HF20) {
+		return
+	}
+	pending := objects.GetRCPendingData(s)
+	pending.ResetDifferentialUsage()
+	objects.PutRCPendingData(s, &pending)
+}
+
+// applyRCDifferentialForOp is the pre-apply op hook (HF20+). Computes
+// the per-op differential usage via countDifferentialOp and accumulates
+// it (negated) into rc_pending_data.DifferentialUsage. Mirrors the
+// prepare_differential_usage + add_differential_usage pair in
+// rc_plugin_impl::on_pre_apply_operation (rc_plugin.cpp:1121-1126).
+func applyRCDifferentialForOp(s *state.Session, o op.Op, blockNum uint32) {
+	if !hardfork.SetForBlock(blockNum).Has(hardfork.HF20) {
+		return
+	}
+	diff := countDifferentialOp(s, o)
+	// Skip the persist round-trip when nothing accumulated (the common
+	// case for transfers, votes, comments, …).
+	empty := true
+	for i := 0; i < objects.RCNumResources; i++ {
+		if diff[i] != 0 {
+			empty = false
+			break
+		}
+	}
+	if empty {
+		return
+	}
+	pending := objects.GetRCPendingData(s)
+	pending.AddDifferentialUsage(diff)
+	objects.PutRCPendingData(s, &pending)
+}
+
+// ResetRCDifferentialForTxForTest exposes resetRCDifferentialForTx.
+func ResetRCDifferentialForTxForTest(s *state.Session, blockNum uint32) {
+	resetRCDifferentialForTx(s, blockNum)
+}
+
+// ApplyRCDifferentialForOpForTest exposes applyRCDifferentialForOp.
+func ApplyRCDifferentialForOpForTest(s *state.Session, o op.Op, blockNum uint32) {
+	applyRCDifferentialForOp(s, o, blockNum)
 }

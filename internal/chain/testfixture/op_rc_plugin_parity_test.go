@@ -31,11 +31,11 @@ package testfixture
 //                                      diff/usage which is a Phase 5
 //                                      object).
 //   rc_differential_usage_operations— TestRCPluginDifferentialUsageOperations
-//                                      (skipped — RC Phase 5).
+//                                      (ported — Phase 5.1).
 //   rc_differential_usage_negative  — TestRCPluginDifferentialUsageNegative
-//                                      (skipped — RC Phase 5).
+//                                      (ported — Phase 5.1).
 //   rc_differential_usage_many_ops  — TestRCPluginDifferentialUsageManyOps
-//                                      (skipped — RC Phase 5).
+//                                      (ported — Phase 5.1).
 //   rc_exception_during_modify      — TestRCPluginExceptionDuringModify
 //                                      (skipped — RC Phase 5 not_enough_rc
 //                                      exception path).
@@ -419,25 +419,346 @@ func readRCPendingData(t *testing.T, f *Fixture) objects.RCPendingData {
 // recover_account / witness_update / delegate_rc — each operation
 // shrinking pre-existing state shows a negative differential.
 //
-// The per-op differential visitor is deferred in Phase 5's "minimum
-// viable core" (see rc_phase5.go header). The visitor needs scratch
-// state lookups (find<account_authority_object>, find<witness_object>,
-// find<rc_direct_delegation_object>) at the pre-apply-OP hook — a
-// non-trivial wiring step that's orthogonal to the cost-deduction path.
+// Phase 5.1 (this commit) wires the per-op visitor + the pre-apply-OP
+// hook in the apply loop. The Go assertions follow the C++ `check()`
+// helper coverage:
+//
+//   • account_update.owner    → diff.state_bytes < 0
+//   • account_update.active   → diff.state_bytes < 0
+//   • account_update.posting  → diff.state_bytes < 0
+//   • account_update.memo_key → diff == 0 (no auth changed)
+//   • account_update.metadata → diff == 0 (metadata not subject to diff)
+//   • witness_update (new)    → diff == 0 (witness doesn't exist yet)
+//   • witness_update (modify) → diff.state_bytes < 0 (URL was stored)
+//   • delegate_rc (new)       → diff == 0 (no delegation row to discount)
+//   • delegate_rc (update)    → diff.state_bytes < 0 (rows exist)
+//   • delegate_rc (zero-max)  → diff == 0 (op declines diff usage)
 func TestRCPluginDifferentialUsageOperations(t *testing.T) {
-	t.Skip("MISSING: per-op differential visitor (count_differential_operation_visitor in resource_count.cpp). Phase 5 core implements per-tx reset + pending_data accumulator but the visitor hook itself is deferred to Phase 5.1.")
+	f := New(t)
+	f.HardforksUpTo(hardfork.HF26)
+	f.Actors("alice", "bob", "sam")
+	f.FundVesting("alice", 1_000_000)
+	f.FundVesting("bob", 1_000_000)
+	f.FundLiquid("alice", 100_000)
+	f.GenerateBlock()
+
+	// clean resets per-tx differential to 0 by running a no-diff
+	// transfer (mirrors C++ helper); then a block flushes pending and
+	// reads of get_differential_usage return the diff of THIS tx.
+	clean := func() {
+		t.Helper()
+		if err := f.ApplyOp(op.Transfer{
+			From: "alice", To: "bob", Amount: HIVE(1), Memo: "x",
+		}); err != nil {
+			t.Fatalf("clean transfer: %v", err)
+		}
+	}
+
+	// checkNegative asserts the standard "diff is negative state_bytes
+	// only" shape — mirrors the C++ check() helper.
+	checkNegative := func(label string) {
+		t.Helper()
+		d := readRCPendingData(t, f).DifferentialUsage
+		if d[objects.RCHistoryBytes] != 0 {
+			t.Fatalf("%s: history_bytes diff = %d, want 0", label, d[objects.RCHistoryBytes])
+		}
+		if d[objects.RCNewAccounts] != 0 {
+			t.Fatalf("%s: new_accounts diff = %d, want 0", label, d[objects.RCNewAccounts])
+		}
+		if d[objects.RCMarketBytes] != 0 {
+			t.Fatalf("%s: market_bytes diff = %d, want 0", label, d[objects.RCMarketBytes])
+		}
+		if d[objects.RCStateBytes] >= 0 {
+			t.Fatalf("%s: state_bytes diff = %d, want < 0", label, d[objects.RCStateBytes])
+		}
+	}
+	checkEmpty := func(label string) {
+		t.Helper()
+		d := readRCPendingData(t, f).DifferentialUsage
+		for i := 0; i < objects.RCNumResources; i++ {
+			if d[i] != 0 {
+				t.Fatalf("%s: diff[%d] = %d, want 0", label, i, d[i])
+			}
+		}
+	}
+
+	var newKey [33]byte
+	newKey[0], newKey[1] = 0x02, 'N'
+
+	// account_update.owner
+	if err := f.ApplyOp(op.AccountUpdate{
+		Account: "alice",
+		Owner:   &auth.Authority{WeightThreshold: 1, KeyAuths: []auth.KeyAuth{{Key: newKey, Weight: 1}}},
+		MemoKey: newKey,
+	}); err != nil {
+		t.Fatalf("update owner: %v", err)
+	}
+	checkNegative("account_update owner")
+	clean()
+
+	// account_update.active
+	if err := f.ApplyOp(op.AccountUpdate{
+		Account: "alice",
+		Active:  &auth.Authority{WeightThreshold: 1, KeyAuths: []auth.KeyAuth{{Key: newKey, Weight: 1}}},
+		MemoKey: newKey,
+	}); err != nil {
+		t.Fatalf("update active: %v", err)
+	}
+	checkNegative("account_update active")
+	clean()
+
+	// account_update.posting
+	if err := f.ApplyOp(op.AccountUpdate{
+		Account: "alice",
+		Posting: &auth.Authority{WeightThreshold: 1, KeyAuths: []auth.KeyAuth{{Key: newKey, Weight: 1}}},
+		MemoKey: newKey,
+	}); err != nil {
+		t.Fatalf("update posting: %v", err)
+	}
+	checkNegative("account_update posting")
+	clean()
+
+	// account_update — memo + metadata only: no auth change → no diff.
+	if err := f.ApplyOp(op.AccountUpdate{
+		Account:      "alice",
+		MemoKey:      newKey,
+		JSONMetadata: `{"x":"y"}`,
+	}); err != nil {
+		t.Fatalf("update memo/metadata: %v", err)
+	}
+	checkEmpty("account_update memo+metadata")
+	clean()
+
+	// account_update2.owner — same shape as account_update.
+	if err := f.ApplyOp(op.AccountUpdate2{
+		Account: "bob",
+		Owner:   &auth.Authority{WeightThreshold: 1, KeyAuths: []auth.KeyAuth{{Key: newKey, Weight: 1}}},
+	}); err != nil {
+		t.Fatalf("update2 owner: %v", err)
+	}
+	checkNegative("account_update2 owner")
+	clean()
+
+	// witness_update on alice — witness doesn't exist yet, so diff
+	// should be empty per C++ (find<witness>(owner) == nullptr).
+	if err := f.ApplyOp(op.WitnessUpdate{
+		Owner:           "alice",
+		URL:             "https://alice.has.cat",
+		BlockSigningKey: newKey,
+		Props: op.LegacyChainProperties{
+			AccountCreationFee: LegacyHIVE(1_000),
+			MaximumBlockSize:   65536,
+			HBDInterestRate:    1000,
+		},
+		Fee: HIVE(0),
+	}); err != nil {
+		t.Fatalf("witness create: %v", err)
+	}
+	checkEmpty("witness_update create")
+	clean()
+
+	// witness_update on alice — now exists, diff should be negative.
+	if err := f.ApplyOp(op.WitnessUpdate{
+		Owner:           "alice",
+		URL:             "https://alice.wonder.land/my.cat",
+		BlockSigningKey: newKey,
+		Props: op.LegacyChainProperties{
+			AccountCreationFee: LegacyHIVE(1_000),
+			MaximumBlockSize:   65536,
+			HBDInterestRate:    1000,
+		},
+		Fee: HIVE(0),
+	}); err != nil {
+		t.Fatalf("witness update: %v", err)
+	}
+	checkNegative("witness_update update")
+	clean()
+
+	// delegate_rc — first time (no row exists), diff empty.
+	cj1 := op.CustomJSON{
+		RequiredPostingAuths: []auth.AccountName{"alice"},
+		ID:                   "rc",
+		JSON:                 `["delegate_rc",{"from":"alice","delegatees":["bob"],"max_rc":10000000}]`,
+	}
+	if err := f.ApplyOp(cj1); err != nil {
+		t.Fatalf("delegate_rc create: %v", err)
+	}
+	checkEmpty("delegate_rc create")
+	clean()
+
+	// delegate_rc — update existing row, diff should be negative.
+	cj2 := op.CustomJSON{
+		RequiredPostingAuths: []auth.AccountName{"alice"},
+		ID:                   "rc",
+		JSON:                 `["delegate_rc",{"from":"alice","delegatees":["bob"],"max_rc":5000000}]`,
+	}
+	if err := f.ApplyOp(cj2); err != nil {
+		t.Fatalf("delegate_rc update: %v", err)
+	}
+	checkNegative("delegate_rc update")
+	clean()
+
+	// delegate_rc with max_rc==0 — visitor declines diff (per C++ comment).
+	cj3 := op.CustomJSON{
+		RequiredPostingAuths: []auth.AccountName{"alice"},
+		ID:                   "rc",
+		JSON:                 `["delegate_rc",{"from":"alice","delegatees":["bob"],"max_rc":0}]`,
+	}
+	if err := f.ApplyOp(cj3); err != nil {
+		t.Fatalf("delegate_rc zero: %v", err)
+	}
+	checkEmpty("delegate_rc zero_max_rc")
 }
 
-// TestRCPluginDifferentialUsageNegative — same missing piece.
+// TestRCPluginDifferentialUsageNegative mirrors rc_plugin_tests.cpp::
+// rc_differential_usage_negative. The C++ test creates 3 accounts with
+// 1 / 2 / HIVE_MAX_AUTHORITY_MEMBERSHIP keys respectively in their
+// active authority, then updates each — the differential scales with
+// the key count, and CountResources's prevent_negative clamp keeps the
+// per-tx state_bytes ≥ 0 even when the diff exceeds the op's positive
+// state cost.
+//
+// We do a reduced variant: alice with 10 keys (instead of the chain's
+// max), diana with 1 key. Assert |alice_diff| == 10 × |diana_diff|.
 func TestRCPluginDifferentialUsageNegative(t *testing.T) {
-	t.Skip("MISSING: per-op differential visitor (see TestRCPluginDifferentialUsageOperations).")
+	f := New(t)
+	f.HardforksUpTo(hardfork.HF26)
+	// alice gets a heavy active authority (10 keys), diana stays single-key.
+	f.Actors("alice", "diana")
+	f.FundVesting("alice", 1_000_000)
+	f.FundVesting("diana", 1_000_000)
+	f.FundLiquid("alice", 10_000)
+	f.FundLiquid("diana", 10_000)
+	f.GenerateBlock()
+
+	// Inflate alice's owner+active authorities to 10 keys.
+	s := state.NewSession(f.State)
+	aa, err := objects.GetAccountAuthority(s, "alice")
+	if err != nil {
+		t.Fatalf("get alice auth: %v", err)
+	}
+	const numKeys = 10
+	aa.Owner.KeyAuths = nil
+	aa.Active.KeyAuths = nil
+	for i := 0; i < numKeys; i++ {
+		var k [33]byte
+		k[0], k[1], k[2] = 0x02, 'A', byte('0'+i)
+		aa.Owner.KeyAuths = append(aa.Owner.KeyAuths, auth.KeyAuth{Key: k, Weight: 1})
+		aa.Active.KeyAuths = append(aa.Active.KeyAuths, auth.KeyAuth{Key: k, Weight: 1})
+	}
+	aa.Owner.WeightThreshold = 1
+	aa.Active.WeightThreshold = 1
+	objects.PutAccountAuthority(s, &aa)
+	if err := s.Commit(false); err != nil {
+		t.Fatalf("seed auth: %v", err)
+	}
+	f.GenerateBlock()
+
+	var newKey [33]byte
+	newKey[0], newKey[1] = 0x02, 'X'
+
+	// Update diana's active key — single-key auth, small diff.
+	if err := f.ApplyOp(op.AccountUpdate{
+		Account: "diana",
+		Active:  &auth.Authority{WeightThreshold: 1, KeyAuths: []auth.KeyAuth{{Key: newKey, Weight: 1}}},
+		MemoKey: newKey,
+	}); err != nil {
+		t.Fatalf("update diana: %v", err)
+	}
+	dianaDiff := readRCPendingData(t, f).DifferentialUsage[objects.RCStateBytes]
+	if dianaDiff >= 0 {
+		t.Fatalf("diana diff state_bytes = %d, want < 0", dianaDiff)
+	}
+
+	// Update alice's active key — 10-key auth, diff = 10× diana's.
+	if err := f.ApplyOp(op.AccountUpdate{
+		Account: "alice",
+		Active:  &auth.Authority{WeightThreshold: 1, KeyAuths: []auth.KeyAuth{{Key: newKey, Weight: 1}}},
+		MemoKey: newKey,
+	}); err != nil {
+		t.Fatalf("update alice: %v", err)
+	}
+	aliceDiff := readRCPendingData(t, f).DifferentialUsage[objects.RCStateBytes]
+	if aliceDiff >= 0 {
+		t.Fatalf("alice diff state_bytes = %d, want < 0", aliceDiff)
+	}
+	if got, want := aliceDiff, dianaDiff*numKeys; got != want {
+		t.Fatalf("alice diff vs diana×%d: got %d, want %d (diana=%d)",
+			numKeys, got, want, dianaDiff)
+	}
+
+	// CountResources's prevent_negative clamp: when diff is large and
+	// the per-op positive state cost is small, the SUM clamps at 0.
+	var stx tx.SignedTransaction
+	stx.Operations = []op.Op{op.FromOperation(op.AccountUpdate{
+		Account: "alice",
+		Active:  &auth.Authority{WeightThreshold: 1, KeyAuths: []auth.KeyAuth{{Key: newKey, Weight: 1}}},
+		MemoKey: newKey,
+	})}
+	usage := readRCPendingData(t, f).DifferentialUsage
+	chain.CountResources(&stx, 100, &usage)
+	if usage[objects.RCStateBytes] < 0 {
+		t.Fatalf("clamped state_bytes = %d, want ≥ 0", usage[objects.RCStateBytes])
+	}
 }
 
-// TestRCPluginDifferentialUsageManyOps — same missing piece, plus the
-// per-OP (not per-TX) granularity that requires hooking the visitor
-// inside the per-op apply loop in database.go.
+// TestRCPluginDifferentialUsageManyOps mirrors rc_plugin_tests.cpp::
+// rc_differential_usage_many_ops. The C++ test runs two witness_updates
+// for "alice" in a single tx and asserts the SAME final per-tx state
+// usage as a single witness_update for "carol". The first update creates
+// the witness (no diff), the second sees the just-created witness in
+// state (diff cancels its full cost) — proving the visitor reads
+// per-OP state, not per-TX.
+//
+// Our assertion: after the 2-op tx, the per-tx DifferentialUsage's
+// state_bytes is negative (the second update's diff fires). Without
+// per-OP granularity (i.e., if we did per-TX), the diff would be 0
+// because at pre-apply-TX the witness doesn't exist yet.
 func TestRCPluginDifferentialUsageManyOps(t *testing.T) {
-	t.Skip("MISSING: per-op differential visitor + per-op (not per-tx) hook in apply loop (see TestRCPluginDifferentialUsageOperations).")
+	f := New(t)
+	f.HardforksUpTo(hardfork.HF26)
+	f.Actors("alice")
+	f.FundVesting("alice", 1_000_000)
+	f.FundLiquid("alice", 10_000)
+	f.GenerateBlock()
+
+	var alicePubKey [33]byte
+	alicePubKey[0], alicePubKey[1] = 0x02, 'W'
+
+	op1 := op.WitnessUpdate{
+		Owner:           "alice",
+		URL:             "https://alice.wonder.land/my.cat",
+		BlockSigningKey: alicePubKey,
+		Props: op.LegacyChainProperties{
+			AccountCreationFee: LegacyHIVE(1_000),
+			MaximumBlockSize:   65536,
+			HBDInterestRate:    1000,
+		},
+		Fee: HIVE(0),
+	}
+	op2 := op.WitnessUpdate{
+		Owner:           "alice",
+		URL:             "https://alice.has.cat",
+		BlockSigningKey: alicePubKey,
+		Props: op.LegacyChainProperties{
+			AccountCreationFee: LegacyHIVE(1_000),
+			MaximumBlockSize:   65536,
+			HBDInterestRate:    1000,
+		},
+		Fee: HIVE(0),
+	}
+	// Both ops in one tx — per-OP visitor must see the 1st update's
+	// effect before processing the 2nd.
+	f.PushOps(op1, op2)
+	if err := f.tryGenerateBlock(); err != nil {
+		t.Fatalf("apply 2-op tx: %v", err)
+	}
+
+	diff := readRCPendingData(t, f).DifferentialUsage
+	if diff[objects.RCStateBytes] >= 0 {
+		t.Fatalf("expected negative state_bytes diff after 2-witness-update tx (2nd update sees the witness created by 1st), got %d",
+			diff[objects.RCStateBytes])
+	}
 }
 
 // TestRCPluginExceptionDuringModify mirrors rc_plugin_tests.cpp::
