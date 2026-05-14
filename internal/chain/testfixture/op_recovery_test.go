@@ -46,10 +46,36 @@ func TestRequestAccountRecovery(t *testing.T) {
 // TestRecoverAccountConsumesRequest ports the consume-request portion of
 // account_recovery: after a recover_account op, the pending request is
 // removed.
+//
+// recover_account_evaluator (hive_evaluator.cpp:2609) requires the
+// op's recent_owner_authority to match a recorded
+// owner_authority_history row. We seed one by doing an account_update
+// that rotates bob's owner key beforehand — that records the original
+// (zero-key) authority as a history row, which recent_owner_authority
+// then matches.
 func TestRecoverAccountConsumesRequest(t *testing.T) {
 	f := New(t)
 	f.Actors("alice", "bob")
 	f.GenerateBlock()
+
+	// Seed bob's owner_authority_history. account_update records the
+	// current AccountAuthority.Owner as the previous_owner_authority
+	// history row, which recent_owner_authority must then match.
+	bobAuthBefore, err := objects.GetAccountAuthority(state.NewSession(f.State), "bob")
+	if err != nil {
+		t.Fatalf("get bob auth: %v", err)
+	}
+	oldOwner := bobAuthBefore.Owner
+	var newOwnerKey [33]byte
+	newOwnerKey[0], newOwnerKey[1] = 0x02, 'B'
+	newOwnerAuth := newAuth(newOwnerKey)
+	if err := f.ApplyOp(op.AccountUpdate{
+		Account: "bob",
+		Owner:   &newOwnerAuth,
+		MemoKey: newOwnerKey,
+	}); err != nil {
+		t.Fatalf("seed account_update: %v", err)
+	}
 
 	if err := f.ApplyOp(op.RequestAccountRecovery{
 		RecoveryAccount:   "alice",
@@ -67,7 +93,7 @@ func TestRecoverAccountConsumesRequest(t *testing.T) {
 	if err := f.ApplyOp(op.RecoverAccount{
 		AccountToRecover:     "bob",
 		NewOwnerAuthority:    auth.Authority{WeightThreshold: 1, KeyAuths: []auth.KeyAuth{{Weight: 1}}},
-		RecentOwnerAuthority: auth.Authority{WeightThreshold: 1, KeyAuths: []auth.KeyAuth{{Weight: 1}}},
+		RecentOwnerAuthority: oldOwner,
 	}); err != nil {
 		t.Fatalf("recover_account: %v", err)
 	}

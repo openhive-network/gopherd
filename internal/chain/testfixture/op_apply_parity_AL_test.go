@@ -27,7 +27,10 @@ package testfixture
 import (
 	"testing"
 
+	"hived-go/internal/protocol/auth"
 	"hived-go/internal/protocol/op"
+	"hived-go/internal/state"
+	"hived-go/internal/state/objects"
 )
 
 // TestFixtureConvertChecksBalance ports
@@ -111,25 +114,106 @@ func TestIssue971VestingRemoval(t *testing.T) {
 	}
 }
 
-// TestAccountRecoveryOwnerHistoryExpires scaffolds the
-// "owner authority history expiration" branch of
-// operation_tests.cpp::account_recovery — the C++ test rotates owner
-// authority several times across HIVE_OWNER_AUTH_RECOVERY_PERIOD
-// (30 days) to verify that an owner_authority_history row created
-// 30+ days ago is no longer considered "recent" enough to authorize
-// a recover_account.
+// TestAccountRecoveryOwnerHistoryExpires ports the "owner authority
+// history expiration" branch of operation_tests.cpp::account_recovery —
+// once HIVE_OWNER_AUTH_RECOVERY_PERIOD (30 days) has elapsed since the
+// owner_authority_history row was recorded, recover_account_evaluator
+// can no longer use that row to authorize the recovery. In C++, the
+// periodic account_recovery_processing pass (database.cpp:3702-3710)
+// removes stale history rows; the matching loop in
+// recover_account_evaluator (hive_evaluator.cpp:2609-2620) then sees
+// no row and the FC_ASSERT fires. The Go evaluator applies the same
+// 30-day age filter inline.
 //
-// SKIPPED: hived-go's owner_authority_history is captured by
-// recover_account_evaluator (see internal/chain/evaluator/recovery.go)
-// but the live-sync replay never asserts on the "owner history
-// expired" branch and there is no test-side helper to forge
-// authority key matches without a signing layer. Once the fixture
-// supports authority-key matching, port the full sub-scenario.
+// We exercise the apply path directly — sigs are skipped in the
+// testfixture, so authority-key signing isn't required to reach the
+// history-match assertion. The test:
+//
+//   1. Rotates bob's owner key — recording the original owner as a
+//      history row at time T0.
+//   2. Advances head_block_time by 30 days + epsilon (history row is
+//      now older than HIVE_OWNER_AUTH_RECOVERY_PERIOD).
+//   3. Requests + attempts recover_account using the now-stale
+//      original owner as recent_owner_authority. Must be rejected.
 func TestAccountRecoveryOwnerHistoryExpires(t *testing.T) {
-	t.Skip("MISSING: owner-authority-history expiration sub-scenario " +
-		"of account_recovery requires authority-key signing in the " +
-		"testfixture (currently signatures are skipped). C++ rotates " +
-		"owner keys across 30d to verify that owner_authority_history " +
-		"entries older than HIVE_OWNER_AUTH_RECOVERY_PERIOD reject the " +
-		"recover_account op.")
+	f := New(t)
+	f.Actors("alice", "bob")
+	f.GenerateBlock()
+
+	// Record bob's current owner — this is what will be stored as the
+	// history row's previous_owner_authority once we rotate.
+	bobAuthBefore, err := objects.GetAccountAuthority(state.NewSession(f.State), "bob")
+	if err != nil {
+		t.Fatalf("get bob auth: %v", err)
+	}
+	staleOwner := bobAuthBefore.Owner
+
+	// Step 1: rotate bob's owner — creates owner_authority_history
+	// row with LastValidTime = head_block_time().
+	var newOwnerKey [33]byte
+	newOwnerKey[0], newOwnerKey[1] = 0x02, 'N'
+	newOwnerAuth := auth.Authority{
+		WeightThreshold: 1,
+		KeyAuths:        []auth.KeyAuth{{Key: newOwnerKey, Weight: 1}},
+	}
+	if err := f.ApplyOp(op.AccountUpdate{
+		Account: "bob",
+		Owner:   &newOwnerAuth,
+		MemoKey: newOwnerKey,
+	}); err != nil {
+		t.Fatalf("rotate owner: %v", err)
+	}
+	if !objects.HasOwnerAuthorityHistoryFor(state.NewSession(f.State), "bob") {
+		t.Fatal("expected owner_authority_history row after rotate")
+	}
+
+	// Step 2: skip past HIVE_OWNER_AUTH_RECOVERY_PERIOD + 1h. The
+	// stored history row's last_valid_time + 30d is now strictly less
+	// than head_block_time, so the row is effectively expired.
+	const thirtyDaysSec = uint32(60 * 60 * 24 * 30)
+	f.SkipSeconds(thirtyDaysSec + 60*60)
+
+	// Step 3a: alice (bob's recovery account) requests recovery.
+	// We make NewOwnerAuthority distinct from the stale one so the
+	// op doesn't fail on the "new == recent" check (if any).
+	var recoveryKey [33]byte
+	recoveryKey[0], recoveryKey[1] = 0x02, 'R'
+	recoveryNewAuth := auth.Authority{
+		WeightThreshold: 1,
+		KeyAuths:        []auth.KeyAuth{{Key: recoveryKey, Weight: 1}},
+	}
+	if err := f.ApplyOp(op.RequestAccountRecovery{
+		RecoveryAccount:   "alice",
+		AccountToRecover:  "bob",
+		NewOwnerAuthority: recoveryNewAuth,
+	}); err != nil {
+		t.Fatalf("request_account_recovery: %v", err)
+	}
+
+	// Step 3b: recover_account using the now-expired history row's
+	// authority. Must be rejected — the row is older than
+	// HIVE_OWNER_AUTH_RECOVERY_PERIOD.
+	err = f.ApplyOp(op.RecoverAccount{
+		AccountToRecover:     "bob",
+		NewOwnerAuthority:    recoveryNewAuth,
+		RecentOwnerAuthority: staleOwner,
+	})
+	if err == nil {
+		t.Fatal("recover_account using >30d-old owner_authority_history " +
+			"should be rejected, got nil error")
+	}
+
+	// And bob's account_authority_object must NOT have been rotated —
+	// the rejected op should be a no-op on the authority side. We
+	// confirm the owner is still the post-rotate key, not the recovery
+	// key.
+	bobAuthAfter, err := objects.GetAccountAuthority(state.NewSession(f.State), "bob")
+	if err != nil {
+		t.Fatalf("get bob auth after: %v", err)
+	}
+	if len(bobAuthAfter.Owner.KeyAuths) != 1 ||
+		bobAuthAfter.Owner.KeyAuths[0].Key != newOwnerKey {
+		t.Errorf("bob.Owner after rejected recover: got %+v, want owner=newOwnerKey",
+			bobAuthAfter.Owner)
+	}
 }

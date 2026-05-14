@@ -15,6 +15,61 @@ const recoveryRequestExpirationSec uint32 = 60 * 60 * 24
 // HIVE_OWNER_AUTH_RECOVERY_PERIOD = 30 days.
 const changeRecoveryEffectiveDelaySec uint32 = 60 * 60 * 24 * 30
 
+// authoritiesEqual reports whether two authority structs are equal in
+// the FC sense — same weight_threshold and same (sorted) sequence of
+// account_auths and key_auths. We compare by their canonical FC binary
+// encoding so nil vs empty-slice fields round-trip identically (which
+// `reflect.DeepEqual` would not).
+func authoritiesEqual(a, b auth.Authority) bool {
+	if a.WeightThreshold != b.WeightThreshold {
+		return false
+	}
+	ab := auth.AppendAuthority(nil, a)
+	bb := auth.AppendAuthority(nil, b)
+	if len(ab) != len(bb) {
+		return false
+	}
+	for i := range ab {
+		if ab[i] != bb[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// findRecentOwnerAuthority scans owner_authority_history rows for
+// `account` and returns true iff any row's PreviousOwnerAuthority
+// equals `recent` AND that row's LastValidTime is within
+// HIVE_OWNER_AUTH_RECOVERY_PERIOD of headBlockTime. Mirrors the
+// matching loop in C++ recover_account_evaluator (hive_evaluator.cpp:2609)
+// combined with the periodic cleanup pass (database.cpp:3702-3710) that
+// would otherwise have already removed stale rows.
+func findRecentOwnerAuthority(s *state.Session, account auth.AccountName, recent auth.Authority, headBlockTime uint32) bool {
+	prefix := state.AppendAccountName(nil, account)
+	found := false
+	_ = s.Range(objects.OwnerAuthorityHistoryTable, state.PrimaryIndex, prefix,
+		func(_, value []byte) (bool, error) {
+			row, err := objects.ReadOwnerAuthorityHistory(value)
+			if err != nil {
+				return true, nil
+			}
+			if row.Account != account {
+				return false, nil
+			}
+			// Skip rows older than HIVE_OWNER_AUTH_RECOVERY_PERIOD —
+			// they would have been deleted by C++'s periodic cleanup.
+			if row.LastValidTime+changeRecoveryEffectiveDelaySec < headBlockTime {
+				return true, nil
+			}
+			if authoritiesEqual(row.PreviousOwnerAuthority, recent) {
+				found = true
+				return false, nil
+			}
+			return true, nil
+		})
+	return found
+}
+
 type requestAccountRecoveryEvaluator struct{}
 
 func (requestAccountRecoveryEvaluator) Apply(ctx *Context, opArg op.Op) error {
@@ -52,6 +107,18 @@ func (recoverAccountEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	if ctx.HeadBlockTime > req.Expiration {
 		objects.DeleteAccountRecoveryRequestFull(ctx.DB, &req)
 		return fmt.Errorf("recover_account: request expired")
+	}
+	// Match recent_owner_authority against the recorded
+	// owner_authority_history rows for this account, skipping any row
+	// whose last_valid_time is older than HIVE_OWNER_AUTH_RECOVERY_PERIOD
+	// (30 days). In C++ those stale rows are removed by a periodic
+	// cleanup pass in account_recovery_processing
+	// (database.cpp:3702-3710); the matching loop in
+	// recover_account_evaluator (hive_evaluator.cpp:2609-2620) then
+	// only sees fresh rows. We don't run a separate cleanup, so we
+	// apply the same age filter inline here — semantically equivalent.
+	if !findRecentOwnerAuthority(ctx.DB, r.AccountToRecover, r.RecentOwnerAuthority, ctx.HeadBlockTime) {
+		return fmt.Errorf("recover_account: recent authority not found in owner_authority_history (or expired)")
 	}
 	// Rotate owner authority on the account_authority_object. Mirrors
 	// hived's recover_account_evaluator (hive_evaluator_account.cpp:402).
