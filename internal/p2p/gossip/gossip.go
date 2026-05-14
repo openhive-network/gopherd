@@ -37,8 +37,6 @@
 package gossip
 
 import (
-	"time"
-
 	"hived-go/internal/chain"
 	"hived-go/internal/crypto"
 	p2pnode "hived-go/internal/p2p/node"
@@ -144,15 +142,6 @@ func (s *Service) BroadcastBlock(rawBlock []byte, blockNum uint32) {
 // usually already broadcast it; this call short-circuits via the
 // seenBlk dedup).
 func (s *Service) BroadcastAppliedBlock(rawBlock []byte, blockNum uint32, source *p2pnode.Peer) {
-	// Skip the re-broadcast for historical-catch-up blocks (header
-	// timestamp >5 minutes stale). Peers at the live tip don't want
-	// us echoing old blocks at them — they verify against their own
-	// chain and respond with "You offered me a block that I have
-	// deemed to be invalid", then disconnect. Once at the tip the
-	// gate clears and gossip re-broadcast is normal.
-	if ts := blockTimestampHeader(rawBlock); ts != 0 && uint32(time.Now().Unix())-ts > 5*60 {
-		return
-	}
 	id, ok := blockIDFromHeader(rawBlock, blockNum)
 	if !ok {
 		s.logger.Logf("gossip: re-broadcast block %d — header parse failed", blockNum)
