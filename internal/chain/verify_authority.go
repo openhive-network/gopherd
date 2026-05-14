@@ -33,34 +33,112 @@ func RequiredAuthorities(signedTx *tx.SignedTransaction) map[AuthorityLevel]map[
 		AuthorityOwner:   make(map[string]struct{}),
 		AuthorityPosting: make(map[string]struct{}),
 	}
-	for _, o := range signedTx.Operations {
-		level := authorityLevelFor(o)
-		acct := PayerOf(o)
-		if acct == "" {
-			continue
+	add := func(level AuthorityLevel, name string) {
+		if name != "" {
+			out[level][name] = struct{}{}
 		}
-		out[level][acct] = struct{}{}
+	}
+	for _, o := range signedTx.Operations {
+		switch o.Tag {
+		// Posting-level operations (vote, comment, etc.) — mirrors
+		// the per-op get_required_posting_authorities in C++
+		// libraries/protocol/hive_operations.cpp.
+		case op.TagVote:
+			add(AuthorityPosting, string(o.AsVote().Voter))
+		case op.TagComment:
+			add(AuthorityPosting, string(o.AsComment().Author))
+		case op.TagCommentOptions:
+			add(AuthorityPosting, string(o.AsCommentOptions().Author))
+		case op.TagDeleteComment:
+			add(AuthorityPosting, string(o.AsDeleteComment().Author))
+		case op.TagClaimRewardBalance:
+			// hive_operations.hpp:claim_reward_balance is posting-level
+			// (added via add_authorities(posting)).
+			add(AuthorityPosting, string(o.AsClaimRewardBalance().Account))
+
+		// custom_json carries BOTH required_auths (active) AND
+		// required_posting_auths (posting). Each is its own list.
+		// hive_operations.cpp:get_required_active_authorities /
+		// get_required_posting_authorities for custom_json_operation.
+		case op.TagCustomJSON:
+			cj := o.AsCustomJSON()
+			for _, a := range cj.RequiredPostingAuths {
+				add(AuthorityPosting, string(a))
+			}
+			for _, a := range cj.RequiredAuths {
+				add(AuthorityActive, string(a))
+			}
+
+		// custom (binary, ID-only) — active-only (required_auths).
+		case op.TagCustom:
+			for _, a := range o.AsCustom().RequiredAuths {
+				add(AuthorityActive, string(a))
+			}
+
+		// custom_binary — multi-level (owner/active/posting/account_auths).
+		case op.TagCustomBinary:
+			cb := o.AsCustomBinary()
+			for _, a := range cb.RequiredOwnerAuths {
+				add(AuthorityOwner, string(a))
+			}
+			for _, a := range cb.RequiredActiveAuths {
+				add(AuthorityActive, string(a))
+			}
+			for _, a := range cb.RequiredPostingAuths {
+				add(AuthorityPosting, string(a))
+			}
+
+		// account_update / account_update2: owner-level when the owner
+		// authority itself is being touched (hive_operations.cpp:account_
+		// update_operation::get_required_authorities), else active.
+		case op.TagAccountUpdate:
+			au := o.AsAccountUpdate()
+			if au.Owner != nil {
+				add(AuthorityOwner, string(au.Account))
+			} else {
+				add(AuthorityActive, string(au.Account))
+			}
+		case op.TagAccountUpdate2:
+			au := o.AsAccountUpdate2()
+			if au.Owner != nil {
+				add(AuthorityOwner, string(au.Account))
+			} else {
+				// account_update2 with no owner change: posting auths
+				// can sign if only posting/json_metadata is updated
+				// (hive_evaluator_account.cpp:451+). Defaulting to
+				// active is conservative; tighten if a real block
+				// uses the posting-only path.
+				add(AuthorityActive, string(au.Account))
+			}
+
+		// Owner-only ops where the required authority is a STATE LOOKUP
+		// on the affected account.
+		case op.TagChangeRecoveryAccount, op.TagDeclineVotingRights:
+			add(AuthorityOwner, PayerOf(o))
+
+		// recover_account uses get_required_authorities (an ad-hoc list
+		// of TWO embedded authorities — new_owner_authority and
+		// recent_owner_authority — directly from the op), NOT
+		// get_required_owner_authorities on a state-stored account.
+		// Mirrors C++ hive_operations.cpp:recover_account_operation::
+		// get_required_authorities. The evaluator at
+		// internal/chain/evaluator/recovery.go re-checks
+		// recent_owner_authority against owner_authority_history at
+		// apply time, so omitting the pre-flight key→account match
+		// here loses some defense-in-depth but doesn't open a real
+		// hole: a malformed tx still fails the evaluator gate.
+		case op.TagRecoverAccount:
+			// no required state-authority; leave the op for the
+			// evaluator to validate.
+
+		default:
+			// Everything else (transfer, transfer_to_vesting,
+			// witness_update, limit_order, claim_*, escrow_*, etc.)
+			// requires active.
+			add(AuthorityActive, PayerOf(o))
+		}
 	}
 	return out
-}
-
-// authorityLevelFor classifies an op into the authority level required
-// to sign it. The mapping matches hived's per-op
-// get_required_*_authorities methods.
-func authorityLevelFor(o op.Op) AuthorityLevel {
-	switch o.Tag {
-	case op.TagVote, op.TagComment, op.TagCommentOptions, op.TagDeleteComment:
-		return AuthorityPosting
-	case op.TagAccountUpdate, op.TagAccountUpdate2:
-		// account_update touching the owner authority requires owner;
-		// we coarsely classify all account_updates as active here.
-		return AuthorityActive
-	case op.TagRecoverAccount, op.TagChangeRecoveryAccount:
-		return AuthorityOwner
-	}
-	// All others (transfer, transfer_to_vesting, witness_update,
-	// limit_order, etc.) require active.
-	return AuthorityActive
 }
 
 // VerifyAuthority is the entry point for live-mode signature

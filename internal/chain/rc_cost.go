@@ -365,6 +365,22 @@ func PayerOf(o op.Op) string {
 		if len(o.AsCustomJSON().RequiredAuths) > 0 {
 			return string(o.AsCustomJSON().RequiredAuths[0])
 		}
+	case op.TagCollateralizedConvert:
+		return string(o.AsCollateralizedConvert().Owner)
+	case op.TagRequestAccountRecovery:
+		return string(o.AsRequestAccountRecovery().RecoveryAccount)
+	case op.TagEscrowTransfer:
+		return string(o.AsEscrowTransfer().From)
+	case op.TagEscrowApprove:
+		return string(o.AsEscrowApprove().Who)
+	case op.TagEscrowDispute:
+		return string(o.AsEscrowDispute().Who)
+	case op.TagEscrowRelease:
+		return string(o.AsEscrowRelease().Who)
+	case op.TagRecoverAccount:
+		return string(o.AsRecoverAccount().AccountToRecover)
+	case op.TagChangeRecoveryAccount:
+		return string(o.AsChangeRecoveryAccount().AccountToRecover)
 	}
 	return ""
 }
