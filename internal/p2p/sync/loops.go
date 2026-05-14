@@ -247,14 +247,27 @@ func (d *Delegate) applyLoop() {
 			// Block signature (validate_block_header) is still verified —
 			// that's the cryptographic gate that ties the block to the
 			// scheduled witness's BlockSigningKey on chain.
-			skipTxSigs := false
+			historical := false
 			if ts := blockTimestamp(job.rawBlock); ts != 0 && uint32(time.Now().Unix())-ts > 5*60 {
-				skipTxSigs = true
+				historical = true
 			}
+			// Historical catch-up also needs to tolerate per-op apply
+			// failures: the canonical mainnet block_log carries txs
+			// that hived's replay path skips because
+			// chain_plugin.cpp:1232-1239 sets `skip_undo_history_check`
+			// (and the entire apply runs inside a no-validate session).
+			// Concrete example: block 5,147,607 tx 2 op 0 is a
+			// transfer_from_savings on `abit` with request_id 101 that
+			// duplicates a prior pending withdrawal; pure consensus
+			// replay carries the block forward unchanged, so we have to
+			// as well. TolerateFailingOps reproduces hived's behavior
+			// at the per-op granularity. Once at the live tip the gate
+			// clears and apply is strict again.
 			if _, err := d.chain.ApplyBlock(job.rawBlock, job.blockNum, chain.ApplyOptions{
 				Sync:                      false,
-				SkipTransactionSignatures: skipTxSigs,
+				SkipTransactionSignatures: historical,
 				SkipBlockSignature:        false,
+				TolerateFailingOps:        historical,
 				PreVerifiedBlockSigner:    job.preVerifiedSigner,
 				PreRecoveredTxKeys:        job.preRecoveredTxKeys,
 			}, nil); err != nil {
