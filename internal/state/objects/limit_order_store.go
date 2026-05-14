@@ -373,6 +373,21 @@ func (s *LimitOrderStore) RangeByPrice(base, quote uint32, fn func(lo *LimitOrde
 	return rerr
 }
 
+// RangeByOwner iterates every order whose owner matches `owner`. Order
+// is not specified (primary map iteration). Used by HF23 clear_account
+// to cancel every open order for the cleared account.
+func (s *LimitOrderStore) RangeByOwner(owner auth.AccountName, fn func(lo LimitOrder) bool) {
+	o := string(owner)
+	for pk, lo := range s.primary {
+		if pk.owner != o {
+			continue
+		}
+		if !fn(*lo) {
+			return
+		}
+	}
+}
+
 // RangeByExpiration iterates orders by expiration ASC. Returning false
 // stops iteration (the C++ clear_expired loop stops at the first row
 // with expiration > now).

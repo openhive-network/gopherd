@@ -224,6 +224,32 @@ func (s *ConvertRequestStore) RangeDueBefore(now uint32, fn func(c ConvertReques
 // Count returns the number of pending convert requests.
 func (s *ConvertRequestStore) Count() int { return len(s.primary) }
 
+// RangeByOwner iterates every request whose owner == owner. Order is
+// not specified (primary map iteration). Used by HF23 clear_account to
+// refund every pending convert request for the cleared account.
+func (s *ConvertRequestStore) RangeByOwner(owner auth.AccountName, fn func(c ConvertRequest) bool) {
+	for pk, c := range s.primary {
+		if pk.owner != owner {
+			continue
+		}
+		if !fn(*c) {
+			return
+		}
+	}
+}
+
+// HasOwner reports whether any collateralized request exists for owner.
+// Used by HF23 clear_account to raise the same assert hived does.
+func HasAnyCollateralizedConvertForOwner(s *state.Session, owner auth.AccountName) bool {
+	prefix := state.AppendAccountName(nil, owner)
+	found := false
+	_ = s.Range(CollateralizedConvertTable, state.PrimaryIndex, prefix, func(_, _ []byte) (bool, error) {
+		found = true
+		return false, nil
+	})
+	return found
+}
+
 // MarshalSnapshot / UnmarshalSnapshot
 
 var convertRequestStoreSnapshotMagic = [4]byte{'C', 'V', 'R', 'Q'}
