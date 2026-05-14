@@ -385,14 +385,14 @@ func (d *Delegate) handleFetchItems(p *node.Peer, body []byte) {
 		case proto.ItemTypeBlock, proto.ItemTypeBlockCompressed:
 			bid := block.ID(h)
 			raw := d.chain.RecentBlockBytesByID(bid)
-			if raw == nil {
-				// Fall back to block-num lookup (the embedded num in
-				// id[:4] is canonical) so peers re-asking by num can
-				// still get an answer if the cache evicted by id.
-				if n := bid.Num(); n != 0 {
-					raw = d.chain.RecentBlockBytes(n)
-				}
-			}
+			// Intentionally NO num-based fallback: if peer asks for
+			// block ID X and our cache evicted X, returning OUR block
+			// at the embedded num would be a DIFFERENT block (different
+			// fork or different witness) — hived peers compare the
+			// returned block's computed ID against their requested ID
+			// and respond with "You offered me a block that I have
+			// deemed to be invalid", then disconnect. Better to send
+			// item_not_available and let them ask another peer.
 			if raw == nil {
 				notAvail := proto.ItemNotAvailableMessage{
 					RequestedItem: proto.ItemID{
