@@ -92,8 +92,12 @@ import (
 )
 
 // cgoDecoder wraps a single libzstd DCtx for a specific dict number.
-// One per (dictNum, goroutine) — DCtx is NOT thread-safe.
+// DCtx is NOT thread-safe, so the mutex serializes ZSTD_decompressDCtx
+// calls across goroutines (the p2p compressed_block_message handler
+// runs decompress concurrently from N peer goroutines, while replay
+// uses a single goroutine — both share the same Decompressor).
 type cgoDecoder struct {
+	mu       sync.Mutex
 	dctx     *C.ZSTD_DCtx
 	dictKeep []byte // pinned dict bytes (held to satisfy by-reference load)
 }
@@ -157,6 +161,8 @@ func (p *cgoDecoderPool) decoderFor(num uint8) (*cgoDecoder, error) {
 // the caller-supplied output buffer (a fresh slice or pooled). On
 // dst capacity overflow, retry with a doubled buffer.
 func (d *cgoDecoder) decompress(payload []byte, dst []byte) ([]byte, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	if cap(dst) < 8192 {
 		dst = make([]byte, 0, 65536)
 	}
