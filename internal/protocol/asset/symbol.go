@@ -166,3 +166,163 @@ func appendU32LE(dst []byte, v uint32) []byte {
 // ErrInvalidLegacyFrame is returned when a 4-byte read suggests a legacy
 // asset but the trailing 4 bytes of the 8-byte frame are inconsistent.
 var ErrInvalidLegacyFrame = errors.New("asset: malformed legacy symbol frame")
+
+// hiveAssetMaxDecimals mirrors HIVE_ASSET_MAX_DECIMALS.
+const hiveAssetMaxDecimals = 12
+
+// smtAssetNumControlMask mirrors SMT_ASSET_NUM_CONTROL_MASK (bit 4).
+const smtAssetNumControlMask uint32 = 0x10
+
+// Well-known NAI data digits (the 8-digit pre-checksum form used by
+// HIVE/HBD/VESTS). Mirrors HIVE_NAI_HIVE/HIVE_NAI_HBD/HIVE_NAI_VESTS.
+const (
+	hiveNAIHbd   uint32 = 1
+	hiveNAIHive  uint32 = 2
+	hiveNAIVests uint32 = 3
+)
+
+// hiveNAIStringLength is HIVE_ASSET_SYMBOL_NAI_STRING_LENGTH - 1, i.e. the
+// expected strlen of a NAI string: "@@" + 9 base digits = 11 chars.
+const hiveNAIStringLength = 11
+
+// dammChecksum8Digit computes the Damm-algorithm check digit for an 8-digit
+// decimal value. Mirrors asset_symbol_type::damm_checksum_8digit. The input
+// must be < 1e8.
+func dammChecksum8Digit(value uint32) uint8 {
+	t := [...]uint8{
+		0, 30, 10, 70, 50, 90, 80, 60, 40, 20,
+		70, 0, 90, 20, 10, 50, 40, 80, 60, 30,
+		40, 20, 0, 60, 80, 70, 10, 30, 50, 90,
+		10, 70, 50, 0, 90, 80, 30, 40, 20, 60,
+		60, 10, 20, 30, 0, 40, 50, 90, 70, 80,
+		30, 60, 70, 40, 20, 0, 90, 50, 80, 10,
+		50, 80, 60, 90, 70, 20, 0, 10, 30, 40,
+		80, 90, 40, 50, 30, 60, 20, 0, 10, 70,
+		90, 40, 30, 80, 60, 10, 70, 20, 0, 50,
+		20, 50, 80, 10, 40, 30, 60, 70, 90, 0,
+	}
+	q0 := value / 10
+	d0 := value % 10
+	q1 := q0 / 10
+	d1 := q0 % 10
+	q2 := q1 / 10
+	d2 := q1 % 10
+	q3 := q2 / 10
+	d3 := q2 % 10
+	q4 := q3 / 10
+	d4 := q3 % 10
+	q5 := q4 / 10
+	d5 := q4 % 10
+	d6 := q5 % 10
+	d7 := q5 / 10
+
+	x := t[d7]
+	x = t[uint32(x)+d6]
+	x = t[uint32(x)+d5]
+	x = t[uint32(x)+d4]
+	x = t[uint32(x)+d3]
+	x = t[uint32(x)+d2]
+	x = t[uint32(x)+d1]
+	x = t[uint32(x)+d0]
+	return x / 10
+}
+
+// assetNumFromNAI mirrors asset_symbol_type::asset_num_from_nai. The input is
+// the 9-digit NAI (with check digit); the function validates the check digit
+// and returns the canonical asset_num. Well-known NAIs (HIVE/HBD/VESTS) must
+// be paired with their canonical precision.
+func assetNumFromNAI(nai uint32, decimalPlaces uint8) (AssetNum, error) {
+	naiCheckDigit := nai % 10
+	naiDataDigits := nai / 10
+
+	if naiDataDigits < 1 || naiDataDigits > smtMaxNAI {
+		return 0, fmt.Errorf("asset: NAI %d out of range", nai)
+	}
+	if uint32(dammChecksum8Digit(naiDataDigits)) != naiCheckDigit {
+		return 0, fmt.Errorf("asset: invalid NAI check digit in %d", nai)
+	}
+
+	switch naiDataDigits {
+	case hiveNAIHive:
+		if decimalPlaces != 3 {
+			return 0, fmt.Errorf("asset: HIVE NAI requires precision 3, got %d", decimalPlaces)
+		}
+		return HiveSymbol, nil
+	case hiveNAIHbd:
+		if decimalPlaces != 3 {
+			return 0, fmt.Errorf("asset: HBD NAI requires precision 3, got %d", decimalPlaces)
+		}
+		return HbdSymbol, nil
+	case hiveNAIVests:
+		if decimalPlaces != 6 {
+			return 0, fmt.Errorf("asset: VESTS NAI requires precision 6, got %d", decimalPlaces)
+		}
+		return VestsSymbol, nil
+	default:
+		if decimalPlaces > hiveAssetMaxDecimals {
+			return 0, fmt.Errorf("asset: precision %d exceeds max %d",
+				decimalPlaces, hiveAssetMaxDecimals)
+		}
+		return AssetNum((naiDataDigits << hiveNAIShift) | smtAssetNumControlMask | uint32(decimalPlaces)), nil
+	}
+}
+
+// SymbolFromNAIString parses a NAI-string of the form "@@NNNNNNNNN" (exactly
+// "@@" followed by 9 decimal digits, including the Damm check digit) paired
+// with a precision. Mirrors asset_symbol_type::from_nai_string. The well-known
+// NAIs are HIVE="@@000000021", HBD="@@000000013", VESTS="@@000000037".
+func SymbolFromNAIString(s string, decimalPlaces uint8) (Symbol, error) {
+	if len(s) != hiveNAIStringLength {
+		return Symbol{}, fmt.Errorf("asset: NAI string %q wrong length (got %d, want %d)",
+			s, len(s), hiveNAIStringLength)
+	}
+	if s[0] != '@' || s[1] != '@' {
+		return Symbol{}, fmt.Errorf("asset: NAI string %q missing '@@' prefix", s)
+	}
+	var nai uint32
+	for i := 2; i < hiveNAIStringLength; i++ {
+		c := s[i]
+		if c < '0' || c > '9' {
+			return Symbol{}, fmt.Errorf("asset: NAI string %q non-digit at %d", s, i)
+		}
+		nai = nai*10 + uint32(c-'0')
+	}
+	num, err := assetNumFromNAI(nai, decimalPlaces)
+	if err != nil {
+		return Symbol{}, err
+	}
+	return Symbol{Num: num}, nil
+}
+
+// ToNAI returns the 9-digit NAI (data digits + Damm check digit) for s.
+// Mirrors asset_symbol_type::to_nai. For HIVE/HBD/VESTS this returns
+// 21/13/37 respectively; for SMT symbols it returns
+// (asset_num >> HIVE_NAI_SHIFT) * 10 + damm_checksum.
+func (s Symbol) ToNAI() uint32 {
+	var dataDigits uint32
+	switch s.Num {
+	case HiveSymbol:
+		dataDigits = hiveNAIHive
+	case HbdSymbol:
+		dataDigits = hiveNAIHbd
+	case VestsSymbol:
+		dataDigits = hiveNAIVests
+	default:
+		dataDigits = uint32(s.Num) >> hiveNAIShift
+	}
+	return dataDigits*10 + uint32(dammChecksum8Digit(dataDigits))
+}
+
+// ToNAIString returns the canonical "@@NNNNNNNNN" representation. Mirrors
+// asset_symbol_type::to_nai_string.
+func (s Symbol) ToNAIString() string {
+	x := s.ToNAI()
+	var buf [hiveNAIStringLength]byte
+	buf[0] = '@'
+	buf[1] = '@'
+	for i := hiveNAIStringLength - 1; i >= 2; i-- {
+		buf[i] = byte('0' + x%10)
+		x /= 10
+	}
+	return string(buf[:])
+}
