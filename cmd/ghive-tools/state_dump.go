@@ -14,6 +14,7 @@ import (
 
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
+	"hived-go/internal/state/snapshot"
 )
 
 func cmdStateDump(args []string) int {
@@ -24,6 +25,8 @@ func cmdStateDump(args []string) int {
 	includeWitnesses := fs.Bool("witnesses", true, "include witnesses")
 	includeComments := fs.Bool("comments", false, "include comments (LARGE)")
 	includeDGPO := fs.Bool("dgpo", true, "include DGPO singleton")
+	includeAuth := fs.Bool("auth", false, "include account_authority rows")
+	loadSnap := fs.String("load-snapshot", "", "load a snapshot dir into the fresh data-dir before dumping (the typed in-memory stores are not persisted to Pebble; without --load-snapshot, accounts/dgpo/etc are empty for a Pebble-only state dir)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -38,6 +41,39 @@ func cmdStateDump(args []string) int {
 		return 1
 	}
 	defer db.Close()
+
+	if *loadSnap != "" {
+		boot := state.NewSession(db)
+		objects.EnsureWitnessStore(boot)
+		objects.EnsureWitnessVoteStore(boot)
+		objects.EnsureAccountStore(boot)
+		objects.EnsureCommentStore(boot)
+		objects.EnsureCommentVoteStore(boot)
+		objects.EnsureBlockSummaryStore(boot)
+		objects.EnsureWitnessScheduleStore(boot)
+		objects.EnsureDGPOStore(boot)
+		objects.EnsureCommentCashoutScheduleStore(boot)
+		objects.EnsureLimitOrderStore(boot)
+		objects.EnsureVestingWithdrawalScheduleStore(boot)
+		objects.EnsureTransactionStore(boot)
+		objects.EnsureConvertRequestStore(boot)
+		st, err := os.Stat(*loadSnap)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "state-dump: stat snapshot: %v\n", err)
+			return 1
+		}
+		if st.IsDir() {
+			if _, err := snapshot.Load(db, *loadSnap); err != nil {
+				fmt.Fprintf(os.Stderr, "state-dump: load snapshot dir: %v\n", err)
+				return 1
+			}
+		} else {
+			if _, err := db.LoadSnapshot(*loadSnap); err != nil {
+				fmt.Fprintf(os.Stderr, "state-dump: load snapshot: %v\n", err)
+				return 1
+			}
+		}
+	}
 
 	var w *bufio.Writer
 	if *out == "-" {
@@ -79,6 +115,43 @@ func cmdStateDump(args []string) int {
 	}
 
 	var counts = map[string]uint64{}
+
+	if *includeAuth {
+		_ = s.Range(objects.AccountAuthorityTable, state.PrimaryIndex, nil, func(_, value []byte) (bool, error) {
+			a, err := objects.ReadAccountAuthority(value)
+			if err != nil {
+				return true, nil
+			}
+			ownerKeys := make([]string, 0, len(a.Owner.KeyAuths))
+			for _, k := range a.Owner.KeyAuths {
+				ownerKeys = append(ownerKeys, k.Key.EncodeBase58())
+			}
+			activeKeys := make([]string, 0, len(a.Active.KeyAuths))
+			for _, k := range a.Active.KeyAuths {
+				activeKeys = append(activeKeys, k.Key.EncodeBase58())
+			}
+			postingKeys := make([]string, 0, len(a.Posting.KeyAuths))
+			for _, k := range a.Posting.KeyAuths {
+				postingKeys = append(postingKeys, k.Key.EncodeBase58())
+			}
+			emit(enc, "account_authority", map[string]interface{}{
+				"account":               string(a.Account),
+				"last_owner_update":     a.LastOwnerUpdate,
+				"previous_owner_update": a.PreviousOwnerUpdate,
+				"owner_threshold":       a.Owner.WeightThreshold,
+				"active_threshold":      a.Active.WeightThreshold,
+				"posting_threshold":     a.Posting.WeightThreshold,
+				"owner_keys":            ownerKeys,
+				"active_keys":           activeKeys,
+				"posting_keys":          postingKeys,
+				"owner_account_auths":   len(a.Owner.AccountAuths),
+				"active_account_auths":  len(a.Active.AccountAuths),
+				"posting_account_auths": len(a.Posting.AccountAuths),
+			})
+			counts["account_authorities"]++
+			return true, nil
+		})
+	}
 
 	if *includeAccounts {
 		err := s.Range(objects.AccountTable, state.PrimaryIndex, nil, func(_, value []byte) (bool, error) {

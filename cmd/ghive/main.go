@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"hived-go/internal/chain"
 	"hived-go/internal/config"
@@ -22,16 +23,18 @@ import (
 	"hived-go/internal/state"
 	"hived-go/internal/state/genesis"
 	"hived-go/internal/state/objects"
+	"hived-go/internal/state/snapshot"
 )
 
 func main() {
 	var (
-		showVersion bool
-		showNetwork bool
-		configPath  string
-		dataDir     string
-		replay      bool
-		cacheMB     int
+		showVersion  bool
+		showNetwork  bool
+		configPath   string
+		dataDir      string
+		replay       bool
+		cacheMB      int
+		loadSnapshot string
 	)
 	flag.BoolVar(&showVersion, "version", false, "print version and exit")
 	flag.BoolVar(&showNetwork, "network", false, "print compiled-in network constants and exit")
@@ -39,6 +42,7 @@ func main() {
 	flag.StringVar(&dataDir, "data-dir", "", "data directory (overrides config.ini)")
 	flag.BoolVar(&replay, "replay-blockchain", false, "replay the block_log into a fresh state dir before starting")
 	flag.IntVar(&cacheMB, "cache-mb", 1024, "pebble block-cache size in MB (default 1024; was 256 hard-coded)")
+	flag.StringVar(&loadSnapshot, "load-snapshot", "", "load a state snapshot (single-file or directory) on startup before genesis/sync")
 	flag.Parse()
 
 	if showVersion {
@@ -81,19 +85,65 @@ func main() {
 	}
 	defer stateDB.Close()
 
-	// Bootstrap: if the state dir is empty, apply genesis. Selects
-	// mainnet vs testnet variant via config-ini `genesis-type`.
-	switch cfg.GenesisType {
-	case "testnet":
-		if err := genesis.ApplyTestnet(stateDB, 21); err != nil {
-			_ = err
+	// Pre-register every typed subsystem on the freshly-opened Database
+	// so a snapshot load finds them by key. Mirrors the boot section in
+	// ghive-tools/replay.go.
+	{
+		boot := state.NewSession(stateDB)
+		objects.EnsureWitnessStore(boot)
+		objects.EnsureWitnessVoteStore(boot)
+		objects.EnsureAccountStore(boot)
+		objects.EnsureCommentStore(boot)
+		objects.EnsureCommentVoteStore(boot)
+		objects.EnsureBlockSummaryStore(boot)
+		objects.EnsureWitnessScheduleStore(boot)
+		objects.EnsureDGPOStore(boot)
+		objects.EnsureCommentCashoutScheduleStore(boot)
+		objects.EnsureLimitOrderStore(boot)
+		objects.EnsureVestingWithdrawalScheduleStore(boot)
+		objects.EnsureTransactionStore(boot)
+		objects.EnsureConvertRequestStore(boot)
+	}
+
+	// Snapshot load happens BEFORE genesis. If the snapshot covers a
+	// post-genesis state, we skip genesis.Apply (which would clobber
+	// initminer's mana, DGPO, etc.).
+	if loadSnapshot != "" {
+		st, err := os.Stat(loadSnapshot)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "ghive: stat snapshot: %v\n", err)
+			os.Exit(1)
 		}
-		fmt.Println("ghive: testnet genesis applied (21 init witnesses + 21 operator accounts)")
-	default:
-		if err := genesis.Apply(stateDB); err != nil {
-			// genesis.Apply tolerates an already-bootstrapped dir
-			// (writes are idempotent).
-			_ = err
+		if st.IsDir() {
+			man, err := snapshot.Load(stateDB, loadSnapshot)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "ghive: load snapshot dir: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Printf("ghive: loaded snapshot dir %s at block %d\n", loadSnapshot, man.BlockNum)
+		} else {
+			h, err := stateDB.LoadSnapshot(loadSnapshot)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "ghive: load snapshot: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Printf("ghive: loaded snapshot %s at block %d\n", loadSnapshot, h)
+		}
+	} else {
+		// Bootstrap: if the state dir is empty, apply genesis. Selects
+		// mainnet vs testnet variant via config-ini `genesis-type`.
+		switch cfg.GenesisType {
+		case "testnet":
+			if err := genesis.ApplyTestnet(stateDB, 21); err != nil {
+				_ = err
+			}
+			fmt.Println("ghive: testnet genesis applied (21 init witnesses + 21 operator accounts)")
+		default:
+			if err := genesis.Apply(stateDB); err != nil {
+				// genesis.Apply tolerates an already-bootstrapped dir
+				// (writes are idempotent).
+				_ = err
+			}
 		}
 	}
 
@@ -208,10 +258,69 @@ func main() {
 	wp.Start()
 	defer wp.Stop()
 
+	// Periodic head-block logger so an outside watcher can see progress
+	// during a long p2p sync. Logs once a second; cheap (1 DGPO read).
+	stopHB := make(chan struct{})
+	go func() {
+		t := time.NewTicker(time.Second)
+		defer t.Stop()
+		var last uint32
+		for {
+			select {
+			case <-stopHB:
+				return
+			case <-t.C:
+				if h, err := cdb.HeadBlock(); err == nil && h != last {
+					fmt.Printf("ghive: head=%d\n", h)
+					last = h
+				}
+			}
+		}
+	}()
+
+	// Snapshot-on-SIGUSR1: writes a single-file snapshot to
+	// ${GHIVE_SNAPSHOT_DIR}/p2p-block-<head>.snap when the signal is
+	// received. Allows an outside loop to periodically checkpoint the
+	// state without restarting the daemon. The Pebble layer is safe for
+	// concurrent reads during apply, so the snapshot just races at the
+	// row level — any per-block partial-write window is small relative
+	// to the time to scan all rows.
+	usrCh := make(chan os.Signal, 1)
+	signal.Notify(usrCh, syscall.SIGUSR1)
+	go func() {
+		for range usrCh {
+			snapDir := os.Getenv("GHIVE_SNAPSHOT_DIR")
+			if snapDir == "" {
+				fmt.Fprintln(os.Stderr, "ghive: SIGUSR1: GHIVE_SNAPSHOT_DIR not set; skipping")
+				continue
+			}
+			h, err := cdb.HeadBlock()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "ghive: SIGUSR1: read head: %v\n", err)
+				continue
+			}
+			// Use the directory-format snapshot so the typed stores
+			// (Account/DGPO/etc — in-memory only, NOT persisted to
+			// Pebble) get written too. The single-file SaveSnapshot
+			// only covers the K/V layer and would not be loadable.
+			headID := ""
+			if id, err := cdb.HeadBlockID(); err == nil {
+				headID = fmt.Sprintf("%x", id[:])
+			}
+			path, err := snapshot.Save(stateDB, snapDir, h, headID)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "ghive: SIGUSR1: save snapshot: %v\n", err)
+				continue
+			}
+			fmt.Printf("ghive: snapshot saved %s (head=%d)\n", path, h)
+		}
+	}()
+
 	// Wait for interrupt.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
+	close(stopHB)
 	fmt.Println("ghive: shutting down...")
 }
 

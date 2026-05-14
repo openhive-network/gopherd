@@ -126,6 +126,14 @@ func cmdReplay(args []string) int {
 		objects.EnsureAccountStore(boot)
 		objects.EnsureCommentStore(boot)
 		objects.EnsureCommentVoteStore(boot)
+		objects.EnsureBlockSummaryStore(boot)
+		objects.EnsureWitnessScheduleStore(boot)
+		objects.EnsureDGPOStore(boot)
+		objects.EnsureCommentCashoutScheduleStore(boot)
+		objects.EnsureLimitOrderStore(boot)
+		objects.EnsureVestingWithdrawalScheduleStore(boot)
+		objects.EnsureTransactionStore(boot)
+		objects.EnsureConvertRequestStore(boot)
 	}
 
 	if *loadSnapshot != "" {
