@@ -1,6 +1,7 @@
 package chain
 
 import (
+	"hived-go/internal/protocol/auth"
 	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
@@ -15,10 +16,15 @@ import (
 //     witness it votes for (or from its proxy chain's terminal voter)
 //   - clear_witness_votes: remove the witness_vote rows and zero
 //     witnesses_voted_for
-//   - clear any proxy
+//   - clear any proxy (emit proxy_cleared_operation virtual op if the
+//     account had a non-empty proxy when this fires)
 //   - mark the account VoteRevoked = true
 //   - remove the request
-func processDeclineVotingRights(s *state.Session, blockTime, blockNum uint32) {
+//
+// The `d` parameter is the chain.Database — passed in so we can push
+// proxy_cleared virtual ops onto the per-block buffer (block_vops.go).
+// May be nil in test contexts that bypass the vop buffer.
+func processDeclineVotingRights(s *state.Session, blockTime, blockNum uint32, d *Database) {
 	if hint, ok := s.GetExpHint(objects.DeclineVotingRightsRequestTable, objects.DeclineVotingRightsByEffectiveIndex); ok && hint > blockTime {
 		return
 	}
@@ -73,9 +79,21 @@ func processDeclineVotingRights(s *state.Session, blockTime, blockNum uint32) {
 			// nullify call above already adjusted witness totals).
 			objects.ClearWitnessVotesForAccount(s, p.account, 0)
 			a.WitnessesVotedFor = 0
+			oldProxy := a.Proxy
 			a.Proxy = ""
 			a.VoteRevoked = true
 			objects.PutAccount(s, &a)
+			// hived emits proxy_cleared_operation when the settled
+			// decline_voting_rights request clears a non-empty proxy.
+			// Mirrors libraries/chain/database_dhf.cpp:225 (push_virtual_operation
+			// of proxy_cleared_operation in process_decline_voting_rights).
+			if d != nil && oldProxy != "" {
+				d.pushVOp(BlockVOp{
+					Kind:    BlockVOpProxyCleared,
+					Account: auth.AccountName(p.account),
+					Proxy:   auth.AccountName(oldProxy),
+				})
+			}
 		}
 		objects.DeleteDeclineVotingRightsRequestFull(s, &req)
 	}

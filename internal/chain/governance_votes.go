@@ -1,6 +1,10 @@
 package chain
 
 import (
+	"fmt"
+	"os"
+
+	"hived-go/internal/protocol/auth"
 	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
@@ -22,7 +26,10 @@ import (
 // hived uses a by-expiration secondary index. For replay correctness
 // the difference is only timing — both approaches converge on the
 // same final state once all due accounts are processed.
-func removeExpiredGovernanceVotes(s *state.Session, blockTime, blockNum uint32) {
+// The `d` parameter is the chain.Database — passed in so we can push
+// proxy_cleared virtual ops onto the per-block buffer (block_vops.go).
+// May be nil in test contexts that bypass the vop buffer.
+func removeExpiredGovernanceVotes(s *state.Session, blockTime, blockNum uint32, d *Database) {
 	hf := hardfork.SetForBlock(blockNum)
 	if !hf.Has(hardfork.HF25) {
 		return
@@ -49,10 +56,19 @@ func removeExpiredGovernanceVotes(s *state.Session, blockTime, blockNum uint32) 
 		return true, nil
 	})
 
+	if os.Getenv("GHIVEDBG_SWEEP") != "" && len(due) > 0 {
+		fmt.Fprintf(os.Stderr, "SWEEP blockTime=%d due=%d\n", blockTime, len(due))
+		for _, e := range due {
+			fmt.Fprintf(os.Stderr, "  due: %s\n", e.name)
+		}
+	}
 	for _, e := range due {
 		a, err := objects.GetAccount(s, e.name)
 		if err != nil {
 			continue
+		}
+		if os.Getenv("GHIVEDBG_SWEEP") != "" {
+			fmt.Fprintf(os.Stderr, "  processing %s\n", e.name)
 		}
 		// C++ database.cpp:3633-3634 — nullify proxied votes BEFORE
 		// clearing direct votes, so accumulated proxied_vsf_votes drain
@@ -66,6 +82,9 @@ func removeExpiredGovernanceVotes(s *state.Session, blockTime, blockNum uint32) 
 		}
 		objects.NullifyProxiedWitnessVotes(s, &a, directPower)
 		// Drop all proposal votes by this account.
+		if os.Getenv("GHIVEDBG_SWEEP") != "" {
+			fmt.Fprintf(os.Stderr, "  clearProposalVotesForVoter(%s)\n", e.name)
+		}
 		clearProposalVotesForVoter(s, e.name)
 		// Drop direct witness votes. Pass 0 because Nullify above
 		// already removed the propagation-array contribution for the
@@ -75,10 +94,22 @@ func removeExpiredGovernanceVotes(s *state.Session, blockTime, blockNum uint32) 
 		if fresh, ferr := objects.GetAccount(s, e.name); ferr == nil {
 			a = fresh
 		}
+		oldProxy := a.Proxy
 		a.Proxy = ""
 		a.WitnessesVotedFor = 0
 		a.GovernanceVoteExpiration = 0
 		objects.PutAccount(s, &a)
+		// hived emits proxy_cleared_operation when the 365-day governance
+		// vote expiration sweep clears a non-empty proxy. Mirrors
+		// libraries/chain/database.cpp:3650 (push_virtual_operation of
+		// proxy_cleared_operation in remove_expired_governance_votes).
+		if d != nil && oldProxy != "" {
+			d.pushVOp(BlockVOp{
+				Kind:    BlockVOpProxyCleared,
+				Account: auth.AccountName(e.name),
+				Proxy:   auth.AccountName(oldProxy),
+			})
+		}
 	}
 }
 
@@ -112,6 +143,12 @@ func clearProposalVotesForVoter(s *state.Session, voter string) {
 			}
 			return true, nil
 		})
+	if os.Getenv("GHIVEDBG_SWEEP") != "" {
+		fmt.Fprintf(os.Stderr, "    clearProposalVotesForVoter(%s) -> %d rows\n", voter, len(toDelete))
+		for _, p := range toDelete {
+			fmt.Fprintf(os.Stderr, "      delete (pid=%d, voter=%s)\n", p.proposalID, p.voter)
+		}
+	}
 	for _, p := range toDelete {
 		objects.DeleteProposalVote(s, p.proposalID, p.voter)
 	}

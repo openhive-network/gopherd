@@ -985,10 +985,10 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	updateVirtualSupply(session, blockNum)
 	processAccountRecovery(session, hdr.Timestamp)
 	expireEscrowRatifications(session, hdr.Timestamp)
-	processDeclineVotingRights(session, hdr.Timestamp, blockNum)
+	processDeclineVotingRights(session, hdr.Timestamp, blockNum, d)
 	processProposals(session, hdr.Timestamp, blockNum)
 	processDelayedVoting(session, hdr.Timestamp, blockNum)
-	removeExpiredGovernanceVotes(session, hdr.Timestamp, blockNum)
+	removeExpiredGovernanceVotes(session, hdr.Timestamp, blockNum, d)
 	processRecurrentTransfers(session, hdr.Timestamp, blockNum, d)
 	processHardforks(session, blockNum)
 
