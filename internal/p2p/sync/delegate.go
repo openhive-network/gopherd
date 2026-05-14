@@ -650,7 +650,12 @@ func (d *Delegate) FetchInhibited() bool { return d.inhibitFetching.Load() }
 // burning measurable CPU.
 func (d *Delegate) isFarBehind() bool {
 	const catchupGap = 100
-	myHead, _ := d.chain.HeadBlock()
+	// Atomic-hint head — isFarBehind is called from the INV loop and
+	// taking applyMu.RLock per tick contends with the apply writer.
+	myHead := d.headBlockHint.Load()
+	if myHead == 0 {
+		myHead, _ = d.chain.HeadBlock()
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	for _, st := range d.peers {

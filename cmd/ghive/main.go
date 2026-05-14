@@ -294,22 +294,33 @@ func main() {
 				fmt.Fprintln(os.Stderr, "ghive: SIGUSR1: GHIVE_SNAPSHOT_DIR not set; skipping")
 				continue
 			}
-			h, err := cdb.HeadBlock()
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "ghive: SIGUSR1: read head: %v\n", err)
-				continue
-			}
-			// Use the directory-format snapshot so the typed stores
-			// (Account/DGPO/etc — in-memory only, NOT persisted to
-			// Pebble) get written too. The single-file SaveSnapshot
-			// only covers the K/V layer and would not be loadable.
-			headID := ""
-			if id, err := cdb.HeadBlockID(); err == nil {
-				headID = fmt.Sprintf("%x", id[:])
-			}
-			path, err := snapshot.Save(stateDB, snapDir, h, headID)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "ghive: SIGUSR1: save snapshot: %v\n", err)
+			// Serialize the snapshot against the apply goroutine. The
+			// typed stores (DGPOStore, AccountStore, etc.) use Go maps
+			// internally — concurrent read from snapshot.Save while
+			// ApplyBlock writes them crashes the runtime with
+			// "concurrent map read and map write". WithApplyLock holds
+			// the apply write lock for the duration; apply pauses
+			// briefly while the snapshot streams.
+			var (
+				path  string
+				saveE error
+				h     uint32
+			)
+			cdb.WithApplyLock(func() {
+				var err error
+				h, err = cdb.HeadBlock()
+				if err != nil {
+					saveE = fmt.Errorf("read head: %w", err)
+					return
+				}
+				headID := ""
+				if id, err := cdb.HeadBlockID(); err == nil {
+					headID = fmt.Sprintf("%x", id[:])
+				}
+				path, saveE = snapshot.Save(stateDB, snapDir, h, headID)
+			})
+			if saveE != nil {
+				fmt.Fprintf(os.Stderr, "ghive: SIGUSR1: save snapshot: %v\n", saveE)
 				continue
 			}
 			fmt.Printf("ghive: snapshot saved %s (head=%d)\n", path, h)

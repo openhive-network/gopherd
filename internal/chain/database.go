@@ -174,6 +174,19 @@ func New(s *state.Database) *Database {
 // State returns the underlying state.Database.
 func (d *Database) State() *state.Database { return d.state }
 
+// WithApplyLock runs fn while holding the apply write lock. The chain
+// state (Pebble overlay + every typed in-memory store) is guaranteed
+// not to be mutated by ApplyBlock for the duration. Used by the
+// SIGUSR1 snapshot path to serialize the snapshot against the apply
+// goroutine — without it, snapshot.Save races against the apply path
+// (concurrent map read+write inside the typed stores) and crashes the
+// daemon with a Go runtime fatal.
+func (d *Database) WithApplyLock(fn func()) {
+	d.applyMu.Lock()
+	defer d.applyMu.Unlock()
+	fn()
+}
+
 // EnableRecentBlockCache turns on the in-memory ring of last-N-applied
 // raw block bytes. Required for serving p2p sync responses; callers that
 // only replay block_log can leave it disabled. Safe to call once at

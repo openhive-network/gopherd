@@ -1,6 +1,9 @@
 package sync
 
 import (
+	"time"
+
+	"hived-go/internal/crypto"
 	"hived-go/internal/p2p/node"
 	"hived-go/internal/p2p/proto"
 	"hived-go/internal/protocol/block"
@@ -130,7 +133,13 @@ func (d *Delegate) handleInv(p *node.Peer, body []byte) {
 			}
 			// Skip if its embedded block_num is at or below our head.
 			if bid.Num() != 0 {
-				head, _ := d.chain.HeadBlock()
+				// headBlockHint is a lock-free atomic mirror; calling
+				// d.chain.HeadBlock() here would take applyMu.RLock per
+				// item and serialize against the apply goroutine.
+				head := d.headBlockHint.Load()
+				if head == 0 {
+					head, _ = d.chain.HeadBlock()
+				}
 				if bid.Num() <= head {
 					st.known[bid] = struct{}{}
 					continue
@@ -208,9 +217,14 @@ func (d *Delegate) handleFetchBlockchainItemIDs(p *node.Peer, body []byte) {
 		st.mu.Unlock()
 	}
 
-	// Fetch our recent blocks AFTER peer's head.
+	// Fetch our recent blocks AFTER peer's head. Read via the atomic
+	// hint instead of d.chain.HeadBlock() to avoid the applyMu.RLock
+	// contention with applyLoop's writer.
 	hashes := make([]proto.ItemHash, 0, d.cfg.MaxBlocksPerInv)
-	myHead, _ := d.chain.HeadBlock()
+	myHead := d.headBlockHint.Load()
+	if myHead == 0 {
+		myHead, _ = d.chain.HeadBlock()
+	}
 	if myHead > peerHeadNum {
 		// Walk forward from peerHeadNum+1 until we run out of cached
 		// blocks or hit MaxBlocksPerInv.
@@ -259,7 +273,12 @@ func (d *Delegate) handleBlockchainItemIDsInventory(p *node.Peer, body []byte) {
 	if st == nil {
 		return
 	}
-	myHead, _ := d.chain.HeadBlock()
+	// Atomic-hint head avoids the applyMu.RLock per call when many
+	// peers deliver inventory concurrently.
+	myHead := d.headBlockHint.Load()
+	if myHead == 0 {
+		myHead, _ = d.chain.HeadBlock()
+	}
 	missing := make([]proto.ItemHash, 0, len(msg.ItemHashesAvailable))
 	throttled := false
 	st.mu.Lock()
@@ -516,7 +535,17 @@ func (d *Delegate) handleBlockBytes(p *node.Peer, signedBlockBytes []byte, bid b
 	// single-writer applyLoop. Without this, applyLoop's per-tx
 	// VerifyAuthority dominates CPU on post-HF12 blocks (50-100 txs
 	// each, ~100µs per RecoverPublicKey).
-	txKeys := recoverTxKeysCached(signedBlockBytes, bid.Num(), d.txSigCache, bid)
+	//
+	// Skip the pre-recovery for historical-catch-up blocks (header
+	// timestamp >5min behind wall clock) — the applyLoop sets
+	// SkipTransactionSignatures=true for those, so any keys we recover
+	// here would be discarded. Cuts ~50% of CPU on the per-peer
+	// receive goroutine during a long catch-up. Cache lookup still
+	// fires; only the recovery itself is gated.
+	var txKeys [][]crypto.PublicKey
+	if ts := blockTimestamp(signedBlockBytes); ts == 0 || uint32(time.Now().Unix())-ts <= 5*60 {
+		txKeys = recoverTxKeysCached(signedBlockBytes, bid.Num(), d.txSigCache, bid)
+	}
 
 	job := applyJob{
 		blockNum:           bid.Num(),
