@@ -13,12 +13,14 @@ package testfixture
 // not duplicated here.
 
 import (
+	"encoding/binary"
 	"errors"
 	"strings"
 	"testing"
 
 	"hived-go/internal/chain"
 	"hived-go/internal/crypto"
+	"hived-go/internal/fcraw"
 	"hived-go/internal/protocol/asset"
 	"hived-go/internal/protocol/network"
 	"hived-go/internal/protocol/op"
@@ -629,8 +631,145 @@ func TestWitnessSetPropertiesValidate(t *testing.T) {
 	}
 }
 
-func TestWitnessSetPropertiesPropBlobInspectionMissing(t *testing.T) {
-	t.Skip("MISSING: Go validator does not inspect packed prop blobs (account_creation_fee symbol, maximum_block_size lower bound, hbd_interest_rate range, exchange_rate asymmetry, url UTF-8, account_subsidy_budget range, account_subsidy_decay range)")
+// TestWitnessSetPropertiesPropBlobInspection mirrors the per-property
+// unpack/validate rules in
+// libraries/protocol/hive_operations.cpp::witness_set_properties_operation::validate().
+// Each property entry is an FC-packed value; this test stresses each known
+// key with a negative case and confirms the validator rejects it.
+func TestWitnessSetPropertiesPropBlobInspection(t *testing.T) {
+	t.Parallel()
+	keyProp := op.WitnessProperty{Key: "key", Value: make([]byte, 33)}
+
+	packAsset := func(a asset.Asset) []byte { return asset.AppendAsset(nil, a) }
+	packPrice := func(p asset.Price) []byte { return asset.AppendPrice(nil, p) }
+	packU32 := func(v uint32) []byte {
+		var b [4]byte
+		binary.LittleEndian.PutUint32(b[:], v)
+		return b[:]
+	}
+	packI32 := func(v int32) []byte { return packU32(uint32(v)) }
+	packU16 := func(v uint16) []byte {
+		var b [2]byte
+		binary.LittleEndian.PutUint16(b[:], v)
+		return b[:]
+	}
+	packString := func(s string) []byte {
+		buf := fcraw.AppendVarUint(nil, uint32(len(s)))
+		return append(buf, s...)
+	}
+
+	hive := func(amount int64) asset.Asset {
+		return asset.Asset{Amount: amount, Symbol: asset.Symbol{Num: asset.HiveSymbol}}
+	}
+	hbd := func(amount int64) asset.Asset {
+		return asset.Asset{Amount: amount, Symbol: asset.Symbol{Num: asset.HbdSymbol}}
+	}
+	vests := func(amount int64) asset.Asset {
+		return asset.Asset{Amount: amount, Symbol: asset.Symbol{Num: asset.VestsSymbol}}
+	}
+
+	tryValidate := func(label string, prop op.WitnessProperty, wantErr bool) {
+		t.Helper()
+		o := op.WitnessSetProperties{
+			Owner: "alice",
+			Props: []op.WitnessProperty{keyProp, prop},
+		}
+		err := o.Validate()
+		if wantErr && err == nil {
+			t.Fatalf("%s: expected error, got nil", label)
+		}
+		if !wantErr && err != nil {
+			t.Fatalf("%s: expected ok, got %v", label, err)
+		}
+	}
+
+	// account_creation_fee: must be HIVE; bounded by [MIN, MAX].
+	tryValidate("acf valid",
+		op.WitnessProperty{Key: "account_creation_fee", Value: packAsset(hive(1000))}, false)
+	tryValidate("acf wrong symbol (HBD)",
+		op.WitnessProperty{Key: "account_creation_fee", Value: packAsset(hbd(1000))}, true)
+	tryValidate("acf wrong symbol (VESTS)",
+		op.WitnessProperty{Key: "account_creation_fee", Value: packAsset(vests(1000))}, true)
+	tryValidate("acf negative amount",
+		op.WitnessProperty{Key: "account_creation_fee", Value: packAsset(hive(-1))}, true)
+	tryValidate("acf above max",
+		op.WitnessProperty{Key: "account_creation_fee", Value: packAsset(hive(1_000_000_001))}, true)
+
+	// maximum_block_size: ≥ HIVE_MIN_BLOCK_SIZE_LIMIT (65536), ≤ HIVE_MAX_BLOCK_SIZE.
+	tryValidate("max_block valid",
+		op.WitnessProperty{Key: "maximum_block_size", Value: packU32(131_072)}, false)
+	tryValidate("max_block at minimum",
+		op.WitnessProperty{Key: "maximum_block_size", Value: packU32(65_536)}, false)
+	tryValidate("max_block below minimum",
+		op.WitnessProperty{Key: "maximum_block_size", Value: packU32(65_535)}, true)
+	tryValidate("max_block above 2MiB",
+		op.WitnessProperty{Key: "maximum_block_size", Value: packU32(64*1024*3*2000 + 1)}, true)
+
+	// hbd_interest_rate / sbd_interest_rate: 0..HIVE_100_PERCENT.
+	tryValidate("hbd_interest valid",
+		op.WitnessProperty{Key: "hbd_interest_rate", Value: packU16(500)}, false)
+	tryValidate("hbd_interest at 100%",
+		op.WitnessProperty{Key: "hbd_interest_rate", Value: packU16(10_000)}, false)
+	tryValidate("hbd_interest > 100%",
+		op.WitnessProperty{Key: "hbd_interest_rate", Value: packU16(10_001)}, true)
+	tryValidate("sbd_interest > 100% (alias)",
+		op.WitnessProperty{Key: "sbd_interest_rate", Value: packU16(20_000)}, true)
+
+	// hbd_exchange_rate: base must be HBD, quote must be HIVE (asymmetry).
+	tryValidate("xrate valid",
+		op.WitnessProperty{Key: "hbd_exchange_rate", Value: packPrice(asset.Price{Base: hbd(1), Quote: hive(1)})},
+		false)
+	tryValidate("xrate base must be HBD",
+		op.WitnessProperty{Key: "hbd_exchange_rate", Value: packPrice(asset.Price{Base: hive(1), Quote: hive(1)})},
+		true)
+	tryValidate("xrate quote must be HIVE",
+		op.WitnessProperty{Key: "hbd_exchange_rate", Value: packPrice(asset.Price{Base: hbd(1), Quote: hbd(1)})},
+		true)
+	tryValidate("xrate base 0",
+		op.WitnessProperty{Key: "hbd_exchange_rate", Value: packPrice(asset.Price{Base: hbd(0), Quote: hive(1)})},
+		true)
+	tryValidate("xrate quote 0",
+		op.WitnessProperty{Key: "hbd_exchange_rate", Value: packPrice(asset.Price{Base: hbd(1), Quote: hive(0)})},
+		true)
+	tryValidate("sbd_exchange_rate alias - bad base",
+		op.WitnessProperty{Key: "sbd_exchange_rate", Value: packPrice(asset.Price{Base: hive(1), Quote: hive(1)})},
+		true)
+
+	// url: non-empty, ≤ HIVE_MAX_WITNESS_URL_LENGTH, valid UTF-8.
+	tryValidate("url valid",
+		op.WitnessProperty{Key: "url", Value: packString("https://example.com/witness")}, false)
+	tryValidate("url empty",
+		op.WitnessProperty{Key: "url", Value: packString("")}, true)
+	tryValidate("url too long",
+		op.WitnessProperty{Key: "url", Value: packString(strings.Repeat("a", 2049))}, true)
+	tryValidate("url invalid UTF-8",
+		op.WitnessProperty{Key: "url", Value: packString(string([]byte{0xff, 0xfe, 0xfd}))}, true)
+
+	// account_subsidy_budget: HIVE_RD_MIN_BUDGET (1) ≤ v ≤ HIVE_RD_MAX_BUDGET (268_435_455).
+	tryValidate("budget valid",
+		op.WitnessProperty{Key: "account_subsidy_budget", Value: packI32(1000)}, false)
+	tryValidate("budget at minimum",
+		op.WitnessProperty{Key: "account_subsidy_budget", Value: packI32(1)}, false)
+	tryValidate("budget at maximum",
+		op.WitnessProperty{Key: "account_subsidy_budget", Value: packI32(268_435_455)}, false)
+	tryValidate("budget below minimum (0)",
+		op.WitnessProperty{Key: "account_subsidy_budget", Value: packI32(0)}, true)
+	tryValidate("budget negative",
+		op.WitnessProperty{Key: "account_subsidy_budget", Value: packI32(-1)}, true)
+	tryValidate("budget above maximum",
+		op.WitnessProperty{Key: "account_subsidy_budget", Value: packI32(268_435_456)}, true)
+
+	// account_subsidy_decay: HIVE_RD_MIN_DECAY (64) ≤ v ≤ HIVE_RD_MAX_DECAY (0xFFFFFFFF).
+	tryValidate("decay valid",
+		op.WitnessProperty{Key: "account_subsidy_decay", Value: packU32(1000)}, false)
+	tryValidate("decay at minimum",
+		op.WitnessProperty{Key: "account_subsidy_decay", Value: packU32(64)}, false)
+	tryValidate("decay at maximum",
+		op.WitnessProperty{Key: "account_subsidy_decay", Value: packU32(0xFFFFFFFF)}, false)
+	tryValidate("decay below minimum",
+		op.WitnessProperty{Key: "account_subsidy_decay", Value: packU32(63)}, true)
+	tryValidate("decay zero",
+		op.WitnessProperty{Key: "account_subsidy_decay", Value: packU32(0)}, true)
 }
 
 // TestWitnessSetPropertiesAuthorities ports the structural half of

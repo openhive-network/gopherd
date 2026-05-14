@@ -3,7 +3,9 @@ package op
 import (
 	"errors"
 	"fmt"
+	"unicode/utf8"
 
+	"hived-go/internal/fcraw"
 	"hived-go/internal/protocol/asset"
 )
 
@@ -373,6 +375,155 @@ func (o DelegateVestingShares) Validate() error {
 
 // ---- WitnessSetProperties --------------------------------------------
 
+// Constants mirrored from libraries/protocol/include/hive/protocol/config.hpp.
+//
+//	HIVE_MAX_TRANSACTION_SIZE   = 1024*64                                = 65536
+//	HIVE_MIN_BLOCK_SIZE_LIMIT   = HIVE_MAX_TRANSACTION_SIZE              = 65536
+//	HIVE_MAX_BLOCK_SIZE         = HIVE_MAX_TRANSACTION_SIZE*INTERVAL*2K  = 65536*3*2000
+//	HIVE_MAX_WITNESS_URL_LENGTH = 2048
+//	HIVE_RD_DECAY_DENOM_SHIFT   = 36
+//	HIVE_RD_MAX_POOL_BITS       = 64
+//	HIVE_RD_MIN_DECAY_BITS      = 6
+//	HIVE_RD_MIN_DECAY           = 1<<6                                   = 64
+//	HIVE_RD_MAX_DECAY           = 0xFFFFFFFF
+//	HIVE_RD_MIN_BUDGET          = 1
+//	HIVE_RD_MAX_BUDGET          = min(BUDGET_1, BUDGET_2, BUDGET_3)
+//	  BUDGET_1 = (1<<(64+6-36))-1 = (1<<34)-1     = 17_179_869_183
+//	  BUDGET_2 = (1<<(64-36))-1   = (1<<28)-1     = 268_435_455
+//	  BUDGET_3 = int32_max                        = 2_147_483_647
+//	  → min                                       = 268_435_455
+const (
+	hiveMinBlockSizeLimit   uint32 = 64 * 1024
+	hiveMaxBlockSize        uint32 = 64 * 1024 * 3 * 2000
+	hiveMaxWitnessURLLength        = 2048
+	hiveRDMinBudget         int32  = 1
+	hiveRDMaxBudget         int32  = 268_435_455
+	hiveRDMinDecay          uint32 = 64
+	hiveRDMaxDecay          uint32 = 0xFFFFFFFF
+)
+
+// validateWitnessSetPropertyBlob unpacks a single (key,blob) entry and
+// applies the property-specific rules from
+// libraries/protocol/hive_operations.cpp::witness_set_properties_operation::validate().
+//
+// Unknown keys are accepted (the C++ code only inspects the known set).
+func validateWitnessSetPropertyBlob(key string, blob []byte) error {
+	switch key {
+	case "account_creation_fee":
+		r := fcraw.NewReader(blob)
+		a, err := asset.ReadAsset(r)
+		if err != nil {
+			return fmt.Errorf("witness_set_properties.account_creation_fee: %w", err)
+		}
+		if !isHive(a) {
+			return errors.New("witness_set_properties.account_creation_fee: must be in HIVE")
+		}
+		if a.Amount < 0 {
+			return errors.New("witness_set_properties.account_creation_fee: smaller than minimum account creation fee")
+		}
+		if a.Amount > maxAccountCreationFeeSatoshi {
+			return errors.New("witness_set_properties.account_creation_fee: greater than maximum account creation fee")
+		}
+
+	case "maximum_block_size":
+		r := fcraw.NewReader(blob)
+		v, err := r.ReadUint32()
+		if err != nil {
+			return fmt.Errorf("witness_set_properties.maximum_block_size: %w", err)
+		}
+		if v < hiveMinBlockSizeLimit {
+			return fmt.Errorf("witness_set_properties.maximum_block_size: %d smaller than minimum %d", v, hiveMinBlockSizeLimit)
+		}
+		if v > hiveMaxBlockSize {
+			return fmt.Errorf("witness_set_properties.maximum_block_size: %d cannot be more than 2MiB (%d)", v, hiveMaxBlockSize)
+		}
+
+	case "sbd_interest_rate", "hbd_interest_rate":
+		r := fcraw.NewReader(blob)
+		v, err := r.ReadUint16()
+		if err != nil {
+			return fmt.Errorf("witness_set_properties.hbd_interest_rate: %w", err)
+		}
+		if v > hivePercent {
+			return fmt.Errorf("witness_set_properties.hbd_interest_rate: %d must not exceed 100%% (%d)", v, hivePercent)
+		}
+
+	case "new_signing_key":
+		// C++ unpacks a 33-byte public_key_type purely to test
+		// deserialization. Our wire form is the raw 33 bytes; just
+		// enforce length.
+		if len(blob) != 33 {
+			return fmt.Errorf("witness_set_properties.new_signing_key: expected 33 bytes, got %d", len(blob))
+		}
+
+	case "sbd_exchange_rate", "hbd_exchange_rate":
+		r := fcraw.NewReader(blob)
+		p, err := asset.ReadPrice(r)
+		if err != nil {
+			return fmt.Errorf("witness_set_properties.hbd_exchange_rate: %w", err)
+		}
+		if !isHbd(p.Base) {
+			return errors.New("witness_set_properties.hbd_exchange_rate: base part of price feed must be in HBD")
+		}
+		if !isHive(p.Quote) {
+			return errors.New("witness_set_properties.hbd_exchange_rate: quote part of price feed must be in HIVE")
+		}
+		// price::validate(): base > 0, quote > 0, base.symbol != quote.symbol.
+		if p.Base.Amount <= 0 {
+			return errors.New("witness_set_properties.hbd_exchange_rate.base: amount must be > 0")
+		}
+		if p.Quote.Amount <= 0 {
+			return errors.New("witness_set_properties.hbd_exchange_rate.quote: amount must be > 0")
+		}
+		if p.Base.Symbol.Num == p.Quote.Symbol.Num {
+			return errors.New("witness_set_properties.hbd_exchange_rate: base and quote symbols cannot be the same")
+		}
+
+	case "url":
+		r := fcraw.NewReader(blob)
+		s, err := r.ReadString()
+		if err != nil {
+			return fmt.Errorf("witness_set_properties.url: %w", err)
+		}
+		if len(s) == 0 {
+			return errors.New("witness_set_properties.url: URL size must be greater than 0")
+		}
+		if len(s) > hiveMaxWitnessURLLength {
+			return fmt.Errorf("witness_set_properties.url: URL is too long (%d > %d)", len(s), hiveMaxWitnessURLLength)
+		}
+		if !utf8.ValidString(s) {
+			return errors.New("witness_set_properties.url: URL is not valid UTF8")
+		}
+
+	case "account_subsidy_budget":
+		r := fcraw.NewReader(blob)
+		v, err := r.ReadInt32()
+		if err != nil {
+			return fmt.Errorf("witness_set_properties.account_subsidy_budget: %w", err)
+		}
+		if v < hiveRDMinBudget {
+			return fmt.Errorf("witness_set_properties.account_subsidy_budget: %d must be at least %d", v, hiveRDMinBudget)
+		}
+		if v > hiveRDMaxBudget {
+			return fmt.Errorf("witness_set_properties.account_subsidy_budget: %d must be at most %d", v, hiveRDMaxBudget)
+		}
+
+	case "account_subsidy_decay":
+		r := fcraw.NewReader(blob)
+		v, err := r.ReadUint32()
+		if err != nil {
+			return fmt.Errorf("witness_set_properties.account_subsidy_decay: %w", err)
+		}
+		if v < hiveRDMinDecay {
+			return fmt.Errorf("witness_set_properties.account_subsidy_decay: %d must be at least %d", v, hiveRDMinDecay)
+		}
+		if v > hiveRDMaxDecay {
+			return fmt.Errorf("witness_set_properties.account_subsidy_decay: %d must be at most %d", v, hiveRDMaxDecay)
+		}
+	}
+	return nil
+}
+
 func (o WitnessSetProperties) Validate() error {
 	if err := validateAccountName("witness_set_properties.owner", string(o.Owner)); err != nil {
 		return err
@@ -386,6 +537,11 @@ func (o WitnessSetProperties) Validate() error {
 	}
 	if !hasKey {
 		return errors.New("witness_set_properties.props: 'key' (signing key) is required")
+	}
+	for _, p := range o.Props {
+		if err := validateWitnessSetPropertyBlob(p.Key, p.Value); err != nil {
+			return err
+		}
 	}
 	return nil
 }
