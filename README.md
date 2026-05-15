@@ -1,4 +1,7 @@
+# WORK IN PROGRESS SOFTWARE, DO NOT USE YET 
+
 # ghive
+
 
 A Go rewrite of [hived](https://gitlab.syncad.com/hive/hive) — the Hive blockchain daemon.
 Goal: faster replay/sync and lower memory than the C++ implementation while remaining
