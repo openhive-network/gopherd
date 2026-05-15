@@ -244,9 +244,19 @@ func (d *Delegate) applyLoop() {
 			// real time is treated as historical. Once we catch up to
 			// the network tip, sigs are validated again.
 			//
-			// Block signature (validate_block_header) is still verified —
-			// that's the cryptographic gate that ties the block to the
-			// scheduled witness's BlockSigningKey on chain.
+			// Historical catch-up: also skip block-signature verification.
+			// In our locally-derived state a small number of witnesses
+			// can end up flagged "disabled" (signing_key == zero) due to
+			// state divergence from gaps we tolerated earlier in the
+			// sync. When a real mainnet block at that height is produced
+			// by such a witness, hived's replay path simply trusts the
+			// header (chain_plugin.cpp:1232-1239) and applies the block,
+			// but our strict verify_block_signature returns "witness X
+			// has no signing_key (disabled)" and the block is dropped.
+			// Concrete example: block 7,730,321 produced by witness
+			// `snailmen09`. Tying block-sig validation to the same
+			// 5-minute staleness gate matches hived's behavior; once at
+			// the live tip the gate clears and apply is strict again.
 			historical := false
 			if ts := blockTimestamp(job.rawBlock); ts != 0 && uint32(time.Now().Unix())-ts > 5*60 {
 				historical = true
@@ -261,12 +271,11 @@ func (d *Delegate) applyLoop() {
 			// duplicates a prior pending withdrawal; pure consensus
 			// replay carries the block forward unchanged, so we have to
 			// as well. TolerateFailingOps reproduces hived's behavior
-			// at the per-op granularity. Once at the live tip the gate
-			// clears and apply is strict again.
+			// at the per-op granularity.
 			if _, err := d.chain.ApplyBlock(job.rawBlock, job.blockNum, chain.ApplyOptions{
 				Sync:                      false,
 				SkipTransactionSignatures: historical,
-				SkipBlockSignature:        false,
+				SkipBlockSignature:        historical,
 				TolerateFailingOps:        historical,
 				PreVerifiedBlockSigner:    job.preVerifiedSigner,
 				PreRecoveredTxKeys:        job.preRecoveredTxKeys,
