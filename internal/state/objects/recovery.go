@@ -83,6 +83,17 @@ func ReadAccountRecoveryRequest(src []byte) (AccountRecoveryRequest, error) {
 }
 
 func PutAccountRecoveryRequest(s *state.Session, r *AccountRecoveryRequest) {
+	// If a row already exists with a DIFFERENT expiration, the old
+	// secondary-index entry must be removed first — otherwise the
+	// (expiration, account) ring accumulates orphan entries that fire
+	// the sweep at stale timestamps. The primary-index entry is
+	// upserted by the second Put below.
+	if prev, err := s.Get(AccountRecoveryRequestTable, state.PrimaryIndex, recoveryRequestKey(r.AccountToRecover)); err == nil {
+		if prevRow, perr := ReadAccountRecoveryRequest(prev); perr == nil && prevRow.Expiration != r.Expiration {
+			s.Delete(AccountRecoveryRequestTable, AccountRecoveryByExpirationIndex,
+				accountRecoveryByExpirationKey(prevRow.Expiration, prevRow.AccountToRecover))
+		}
+	}
 	s.Put(AccountRecoveryRequestTable, state.PrimaryIndex, recoveryRequestKey(r.AccountToRecover), AppendAccountRecoveryRequest(nil, r))
 	s.Put(AccountRecoveryRequestTable, AccountRecoveryByExpirationIndex,
 		accountRecoveryByExpirationKey(r.Expiration, r.AccountToRecover), nil)
@@ -140,6 +151,14 @@ func ReadChangeRecoveryRequest(src []byte) (ChangeRecoveryAccountRequest, error)
 }
 
 func PutChangeRecoveryRequest(s *state.Session, r *ChangeRecoveryAccountRequest) {
+	// Same secondary-index orphan fix as PutAccountRecoveryRequest:
+	// delete the old by_effective_date entry if expiration changes.
+	if prev, err := s.Get(ChangeRecoveryAccountRequestTable, state.PrimaryIndex, recoveryRequestKey(r.AccountToRecover)); err == nil {
+		if prevRow, perr := ReadChangeRecoveryRequest(prev); perr == nil && prevRow.EffectiveOn != r.EffectiveOn {
+			s.Delete(ChangeRecoveryAccountRequestTable, ChangeRecoveryByEffectiveDateIndex,
+				changeRecoveryByEffectiveDateKey(prevRow.EffectiveOn, prevRow.AccountToRecover))
+		}
+	}
 	s.Put(ChangeRecoveryAccountRequestTable, state.PrimaryIndex, recoveryRequestKey(r.AccountToRecover), AppendChangeRecoveryRequest(nil, r))
 	s.Put(ChangeRecoveryAccountRequestTable, ChangeRecoveryByEffectiveDateIndex,
 		changeRecoveryByEffectiveDateKey(r.EffectiveOn, r.AccountToRecover), nil)
