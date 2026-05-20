@@ -1,6 +1,7 @@
 package evaluator
 
 import (
+	"bytes"
 	"fmt"
 
 	"hived-go/internal/protocol/auth"
@@ -107,6 +108,17 @@ func (recoverAccountEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	if ctx.HeadBlockTime > req.Expiration {
 		objects.DeleteAccountRecoveryRequestFull(ctx.DB, &req)
 		return fmt.Errorf("recover_account: request expired")
+	}
+	// Mirror C++ hive_evaluator_account.cpp:541 — the proposed
+	// new_owner_authority on the op MUST match the one recorded with
+	// the recovery request. Without this check, anyone holding a
+	// valid recent_owner_authority could recover the account to ANY
+	// new key, bypassing the request's stated intent. Gopherd
+	// previously stored NewOwnerAuthorityRaw on the request but
+	// never read it back.
+	opNewOwnerRaw := auth.AppendAuthority(nil, r.NewOwnerAuthority)
+	if !bytes.Equal(opNewOwnerRaw, req.NewOwnerAuthorityRaw) {
+		return fmt.Errorf("recover_account: new_owner_authority does not match the recovery request")
 	}
 	// Match recent_owner_authority against the recorded
 	// owner_authority_history rows for this account, skipping any row
