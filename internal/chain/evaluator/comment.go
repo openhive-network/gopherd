@@ -607,16 +607,23 @@ func (voteEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		return fmt.Errorf("vote: %q does not have enough power (%d > %d)", v.Voter, usedPower, currentPower)
 	}
 	// abs_rshares = effective_vesting_shares × used_power / HIVE_100_PERCENT
-	// (hive_evaluator_social.cpp:364). C++ calls
-	// get_effective_vesting_shares(false), which is
-	// vesting_shares - delegated_vesting_shares + received_vesting_shares
-	// (excludeWeeklyPowerDown=false ⇒ skip the next-withdrawal subtraction).
-	// Voters with active delegations have effective != raw vesting; using
-	// raw VestingShares here over-credits delegators and under-credits
-	// delegatees, drifting shares2 over time.
-	effectiveVesting := voter.VestingShares - voter.DelegatedVestingShares + voter.ReceivedVestingShares
-	if effectiveVesting < 0 {
-		effectiveVesting = 0
+	// (hive_evaluator_social.cpp:364, :722).
+	//
+	// C++ has TWO variants of get_effective_vesting_shares:
+	//   - false: vesting - delegated + received (the basic effective set)
+	//   - true:  same MINUS get_next_vesting_withdrawal() (the "exclude
+	//            weekly power-down" set)
+	//
+	// Pre-HF20 vote_evaluator calls the FALSE variant (line 364).
+	// HF20+ hf20_vote_evaluator calls update_manabar which uses the
+	// TRUE variant (manabar.hpp:107). Excluding the next-withdrawal
+	// slice prevents VESTS about to leave the vesting pool from
+	// inflating vote weight.
+	var effectiveVesting int64
+	if ctx.Hardforks.Has(hardfork.HF20) {
+		effectiveVesting = voter.EffectiveVestingSharesExclWithdraw()
+	} else {
+		effectiveVesting = voter.EffectiveVestingShares()
 	}
 	// abs_rshares = effective_vesting * used_power / hive_percent.
 	// effective_vesting ≤ ~2^50 (whale-scale VESTS); used_power and

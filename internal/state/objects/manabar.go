@@ -14,17 +14,41 @@ type ManabarParams struct {
 }
 
 // EffectiveVestingShares returns the VESTS amount that backs both
-// voting power and Resource Credits. Mirrors
-// account_object::get_effective_vesting_shares() —
+// voting power and Resource Credits — the FALSE-variant
+// (`exclude_weekly_power_down=false`) of
+// account_object::get_effective_vesting_shares(). Pre-HF20 callers
+// use this; HF20+ voting and RC use EffectiveVestingSharesExclWithdraw
+// instead.
 //
-//	vesting - delegated_out + received_in - withdrawing_pending
-//
-// We approximate "withdrawing_pending" as zero since our schema
-// doesn't yet split out the next-week's-share. For RC purposes the
-// drift is small (<1% of vested) and the value re-syncs on the next
-// withdrawal payout.
+//	effective = vesting - delegated_out + received_in
 func (a *Account) EffectiveVestingShares() int64 {
 	v := a.VestingShares - a.DelegatedVestingShares + a.ReceivedVestingShares
+	if v < 0 {
+		return 0
+	}
+	return v
+}
+
+// EffectiveVestingSharesExclWithdraw is the TRUE-variant
+// (`exclude_weekly_power_down=true`) of
+// account_object::get_effective_vesting_shares(). It additionally
+// subtracts the value of the NEXT scheduled power-down slice
+// (manabar.hpp:107, rc_utility.cpp:318). HF20+ voting/RC paths use
+// this so VESTS about to leave the vesting pool don't inflate
+// current vote weight or RC max.
+//
+//	effective = vesting - delegated_out + received_in - next_withdrawal
+//	next_withdrawal = min(vesting_withdraw_rate, to_withdraw - withdrawn)
+func (a *Account) EffectiveVestingSharesExclWithdraw() int64 {
+	v := a.VestingShares - a.DelegatedVestingShares + a.ReceivedVestingShares
+	if a.VestingWithdrawRate > 0 && a.ToWithdraw > a.Withdrawn {
+		next := a.VestingWithdrawRate
+		remaining := a.ToWithdraw - a.Withdrawn
+		if next > remaining {
+			next = remaining
+		}
+		v -= next
+	}
 	if v < 0 {
 		return 0
 	}
@@ -36,8 +60,12 @@ func (a *Account) EffectiveVestingShares() int64 {
 // equals effective_vesting_shares; post-HF22 it incorporates direct
 // rc delegations: max_rc = effective_vesting + delegated_rc_in -
 // delegated_rc_out.
+//
+// RC is HF20+ only, so it always uses the "exclude weekly power-down"
+// variant — VESTS scheduled for the next withdrawal don't contribute
+// to RC capacity.
 func (a *Account) MaximumRC() int64 {
-	v := a.EffectiveVestingShares() + a.DelegatedRCIn - a.DelegatedRCOut
+	v := a.EffectiveVestingSharesExclWithdraw() + a.DelegatedRCIn - a.DelegatedRCOut
 	if v < 0 {
 		return 0
 	}
