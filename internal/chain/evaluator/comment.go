@@ -428,15 +428,16 @@ func (commentOptionsEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	return nil
 }
 
-// voteEvaluator implements vote. The full hived semantics involve a
-// nontrivial rshares calculation derived from voting power, account
-// vesting_shares, current vote weight, and voting-mana decay; the
-// payout curve and curation reward distribution add further complexity.
+// voteEvaluator implements vote with the full hived semantics:
+// voting-mana regeneration, used-mana → rshares (per-HF formula),
+// reverse-auction discount + HF21+ early/mid/late voting phases, the
+// per-HF curve dispatch (quadratic/bounded/sqrt/convergent_*) with
+// approx_sqrt matching fc::uint128_approx_sqrt, recast handling (with
+// HF20+ VoteRshares update), and pre-HF17 reward-shares-2 plus
+// post-HF17 reward_fund.recent_claims accumulation.
 //
-// For the minimum-viable apply we record the vote (creating a
-// CommentVote row, incrementing the comment's vote_count, and adding
-// a placeholder rshares contribution) without computing the curve.
-// Mana decay and exact rshares math land with the curation work.
+// Pre-HF20 mana stays in percent units; HF20+ manabar refactor is
+// tracked as task #53 (BLOCKER for replay past block 26.2M).
 type voteEvaluator struct{}
 
 func (voteEvaluator) Apply(ctx *Context, opArg op.Op) error {
