@@ -61,7 +61,13 @@ func Apply(db *state.Database) error {
 	// hardfork seed runs, and clearNullAccountBalance / null transfer
 	// burn paths depend on these existing.
 	systemAuth := auth.Authority{WeightThreshold: 1}
-	for _, name := range []string{"null", "temp", "miner"} {
+	// Mirror C++ database_init.cpp:197-211: hived creates "miners"
+	// (plural — HIVE_MINER_ACCOUNT in config.hpp:443), "null", and
+	// "temp" at genesis. Gopherd previously seeded "miner" (no 's')
+	// — a literal name typo that would surface in any hived-state
+	// diff and would silently fail any future op referencing the
+	// canonical account by literal "miners".
+	for _, name := range []string{"null", "temp", "miners"} {
 		objects.PutAccount(s, &objects.Account{
 			Name:                 name,
 			Created:              network.GenesisTimeUnix,

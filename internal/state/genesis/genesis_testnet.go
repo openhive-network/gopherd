@@ -124,7 +124,9 @@ func ApplyTestnet(db *state.Database, operatorCount int) error {
 	// System accounts — same set Apply() seeds. null is the burn sink;
 	// removing it would break first-block transfers to "null".
 	systemAuth := auth.Authority{WeightThreshold: 1}
-	for _, name := range []string{"null", "temp", "miner", "steem"} {
+	// "miners" with 's' matches hived's HIVE_MINER_ACCOUNT
+	// (config.hpp:443 + database_init.cpp:197).
+	for _, name := range []string{"null", "temp", "miners", "steem"} {
 		objects.PutAccount(s, &objects.Account{
 			Name:                 name,
 			Created:              network.GenesisTimeUnix,
