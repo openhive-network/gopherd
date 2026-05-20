@@ -167,6 +167,19 @@ type DynamicGlobalProperty struct {
 	// HIVE_PROPOSAL_CONVERSION_RATE (5 basis points) of the treasury's
 	// HIVE balance into HBD at the current median feed price.
 	NextDailyMaintenanceTime uint32
+	// PendingRewardedVestingShares + PendingRewardedVestingHive (HF17+)
+	// mirror dynamic_global_property_object::pending_rewarded_vesting_shares
+	// and pending_rewarded_vesting_hive. They hold the VESTS minted into
+	// per-account RewardVests pools but not yet claimed into spendable
+	// VestingShares. The reward vesting share price
+	// (database_vesting_helpers.hpp:calculate_vesting toReward branch) is
+	//   (total_vesting_shares + pending_rewarded_vesting_shares) /
+	//   (total_vesting_fund_hive + pending_rewarded_vesting_hive)
+	// so without these fields the reward path under-credits VESTS by
+	// the pending-pool ratio, surfacing as `claim_reward_balance:
+	// insufficient balance` mismatches starting at HF17_659.
+	PendingRewardedVestingShares int64
+	PendingRewardedVestingHive   int64
 }
 
 // AppendDGPO serializes p to dst.
@@ -202,6 +215,8 @@ func AppendDGPO(dst []byte, p *DynamicGlobalProperty) []byte {
 	dst = appendI64LE(dst, p.DHFIntervalLedger)
 	dst = appendU64LE(dst, p.CurrentAslot)
 	dst = appendU32LE(dst, p.NextDailyMaintenanceTime)
+	dst = appendI64LE(dst, p.PendingRewardedVestingShares)
+	dst = appendI64LE(dst, p.PendingRewardedVestingHive)
 	return dst
 }
 
@@ -354,6 +369,16 @@ func ReadDGPO(src []byte) (DynamicGlobalProperty, error) {
 	}
 	if p.NextDailyMaintenanceTime, err = r.ReadUint32(); err != nil {
 		return p, fmt.Errorf("dgpo.next_daily_maintenance_time: %w", err)
+	}
+	// PendingRewardedVesting{Shares,Hive} are later schema additions; tolerate EOF.
+	if r.AtEnd() {
+		return p, nil
+	}
+	if p.PendingRewardedVestingShares, err = r.ReadInt64(); err != nil {
+		return p, fmt.Errorf("dgpo.pending_rewarded_vesting_shares: %w", err)
+	}
+	if p.PendingRewardedVestingHive, err = r.ReadInt64(); err != nil {
+		return p, fmt.Errorf("dgpo.pending_rewarded_vesting_hive: %w", err)
 	}
 	if !r.AtEnd() {
 		return p, errors.New("dgpo: trailing bytes after decode (schema mismatch?)")

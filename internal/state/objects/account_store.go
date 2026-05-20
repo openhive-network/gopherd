@@ -4,11 +4,74 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"os"
+	"runtime"
 	"sort"
+	"strings"
 
 	"hived-go/internal/protocol/auth"
 	"hived-go/internal/state"
 )
+
+// envBalanceTrace is a comma-separated list of account names whose
+// Balance / RewardHive changes get printed (with a 2-frame call-site
+// hint) on every Put / Mutate. Cached at process start. Replays set
+// ACCOUNT_TRACE=dantheman to chase the 2-sat HIVE drift.
+var (
+	envBalanceTrace     = os.Getenv("ACCOUNT_TRACE")
+	envBalanceTraceList = func() []string {
+		if envBalanceTrace == "" {
+			return nil
+		}
+		out := strings.Split(envBalanceTrace, ",")
+		for i := range out {
+			out[i] = strings.TrimSpace(out[i])
+		}
+		return out
+	}()
+)
+
+func balanceTraceWanted(name string) bool {
+	for _, n := range envBalanceTraceList {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
+// emitBalanceTrace prints when Balance, HBDBalance, RewardHive or
+// RewardHBD changed on a traced account. Reports old → new and a
+// shallow stack hint so we can pin the call site without instrumenting
+// every Balance += / -= site individually.
+func emitBalanceTrace(name string, oldA, newA *Account) {
+	if oldA.Balance == newA.Balance &&
+		oldA.HBDBalance == newA.HBDBalance &&
+		oldA.RewardHive == newA.RewardHive &&
+		oldA.RewardHBD == newA.RewardHBD {
+		return
+	}
+	pcs := make([]uintptr, 8)
+	n := runtime.Callers(3, pcs)
+	frames := runtime.CallersFrames(pcs[:n])
+	var sb strings.Builder
+	for i := 0; i < 4; i++ {
+		f, more := frames.Next()
+		fmt.Fprintf(&sb, " %s:%d", f.Function, f.Line)
+		if !more {
+			break
+		}
+	}
+	fmt.Fprintf(os.Stderr,
+		"GHIVEDIFF ACCT-DIFF name=%s bal=%d->%d hbd=%d->%d rhive=%d->%d rhbd=%d->%d stack=%s\n",
+		name,
+		oldA.Balance, newA.Balance,
+		oldA.HBDBalance, newA.HBDBalance,
+		oldA.RewardHive, newA.RewardHive,
+		oldA.RewardHBD, newA.RewardHBD,
+		sb.String(),
+	)
+}
 
 // AccountStore is the in-memory typed container for the Account table.
 // It replaces the generic K/V state path for accounts: mutations
@@ -189,6 +252,18 @@ func (s *AccountStore) Put(a *Account) {
 				name: name, op: 1, slot: cur, snap: *cur,
 			})
 		}
+		if envBalanceTrace != "" && balanceTraceWanted(name) {
+			// Capture pre-write snapshot. When cur == a the in-place
+			// mutation already happened, so we can't see the diff here;
+			// callers using the Ref+mutate pattern are traced from
+			// Mutate() instead.
+			if cur != a {
+				old := *cur
+				*cur = *a
+				emitBalanceTrace(name, &old, cur)
+				return
+			}
+		}
 		// Same-slot pointer (caller did GetAccountRef + mutate + Put)?
 		// Skip the no-op self-copy — the slot is already at the
 		// post-mutation state. Saves the ~700-byte struct copy per call
@@ -230,6 +305,12 @@ func (s *AccountStore) Mutate(name auth.AccountName, fn func(*Account)) bool {
 		s.undoLog = append(s.undoLog, accountUndo{
 			name: n, op: 1, slot: cur, snap: *cur,
 		})
+	}
+	if envBalanceTrace != "" && balanceTraceWanted(n) {
+		old := *cur
+		fn(cur)
+		emitBalanceTrace(n, &old, cur)
+		return true
 	}
 	fn(cur)
 	return true

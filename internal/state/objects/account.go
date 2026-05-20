@@ -179,6 +179,13 @@ type Account struct {
 	Mined                    bool
 	LastAccountUpdate        uint32
 	BlockLastAccountRecovery uint32
+	// RewardVestingHive mirrors hived's account_object::reward_vesting_hive
+	// (vest_rewards_as_hive). HF17+ comment payouts to the reward pool
+	// credit (RewardVests, RewardVestingHive) in lockstep; on
+	// claim_reward_balance, the matching HIVE-backing share moves from
+	// dgpo.pending_rewarded_vesting_* into dgpo.total_vesting_* so the
+	// vesting share price stays correct.
+	RewardVestingHive int64
 }
 
 // CanVote returns whether the account is allowed to cast votes
@@ -259,6 +266,7 @@ func AppendAccount(dst []byte, a *Account) []byte {
 	}
 	dst = appendU32LE(dst, a.LastAccountUpdate)
 	dst = appendU32LE(dst, a.BlockLastAccountRecovery)
+	dst = appendI64LE(dst, a.RewardVestingHive)
 	return dst
 }
 
@@ -476,6 +484,13 @@ func ReadAccount(src []byte) (Account, error) {
 	}
 	if a.BlockLastAccountRecovery, err = r.ReadUint32(); err != nil {
 		return a, fmt.Errorf("account.block_last_account_recovery: %w", err)
+	}
+	// RewardVestingHive is a later schema addition; tolerate EOF for legacy rows.
+	if r.AtEnd() {
+		return a, nil
+	}
+	if a.RewardVestingHive, err = r.ReadInt64(); err != nil {
+		return a, fmt.Errorf("account.reward_vesting_hive: %w", err)
 	}
 	if !r.AtEnd() {
 		return a, errors.New("account: trailing bytes after decode (schema mismatch?)")

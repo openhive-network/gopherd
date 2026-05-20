@@ -79,6 +79,15 @@ type WitnessSchedule struct {
 	// HF17+: 1. Together with MaxVotedWitnesses + MaxMinerWitnesses
 	// must sum to HIVE_MAX_WITNESSES (21).
 	MaxRunnerWitnesses uint8
+
+	// HF20+ median'd RC subsidy fields. C++ update_median_witness_props
+	// (witness_schedule.cpp:58-107) medians 6 fields across the active
+	// schedule's witnesses; we previously stored only the first 3. These
+	// feed the RC pool params (rc_resource_param_object) post-HF20.
+	// EOF-tolerant on read for backwards-compat with pre-schema rows.
+	MedianAccountSubsidyBudget             int32
+	MedianAccountSubsidyDecay              uint32
+	MedianAvailableWitnessAccountSubsidies int64
 }
 
 // AppendWitnessSchedule serializes the schedule.
@@ -106,6 +115,9 @@ func AppendWitnessSchedule(dst []byte, w *WitnessSchedule) []byte {
 	}
 	dst = appendU32LE(dst, w.MajorityVersion)
 	dst = append(dst, w.HardforkRequiredWitnesses, w.MaxRunnerWitnesses)
+	dst = appendU32LE(dst, uint32(w.MedianAccountSubsidyBudget))
+	dst = appendU32LE(dst, w.MedianAccountSubsidyDecay)
+	dst = appendI64LE(dst, w.MedianAvailableWitnessAccountSubsidies)
 	return dst
 }
 
@@ -198,6 +210,22 @@ func ReadWitnessSchedule(src []byte) (WitnessSchedule, error) {
 	}
 	if w.MaxRunnerWitnesses, err = r.ReadByte(); err != nil {
 		return w, fmt.Errorf("ws.max_runner_witnesses: %w", err)
+	}
+	// HF20+ median'd RC subsidy fields — schema addition, tolerate EOF
+	// for pre-schema rows.
+	if r.AtEnd() {
+		return w, nil
+	}
+	if v, err := r.ReadUint32(); err != nil {
+		return w, fmt.Errorf("ws.median_account_subsidy_budget: %w", err)
+	} else {
+		w.MedianAccountSubsidyBudget = int32(v)
+	}
+	if w.MedianAccountSubsidyDecay, err = r.ReadUint32(); err != nil {
+		return w, fmt.Errorf("ws.median_account_subsidy_decay: %w", err)
+	}
+	if w.MedianAvailableWitnessAccountSubsidies, err = r.ReadInt64(); err != nil {
+		return w, fmt.Errorf("ws.median_available_witness_account_subsidies: %w", err)
 	}
 	if !r.AtEnd() {
 		return w, errors.New("witness_schedule: trailing bytes")

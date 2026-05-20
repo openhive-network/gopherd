@@ -130,7 +130,13 @@ const hf25LiquidHbdDisabledBlock uint32 = 55_235_767
 func AdjustHBDBalance(s *state.Session, a *Account, blockTime uint32, delta int64) {
 	if a.HBDSecondsLastUpdate != blockTime {
 		dgpo, dgpoErr := GetDGPO(s)
-		hf25Active := dgpoErr == nil && dgpo.HeadBlockNumber >= hf25LiquidHbdDisabledBlock
+		// C++ has_hardfork(HF25) is FALSE during the activation block's
+		// ops — process_hardforks runs LAST in _apply_block. Go bumps
+		// dgpo.HeadBlockNumber at the START of the block, so a `>=`
+		// gate flips true one block too early. Use `>` to match the
+		// off-by-one semantics that hardfork.SetForBlock(N).Has(HF25)
+		// also obeys (per hardfork_test.go).
+		hf25Active := dgpoErr == nil && dgpo.HeadBlockNumber > hf25LiquidHbdDisabledBlock
 		if !hf25Active && dgpoErr == nil {
 			elapsed := blockTime - a.HBDSecondsLastUpdate
 			a.HBDSeconds = uint128AddProduct(a.HBDSeconds, a.HBDBalance, elapsed)
