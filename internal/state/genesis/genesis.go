@@ -68,11 +68,18 @@ func Apply(db *state.Database) error {
 	// diff and would silently fail any future op referencing the
 	// canonical account by literal "miners".
 	for _, name := range []string{"null", "temp", "miners"} {
+		// Mirror C++ account_object minimal ctor at account_object.hpp:64-68
+		// — system accounts use the minimal ctor with _fill_mana=false,
+		// leaving voting_manabar.current_mana = 0. The default ctor also
+		// sets mined=true on every account (account_object.hpp:270). Pass-14
+		// genesis audit findings A2 + A3 — cosmetic state-dump diff but
+		// trivial to mirror.
 		objects.PutAccount(s, &objects.Account{
 			Name:                 name,
 			Created:              network.GenesisTimeUnix,
-			VotingManaCurrent:    10000,
+			VotingManaCurrent:    0,
 			VotingManaLastUpdate: network.GenesisTimeUnix,
+			Mined:                true,
 		})
 		objects.PutAccountAuthority(s, &objects.AccountAuthority{
 			Account:             name,
@@ -163,8 +170,14 @@ func Apply(db *state.Database) error {
 		ContentRewardPercent: 7500,
 		VestingRewardPercent: 1500,
 		ProposalFundPercent:  0,
-		// Pre-HF6 there's no auction window; HF6 sets it to 30 min.
-		ReverseAuctionSeconds: 0,
+		// Mirror C++ global_property_object.hpp struct default —
+		// reverse_auction_seconds = HIVE_REVERSE_AUCTION_WINDOW_SECONDS_HF6
+		// = 1800. The pre-HF6 vote evaluator gates the discount on
+		// hardfork.HF6 / `now > HF6_TIME` predicates, so the field is
+		// functionally inactive pre-HF6; mirror the C++ value anyway for
+		// state-dump parity (HF6 hook overwrites to the same 1800).
+		// Pass-14 genesis audit finding A7.
+		ReverseAuctionSeconds: 1800,
 		// Mirror C++ global_property_object.hpp:238 —
 		// HIVE_DELEGATION_RETURN_PERIOD_HF0 = HIVE_CASHOUT_WINDOW_SECONDS
 		// = 7 days (HF0 default). HF20 transitions to 5 days
