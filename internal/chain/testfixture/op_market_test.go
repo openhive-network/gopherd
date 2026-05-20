@@ -25,6 +25,7 @@ func TestConvertApply(t *testing.T) {
 	f.FundLiquid("bob", 3_000)
 	f.FundLiquidHBD("alice", 2_500)
 	f.FundLiquidHBD("bob", 7_000)
+	f.SetPriceFeed(t, DefaultPriceFeed())
 	f.GenerateBlock()
 
 	// HBD balances after the GenerateBlock — one block of HBD interest

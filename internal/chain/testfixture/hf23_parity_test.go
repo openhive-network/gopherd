@@ -704,6 +704,7 @@ func TestHF23ConvertRequestCleanupTest(t *testing.T) {
 	}
 	f.GenerateBlock()
 	f.FundLiquidHBD("alice", 5_000)
+	f.SetPriceFeed(t, DefaultPriceFeed())
 
 	if err := f.ApplyOp(op.Convert{
 		Owner: "alice", RequestID: 1, Amount: HBD(5_000),

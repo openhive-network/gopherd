@@ -1,9 +1,46 @@
 package testfixture
 
 import (
+	"testing"
+
 	"hived-go/internal/protocol/asset"
 	"hived-go/internal/protocol/op"
+	"hived-go/internal/state"
+	"hived-go/internal/state/objects"
 )
+
+// SetPriceFeed pokes the feed_history singleton directly with `p` so
+// convert / collateralized_convert ops pass the
+// validate_price_feed_available gate. Mirrors C++
+// database_fixture::set_price_feed — direct state poke, no witness
+// quorum required (saves dozens of lines of witness scaffolding in
+// each test).
+//
+// Sets all three price fields (CurrentMedianHistory, MarketMedianHistory,
+// CurrentMinHistory) to the same value, matching the C++ helper. Does
+// NOT touch DGPO — tests that need print-rate / HBD interest tweaks
+// should poke those separately.
+func (f *Fixture) SetPriceFeed(t *testing.T, p asset.Price) {
+	t.Helper()
+	s := state.NewSession(f.State)
+	fh, _ := objects.GetFeedHistory(s)
+	fh.CurrentMedianHistory = p
+	fh.MarketMedianHistory = p
+	fh.CurrentMinHistory = p
+	objects.PutFeedHistory(s, &fh)
+	if err := s.Commit(false); err != nil {
+		t.Fatalf("SetPriceFeed: commit: %v", err)
+	}
+}
+
+// DefaultPriceFeed returns the 1:1 HBD/HIVE price every C++
+// set_price_feed( HBD_price(1000,1000) ) call site uses by default.
+func DefaultPriceFeed() asset.Price {
+	return asset.Price{
+		Base:  asset.Asset{Amount: 1000, Symbol: asset.Symbol{Num: asset.HbdSymbol}},
+		Quote: asset.Asset{Amount: 1000, Symbol: asset.Symbol{Num: asset.HiveSymbol}},
+	}
+}
 
 // witnessUpdateOp returns a minimal witness_update operation for the
 // named account with a deterministic block-signing key based on the

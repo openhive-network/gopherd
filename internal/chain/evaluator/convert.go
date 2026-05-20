@@ -66,13 +66,19 @@ func (convertEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	} else if has {
 		return fmt.Errorf("%w: %q/%d", ErrConvertExists, c.Owner, c.RequestID)
 	}
-	// KNOWN DIVERGENCE: C++ hive_evaluator_transfer.cpp:476-477 calls
-	// validate_price_feed_available here, rejecting convert ops when the
-	// median feed is null. Gopherd silently accepts (the ConvertRequest
-	// row will settle once a feed arrives via processConversions). Zero
-	// mainnet impact (no convert ops were submitted in the pre-feed era,
-	// blocks 0..~933,600). Reinstating the check requires test fixtures
-	// that set up a feed before convert-flow tests; deferred.
+	// Mirror C++ hive_evaluator_transfer.cpp:476-477 →
+	// chain_validation.hpp:11 — reject convert when the median feed
+	// is null. Pre-fix, gopherd silently queued the ConvertRequest
+	// row; the settle would happen once a feed arrived via
+	// processConversions, but the op-apply hash would diverge from
+	// hived which rejects the entire tx.
+	//
+	// Zero mainnet impact in the pre-feed era (blocks 0..~933,600,
+	// no convert ops submitted), but live-sync parity needs the
+	// gate.
+	if fh, ferr := objects.GetFeedHistory(ctx.DB); ferr != nil || priceIsZeroLocal(fh.CurrentMedianHistory) {
+		return fmt.Errorf("convert HBD: price feed unavailable")
+	}
 	objects.AdjustHBDBalance(ctx.DB, &a, ctx.HeadBlockTime, -c.Amount.Amount)
 	objects.PutAccount(ctx.DB, &a)
 	objects.PutConvertRequest(ctx.DB, &objects.ConvertRequest{
