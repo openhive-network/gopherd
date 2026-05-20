@@ -91,15 +91,16 @@ const maxAccountsPerDelegationOp = 100
 // rc_adjustment as 0 (we don't yet persist the per-account 1-time
 // account-creation-fee compensation introduced in HF26).
 //
-//	total = effective_vesting - DelegatedRCOut
-//	if !onlyDelegable: total += DelegatedRCIn  (+ rc_adjustment, omitted)
+//	total = effective_vesting - DelegatedRCOut + rc_adjustment
+//	if !onlyDelegable: total += DelegatedRCIn
+//
+// Mirror C++ account_object::get_maximum_rc(bool only_delegable) at
+// account_object.hpp:130-136. effective_vesting uses the
+// excludeWeeklyPowerDown=true variant (RC always subtracts the next
+// scheduled withdrawal slice).
 func maximumRC(a *objects.Account, onlyDelegable bool) int64 {
-	// effective vesting = vesting_shares - delegated_vesting + received_vesting
-	// (we ignore the pending-power-down term for tests — same as the
-	// other tests in this package; the production `excludeWeeklyPowerDown`
-	// path becomes relevant only when next_vesting_withdrawal is set).
-	eff := a.VestingShares - a.DelegatedVestingShares + a.ReceivedVestingShares
-	total := eff - a.DelegatedRCOut
+	eff := a.EffectiveVestingSharesExclWithdraw()
+	total := eff - a.DelegatedRCOut + a.RCAdjustment
 	if !onlyDelegable {
 		total += a.DelegatedRCIn
 	}
