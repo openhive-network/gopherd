@@ -45,10 +45,18 @@ func processSubsidizedAccounts(s *state.Session, blockNum uint32) {
 		defaultAccountSubsidyBudget, defaultAccountSubsidyDecay)
 	objects.PutDGPO(s, &dgpo)
 
-	// Per-witness pool: update the current block's producer.
+	// Per-witness pool: update the current block's producer — but ONLY
+	// for elected witnesses. Mirror C++ database_witness.cpp:210 — the
+	// per-witness rd_apply (update_witness_schedule_for_elected) is
+	// gated on `current_witness.schedule == elected`. Timeshare/miner/
+	// none-scheduled producers don't accumulate the per-witness
+	// subsidy pool because they aren't supposed to be paying for
+	// claim_account from that bucket. Gopherd previously ticked the
+	// pool for ANY producer, inflating timeshare witnesses' per-witness
+	// pool by ~40 units/block.
 	if dgpo.CurrentWitness != "" {
 		w, err := objects.GetWitness(s, dgpo.CurrentWitness)
-		if err == nil {
+		if err == nil && w.Schedule == objects.WitnessScheduleElected {
 			// Per-witness budget = 5% of global, decay = 5% of global.
 			// Mirrors HIVE_WITNESS_SUBSIDY_BUDGET_PERCENT / DECAY_PERCENT.
 			wBudget := defaultAccountSubsidyBudget * 5 / 100
