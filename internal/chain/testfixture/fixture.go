@@ -124,6 +124,14 @@ type Fixture struct {
 func New(t *testing.T) *Fixture {
 	t.Helper()
 	t.Parallel()
+	// Mainnet HIVE_OWNER_AUTH_HISTORY_TRACKING_START_BLOCK_NUM = 3,186,477
+	// would prevent any fixture starting at block 1 from ever writing
+	// owner_authority_history rows — the recover_account tests would
+	// then fail "recent authority not found". Override to 1 for
+	// fixture lifetime; restore on cleanup. Mirrors hived's testnet
+	// USE_ALTERNATE_CHAIN_ID config which sets the constant to 1.
+	prevStartBlock := evaluator.SetOwnerAuthHistoryStartBlock(1)
+	t.Cleanup(func() { evaluator.SetOwnerAuthHistoryStartBlock(prevStartBlock) })
 	dir := t.TempDir()
 	db, err := state.Open(dir, 16<<20)
 	if err != nil {

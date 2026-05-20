@@ -174,11 +174,15 @@ func (recoverAccountEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		// Bootstrap if missing.
 		authObj = objects.AccountAuthority{Account: r.AccountToRecover}
 	}
-	objects.PutOwnerAuthorityHistory(ctx.DB, &objects.OwnerAuthorityHistory{
+	// Mirror C++ database.cpp:1670-1673 gate on
+	// HIVE_OWNER_AUTH_HISTORY_TRACKING_START_BLOCK_NUM.
+	if ctx.BlockNum >= OwnerAuthHistoryTrackingStartBlockNum {
+		objects.PutOwnerAuthorityHistory(ctx.DB, &objects.OwnerAuthorityHistory{
 		Account:                r.AccountToRecover,
 		PreviousOwnerAuthority: authObj.Owner,
 		LastValidTime:          ctx.HeadBlockTime,
-	})
+		})
+	}
 	authObj.Owner = r.NewOwnerAuthority
 	authObj.PreviousOwnerUpdate = authObj.LastOwnerUpdate
 	authObj.LastOwnerUpdate = ctx.HeadBlockTime

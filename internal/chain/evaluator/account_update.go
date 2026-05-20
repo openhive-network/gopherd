@@ -15,6 +15,27 @@ import (
 // minutes between successive owner-authority rotations.
 const HiveOwnerUpdateLimit uint32 = 60 * 60
 
+// OwnerAuthHistoryTrackingStartBlockNum mirrors hived's
+// HIVE_OWNER_AUTH_HISTORY_TRACKING_START_BLOCK_NUM (mainnet
+// 3,186,477). Pre-this-block, hived's update_owner_authority does
+// NOT write owner_authority_history rows; recover_account cannot find
+// recent_owner_authority entries.
+//
+// A `var` (not `const`) so test fixtures that start at block 1 and
+// exercise account_recovery (without pre-rolling 3M blocks) can
+// override it to 1 via SetOwnerAuthHistoryStartBlock. Mainnet replay
+// uses the default 3,186,477.
+var OwnerAuthHistoryTrackingStartBlockNum uint32 = 3_186_477
+
+// SetOwnerAuthHistoryStartBlock overrides the start block for tests
+// that need owner_authority_history active from block 1. Returns the
+// prior value so callers can restore it on teardown.
+func SetOwnerAuthHistoryStartBlock(n uint32) uint32 {
+	prev := OwnerAuthHistoryTrackingStartBlockNum
+	OwnerAuthHistoryTrackingStartBlockNum = n
+	return prev
+}
+
 // ErrOwnerUpdateLimit is returned when an account_update / account_update2
 // op tries to rotate the owner authority more frequently than
 // HIVE_OWNER_UPDATE_LIMIT allows. Pre-HF26 the cap is once per hour; at
@@ -138,11 +159,15 @@ func (accountUpdateEvaluator) Apply(ctx *Context, opArg op.Op) error {
 				return fmt.Errorf("%w: Owner authority can only be updated once an hour.", ErrOwnerUpdateLimit)
 			}
 		}
-		objects.PutOwnerAuthorityHistory(ctx.DB, &objects.OwnerAuthorityHistory{
+		// Mirror C++ database.cpp:1670-1673 gate on
+		// HIVE_OWNER_AUTH_HISTORY_TRACKING_START_BLOCK_NUM.
+		if ctx.BlockNum >= OwnerAuthHistoryTrackingStartBlockNum {
+			objects.PutOwnerAuthorityHistory(ctx.DB, &objects.OwnerAuthorityHistory{
 			Account:                au.Account,
 			PreviousOwnerAuthority: authObj.Owner,
 			LastValidTime:          ctx.HeadBlockTime,
-		})
+			})
+		}
 		authObj.Owner = *au.Owner
 		authObj.PreviousOwnerUpdate = authObj.LastOwnerUpdate
 		authObj.LastOwnerUpdate = ctx.HeadBlockTime
@@ -205,11 +230,15 @@ func (accountUpdate2Evaluator) Apply(ctx *Context, opArg op.Op) error {
 			}
 			return fmt.Errorf("%w: Owner authority can only be updated once an hour.", ErrOwnerUpdateLimit)
 		}
-		objects.PutOwnerAuthorityHistory(ctx.DB, &objects.OwnerAuthorityHistory{
+		// Mirror C++ database.cpp:1670-1673 gate on
+		// HIVE_OWNER_AUTH_HISTORY_TRACKING_START_BLOCK_NUM.
+		if ctx.BlockNum >= OwnerAuthHistoryTrackingStartBlockNum {
+			objects.PutOwnerAuthorityHistory(ctx.DB, &objects.OwnerAuthorityHistory{
 			Account:                au.Account,
 			PreviousOwnerAuthority: authObj.Owner,
 			LastValidTime:          ctx.HeadBlockTime,
-		})
+			})
+		}
 		authObj.Owner = *au.Owner
 		authObj.PreviousOwnerUpdate = authObj.LastOwnerUpdate
 		authObj.LastOwnerUpdate = ctx.HeadBlockTime
