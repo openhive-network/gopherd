@@ -320,14 +320,15 @@ func bumpHardforkPropertyObject(s *state.Session, id hardfork.ID) {
 	if hpo.LastHardfork >= uint32(id) {
 		return
 	}
-	dgpo, err := objects.GetDGPO(s)
-	t := uint32(0)
-	if err == nil {
-		t = dgpo.Time
-	}
-	if t == 0 {
-		t = hardfork.MainnetActivationTime[id]
-	}
+	// Mirror C++ database_hardfork.cpp:512-515 — processed_hardforks[id]
+	// is the CANONICAL HIVE_HARDFORK_0_N_TIME constant, not the
+	// activation block's timestamp. C++ asserts equality after push.
+	// Gopherd previously stored dgpo.Time (the activation block's
+	// wall-clock timestamp), which for mainnet doesn't match the
+	// constant (e.g., HIVE_HARDFORK_0_1_TIME = 1461605400 vs the
+	// actual mainnet block 905693 timestamp). State-dump diff only,
+	// but the parity-fix is cheap.
+	t := hardfork.MainnetActivationTime[id]
 	hpo.ProcessedHardforks = append(hpo.ProcessedHardforks, t)
 	hpo.LastHardfork = uint32(id)
 	hpo.CurrentHardforkVersion = hardfork.PackedVersion(id)
