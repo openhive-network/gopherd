@@ -41,8 +41,23 @@ func processSubsidizedAccounts(s *state.Session, blockNum uint32) {
 	if err != nil {
 		return
 	}
-	dgpo.AvailableAccountSubsidies = rdApply(dgpo.AvailableAccountSubsidies,
-		defaultAccountSubsidyBudget, defaultAccountSubsidyDecay)
+	// Pull subsidy budget+decay from the active witness schedule's
+	// median fields (hived: wso.account_subsidy_rd / decay_params,
+	// sourced from each witness's witness_object.props.account_subsidy_*
+	// medianed across the active set). Fall back to genesis defaults
+	// when the schedule hasn't produced a median yet (early HF20
+	// boot, before the first schedule rebuild).
+	budget := defaultAccountSubsidyBudget
+	decay := defaultAccountSubsidyDecay
+	if ws, ok := objects.GetWitnessScheduleRef(s); ok {
+		if ws.MedianAccountSubsidyBudget > 0 {
+			budget = int64(ws.MedianAccountSubsidyBudget)
+		}
+		if ws.MedianAccountSubsidyDecay > 0 {
+			decay = int64(ws.MedianAccountSubsidyDecay)
+		}
+	}
+	dgpo.AvailableAccountSubsidies = rdApply(dgpo.AvailableAccountSubsidies, budget, decay)
 	objects.PutDGPO(s, &dgpo)
 
 	// Per-witness pool: update the current block's producer — but ONLY
@@ -51,16 +66,14 @@ func processSubsidizedAccounts(s *state.Session, blockNum uint32) {
 	// gated on `current_witness.schedule == elected`. Timeshare/miner/
 	// none-scheduled producers don't accumulate the per-witness
 	// subsidy pool because they aren't supposed to be paying for
-	// claim_account from that bucket. Gopherd previously ticked the
-	// pool for ANY producer, inflating timeshare witnesses' per-witness
-	// pool by ~40 units/block.
+	// claim_account from that bucket.
 	if dgpo.CurrentWitness != "" {
 		w, err := objects.GetWitness(s, dgpo.CurrentWitness)
 		if err == nil && w.Schedule == objects.WitnessScheduleElected {
 			// Per-witness budget = 5% of global, decay = 5% of global.
 			// Mirrors HIVE_WITNESS_SUBSIDY_BUDGET_PERCENT / DECAY_PERCENT.
-			wBudget := defaultAccountSubsidyBudget * 5 / 100
-			wDecay := defaultAccountSubsidyDecay * 5 / 100
+			wBudget := budget * 5 / 100
+			wDecay := decay * 5 / 100
 			w.AvailableWitnessAccountSubsidies = rdApply(
 				w.AvailableWitnessAccountSubsidies, wBudget, wDecay)
 			objects.PutWitness(s, &w)

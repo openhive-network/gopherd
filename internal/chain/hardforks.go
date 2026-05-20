@@ -180,6 +180,25 @@ func applyHardfork(s *state.Session, id hardfork.ID) {
 		// run this cleanup — by block 21.5M the store held millions of
 		// post-paid rows that hived had already dropped.
 		removeOldCashouts(s)
+		// Mirror C++ database_hardfork.cpp:304-320 — at HF19, drop every
+		// vesting_delegation_object whose vesting_shares == 0. These
+		// are leftover rows from HF17-era delegations that got reduced
+		// to zero but never garbage-collected. Two-phase walk to avoid
+		// mutating the index during iteration.
+		var zeroDelegations []objects.VestingDelegation
+		_ = s.Range(objects.VestingDelegationTable, state.PrimaryIndex, nil, func(_, value []byte) (bool, error) {
+			d, derr := objects.ReadVestingDelegation(value)
+			if derr != nil {
+				return false, derr
+			}
+			if d.VestingShares == 0 {
+				zeroDelegations = append(zeroDelegations, d)
+			}
+			return true, nil
+		})
+		for _, d := range zeroDelegations {
+			objects.DeleteVestingDelegation(s, d.Delegator, d.Delegatee)
+		}
 	case hardfork.HF20:
 		if dgpo, err := objects.GetDGPO(s); err == nil {
 			dgpo.HBDStartPercent = 900                     // 9 %
