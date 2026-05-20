@@ -643,6 +643,12 @@ func (o RecurrentTransfer) Validate() error {
 	if len(o.Memo) >= MaxMemoSize {
 		return fmt.Errorf("recurrent_transfer.memo: %d bytes exceeds %d", len(o.Memo), MaxMemoSize-1)
 	}
+	// Mirror C++ hive_operations.cpp:817 — validate_is_utf8(memo).
+	// Recurrent transfer op-validate rejects non-UTF8 memos at validate
+	// time. Pass-12 recurrent-transfer audit finding A2.
+	if !utf8.ValidString(o.Memo) {
+		return errors.New("recurrent_transfer.memo: not valid UTF-8")
+	}
 	if o.From == o.To {
 		return errors.New("recurrent_transfer: cannot transfer to self")
 	}
