@@ -121,9 +121,14 @@ func TestDeclineVotingRightsApply(t *testing.T) {
 // Port of operation_tests.cpp::delegate_vesting_shares_apply (subset).
 //
 // HF17+: alice delegates VESTS to bob. Reducing the delegation
-// schedules the returned VESTS to come back after 5 days.
+// schedules the returned VESTS to come back after the dgpo
+// delegation_return_period — 7 days at HF0 (= HIVE_CASHOUT_WINDOW_SECONDS),
+// reduced to 5 days at HF20 (HIVE_VOTING_MANA_REGENERATION_SECONDS).
+// We bump to HF20 explicitly so the test runs against the modern
+// 5-day window most of mainnet operates under.
 func TestDelegateVestingSharesApply(t *testing.T) {
 	f := New(t)
+	f.HardforksUpTo(hardfork.HF20)
 	f.Actors("alice", "bob")
 	f.FundVesting("alice", 10_000) // 10M VESTS-sat
 	f.GenerateBlock()

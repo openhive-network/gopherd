@@ -142,10 +142,14 @@ func Apply(db *state.Database) error {
 		HeadBlockNumber: 0,
 		Time:            network.GenesisTimeUnix,
 		CurrentWitness:  MainnetInitminer,
-		// HIVE_DEFAULT_HBD_INTEREST_RATE = 1000 (10% APR). Witnesses
-		// publish their preferred rate; the median lands here once the
-		// witness schedule subsystem is wired up.
-		HBDInterestRate: 1000,
+		// Mirror C++ global_property_object.hpp:205 — hbd_interest_rate
+		// = 0 at genesis. Hived only credits HBD interest once
+		// witnesses have published rates and the schedule rebuild
+		// computes a non-zero median. Gopherd previously seeded 1000
+		// (10% APR) defensively; that caused interest to start
+		// accruing on the FIRST block instead of waiting for the feed
+		// publish — directly diverging early-chain HBD balances.
+		HBDInterestRate: 0,
 		// Pre-HF14 print rate is pinned at 100%; HF14 activation hook
 		// also explicitly sets this.
 		HBDPrintRate: 10000,
@@ -161,8 +165,13 @@ func Apply(db *state.Database) error {
 		ProposalFundPercent:  0,
 		// Pre-HF6 there's no auction window; HF6 sets it to 30 min.
 		ReverseAuctionSeconds: 0,
-		// Pre-HF20 default delegation return period is 5 days.
-		DelegationReturnPeriod: 5 * 24 * 60 * 60,
+		// Mirror C++ global_property_object.hpp:238 —
+		// HIVE_DELEGATION_RETURN_PERIOD_HF0 = HIVE_CASHOUT_WINDOW_SECONDS
+		// = 7 days (HF0 default). HF20 transitions to 5 days
+		// (HIVE_VOTING_MANA_REGENERATION_SECONDS). Gopherd previously
+		// seeded the post-HF20 5-day value at genesis, returning
+		// delegated VESTS 2 days too early pre-HF20.
+		DelegationReturnPeriod: 7 * 24 * 60 * 60,
 		// hived's dynamic_global_property_object inits total_pow = -1
 		// (= uint64::max) on purpose so the FIRST pow op's `++total_pow`
 		// wraps to 0. That makes the first ever pow_worker for any
