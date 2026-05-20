@@ -149,6 +149,13 @@ func Open(path string) (*Reader, error) {
 				r.Close()
 				return nil, fmt.Errorf("blocklog: rebuild index for %s: %w", p.mainPath, err)
 			}
+			// Persist the just-built index so the next Open() finds a
+			// sidecar and skips the multi-minute backward-walk on a
+			// full mainnet block_log. Best-effort: errors are logged
+			// to stderr but don't fail the open (e.g. read-only dirs).
+			if err := writeSidecarIndex(idxPath, p.indexMem); err != nil {
+				fmt.Fprintf(os.Stderr, "blocklog: warning: persist %s failed: %v\n", idxPath, err)
+			}
 		} else {
 			r.Close()
 			return nil, err
@@ -456,6 +463,34 @@ func buildInMemoryIndex(p *part) error {
 	p.indexMem = trailers
 	p.count = uint32(len(trailers))
 	return nil
+}
+
+// writeSidecarIndex atomically writes the in-memory index (packed
+// uint64 trailers in block-order) to <path>. Uses a `<path>.tmp` →
+// rename dance so a partial write never leaves a corrupt sidecar.
+// On a 575 GB mainnet block_log the in-memory rebuild takes ~16 min
+// (sequential backward read at ~600 MB/s), so persisting it once
+// converts every future Open() into a millisecond stat+ReadAt path.
+func writeSidecarIndex(path string, trailers []uint64) error {
+	tmp := path + ".tmp"
+	f, err := os.Create(tmp)
+	if err != nil {
+		return err
+	}
+	buf := make([]byte, len(trailers)*indexEntrySize)
+	for i, t := range trailers {
+		binary.LittleEndian.PutUint64(buf[i*indexEntrySize:], t)
+	}
+	if _, err := f.Write(buf); err != nil {
+		f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 // --- File-discovery helpers ----------------------------------------------

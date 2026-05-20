@@ -56,6 +56,8 @@ func main() {
 		os.Exit(cmdValidateBlocklog(os.Args[2:]))
 	case "debug-block":
 		os.Exit(cmdDebugBlock(os.Args[2:]))
+	case "quickdump":
+		os.Exit(cmdQuickDump(os.Args[2:]))
 	case "replay":
 		os.Exit(cmdReplay(os.Args[2:]))
 	case "state-dump":

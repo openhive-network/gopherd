@@ -95,15 +95,18 @@ func cmdStateDump(args []string) int {
 	if *includeDGPO {
 		if p, err := objects.GetDGPO(s); err == nil {
 			emit(enc, "dgpo", map[string]interface{}{
-				"head_block_number":       p.HeadBlockNumber,
-				"head_block_id":           hex.EncodeToString(p.HeadBlockID[:]),
-				"time":                    p.Time,
-				"current_witness":         p.CurrentWitness,
-				"current_supply":          p.CurrentSupply,
-				"current_hbd_supply":      p.CurrentHBDSupply,
-				"total_vesting_shares":    p.TotalVestingShares,
-				"total_vesting_fund_hive": p.TotalVestingFundHive,
-				"total_reward_fund_hive":  p.TotalRewardFundHive,
+				"head_block_number":                p.HeadBlockNumber,
+				"head_block_id":                    hex.EncodeToString(p.HeadBlockID[:]),
+				"time":                             p.Time,
+				"current_witness":                  p.CurrentWitness,
+				"current_supply":                   p.CurrentSupply,
+				"current_hbd_supply":               p.CurrentHBDSupply,
+				"virtual_supply":                   p.VirtualSupply,
+				"total_vesting_shares":             p.TotalVestingShares,
+				"total_vesting_fund_hive":          p.TotalVestingFundHive,
+				"total_reward_fund_hive":           p.TotalRewardFundHive,
+				"pending_rewarded_vesting_shares":  p.PendingRewardedVestingShares,
+				"pending_rewarded_vesting_hive":    p.PendingRewardedVestingHive,
 			})
 		}
 		if h, err := objects.GetFeedHistory(s); err == nil {
@@ -154,11 +157,7 @@ func cmdStateDump(args []string) int {
 	}
 
 	if *includeAccounts {
-		err := s.Range(objects.AccountTable, state.PrimaryIndex, nil, func(_, value []byte) (bool, error) {
-			a, err := objects.ReadAccount(value)
-			if err != nil {
-				return true, nil // skip malformed
-			}
+		err := objects.RangeAccounts(s, func(a *objects.Account) (bool, error) {
 			emit(enc, "account", map[string]interface{}{
 				"name":                 a.Name,
 				"created":              a.Created,
