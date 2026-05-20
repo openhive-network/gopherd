@@ -145,6 +145,14 @@ func verifyBlockSignatureWithCache(s *state.Session, hdr *block.SignedHeader, ra
 		digest := block.BlockSigningDigest(unsignedHeader)
 		var sig crypto.CompactSignature
 		copy(sig[:], hdr.WitnessSignature[:])
+		// Mirror C++ fc::ecc::public_key(sig, digest) ctor which calls
+		// FC_ASSERT(is_canonical(c)) — reject high-s signatures so the
+		// block path enforces the same BIP-0062 low-s rule the tx path
+		// already does (verify_authority.go:198). Witnesses produce
+		// canonical signatures in practice; this is parity-defense.
+		if !sig.IsCanonical() {
+			return fmt.Errorf("verify_block_signature %d: signature is not canonical (high-s)", blockNum)
+		}
 		var err error
 		got, err = crypto.RecoverPublicKey(digest, sig)
 		if err != nil {

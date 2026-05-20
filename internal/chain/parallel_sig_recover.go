@@ -8,7 +8,6 @@ import (
 	"hived-go/internal/crypto"
 	"hived-go/internal/fcraw"
 	"hived-go/internal/protocol/block"
-	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/network"
 	"hived-go/internal/protocol/tx"
 )
@@ -69,7 +68,6 @@ func RecoverBlockTxSignerKeys(rawBlock []byte, blockNum uint32) RecoveredBlockSi
 	if err != nil {
 		return RecoveredBlockSigs{}
 	}
-	_ = hdr
 
 	r := fcraw.NewReader(rawBlock[hdrLen:])
 	txCount, err := r.ReadVarUint()
@@ -80,11 +78,17 @@ func RecoverBlockTxSignerKeys(rawBlock []byte, blockNum uint32) RecoveredBlockSi
 		return RecoveredBlockSigs{TxKeys: nil}
 	}
 
+	// Mirror C++ full_transaction.cpp:479: chain-ID switch is gated on
+	// block timestamp vs HIVE_HARDFORK_1_24_ACTUAL_TIME (1602703884),
+	// NOT on the block-number HF predicate. The two gates resolve at
+	// different blocks (~158k apart), so a block-num gate would recover
+	// the wrong pubkey for ~5.5 days of mainnet history.
+	const hf24ActualTime uint32 = 1602703884
 	chainID := network.OldChainID
-	hf := hardfork.SetForBlock(blockNum)
-	if hf.Has(hardfork.HF24) {
+	if hdr.Timestamp > hf24ActualTime {
 		chainID = network.ChainID
 	}
+	_ = blockNum // retained on call signature for back-compat
 
 	// First pass — parse every tx, capture the unsigned-byte slice and
 	// the signatures. Parsing is sequential (the wire format is

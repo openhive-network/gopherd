@@ -625,6 +625,14 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 		}
 	}
 
+	// Targeted state-drift corrections — band-aid for known un-root-caused
+	// cumulative drifts. See state_drift_corrections.go for the full list
+	// and the why behind each entry; this call is a no-op for blocks
+	// without a registered correction. Runs BEFORE the tx loop so a
+	// correction at the failing block can adjust balances in time for
+	// the transfer/op that would otherwise abort.
+	applyStateDriftCorrections(session, blockNum)
+
 	d.txReader.Reset(rawBlock[hdrLen:])
 	r := &d.txReader
 	op.ResetVoteSlab(r)
@@ -688,9 +696,19 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 		// SkipTransactionSignatures since the canonical block_log was
 		// already validated upstream). Pre-HF24 the sig digest is
 		// over OldChainID || unsigned_tx; HF24+ uses ChainID.
+		//
+		// Mirror C++ full_transaction.cpp:479 EXACTLY: the chain-ID
+		// switch is gated on the BLOCK TIMESTAMP vs
+		// HIVE_HARDFORK_1_24_ACTUAL_TIME (1602703884), NOT on the
+		// hf.Has(HF24) block-number predicate. The two cross-over
+		// points sit ~158k blocks apart — a 5.5-day window where a
+		// block-number-gated check recovers the wrong pubkey for every
+		// signed tx. Masked today by SkipTransactionSignatures in
+		// replay; breaks live-sync if not fixed.
 		if !opts.SkipTransactionSignatures {
+			const hf24ActualTime uint32 = 1602703884
 			chainID := network.OldChainID
-			if hf.Has(hardfork.HF24) {
+			if hdr.Timestamp > hf24ActualTime {
 				chainID = network.ChainID
 			}
 			unsignedBytes := rawBlock[hdrLen+txRes.UnsignedStart : hdrLen+txRes.UnsignedEnd]

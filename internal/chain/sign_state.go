@@ -82,8 +82,23 @@ func (s *signState) satisfies(a *auth.Authority, level AuthorityLevel, depth int
 			}
 		}
 	}
+	// Mirror C++ transaction_util.cpp:119: when verifying OWNER- or
+	// ACTIVE-required ops, the sign_state's recursion fetcher is set
+	// to get_active BEFORE the required_active / required_owner walks
+	// begin. So even though the TOP-LEVEL authority of an owner-required
+	// op is the owner auth, sub-accounts referenced via account_auths
+	// are looked up at the ACTIVE level — gopherd previously fetched
+	// owner-of-subaccount which would accept signatures from a key only
+	// on the sub-account's owner key (stricter than hived) or reject a
+	// valid sig that's only on the sub-account's active key. For
+	// POSTING-required, the sign_state stays at the POSTING fetcher
+	// throughout (constructor at C++ line 57).
+	subLevel := level
+	if level == AuthorityOwner {
+		subLevel = AuthorityActive
+	}
 	for _, aa := range a.AccountAuths {
-		if s.checkAuthority(level, aa.Account, depth+1) {
+		if s.checkAuthority(subLevel, aa.Account, depth+1) {
 			total += uint64(aa.Weight)
 			if total >= uint64(a.WeightThreshold) {
 				return true

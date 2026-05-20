@@ -58,7 +58,12 @@ func validateTxPreFlight(s *state.Session, signed *tx.SignedTransaction, blockNu
 	//    The block_id has the form [block_num_BE_4 | sha224_bytes_4_to_19],
 	//    and `_hash[1]` is bytes[4..7] interpreted as little-endian uint32
 	//    (matches the FC ripemd160 layout on x86 / standard hived deploys).
-	if blockNum > 1 && signed.RefBlockNum != 0 {
+	// Mirror C++ database.cpp:2545-2549 — TaPoS check fires for ALL
+	// ref_block_num values including 0 (which maps to ring slot 0 =
+	// block_summary[0] = block 65536's ID). The prior `!= 0` exception
+	// allowed a tx with ref_block_num==0 to bypass TaPoS regardless of
+	// ref_block_prefix.
+	if blockNum > 1 {
 		bs, err := getBlockSummaryAtRingSlot(s, signed.RefBlockNum)
 		if err != nil || bs.Empty() {
 			if strictTapos {
