@@ -266,7 +266,18 @@ func recalculateProposalVotes(s *state.Session, pid int64) int64 {
 			if a.Proxy != "" {
 				return true, nil
 			}
+			// Mirror C++ account_object::get_governance_vote_power
+			// (account_object.hpp:329-333): direct = vesting_shares -
+			// sum_delayed_votes; total = direct + sum(proxied_vsf_votes).
+			// Omitting the proxied component systematically under-counts
+			// proxy-receiving witnesses' proposal vote weights, which
+			// shifts the desc-by-votes ordering and the budget-exhaustion
+			// break point.
 			power := a.VestingShares - int64(a.SumDelayedVotes)
+			if power < 0 {
+				power = 0
+			}
+			power += objects.SumProxiedVotes(&a)
 			if power > 0 {
 				total += power
 			}
