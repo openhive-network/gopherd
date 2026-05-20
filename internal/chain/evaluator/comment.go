@@ -643,6 +643,16 @@ func (voteEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	if ctx.Hardforks.Has(hardfork.HF14) && absRshares <= hiveVoteDustThreshold && v.Weight != 0 {
 		return fmt.Errorf("vote: %q rshares %d below dust threshold", v.Voter, absRshares)
 	}
+	// HF13-only dust assertion (hive_evaluator_social.cpp:371-373):
+	// post-HF13_248, pre-HF14, hived rejects abs_rshares in [2, 50M] —
+	// but explicitly allows abs_rshares == 1 (the legacy single-sat
+	// edge case). Gopherd previously only gated on HF14+, so the
+	// HF13→HF14 window (blocks ~3.3M-5.0M) accepted votes hived
+	// rejected.
+	if ctx.Hardforks.Has(hardfork.HF13) && !ctx.Hardforks.Has(hardfork.HF14) &&
+		absRshares <= hiveVoteDustThreshold && absRshares != 1 && v.Weight != 0 {
+		return fmt.Errorf("vote: %q rshares %d below HF13 dust threshold (allowed values: 1 or >50M)", v.Voter, absRshares)
+	}
 	// HF20+ subtracts the dust threshold from abs_rshares before it becomes
 	// rshares (hf20_vote_evaluator at hive_evaluator_social.cpp:706). The
 	// pre-HF20 evaluator only gates on the threshold (line 369) and uses
