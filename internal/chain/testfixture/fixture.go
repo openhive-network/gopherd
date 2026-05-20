@@ -354,6 +354,11 @@ func (f *Fixture) Actor(name string) {
 		Created:              f.HeadBlockTime(),
 		VotingManaCurrent:    10000,
 		VotingManaLastUpdate: f.HeadBlockTime(),
+		// Fixture accounts use "steem" as recovery_account by default
+		// (matches pre-HF11 system convention). Tests that exercise
+		// the recovery-agent path explicitly call SetRecoveryAccount
+		// to set an agent.
+		RecoveryAccount: "steem",
 	})
 	// Seed AccountAuthority so VerifyAuthority can resolve the row when
 	// RequireSignatures is on. The active key is sha256("<name>") and
@@ -439,6 +444,24 @@ func derivePrivateKey(t *testing.T, seed string) *crypto.PrivateKey {
 func (f *Fixture) Actors(names ...string) {
 	for _, n := range names {
 		f.Actor(n)
+	}
+}
+
+// SetRecoveryAccount sets `target`'s recovery_account to `agent`.
+// Used by recovery-flow tests to establish the (target, agent)
+// relationship without going through the 30-day
+// change_recovery_account wait.
+func (f *Fixture) SetRecoveryAccount(target, agent string) {
+	f.t.Helper()
+	s := state.NewSession(f.State)
+	a, err := objects.GetAccount(s, target)
+	if err != nil {
+		f.t.Fatalf("SetRecoveryAccount: target %q: %v", target, err)
+	}
+	a.RecoveryAccount = auth.AccountName(agent)
+	objects.PutAccount(s, &a)
+	if err := s.Commit(false); err != nil {
+		f.t.Fatalf("SetRecoveryAccount commit: %v", err)
 	}
 }
 

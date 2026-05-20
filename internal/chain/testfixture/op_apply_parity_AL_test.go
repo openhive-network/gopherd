@@ -139,6 +139,7 @@ func TestAccountRecoveryOwnerHistoryExpires(t *testing.T) {
 	f := New(t)
 	f.Actors("alice", "bob")
 	f.GenerateBlock()
+	f.SetRecoveryAccount("bob", "alice")
 
 	// Record bob's current owner — this is what will be stored as the
 	// history row's previous_owner_authority once we rotate.

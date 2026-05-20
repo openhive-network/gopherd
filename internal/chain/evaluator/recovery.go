@@ -78,10 +78,30 @@ func (requestAccountRecoveryEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		return fmt.Errorf("requestAccountRecoveryEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
 	rr := opArg.AsRequestAccountRecovery()
-	if has, err := objects.HasAccount(ctx.DB, rr.AccountToRecover); err != nil {
-		return err
-	} else if !has {
-		return fmt.Errorf("%w: %q", ErrAccountNotFound, rr.AccountToRecover)
+	acct, aerr := objects.GetAccount(ctx.DB, rr.AccountToRecover)
+	if aerr != nil {
+		if aerr == state.ErrNotFound {
+			return fmt.Errorf("%w: %q", ErrAccountNotFound, rr.AccountToRecover)
+		}
+		return aerr
+	}
+	// Mirror C++ hive_evaluator_account.cpp:479-489 — the op's
+	// recovery_account must match the account's stored
+	// recovery_account. Without this check, any account could file
+	// a recovery request for any target.
+	if rr.RecoveryAccount != acct.RecoveryAccount {
+		return fmt.Errorf("request_account_recovery: signer %q does not match %q's recovery_account %q",
+			rr.RecoveryAccount, rr.AccountToRecover, acct.RecoveryAccount)
+	}
+	// 3-branch shape (hive_evaluator_account.cpp:499-527):
+	// (a) new_owner_authority is "impossible" (weight_threshold 0) →
+	//     cancel the pending request if one exists.
+	// (b) otherwise → upsert the request with 24h expiration.
+	if rr.NewOwnerAuthority.WeightThreshold == 0 {
+		if req, gerr := objects.GetAccountRecoveryRequest(ctx.DB, rr.AccountToRecover); gerr == nil {
+			objects.DeleteAccountRecoveryRequestFull(ctx.DB, &req)
+		}
+		return nil
 	}
 	objects.PutAccountRecoveryRequest(ctx.DB, &objects.AccountRecoveryRequest{
 		AccountToRecover:     rr.AccountToRecover,

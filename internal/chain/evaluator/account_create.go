@@ -12,6 +12,26 @@ import (
 	"hived-go/internal/state/objects"
 )
 
+// defaultRecoveryAccount returns the value the new account's
+// recovery_account field should take at creation. Mirror C++
+// hive_evaluator_account.cpp:134-142:
+//
+//   - HIVE_TEMP_ACCOUNT creator → empty (no recovery agent)
+//   - pre-HF11             → "steem"
+//   - post-HF11            → creator
+//
+// post-HF11 is the dominant on-chain case; the "steem" pre-HF11
+// default is the original legacy behavior.
+func defaultRecoveryAccount(ctx *Context, creator auth.AccountName) auth.AccountName {
+	if creator == "temp" {
+		return ""
+	}
+	if ctx.Hardforks.Has(hardfork.HF11) {
+		return creator
+	}
+	return "steem"
+}
+
 // verifyAuthorityAccountsExist mirrors hived's verify_authority_accounts_exist
 // (libraries/chain/hive_evaluator_account.cpp:80). Each name appearing in the
 // authority's account_auths list must already exist in the account table.
@@ -132,6 +152,11 @@ func (accountCreateEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		JSONMetadata:         ac.JSONMetadata,
 		VotingManaCurrent:    10000, // full mana at creation
 		VotingManaLastUpdate: ctx.HeadBlockTime,
+		// Mirror C++ hive_evaluator_account.cpp:134-142: recovery_account
+		// defaults to "steem" pre-HF11, creator account post-HF11, or
+		// empty when creator is HIVE_TEMP_ACCOUNT. The post-HF11 case
+		// is the dominant on-chain path.
+		RecoveryAccount: defaultRecoveryAccount(ctx, ac.Creator),
 	}
 	// HF20+: prime the RC manabar at creation so subsequent regen
 	// has a defined origin. max_rc starts at 0 (no VESTS yet).

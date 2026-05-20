@@ -135,6 +135,7 @@ func (createClaimedAccountEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		JSONMetadata:         cc.JSONMetadata,
 		VotingManaCurrent:    10000,
 		VotingManaLastUpdate: ctx.HeadBlockTime,
+		RecoveryAccount:      defaultRecoveryAccount(ctx, cc.Creator),
 	}
 	if ctx.Hardforks.Has(hardfork.HF20) {
 		objects.InitRCManabar(&newAcct, ctx.HeadBlockTime)
@@ -217,6 +218,7 @@ func (accountCreateWithDelegationEvaluator) Apply(ctx *Context, opArg op.Op) err
 		ReceivedVestingShares: ac.Delegation.Amount,
 		VotingManaCurrent:     10000,
 		VotingManaLastUpdate:  ctx.HeadBlockTime,
+		RecoveryAccount:       defaultRecoveryAccount(ctx, ac.Creator),
 	}
 	if ctx.Hardforks.Has(hardfork.HF20) {
 		objects.InitRCManabar(&newAcct, ctx.HeadBlockTime)

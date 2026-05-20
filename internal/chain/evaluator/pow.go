@@ -265,6 +265,14 @@ func ensureMinerAccountForPow(ctx *Context, worker string, payReward bool, props
 		// or *o.new_owner_key (pow2). Gopherd previously left MemoKey
 		// at the zero [33]byte{}, so state-dump comparisons of PoW-
 		// mined accounts diverged.
+		// PoW-mined accounts have no explicit creator. C++ sets
+		// recovery_account = "steem" pre-HF11, empty post-HF11.
+		// PoW ended at HF16 so the post-HF11 branch only matters
+		// for the HF11→HF16 window of pow ops.
+		var recoveryAcct auth.AccountName
+		if !ctx.Hardforks.Has(hardfork.HF11) {
+			recoveryAcct = "steem"
+		}
 		objects.PutAccount(ctx.DB, &objects.Account{
 			Name:                 worker,
 			Created:              ctx.HeadBlockTime,
@@ -272,6 +280,7 @@ func ensureMinerAccountForPow(ctx *Context, worker string, payReward bool, props
 			VotingManaLastUpdate: ctx.HeadBlockTime,
 			Mined:                true,
 			MemoKey:              signingKey,
+			RecoveryAccount:      recoveryAcct,
 		})
 		// Mirror C++ pow_apply (hive_evaluator.cpp:424-430) +
 		// pow2_evaluator (hive_evaluator.cpp:561-567): when a new

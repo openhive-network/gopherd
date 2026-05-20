@@ -18,6 +18,7 @@ func TestRequestAccountRecovery(t *testing.T) {
 	f := New(t)
 	f.Actors("alice", "bob")
 	f.GenerateBlock()
+	f.SetRecoveryAccount("bob", "alice")
 
 	if err := f.ApplyOp(op.RequestAccountRecovery{
 		RecoveryAccount:   "alice",
@@ -57,6 +58,7 @@ func TestRecoverAccountConsumesRequest(t *testing.T) {
 	f := New(t)
 	f.Actors("alice", "bob")
 	f.GenerateBlock()
+	f.SetRecoveryAccount("bob", "alice")
 
 	// Seed bob's owner_authority_history. account_update records the
 	// current AccountAuthority.Owner as the previous_owner_authority
@@ -112,6 +114,7 @@ func TestRecoverAccountExpiredRequestRejected(t *testing.T) {
 	f := New(t)
 	f.Actors("alice", "bob")
 	f.GenerateBlock()
+	f.SetRecoveryAccount("bob", "alice")
 
 	if err := f.ApplyOp(op.RequestAccountRecovery{
 		RecoveryAccount:   "alice",
@@ -142,6 +145,7 @@ func TestChangeRecoveryAccount(t *testing.T) {
 	f := New(t)
 	f.Actors("alice", "bob", "carol")
 	f.GenerateBlock()
+	f.SetRecoveryAccount("bob", "alice")
 
 	if err := f.ApplyOp(op.ChangeRecoveryAccount{
 		AccountToRecover:   "bob",
@@ -170,6 +174,7 @@ func TestChangeRecoveryAccountOverwritesPending(t *testing.T) {
 	f := New(t)
 	f.Actors("alice", "bob", "carol", "dave")
 	f.GenerateBlock()
+	f.SetRecoveryAccount("bob", "alice")
 
 	f.MustApplyOp(op.ChangeRecoveryAccount{
 		AccountToRecover:   "bob",
