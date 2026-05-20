@@ -234,6 +234,19 @@ func VerifyAuthorityWithKeys(s *state.Session, signedTx *tx.SignedTransaction, k
 		return nil
 	}
 
+	// Mirror C++ transaction_util.cpp:69-73 — pre-HF28 reject any tx
+	// that combines posting-required ops with active- or owner-required
+	// ops (the "mixed_with_posting" verify_authority_problem). HF28 is
+	// set to block 100,000,000 (a placeholder past any current mainnet
+	// height), so this check unconditionally fires today; when HF28
+	// actually activates the guard should be gated on
+	// !hf.Has(HF28). The current `required` map captures bucket-per-
+	// level membership; checking length per bucket is enough.
+	if len(required[AuthorityPosting]) > 0 &&
+		(len(required[AuthorityActive]) > 0 || len(required[AuthorityOwner]) > 0) {
+		return fmt.Errorf("verify_authority: tx mixes posting-required ops with active/owner-required ops")
+	}
+
 	fetcher := &sessionAuthFetcher{s: s}
 	state := newSignState(keys, fetcher)
 
