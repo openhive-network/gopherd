@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/tx"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
@@ -36,7 +37,16 @@ const maxTimeUntilExpirationSec uint32 = 60 * 60
 // transaction.cpp::validate.
 func validateTxPreFlight(s *state.Session, signed *tx.SignedTransaction, blockNum, headBlockTime uint32, txID [20]byte, strictTapos bool) error {
 	// 1) Expiration in the future of head_block_time AND ≤ +1h.
-	if signed.Expiration < headBlockTime {
+	// Mirror C++ database.cpp:2535-2538 — HF9 tightened the boundary
+	// from `now <= expiration` (pre-HF9) to `now < expiration` (post-HF9).
+	// Gopherd's prior `expiration < headBlockTime` accepted equality at
+	// ALL times, matching the pre-HF9 behavior even post-HF9.
+	hfTx := hardfork.SetForBlock(blockNum)
+	if hfTx.Has(hardfork.HF9) {
+		if signed.Expiration <= headBlockTime {
+			return fmt.Errorf("transaction expired (HF9+): expiration=%d head=%d", signed.Expiration, headBlockTime)
+		}
+	} else if signed.Expiration < headBlockTime {
 		return fmt.Errorf("transaction expired: expiration=%d head=%d", signed.Expiration, headBlockTime)
 	}
 	if signed.Expiration > headBlockTime+maxTimeUntilExpirationSec {
