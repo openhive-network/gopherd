@@ -192,16 +192,20 @@ func (updateProposalVotesEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		had, _ := objects.HasProposalVote(ctx.DB, id, uv.Voter)
 		if uv.Approve && !had {
 			objects.PutProposalVote(ctx.DB, id, uv.Voter)
-			p.TotalVotes += voter.VestingShares
-			objects.PutProposal(ctx.DB, &p)
 		} else if !uv.Approve && had {
 			objects.DeleteProposalVote(ctx.DB, id, uv.Voter)
-			p.TotalVotes -= voter.VestingShares
-			if p.TotalVotes < 0 {
-				p.TotalVotes = 0
-			}
-			objects.PutProposal(ctx.DB, &p)
 		}
+		// Mirror C++ dhf_evaluator.cpp: update_proposal_votes_evaluator
+		// only mutates the vote-relation table — it does NOT touch
+		// p.total_votes. The maintenance tick recalculates from scratch
+		// via calculate_votes(). Gopherd previously updated TotalVotes
+		// inline using `voter.VestingShares` (a stale/wrong formula:
+		// missing sum_delayed_votes subtraction and proxied_vsf_votes
+		// addition), which then got overwritten by the next maintenance
+		// recalc — producing transient ordering divergence in any
+		// between-tick read.
+		_ = voter // signature retained; voter check above is still required
+		_ = p
 	}
 	return nil
 }

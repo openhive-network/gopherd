@@ -162,10 +162,13 @@ func TestUpdateProposalVotesAddRemove(t *testing.T) {
 	if has, _ := objects.HasProposalVote(state.NewSession(f.State), pid, "carol"); !has {
 		t.Error("carol's vote should be recorded")
 	}
-	p1, _ := objects.GetProposal(state.NewSession(f.State), pid)
-	if p1.TotalVotes <= 0 {
-		t.Errorf("after approve: TotalVotes=%d, want > 0", p1.TotalVotes)
-	}
+	// Mirror C++ dhf_evaluator: update_proposal_votes does NOT mutate
+	// p.total_votes inline — only the proposal-vote relation is
+	// inserted/removed. p.TotalVotes is recomputed from scratch by the
+	// hourly maintenance tick via recalculateProposalVotes. So between
+	// vote and next maintenance, the field stays at whatever the last
+	// recalc set it to. Just assert the relation is recorded; the tally
+	// recompute is covered by the DHF maintenance test path.
 
 	// carol revokes.
 	f.MustApplyOp(op.UpdateProposalVotes{
