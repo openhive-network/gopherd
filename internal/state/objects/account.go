@@ -186,6 +186,14 @@ type Account struct {
 	// dgpo.pending_rewarded_vesting_* into dgpo.total_vesting_* so the
 	// vesting share price stays correct.
 	RewardVestingHive int64
+	// OpenRecurrentTransfers mirrors hived's account_object::
+	// open_recurrent_transfers (HF25+). Counts active recurrent_transfer
+	// rows where this account is the `from`. Hived caps at
+	// HIVE_MAX_OPEN_RECURRENT_TRANSFERS = 255 (config.hpp). Incremented
+	// by recurrent_transfer_create, decremented by delete (and by
+	// process_recurrent_transfers when a recurrent retires or fails
+	// past the consecutive-failures cap).
+	OpenRecurrentTransfers uint8
 }
 
 // CanVote returns whether the account is allowed to cast votes
@@ -267,6 +275,7 @@ func AppendAccount(dst []byte, a *Account) []byte {
 	dst = appendU32LE(dst, a.LastAccountUpdate)
 	dst = appendU32LE(dst, a.BlockLastAccountRecovery)
 	dst = appendI64LE(dst, a.RewardVestingHive)
+	dst = append(dst, a.OpenRecurrentTransfers)
 	return dst
 }
 
@@ -491,6 +500,14 @@ func ReadAccount(src []byte) (Account, error) {
 	}
 	if a.RewardVestingHive, err = r.ReadInt64(); err != nil {
 		return a, fmt.Errorf("account.reward_vesting_hive: %w", err)
+	}
+	// OpenRecurrentTransfers is a later schema addition; tolerate EOF
+	// for rows persisted before HF25 recurrent-transfer support landed.
+	if r.AtEnd() {
+		return a, nil
+	}
+	if a.OpenRecurrentTransfers, err = r.ReadByte(); err != nil {
+		return a, fmt.Errorf("account.open_recurrent_transfers: %w", err)
 	}
 	if !r.AtEnd() {
 		return a, errors.New("account: trailing bytes after decode (schema mismatch?)")

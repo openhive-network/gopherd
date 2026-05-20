@@ -133,6 +133,14 @@ func processRecurrentTransfers(s *state.Session, blockTime, blockNum uint32, d *
 			remaining := rt.Executions - 1
 			if remaining == 0 {
 				objects.DeleteRecurrentTransfer(s, f.from, f.to, f.pairID)
+				// Mirror C++ hive_evaluator_transfer.cpp:952 — decrement
+				// open_recurrent_transfers on retire. Re-fetch since
+				// `from` was modified above (sufficient-path put the
+				// new balance) and we need the latest counter.
+				if fr, fre := objects.GetAccount(s, f.from); fre == nil && fr.OpenRecurrentTransfers > 0 {
+					fr.OpenRecurrentTransfers--
+					objects.PutAccount(s, &fr)
+				}
 			} else {
 				rt.Executions = remaining
 				rt.Trigger += uint32(rt.Recurrence) * 3600
@@ -170,6 +178,15 @@ func processRecurrentTransfers(s *state.Session, blockTime, blockNum uint32, d *
 			} else {
 				objects.DeleteRecurrentTransfer(s, f.from, f.to, f.pairID)
 				deleted = true
+			}
+			// Mirror C++ hive_evaluator_transfer.cpp:952 — decrement
+			// open_recurrent_transfers on retire (both retire-by-
+			// remaining-zero and retire-by-failure-cap paths).
+			if deleted {
+				if fr, fre := objects.GetAccount(s, f.from); fre == nil && fr.OpenRecurrentTransfers > 0 {
+					fr.OpenRecurrentTransfers--
+					objects.PutAccount(s, &fr)
+				}
 			}
 			if d != nil {
 				d.pushVOp(BlockVOp{

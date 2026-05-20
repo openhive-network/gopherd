@@ -87,6 +87,15 @@ func (recurrentTransferEvaluator) Apply(ctx *Context, opArg op.Op) error {
 			return err
 		} else if has {
 			objects.DeleteRecurrentTransfer(ctx.DB, rt.From, rt.To, pairID)
+			// Mirror C++ hive_evaluator_transfer.cpp:952 — decrement
+			// from_account.open_recurrent_transfers; asserts > 0
+			// before decrement. We use saturated-floor here defensively.
+			if fromAcct, ferr := objects.GetAccount(ctx.DB, rt.From); ferr == nil {
+				if fromAcct.OpenRecurrentTransfers > 0 {
+					fromAcct.OpenRecurrentTransfers--
+					objects.PutAccount(ctx.DB, &fromAcct)
+				}
+			}
 		}
 		return nil
 	}
@@ -156,6 +165,16 @@ func (recurrentTransferEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	var consecFailures uint8
 	if hasExisting {
 		consecFailures = existing.ConsecutiveFailures
+	} else {
+		// Mirror C++ hive_evaluator_transfer.cpp:935-944 — on CREATE
+		// (no existing schedule), assert open_recurrent_transfers <
+		// HIVE_MAX_OPEN_RECURRENT_TRANSFERS (255) and increment.
+		// Updates of an existing schedule don't touch the counter.
+		if from.OpenRecurrentTransfers >= 255 {
+			return fmt.Errorf("recurrent_transfer: %q already has 255 open recurrent transfers (HIVE_MAX_OPEN_RECURRENT_TRANSFERS)", rt.From)
+		}
+		from.OpenRecurrentTransfers++
+		objects.PutAccount(ctx.DB, &from)
 	}
 
 	objects.PutRecurrentTransfer(ctx.DB, &objects.RecurrentTransfer{
