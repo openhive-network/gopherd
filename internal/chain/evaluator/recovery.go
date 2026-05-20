@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"hived-go/internal/protocol/auth"
+	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/op"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
@@ -129,6 +130,20 @@ func (recoverAccountEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		objects.DeleteAccountRecoveryRequestFull(ctx.DB, &req)
 		return fmt.Errorf("recover_account: request expired")
 	}
+	// Mirror C++ hive_evaluator_account.cpp:534-535 — post-HF12,
+	// rate-limit recover_account to once per HIVE_OWNER_UPDATE_LIMIT
+	// (60 minutes). Hived calls
+	// owner_update_limit_mgr::check(head_block_time, last_account_recovery).
+	// Without this, recover_account could be spammed within an hour,
+	// drifting account owner repeatedly where hived rejects.
+	if ctx.Hardforks.Has(hardfork.HF12) {
+		acctRec, arerr := objects.GetAccount(ctx.DB, r.AccountToRecover)
+		if arerr == nil && acctRec.LastAccountRecoveryTime > 0 &&
+			ctx.HeadBlockTime <= acctRec.LastAccountRecoveryTime+HiveOwnerUpdateLimit {
+			return fmt.Errorf("recover_account: %q rate-limited (last recovery at %d, head %d, limit %ds)",
+				r.AccountToRecover, acctRec.LastAccountRecoveryTime, ctx.HeadBlockTime, HiveOwnerUpdateLimit)
+		}
+	}
 	// Mirror C++ hive_evaluator_account.cpp:541 — the proposed
 	// new_owner_authority on the op MUST match the one recorded with
 	// the recovery request. Without this check, anyone holding a
@@ -172,6 +187,9 @@ func (recoverAccountEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		a.PreviousOwnerUpdate = a.LastOwnerUpdate
 		a.LastOwnerUpdate = ctx.HeadBlockTime
 		a.BlockLastAccountRecovery = ctx.BlockNum
+		// Mirror C++ hive_evaluator_account.cpp:550 — record the time
+		// so the next HF12 rate-limit check has the right basis.
+		a.LastAccountRecoveryTime = ctx.HeadBlockTime
 		objects.PutAccount(ctx.DB, &a)
 	}
 	objects.DeleteAccountRecoveryRequestFull(ctx.DB, &req)

@@ -214,6 +214,14 @@ type Account struct {
 	// Without this term, every post-HF20 account is short ~2020 VESTS
 	// of RC capacity forever.
 	RCAdjustment int64
+	// LastAccountRecoveryTime mirrors hived's account_object::
+	// last_account_recovery — the wall-clock time of the last
+	// successful recover_account. HF12 gates recover_account at
+	// HIVE_OWNER_UPDATE_LIMIT (60min) between successful recoveries
+	// for the same account. BlockLastAccountRecovery (block-num) is
+	// kept separately for state-dump purposes; time is what
+	// owner_update_limit_mgr.check needs.
+	LastAccountRecoveryTime uint32
 }
 
 // CanVote returns whether the account is allowed to cast votes
@@ -299,6 +307,7 @@ func AppendAccount(dst []byte, a *Account) []byte {
 	dst = fcraw.AppendVarUint(dst, uint32(len(a.RecoveryAccount)))
 	dst = append(dst, a.RecoveryAccount...)
 	dst = appendI64LE(dst, a.RCAdjustment)
+	dst = appendU32LE(dst, a.LastAccountRecoveryTime)
 	return dst
 }
 
@@ -549,6 +558,14 @@ func ReadAccount(src []byte) (Account, error) {
 	}
 	if a.RCAdjustment, err = r.ReadInt64(); err != nil {
 		return a, fmt.Errorf("account.rc_adjustment: %w", err)
+	}
+	// LastAccountRecoveryTime is a later schema addition; tolerate EOF
+	// for pre-schema rows (default 0 means "no prior recovery").
+	if r.AtEnd() {
+		return a, nil
+	}
+	if a.LastAccountRecoveryTime, err = r.ReadUint32(); err != nil {
+		return a, fmt.Errorf("account.last_account_recovery_time: %w", err)
 	}
 	if !r.AtEnd() {
 		return a, errors.New("account: trailing bytes after decode (schema mismatch?)")
