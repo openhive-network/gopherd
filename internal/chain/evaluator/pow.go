@@ -259,12 +259,19 @@ func ensureMinerAccountForPow(ctx *Context, worker string, payReward bool, props
 		return err
 	}
 	if !has {
+		// Mirror C++ account_object ctor (account_object.hpp:35-40) +
+		// pow_apply (hive_evaluator.cpp:420) / pow2_apply (:552): the
+		// PoW-mined account's memo_key is seeded from work.worker (pow1)
+		// or *o.new_owner_key (pow2). Gopherd previously left MemoKey
+		// at the zero [33]byte{}, so state-dump comparisons of PoW-
+		// mined accounts diverged.
 		objects.PutAccount(ctx.DB, &objects.Account{
 			Name:                 worker,
 			Created:              ctx.HeadBlockTime,
 			VotingManaCurrent:    10000,
 			VotingManaLastUpdate: ctx.HeadBlockTime,
 			Mined:                true,
+			MemoKey:              signingKey,
 		})
 		// Mirror C++ pow_apply (hive_evaluator.cpp:424-430) +
 		// pow2_evaluator (hive_evaluator.cpp:561-567): when a new
