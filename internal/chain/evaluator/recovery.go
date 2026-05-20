@@ -185,10 +185,36 @@ func (changeRecoveryAccountEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		return fmt.Errorf("changeRecoveryAccountEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
 	cr := opArg.AsChangeRecoveryAccount()
-	if has, err := objects.HasAccount(ctx.DB, cr.AccountToRecover); err != nil {
+	acct, aerr := objects.GetAccount(ctx.DB, cr.AccountToRecover)
+	if aerr != nil {
+		if aerr == state.ErrNotFound {
+			return fmt.Errorf("%w: %q", ErrAccountNotFound, cr.AccountToRecover)
+		}
+		return aerr
+	}
+	// The proposed new recovery_account must exist (C++
+	// hive_evaluator_account.cpp:567 — get_account asserts).
+	if has, err := objects.HasAccount(ctx.DB, cr.NewRecoveryAccount); err != nil {
 		return err
 	} else if !has {
-		return fmt.Errorf("%w: %q", ErrAccountNotFound, cr.AccountToRecover)
+		return fmt.Errorf("%w: new_recovery_account=%q", ErrAccountNotFound, cr.NewRecoveryAccount)
+	}
+	// Mirror C++ 3-branch logic (hive_evaluator_account.cpp:565-591):
+	//
+	// (a) If target's current recovery_account ALREADY equals the new one:
+	//     - if a pending request exists → REMOVE it (the user is
+	//       cancelling a previous change).
+	//     - if no pending request → reject (no-op edge case).
+	// (b) Otherwise: upsert a pending request with effective_on = now + 30d.
+	hasReq, _ := objects.HasChangeRecoveryRequest(ctx.DB, cr.AccountToRecover)
+	if acct.RecoveryAccount == cr.NewRecoveryAccount {
+		if !hasReq {
+			return fmt.Errorf("change_recovery_account: %q already has recovery_account=%q and no pending change", cr.AccountToRecover, cr.NewRecoveryAccount)
+		}
+		if req, gerr := objects.GetChangeRecoveryRequest(ctx.DB, cr.AccountToRecover); gerr == nil {
+			objects.DeleteChangeRecoveryRequestFull(ctx.DB, &req)
+		}
+		return nil
 	}
 	objects.PutChangeRecoveryRequest(ctx.DB, &objects.ChangeRecoveryAccountRequest{
 		AccountToRecover: cr.AccountToRecover,
