@@ -47,12 +47,12 @@ func (transferToSavingsEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	switch t.Amount.Symbol.Num {
 	case asset.HiveSymbol:
 		if from.Balance < t.Amount.Amount {
-			return fmt.Errorf("%w: %q has %d HIVE", ErrInsufficientBalance, t.From, from.Balance)
+			return fmt.Errorf("%w: %q has %d HIVE, needs %d", ErrInsufficientBalance, t.From, from.Balance, t.Amount.Amount)
 		}
 		from.Balance -= t.Amount.Amount
 	case asset.HbdSymbol:
 		if from.HBDBalance < t.Amount.Amount {
-			return fmt.Errorf("%w: %q has %d HBD", ErrInsufficientBalance, t.From, from.HBDBalance)
+			return fmt.Errorf("%w: %q has %d HBD, needs %d", ErrInsufficientBalance, t.From, from.HBDBalance, t.Amount.Amount)
 		}
 		objects.AdjustHBDBalance(ctx.DB, &from, ctx.HeadBlockTime, -t.Amount.Amount)
 	default:
@@ -111,12 +111,12 @@ func (transferFromSavingsEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	switch t.Amount.Symbol.Num {
 	case asset.HiveSymbol:
 		if from.SavingsBalance < t.Amount.Amount {
-			return fmt.Errorf("%w: %q savings %d HIVE", ErrInsufficientBalance, t.From, from.SavingsBalance)
+			return fmt.Errorf("%w: %q savings %d HIVE, needs %d", ErrInsufficientBalance, t.From, from.SavingsBalance, t.Amount.Amount)
 		}
 		from.SavingsBalance -= t.Amount.Amount
 	case asset.HbdSymbol:
 		if from.SavingsHBDBalance < t.Amount.Amount {
-			return fmt.Errorf("%w: %q savings %d HBD", ErrInsufficientBalance, t.From, from.SavingsHBDBalance)
+			return fmt.Errorf("%w: %q savings %d HBD, needs %d", ErrInsufficientBalance, t.From, from.SavingsHBDBalance, t.Amount.Amount)
 		}
 		objects.AdjustSavingsHBDBalance(ctx.DB, &from, ctx.HeadBlockTime, -t.Amount.Amount)
 	default:

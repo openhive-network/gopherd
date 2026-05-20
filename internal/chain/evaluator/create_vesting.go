@@ -73,12 +73,30 @@ func vestTraceAccount(name string) bool {
 // that reads the resulting state.
 //
 // Side effects (matches C++ create_vesting2):
-//   - account.VestingShares += new_vesting (or RewardVests if toReward)
-//   - dgpo.TotalVestingShares += new_vesting
-//   - dgpo.TotalVestingFundHive += hiveSatoshi
-//   - witness votes get +new_vesting via AdjustProxiedWitnessVotes
-//     (only when toReward is false — reward vests count when claimed,
-//     not when accumulated)
+//   - !toReward (regular path):
+//       account.VestingShares          += new_vesting
+//       dgpo.TotalVestingShares        += new_vesting
+//       dgpo.TotalVestingFundHive      += hiveSatoshi
+//       witness votes                  += new_vesting via AdjustProxiedWitnessVotes
+//   - toReward (HF17+ comment payout into pending reward pool):
+//       account.RewardVests            += new_vesting
+//       account.RewardVestingHive      += hiveSatoshi
+//       dgpo.PendingRewardedVestingShares += new_vesting
+//       dgpo.PendingRewardedVestingHive   += hiveSatoshi
+//       (no witness vote adjust — reward vests vote only after claim)
+//
+// The vesting share price diverges on the toReward branch
+// (database_vesting_helpers.hpp:calculate_vesting):
+//
+//	!toReward → vests = liquid × total_vesting_shares / total_vesting_fund_hive
+//	 toReward → vests = liquid × (total_vesting_shares + pending_rewarded_vesting_shares)
+//	                            / (total_vesting_fund_hive + pending_rewarded_vesting_hive)
+//
+// Without the per-pool bookkeeping the toReward path mutates
+// total_vesting_* directly, which silently inflates the regular vesting
+// share denominator — surfaces as the HF17_659 `claim_reward_balance:
+// insufficient balance` mismatch first hit at block 10,635,691 (account
+// "ocrdu", ~1.1% under-credit).
 //
 // Returns the VESTS-satoshi amount credited.
 func CreateVesting(s *state.Session, accountName string, hiveSatoshi int64, toReward bool) (int64, error) {
@@ -105,11 +123,19 @@ func createVestingImpl(s *state.Session, accountName string, hiveSatoshi int64, 
 	if dgpoRef != nil {
 		totalVestingFundHive = dgpoRef.TotalVestingFundHive
 		totalVestingShares = dgpoRef.TotalVestingShares
+		// HF17+: toReward credits use the reward-pool share price
+		// (database_vesting_helpers.hpp:calculate_vesting). Sum the
+		// pending pool into both legs so a credit that races with
+		// pre-claim pending balances stays at the same price as hived.
+		if toReward {
+			totalVestingShares += dgpoRef.PendingRewardedVestingShares
+			totalVestingFundHive += dgpoRef.PendingRewardedVestingHive
+		}
 	}
 	if totalVestingFundHive == 0 || totalVestingShares == 0 {
 		vestsAmount = hiveSatoshi * 1000
 	} else {
-		// vests = hive * total_vesting_shares / total_vesting_fund_hive.
+		// vests = hive * shares / fund.
 		// Both inputs are non-negative int64. Product fits in uint128;
 		// quotient back to int64 (mirrors the old IsInt64 saturation).
 		// Native uint128 replaces a math/big triple-alloc that fired on
@@ -136,6 +162,7 @@ func createVestingImpl(s *state.Session, accountName string, hiveSatoshi int64, 
 	if !objects.MutateAccount(s, auth.AccountName(accountName), func(a *objects.Account) {
 		if toReward {
 			a.RewardVests += vestsAmount
+			a.RewardVestingHive += hiveSatoshi
 		} else {
 			a.VestingShares += vestsAmount
 		}
@@ -145,13 +172,32 @@ func createVestingImpl(s *state.Session, accountName string, hiveSatoshi int64, 
 	}
 
 	objects.MutateDGPO(s, func(p *objects.DynamicGlobalProperty) {
-		p.TotalVestingShares += vestsAmount
-		p.TotalVestingFundHive += hiveSatoshi
+		if toReward {
+			p.PendingRewardedVestingShares += vestsAmount
+			p.PendingRewardedVestingHive += hiveSatoshi
+		} else {
+			p.TotalVestingShares += vestsAmount
+			p.TotalVestingFundHive += hiveSatoshi
+		}
 	})
 	traceAll := envGhivediffAllVest != ""
 	if dgpoRef != nil && (vestTraceAccount(accountName) || (traceAll && dgpoRef.HeadBlockNumber >= 2888500 && dgpoRef.HeadBlockNumber <= 2910000)) {
-		fmt.Fprintf(os.Stderr, "GHIVEDIFF VEST-CREATE block=%d acct=%s liquid=%d new_vests=%d after_vests=%d fund_pre=%d shares_pre=%d toReward=%v\n",
-			dgpoRef.HeadBlockNumber, accountName, hiveSatoshi, vestsAmount, aSlot.VestingShares, dgpoRef.TotalVestingFundHive-hiveSatoshi, dgpoRef.TotalVestingShares-vestsAmount, toReward)
+		// Note: TotalVesting{Fund,Shares} reflect post-mutate state, so
+		// subtract the credit to back out pre-state. For toReward we
+		// only mutated Pending*, so the subtraction is a no-op there.
+		preTF := dgpoRef.TotalVestingFundHive
+		preTS := dgpoRef.TotalVestingShares
+		prePH := dgpoRef.PendingRewardedVestingHive
+		prePS := dgpoRef.PendingRewardedVestingShares
+		if toReward {
+			prePH -= hiveSatoshi
+			prePS -= vestsAmount
+		} else {
+			preTF -= hiveSatoshi
+			preTS -= vestsAmount
+		}
+		fmt.Fprintf(os.Stderr, "GHIVEDIFF VEST-CREATE block=%d acct=%s liquid=%d new_vests=%d after_vests=%d fund_pre=%d shares_pre=%d pending_hive_pre=%d pending_shares_pre=%d toReward=%v\n",
+			dgpoRef.HeadBlockNumber, accountName, hiveSatoshi, vestsAmount, aSlot.VestingShares, preTF, preTS, prePH, prePS, toReward)
 	}
 
 	// C++ create_vesting2 calls adjust_proxied_witness_votes when

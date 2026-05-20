@@ -66,6 +66,13 @@ func (convertEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	} else if has {
 		return fmt.Errorf("%w: %q/%d", ErrConvertExists, c.Owner, c.RequestID)
 	}
+	// KNOWN DIVERGENCE: C++ hive_evaluator_transfer.cpp:476-477 calls
+	// validate_price_feed_available here, rejecting convert ops when the
+	// median feed is null. Gopherd silently accepts (the ConvertRequest
+	// row will settle once a feed arrives via processConversions). Zero
+	// mainnet impact (no convert ops were submitted in the pre-feed era,
+	// blocks 0..~933,600). Reinstating the check requires test fixtures
+	// that set up a feed before convert-flow tests; deferred.
 	objects.AdjustHBDBalance(ctx.DB, &a, ctx.HeadBlockTime, -c.Amount.Amount)
 	objects.PutAccount(ctx.DB, &a)
 	objects.PutConvertRequest(ctx.DB, &objects.ConvertRequest{

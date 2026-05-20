@@ -82,6 +82,15 @@ func (claimAccountEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	creator.Balance -= ca.Fee.Amount
 	creator.PendingClaimedAccounts++
 	objects.PutAccount(ctx.DB, &creator)
+	// Mirror C++ hive_evaluator_account.cpp:440-444: the fee is credited
+	// to NULL_ACCOUNT, then clearNullAccountBalance burns it from
+	// current_supply next block. Without this credit, sum(balances)
+	// drops while current_supply stays put — drift bucket: small HIVE
+	// positive in dgpo, accumulating one fee per claim_account post-HF20.
+	if nullAcct, nerr := objects.GetAccount(ctx.DB, "null"); nerr == nil {
+		nullAcct.Balance += ca.Fee.Amount
+		objects.PutAccount(ctx.DB, &nullAcct)
+	}
 	return nil
 }
 
@@ -179,7 +188,7 @@ func (accountCreateWithDelegationEvaluator) Apply(ctx *Context, opArg op.Op) err
 	}
 	availVests := creator.VestingShares - creator.DelegatedVestingShares
 	if availVests < ac.Delegation.Amount {
-		return fmt.Errorf("%w: creator has %d undelegated VESTS, delegation %d", ErrInsufficientBalance, availVests, ac.Delegation.Amount)
+		return fmt.Errorf("%w: %q has %d undelegated VESTS, delegation %d", ErrInsufficientBalance, ac.Creator, availVests, ac.Delegation.Amount)
 	}
 	if has, err := objects.HasAccount(ctx.DB, ac.NewAccountName); err != nil {
 		return err

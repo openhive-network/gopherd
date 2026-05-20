@@ -117,13 +117,24 @@ func (transferEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		objects.AdjustHBDBalance(ctx.DB, &to, ctx.HeadBlockTime, convertedAmt)
 		objects.PutAccount(ctx.DB, &to)
 
-		// adjust_supply(-HIVE) and adjust_supply(+HBD) — supply totals
-		// in DGPO.
+		// adjust_supply(-HIVE) + adjust_supply(+HBD) — supply totals in DGPO.
+		// Mirror C++ database::adjust_supply for the HBD branch
+		// (libraries/chain/database.cpp:3496): after the HBD delta lands,
+		// FULL RECOMPUTE virtual_supply from current_supply +
+		// current_hbd_supply × median_history. Without the recompute,
+		// intra-block readers (process_funds same-block, payCreateHbd
+		// print_rate) see stale VS until the next end-of-block
+		// updateVirtualSupply reconciles.
 		dgpo, derr := objects.GetDGPO(ctx.DB)
 		if derr == nil {
 			dgpo.CurrentSupply -= tx.Amount.Amount
+			dgpo.VirtualSupply -= tx.Amount.Amount
 			if convertedAmt > 0 {
 				dgpo.CurrentHBDSupply += convertedAmt
+				dgpo.VirtualSupply = dgpo.CurrentSupply
+				if fh2, ferr2 := objects.GetFeedHistory(ctx.DB); ferr2 == nil && fh2.CurrentMedianHistory.Base.Amount != 0 {
+					dgpo.VirtualSupply += convertHBDToHiveLocal(dgpo.CurrentHBDSupply, fh2.CurrentMedianHistory)
+				}
 			}
 			objects.PutDGPO(ctx.DB, &dgpo)
 		}

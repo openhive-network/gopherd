@@ -208,7 +208,12 @@ func applyLimitOrderCreate(ctx *Context, owner string, orderID uint32, amountToS
 	if mulDiv(amountToSell.Amount, sellPrice.Quote.Amount, sellPrice.Base.Amount) <= 0 {
 		return fmt.Errorf("%w: amount_to_sell rounds to 0 when traded", ErrTransferAmountNotPos)
 	}
-	if expiration != 0 && expiration <= ctx.HeadBlockTime {
+	// Mirror C++ hive_evaluator_transfer.cpp:536 — strict `expiration >
+	// head_block_time` assertion with NO zero-exception. The prior
+	// `expiration != 0 &&` guard accepted malformed ops with expiration=0
+	// and created orders that would never expire (clearExpiredOrders
+	// also skipped Expiration==0 at limit_orders.go:33).
+	if expiration <= ctx.HeadBlockTime {
 		return ErrLimitOrderExpired
 	}
 	if amountToSell.Symbol.Num != asset.HiveSymbol && amountToSell.Symbol.Num != asset.HbdSymbol {

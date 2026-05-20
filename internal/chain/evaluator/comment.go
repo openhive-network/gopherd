@@ -857,6 +857,27 @@ func (voteEvaluator) Apply(ctx *Context, opArg op.Op) error {
 			q, _ := bits.Div64(hi, lo, uint64(reverseAuction))
 			voteCurationWeight = q
 		}
+		// HF21+ three-phase discount past the reverse-auction window.
+		// Mirror C++ hive_evaluator_social.cpp:810-826: once a vote is
+		// past early_voting_seconds, weight /= 2 (mid window) or /= 8
+		// (late window). Constants HIVE_EARLY_VOTING_SECONDS = 24h,
+		// HIVE_MID_VOTING_SECONDS = 48h (HF21 defaults; HF25 raised
+		// these). Pre-HF21 the old linear reverse-auction ramp above
+		// is the only discount; HF21+ keeps that ramp (with the
+		// 5-minute reverse_auction window) AND adds mid/late phases.
+		if ctx.Hardforks.Has(hardfork.HF21) && voteCurationWeight > 0 {
+			const earlyVotingSeconds uint32 = 24 * 3600
+			const midVotingSeconds uint32 = 48 * 3600
+			elapsed := uint32(0)
+			if ctx.HeadBlockTime > c.Created {
+				elapsed = ctx.HeadBlockTime - c.Created
+			}
+			if elapsed >= midVotingSeconds {
+				voteCurationWeight /= 8
+			} else if elapsed >= earlyVotingSeconds {
+				voteCurationWeight /= 2
+			}
+		}
 		c.VoteRshares = newVoteRshares
 	}
 	// hived's accumulate_vote_rshares (hive_evaluator_social.cpp:485)
@@ -907,6 +928,27 @@ func (voteEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		// drifting state from C++ over millions of recasts.
 		c.TotalVoteWeight -= prev.CurationWeight
 		c.NetRshares += rshares - prev.Rshares
+		// HF20+: also update VoteRshares (positive-only accumulator).
+		// Mirror C++ hive_evaluator_social.cpp:757
+		// `c.accumulate_vote_rshares(rshares - prev_rshares,
+		// (rshares>0?rshares:0) - prev_positive_rshares)`. Pre-HF20 C++
+		// passed 0 for the vote_rshares delta, so this only fires HF20+.
+		if ctx.Hardforks.Has(hardfork.HF20) {
+			posNew := int64(0)
+			if rshares > 0 {
+				posNew = rshares
+			}
+			posPrev := int64(0)
+			if prev.Rshares > 0 {
+				posPrev = prev.Rshares
+			}
+			delta := posNew - posPrev
+			if delta >= 0 {
+				c.VoteRshares += uint64(delta)
+			} else {
+				c.VoteRshares -= uint64(-delta)
+			}
+		}
 		// Build a fresh CommentVote rather than mutating *prev — prev
 		// aliases the in-place store slot under GetCommentVoteRef, and
 		// mutating it before PutCommentVote would scramble the undo
@@ -1073,7 +1115,11 @@ rootDone:
 		// the mutations are in-place — no PutAccount needed.
 		objects.PutAccount(ctx.DB, voter)
 	}
-	adjustRewardShares2(ctx.DB, oldNetRshares, c.NetRshares)
+	var blockNumForAdjust uint32
+	if dgpoRef, ok := objects.GetDGPORef(ctx.DB); ok {
+		blockNumForAdjust = dgpoRef.HeadBlockNumber
+	}
+	adjustRewardShares2(ctx.DB, oldNetRshares, c.NetRshares, blockNumForAdjust)
 	return nil
 }
 
@@ -1102,6 +1148,16 @@ func curationWeightCurve(ctx *Context, c *objects.Comment, voteRshares uint64) u
 			s := uint64(fund.ContentConstant)
 			if fund.ContentConstant <= 0 {
 				s = 2_000_000_000_000
+			}
+			// Mirror C++ hive_evaluator_social.cpp:522-523: comments
+			// authored in the 7-day window before HF19 activation use
+			// the square_root curve regardless of fund.curation_curve.
+			// HIVE_HF_19_SQRT_PRE_CALC = HF19_TIME - 7d (cashout window).
+			// Once HF19 (HF19_1052) activates the override stops; the
+			// fund's curve takes over.
+			const hf19SqrtPreCalc uint32 = 1497970800 - 7*86400
+			if !ctx.Hardforks.Has(hardfork.HF19) && c.Created > hf19SqrtPreCalc {
+				return isqrt64(voteRshares)
 			}
 			switch fund.CurationRewardCurve {
 			case objects.CurveLinear:
@@ -1187,25 +1243,24 @@ func isqrt64(n uint64) uint64 {
 	}
 }
 
-// adjustRewardShares2 mirrors hived's database::adjust_rshares2: shift
-// the running curve sum by curve(new_net_rshares) - curve(old_net_rshares)
-// on every cast/recast. Pre-HF17 the sum lives in
-// dgpo.total_reward_shares2; HF17+ it lives in
-// reward_fund_object.recent_claims (with the fund's selected curve and
-// content_constant).
-func adjustRewardShares2(s *state.Session, oldNetRshares, newNetRshares int64) {
-	// Post-HF17: write to reward_fund.recent_claims.
-	// Mirror C++ database.cpp:1673-1674 — uint128 modular subtraction +
-	// addition, NO clamp. A transient negative is part of normal
-	// operation when an old curve outran the running total temporarily;
-	// U128 wraps mod 2^128 by construction.
-	if fund, err := objects.GetRewardFund(s, objects.PostRewardFundName); err == nil {
-		total := reward.Uint128FromBytes(fund.RecentClaims)
-		oldCurve := evaluateCurveForFund(oldNetRshares, &fund)
-		newCurve := evaluateCurveForFund(newNetRshares, &fund)
-		total = total.Sub(oldCurve).Add(newCurve)
-		fund.RecentClaims = reward.Uint128ToBytes(total)
-		objects.PutRewardFund(s, &fund)
+// adjustRewardShares2 mirrors hived's database::adjust_rshares2 for the
+// pre-HF17 era only. Pre-HF17 every vote ADDed curve(new)-curve(old) to
+// dgpo.total_reward_shares2 (via util/reward.cpp evaluate_reward_curve
+// — quadratic only). HF17_774 introduces the reward_fund_object model
+// where recent_claims is no longer a per-vote running sum: it decays
+// each block and absorbs cashed-out comments' curves once per block in
+// process_comment_cashout (database_comment.cpp:432-446). Hived gates
+// the vote-time adjust with `if !has_hardfork(HF17_774)`
+// (hive_evaluator_social.cpp:594-600); we mirror with the same gate.
+// Without it our recent_claims drifts ~1%+ higher than hived's,
+// shrinking every post-HF17 author/curator payout and surfacing as
+// `claim_reward_balance: insufficient balance` at block 10,635,691
+// (account "ocrdu").
+func adjustRewardShares2(s *state.Session, oldNetRshares, newNetRshares int64, blockNum uint32) {
+	if hardfork.SetForBlock(blockNum).Has(hardfork.HF17) {
+		// Post-HF17: votes no longer touch recent_claims. The cashout
+		// processor handles per-block decay + per-due-comment curve
+		// absorb instead.
 		return
 	}
 	objects.MutateDGPO(s, func(p *objects.DynamicGlobalProperty) {

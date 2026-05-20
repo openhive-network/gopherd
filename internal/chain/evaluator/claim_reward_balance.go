@@ -2,6 +2,8 @@ package evaluator
 
 import (
 	"fmt"
+	"math"
+	"math/bits"
 
 	"hived-go/internal/protocol/asset"
 	"hived-go/internal/protocol/hardfork"
@@ -61,14 +63,51 @@ func (claimRewardBalanceEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	a.Balance += cr.RewardHive.Amount
 	a.RewardHBD -= cr.RewardHbd.Amount
 	objects.AdjustHBDBalance(ctx.DB, &a, ctx.HeadBlockTime, cr.RewardHbd.Amount)
+
+	// hive_evaluator_transfer.cpp:650-655 — the HIVE backing the claimed
+	// VESTS that must move from pending → main pool is proportional:
+	//   if full claim: hive_to_move = a.RewardVestingHive
+	//   else         : hive_to_move = claim_vests × a.RewardVestingHive / a.RewardVests
+	var rewardVestingHiveToMove int64
+	if cr.RewardVests.Amount == a.RewardVests {
+		rewardVestingHiveToMove = a.RewardVestingHive
+	} else if cr.RewardVests.Amount > 0 && a.RewardVests > 0 {
+		hi, lo := bits.Mul64(uint64(cr.RewardVests.Amount), uint64(a.RewardVestingHive))
+		d := uint64(a.RewardVests)
+		if hi >= d {
+			rewardVestingHiveToMove = math.MaxInt64
+		} else {
+			q, _ := bits.Div64(hi, lo, d)
+			if q > math.MaxInt64 {
+				rewardVestingHiveToMove = math.MaxInt64
+			} else {
+				rewardVestingHiveToMove = int64(q)
+			}
+		}
+	}
+
 	a.RewardVests -= cr.RewardVests.Amount
+	a.RewardVestingHive -= rewardVestingHiveToMove
 	a.VestingShares += cr.RewardVests.Amount
 	// Refresh again so LastMaxRC tracks the post-claim cap.
 	if ctx.Hardforks.Has(hardfork.HF20) {
 		objects.RegenerateRCMana(&a, ctx.HeadBlockTime)
 	}
 	objects.PutAccount(ctx.DB, &a)
-	// hive_evaluator_transfer.cpp:717 — propagate the new VESTS into the
+
+	// Move VESTS + HIVE backing from pending → main pool so the regular
+	// (non-reward) vesting share price reflects the now-spendable balance.
+	// Mirrors hive_evaluator_transfer.cpp:677-684.
+	if cr.RewardVests.Amount != 0 || rewardVestingHiveToMove != 0 {
+		objects.MutateDGPO(ctx.DB, func(p *objects.DynamicGlobalProperty) {
+			p.TotalVestingShares += cr.RewardVests.Amount
+			p.TotalVestingFundHive += rewardVestingHiveToMove
+			p.PendingRewardedVestingShares -= cr.RewardVests.Amount
+			p.PendingRewardedVestingHive -= rewardVestingHiveToMove
+		})
+	}
+
+	// hive_evaluator_transfer.cpp:686 — propagate the new VESTS into the
 	// witness-vote totals up the proxy chain.
 	if cr.RewardVests.Amount != 0 {
 		objects.AdjustProxiedWitnessVotes(ctx.DB, &a, cr.RewardVests.Amount)
