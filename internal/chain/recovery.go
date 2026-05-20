@@ -1,6 +1,7 @@
 package chain
 
 import (
+	"hived-go/internal/protocol/auth"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
 )
@@ -97,9 +98,6 @@ func applyEffectiveRecoveryAccountChanges(s *state.Session, blockTime uint32) {
 		})
 
 	for _, p := range ready {
-		// We don't have an account_authority_object, so just remove the
-		// stale row to release the index slot. The actual recovery_account
-		// rotation lands when authority objects do.
 		v, err := s.Get(objects.ChangeRecoveryAccountRequestTable, state.PrimaryIndex,
 			state.AppendAccountName(nil, p.account))
 		if err != nil {
@@ -108,6 +106,14 @@ func applyEffectiveRecoveryAccountChanges(s *state.Session, blockTime uint32) {
 		req, err := objects.ReadChangeRecoveryRequest(v)
 		if err != nil {
 			continue
+		}
+		// Mirror C++ database.cpp:1980-1985 — when the change request
+		// matures, rotate account.recovery_account to the new agent
+		// and push a virtual op. Without this, change_recovery_account
+		// is a 30-day no-op that only removes the request row.
+		if acct, gerr := objects.GetAccount(s, auth.AccountName(req.AccountToRecover)); gerr == nil {
+			acct.RecoveryAccount = req.RecoveryAccount
+			objects.PutAccount(s, &acct)
 		}
 		objects.DeleteChangeRecoveryRequestFull(s, &req)
 	}
