@@ -180,6 +180,22 @@ type DynamicGlobalProperty struct {
 	// insufficient balance` mismatches starting at HF17_659.
 	PendingRewardedVestingShares int64
 	PendingRewardedVestingHive   int64
+
+	// NextMaintenanceTime — time_point_sec of the next HOURLY proposal
+	// maintenance tick (sps_processor::make_payments, HF21+). Mirror
+	// hived's dynamic_global_property_object::next_maintenance_time.
+	// Initial value HIVE_GENESIS_TIME (= 0) so the first HF21-era
+	// block satisfies `next <= head_time` and fires immediately. After
+	// each tick, advance by HIVE_PROPOSAL_MAINTENANCE_PERIOD (3600s).
+	// Gopherd previously used `blockTime % 3600 == 0` which misses any
+	// maintenance window whose hour-boundary block was missed by the
+	// witness schedule (the next block lands past the hour mark).
+	NextMaintenanceTime uint32
+	// LastBudgetTime — time_point_sec of the previous proposal
+	// maintenance tick. Used to compute passed_time_seconds for partial
+	// catch-up payouts when blocks are missed and multiple maintenance
+	// windows elapse between ticks. Mirror C++ last_budget_time.
+	LastBudgetTime uint32
 }
 
 // AppendDGPO serializes p to dst.
@@ -217,6 +233,8 @@ func AppendDGPO(dst []byte, p *DynamicGlobalProperty) []byte {
 	dst = appendU32LE(dst, p.NextDailyMaintenanceTime)
 	dst = appendI64LE(dst, p.PendingRewardedVestingShares)
 	dst = appendI64LE(dst, p.PendingRewardedVestingHive)
+	dst = appendU32LE(dst, p.NextMaintenanceTime)
+	dst = appendU32LE(dst, p.LastBudgetTime)
 	return dst
 }
 
@@ -379,6 +397,17 @@ func ReadDGPO(src []byte) (DynamicGlobalProperty, error) {
 	}
 	if p.PendingRewardedVestingHive, err = r.ReadInt64(); err != nil {
 		return p, fmt.Errorf("dgpo.pending_rewarded_vesting_hive: %w", err)
+	}
+	// NextMaintenanceTime + LastBudgetTime are later schema additions
+	// (DHF cadence parity) — tolerate EOF for pre-schema rows.
+	if r.AtEnd() {
+		return p, nil
+	}
+	if p.NextMaintenanceTime, err = r.ReadUint32(); err != nil {
+		return p, fmt.Errorf("dgpo.next_maintenance_time: %w", err)
+	}
+	if p.LastBudgetTime, err = r.ReadUint32(); err != nil {
+		return p, fmt.Errorf("dgpo.last_budget_time: %w", err)
 	}
 	if !r.AtEnd() {
 		return p, errors.New("dgpo: trailing bytes after decode (schema mismatch?)")

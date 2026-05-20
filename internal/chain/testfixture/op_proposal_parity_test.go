@@ -1014,7 +1014,7 @@ func TestGeneratingPayments_cpp(t *testing.T) {
 	}
 
 	preBob := f.HBDBalance("bob")
-	skip := proposalMaintenanceUntilNext(f.HeadBlockTime())
+	skip := proposalMaintenanceUntilNext(f)
 	f.SkipSeconds(skip)
 	delta := f.HBDBalance("bob") - preBob
 	// Allow ±2 sat slop for interest accrual / rounding.
@@ -1063,7 +1063,7 @@ func TestGeneratingPayments01_cpp(t *testing.T) {
 	})
 
 	preBob := f.HBDBalance("bob")
-	skip := proposalMaintenanceUntilNext(f.HeadBlockTime())
+	skip := proposalMaintenanceUntilNext(f)
 	f.SkipSeconds(skip)
 	got := f.HBDBalance("bob") - preBob
 	want := int64(24_000) * 3600 / 86400
@@ -1101,7 +1101,7 @@ func TestGeneratingPayments02_cpp(t *testing.T) {
 	})
 
 	preBob := f.HBDBalance("bob")
-	skip := proposalMaintenanceUntilNext(f.HeadBlockTime())
+	skip := proposalMaintenanceUntilNext(f)
 	f.SkipSeconds(skip)
 	if delta := f.HBDBalance("bob") - preBob; delta != 0 {
 		t.Fatalf("bob received %d, want 0 (proposal was removed)", delta)
@@ -1151,7 +1151,7 @@ func TestGeneratingPayments03_cpp(t *testing.T) {
 
 	preBob := f.HBDBalance("bob")
 	preCarol := f.HBDBalance("carol")
-	skip := proposalMaintenanceUntilNext(f.HeadBlockTime())
+	skip := proposalMaintenanceUntilNext(f)
 	f.SkipSeconds(skip)
 	bob := f.HBDBalance("bob") - preBob
 	carol := f.HBDBalance("carol") - preCarol
@@ -1184,7 +1184,7 @@ func TestGeneratingPayments04_cpp(t *testing.T) {
 	})
 
 	preBob := f.HBDBalance("bob")
-	skip := proposalMaintenanceUntilNext(f.HeadBlockTime())
+	skip := proposalMaintenanceUntilNext(f)
 	f.SkipSeconds(skip)
 	got := f.HBDBalance("bob") - preBob
 	want := dailyPay * 3600 / 86400 // 99101
@@ -1217,7 +1217,7 @@ func TestGeneratingPayments05_cpp(t *testing.T) {
 	})
 
 	preBob := f.HBDBalance("bob")
-	skip := proposalMaintenanceUntilNext(f.HeadBlockTime())
+	skip := proposalMaintenanceUntilNext(f)
 	f.SkipSeconds(skip)
 	got := f.HBDBalance("bob") - preBob
 	want := dailyPay * 3600 / 86400

@@ -52,7 +52,7 @@ func TestProposalDailyPaymentBasic(t *testing.T) {
 	preTreas := f.HBDBalance("steem.dao")
 
 	// Skip to the next maintenance boundary (1 hour).
-	skip := proposalMaintenanceUntilNext(f.HeadBlockTime())
+	skip := proposalMaintenanceUntilNext(f)
 	f.SkipSeconds(skip)
 
 	bob := f.HBDBalance("bob")
@@ -103,7 +103,7 @@ func TestProposalZeroVotesNoPayment(t *testing.T) {
 	// No votes cast.
 
 	preBob := f.HBDBalance("bob")
-	skip := proposalMaintenanceUntilNext(f.HeadBlockTime())
+	skip := proposalMaintenanceUntilNext(f)
 	f.SkipSeconds(skip)
 	if got := f.HBDBalance("bob"); got != preBob {
 		t.Fatalf("bob with zero-vote proposal got paid: pre=%d post=%d",
@@ -139,7 +139,7 @@ func TestProposalDailyBudgetCap(t *testing.T) {
 		t.Fatalf("vote: %v", err)
 	}
 
-	skip := proposalMaintenanceUntilNext(f.HeadBlockTime())
+	skip := proposalMaintenanceUntilNext(f)
 	f.SkipSeconds(skip)
 
 	bob := f.HBDBalance("bob")
@@ -197,7 +197,7 @@ func TestProposalPaymentVoteOrderRanking(t *testing.T) {
 		t.Fatalf("eve vote: %v", err)
 	}
 
-	skip := proposalMaintenanceUntilNext(f.HeadBlockTime())
+	skip := proposalMaintenanceUntilNext(f)
 	f.SkipSeconds(skip)
 
 	bob := f.HBDBalance("bob")
@@ -234,7 +234,7 @@ func TestProposalPreHF21NoOp(t *testing.T) {
 	})
 
 	preBob := f.HBDBalance("bob")
-	skip := proposalMaintenanceUntilNext(f.HeadBlockTime())
+	skip := proposalMaintenanceUntilNext(f)
 	f.SkipSeconds(skip)
 	if got := f.HBDBalance("bob"); got != preBob {
 		t.Fatalf("pre-HF21: bob received payment despite hook being a no-op: %d→%d",
@@ -244,8 +244,9 @@ func TestProposalPreHF21NoOp(t *testing.T) {
 
 // proposalMaintenanceUntilNext returns the seconds to skip to land on
 // the next 1-hour boundary (when processProposals fires).
-func proposalMaintenanceUntilNext(now uint32) uint32 {
+func proposalMaintenanceUntilNext(f *Fixture) uint32 {
 	const period = uint32(60 * 60)
+	now := f.HeadBlockTime()
 	rem := now % period
 	if rem == 0 {
 		return period
