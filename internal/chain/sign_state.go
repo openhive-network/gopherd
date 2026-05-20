@@ -10,6 +10,18 @@ import (
 // authority graph can't OOM the verifier.
 const maxSigCheckDepth = 2
 
+// HIVE_MAX_AUTHORITY_MEMBERSHIP — per-authority limit on
+// len(key_auths)+len(account_auths). Hived defaults to 40 (config.hpp:375);
+// HF20+ enforced via verify_authority's max_membership parameter
+// (database.cpp:2603-2604). Gopherd applies unconditionally — pre-HF20
+// txs don't exceed 40 in practice on mainnet.
+const maxAuthorityMembership = 40
+
+// HIVE_MAX_SIG_CHECK_ACCOUNTS — cumulative cap on account_auths followed
+// during a single verify (config.hpp:358 = 125). Same HF20+ caveat;
+// applied unconditionally for parity defense.
+const maxSigCheckAccounts = 125
+
 // authorityFetcher returns the {owner, active, posting} authority for an
 // account name. Returned pointers may be nil if the account doesn't have
 // the requested authority registered (treated as a satisfaction failure).
@@ -27,6 +39,10 @@ type signState struct {
 	usedKeys      map[crypto.PublicKey]bool
 	fetcher       authorityFetcher
 	visited       map[string]bool
+	// accountAuthsFollowed is the cumulative count of account_auths
+	// entries we've recursed into during the current verify. Capped at
+	// maxSigCheckAccounts to match hived's HIVE_MAX_SIG_CHECK_ACCOUNTS.
+	accountAuthsFollowed int
 }
 
 // newSignState constructs an empty sign-state seeded with `keys` (the
@@ -72,6 +88,11 @@ func (s *signState) satisfies(a *auth.Authority, level AuthorityLevel, depth int
 		// real authorities can be satisfied.
 		return false
 	}
+	// HIVE_MAX_AUTHORITY_MEMBERSHIP — per-authority cap on the sum of
+	// key_auths + account_auths. Pathological authorities are rejected.
+	if len(a.KeyAuths)+len(a.AccountAuths) > maxAuthorityMembership {
+		return false
+	}
 	total := uint64(0)
 	for _, ka := range a.KeyAuths {
 		if _, ok := s.availableKeys[ka.Key]; ok {
@@ -98,6 +119,12 @@ func (s *signState) satisfies(a *auth.Authority, level AuthorityLevel, depth int
 		subLevel = AuthorityActive
 	}
 	for _, aa := range a.AccountAuths {
+		// HIVE_MAX_SIG_CHECK_ACCOUNTS — cumulative cap. A pathological
+		// graph with >125 account_auths short-circuits as unsatisfied.
+		s.accountAuthsFollowed++
+		if s.accountAuthsFollowed > maxSigCheckAccounts {
+			return false
+		}
 		if s.checkAuthority(subLevel, aa.Account, depth+1) {
 			total += uint64(aa.Weight)
 			if total >= uint64(a.WeightThreshold) {
