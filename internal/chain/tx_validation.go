@@ -36,6 +36,12 @@ const maxTimeUntilExpirationSec uint32 = 60 * 60
 // Mirrors database.cpp::_push_transaction at lines 1190-1230 plus
 // transaction.cpp::validate.
 func validateTxPreFlight(s *state.Session, signed *tx.SignedTransaction, blockNum, headBlockTime uint32, txID [20]byte, strictTapos bool) error {
+	// 0) Structural: transaction.validate() asserts operations.size() > 0
+	// (transaction.cpp:42). An empty-ops tx can't carry any state change
+	// but would still consume a tx-id slot in the dedup set.
+	if len(signed.Operations) == 0 {
+		return errors.New("transaction has no operations")
+	}
 	// 1) Expiration in the future of head_block_time AND ≤ +1h.
 	// Mirror C++ database.cpp:2535-2538 — HF9 tightened the boundary
 	// from `now <= expiration` (pre-HF9) to `now < expiration` (post-HF9).
