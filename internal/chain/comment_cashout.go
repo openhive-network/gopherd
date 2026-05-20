@@ -762,7 +762,16 @@ func evaluateRewardCurveU128(rshares int64, curve objects.CurveID, contentConsta
 	case objects.CurveLinear:
 		return math128.U128{Lo: r}
 	case objects.CurveSquareRoot:
-		return math128.U128{Lo: chainISqrt64(r)}
+		// Mirror C++ util/reward.cpp:58 — sqrt uses fc::uint128_approx_sqrt
+		// (mantissa-MSB approximation that biases UPWARD between perfect
+		// squares), NOT exact Newton's-method sqrt. The approximation is
+		// implemented at internal/math128/math128.go:154-195 (ApproxSqrt).
+		// Previously called exact chainISqrt64 → results diverged from
+		// hived by ~1-2 units for small inputs, up to hundreds at
+		// rshares ~ 2^40, biasing every author/curator payout on
+		// sqrt-curve posts (HF17→HF19 default + post-HF19_1052 with
+		// reward_fund.CurationRewardCurve == square_root).
+		return math128.U128{Lo: math128.U128{Lo: r}.ApproxSqrt()}
 	case objects.CurveBoundedCurve:
 		// (rshares << 64) / (2s + rshares).
 		q, _ := bits.Div64(r /*hi*/, 0 /*lo*/, 2*s+r)
@@ -775,7 +784,9 @@ func evaluateRewardCurveU128(rshares int64, curve objects.CurveID, contentConsta
 		}
 		return chainU128DivU64(num, den)
 	case objects.CurveConvergentSquareRoot:
-		den := chainISqrt64(r + 2*s)
+		// Mirror C++ util/reward.cpp:69 — denominator sqrt uses
+		// approx_sqrt; result = rshares / approx_sqrt(rshares + 2s).
+		den := math128.U128{Lo: r + 2*s}.ApproxSqrt()
 		if den == 0 {
 			return math128.U128{}
 		}

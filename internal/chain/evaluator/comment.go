@@ -1157,19 +1157,22 @@ func curationWeightCurve(ctx *Context, c *objects.Comment, voteRshares uint64) u
 			// fund's curve takes over.
 			const hf19SqrtPreCalc uint32 = 1497970800 - 7*86400
 			if !ctx.Hardforks.Has(hardfork.HF19) && c.Created > hf19SqrtPreCalc {
-				return isqrt64(voteRshares)
+				// Mirror C++ util/reward.cpp:58 — sqrt uses
+				// fc::uint128_approx_sqrt (mantissa approximation),
+				// NOT exact Newton's. See math128/math128.go:154.
+				return math128.U128{Lo: voteRshares}.ApproxSqrt()
 			}
 			switch fund.CurationRewardCurve {
 			case objects.CurveLinear:
 				return voteRshares
 			case objects.CurveSquareRoot:
-				return isqrt64(voteRshares)
+				return math128.U128{Lo: voteRshares}.ApproxSqrt()
 			case objects.CurveConvergentLinear:
 				// C++ reward.cpp:63 — ((r+s)² - s²) / (r + 4s).
 				return curveConvergentLinear(voteRshares, s)
 			case objects.CurveConvergentSquareRoot:
-				// C++ reward.cpp:69 — rshares / sqrt(rshares + 2s).
-				den := isqrt64(voteRshares + 2*s)
+				// C++ reward.cpp:69 — rshares / approx_sqrt(rshares + 2s).
+				den := math128.U128{Lo: voteRshares + 2*s}.ApproxSqrt()
 				if den == 0 {
 					return 0
 				}
@@ -1292,7 +1295,10 @@ func evaluateCurveForFund(rshares int64, f *objects.RewardFund) math128.U128 {
 	case objects.CurveLinear:
 		return math128.U128{Lo: r}
 	case objects.CurveSquareRoot:
-		return math128.U128{Lo: isqrt64(r)}
+		// Mirror C++ util/reward.cpp:58 approx_sqrt (mantissa-MSB
+		// approximation, biases UPWARD between perfect squares), NOT
+		// exact Newton's. See math128/math128.go:154.
+		return math128.U128{Lo: math128.U128{Lo: r}.ApproxSqrt()}
 	case objects.CurveBoundedCurve:
 		// (rshares << 64) / (2s + rshares). Numerator is 128-bit (Hi=r, Lo=0);
 		// denominator fits in uint64 since 2s ≈ 2^42 and rshares ≤ 2^63.
@@ -1310,8 +1316,8 @@ func evaluateCurveForFund(rshares int64, f *objects.RewardFund) math128.U128 {
 		// fit in U128 (it does: result is bounded by r).
 		return u128DivU64(num, den)
 	case objects.CurveConvergentSquareRoot:
-		// rshares / sqrt(rshares + 2s).
-		den := isqrt64(r + 2*s)
+		// rshares / approx_sqrt(rshares + 2s).
+		den := math128.U128{Lo: r + 2*s}.ApproxSqrt()
 		if den == 0 {
 			return math128.U128{}
 		}
