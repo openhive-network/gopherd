@@ -56,16 +56,22 @@ func (a *Account) EffectiveVestingSharesExclWithdraw() int64 {
 }
 
 // MaximumRC is the cap for the RC manabar. Mirrors
-// account_object::get_maximum_rc() (rc_objects.hpp). Pre-HF22 this
-// equals effective_vesting_shares; post-HF22 it incorporates direct
-// rc delegations: max_rc = effective_vesting + delegated_rc_in -
-// delegated_rc_out.
+// account_object::get_maximum_rc() (account_object.hpp:130-136):
 //
-// RC is HF20+ only, so it always uses the "exclude weekly power-down"
+//	max_rc = effective_vesting_shares - delegated_rc_out
+//	         + delegated_rc_in + rc_adjustment
+//
+// where rc_adjustment is HIVE_RC_HISTORICAL_ACCOUNT_CREATION_ADJUSTMENT
+// (= 2020748973 = ~2020.748973 VESTS) seeded on every account at HF20
+// activation. The adjustment recognizes the historical account-
+// creation fee as permanent RC capacity, so dust-VESTS accounts still
+// have enough to pay for trivial ops.
+//
+// RC is HF20+ only and always uses the "exclude weekly power-down"
 // variant — VESTS scheduled for the next withdrawal don't contribute
 // to RC capacity.
 func (a *Account) MaximumRC() int64 {
-	v := a.EffectiveVestingSharesExclWithdraw() + a.DelegatedRCIn - a.DelegatedRCOut
+	v := a.EffectiveVestingSharesExclWithdraw() + a.DelegatedRCIn - a.DelegatedRCOut + a.RCAdjustment
 	if v < 0 {
 		return 0
 	}

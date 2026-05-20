@@ -216,6 +216,38 @@ func applyHardfork(s *state.Session, id hardfork.ID) {
 		// it as raw mana with a vesting-derived cap. We mirror by
 		// keeping VotingManaCurrent at HIVE_100_PERCENT (10000) which
 		// the vote evaluator clamps appropriately.
+		//
+		// HF20 RC subsystem bootstrap. Mirror C++ database_hardfork.cpp:
+		// 392-403 — walk every account and seed:
+		//   rc_adjustment = HIVE_RC_HISTORICAL_ACCOUNT_CREATION_ADJUSTMENT
+		//                 = 2020748973 (= ~2020.748973 VESTS)
+		//   rc_manabar.last_update_time = now
+		//   rc_manabar.current_mana = max_rc (full pool)
+		//   last_max_rc = max_rc
+		//
+		// Without this, every existing account at HF20 starts with
+		// current_mana=0 instead of full. With EnforceRC=true (live
+		// sync) almost every post-HF20 tx would fail ErrInsufficientRC
+		// until the manabar regenerates over 5 days. Other RC bootstrap
+		// pieces (rc_resource_param_object, rc_pool_object, 24 rc_usage
+		// buckets, 2 rc_stats rows, witness rd-params) are still
+		// missing — tracked separately. This is the highest-impact
+		// piece since it affects EVERY account's max_rc and starting
+		// mana.
+		var hf20Time uint32
+		if dgpoNow, derr := objects.GetDGPO(s); derr == nil {
+			hf20Time = dgpoNow.Time
+		}
+		const rcHistoricalAdjustment int64 = 2020748973
+		_ = objects.RangeAccounts(s, func(a *objects.Account) (bool, error) {
+			a.RCAdjustment = rcHistoricalAdjustment
+			a.RCManaLastUpdate = hf20Time
+			maxRC := a.MaximumRC()
+			a.RCManaCurrent = maxRC
+			a.LastMaxRC = maxRC
+			objects.PutAccount(s, a)
+			return true, nil
+		})
 	case hardfork.HF21:
 		if dgpo, err := objects.GetDGPO(s); err == nil {
 			dgpo.ContentRewardPercent = 6500    // 65 %

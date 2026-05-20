@@ -202,6 +202,18 @@ type Account struct {
 	// Mutated by change_recovery_account_operation after the 30-day
 	// HIVE_OWNER_AUTH_RECOVERY_PERIOD waiting window has elapsed.
 	RecoveryAccount auth.AccountName
+	// RCAdjustment mirrors hived's account_object::rc_adjustment
+	// (account_object.hpp:130). HF20 walked every account and set this
+	// to HIVE_RC_HISTORICAL_ACCOUNT_CREATION_ADJUSTMENT (= 2020748973)
+	// — a +2020.748973 VESTS additive on max_rc so the historical
+	// account-creation fee is recognized as RC capacity. Subsequent
+	// account_create_operation calls bump this on the new account by
+	// the per-account creation fee (HF20+).
+	//   max_rc = effective_vesting + delegated_rc_in - delegated_rc_out
+	//            + rc_adjustment
+	// Without this term, every post-HF20 account is short ~2020 VESTS
+	// of RC capacity forever.
+	RCAdjustment int64
 }
 
 // CanVote returns whether the account is allowed to cast votes
@@ -286,6 +298,7 @@ func AppendAccount(dst []byte, a *Account) []byte {
 	dst = append(dst, a.OpenRecurrentTransfers)
 	dst = fcraw.AppendVarUint(dst, uint32(len(a.RecoveryAccount)))
 	dst = append(dst, a.RecoveryAccount...)
+	dst = appendI64LE(dst, a.RCAdjustment)
 	return dst
 }
 
@@ -528,6 +541,14 @@ func ReadAccount(src []byte) (Account, error) {
 		return a, fmt.Errorf("account.recovery_account: %w", err)
 	} else {
 		a.RecoveryAccount = auth.AccountName(s)
+	}
+	// RCAdjustment is a later schema addition; tolerate EOF for
+	// pre-schema rows (which default to the zero-value 0).
+	if r.AtEnd() {
+		return a, nil
+	}
+	if a.RCAdjustment, err = r.ReadInt64(); err != nil {
+		return a, fmt.Errorf("account.rc_adjustment: %w", err)
 	}
 	if !r.AtEnd() {
 		return a, errors.New("account: trailing bytes after decode (schema mismatch?)")
