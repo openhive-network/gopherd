@@ -186,13 +186,13 @@ func convertProposalFunds(s *state.Session, blockTime uint32, hf hardfork.Set) {
 	if err != nil {
 		return
 	}
-	// Bootstrap the next_daily_maintenance_time the first time the hook
-	// fires after HF24. After bootstrap we wait for it to come due.
-	if dgpo.NextDailyMaintenanceTime == 0 {
-		dgpo.NextDailyMaintenanceTime = blockTime + dailyMaintenancePeriodSec
-		objects.PutDGPO(s, &dgpo)
-		return
-	}
+	// Mirror C++ database_dhf.cpp / dhf_processor: next_daily_maintenance_time
+	// is seeded to HIVE_GENESIS_TIME (= 0 in unix terms) so the first
+	// HF24 block satisfies `next <= head_time` → conversion fires
+	// IMMEDIATELY at HF24 activation. Gopherd's prior bootstrap pattern
+	// (set next = block + 86400 and return) skipped that first
+	// conversion entirely — the activation block ended with treasury
+	// HIVE not yet converted to HBD.
 	if dgpo.NextDailyMaintenanceTime > blockTime {
 		return
 	}
