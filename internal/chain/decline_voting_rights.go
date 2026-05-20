@@ -71,8 +71,17 @@ func processDeclineVotingRights(s *state.Session, blockTime, blockNum uint32, d 
 			// nullify_proxied_witness_votes: subtract the account's full
 			// propagation (direct + proxied_vsf_votes[*]) from each
 			// witness it votes for or from its proxy chain. Mirrors
-			// database.cpp:1131.
+			// database.cpp:1131. directVotePower must match C++
+			// account_object::get_direct_governance_vote_power(): pre-HF24
+			// just vesting_shares; HF24+ subtracts sum_delayed_votes so
+			// delayed VESTS don't double-count when removed.
 			directVotePower := a.VestingShares
+			if hf.Has(hardfork.HF24) {
+				directVotePower -= int64(a.SumDelayedVotes)
+				if directVotePower < 0 {
+					directVotePower = 0
+				}
+			}
 			objects.NullifyProxiedWitnessVotes(s, &a, directVotePower)
 			// clear_witness_votes: remove vote rows. Pass voterVesting=0
 			// so the rows are removed without further subtraction (the

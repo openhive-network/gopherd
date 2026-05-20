@@ -33,7 +33,10 @@ func clearNullAccountBalance(s *state.Session, blockNum uint32) {
 	// these snapshotted values; any interest accrued by AdjustHBDBalance /
 	// AdjustSavingsHBDBalance below mints to current_hbd_supply BEFORE
 	// the snapshot subtracts, so net supply change is `-(X - I)`.
-	totalHIVE := a.Balance + a.SavingsBalance + a.RewardHive
+	// RewardVestingHive is the HIVE backing of pending reward vests — C++
+	// includes it via account.get_vest_rewards_as_hive() in the total_hive
+	// sum so it leaves current_supply alongside the regular HIVE balances.
+	totalHIVE := a.Balance + a.SavingsBalance + a.RewardHive + a.RewardVestingHive
 	totalHBD := a.HBDBalance + a.SavingsHBDBalance + a.RewardHBD
 
 	// Mirror C++ database.cpp:1186-1204 — call adjust_balance /
@@ -89,10 +92,23 @@ func clearNullAccountBalance(s *state.Session, blockNum uint32) {
 		a.DelayedVotes = nil
 	}
 
-	if a.RewardVests > 0 {
-		// pending_rewarded_vesting_{shares,hive} accounting omitted —
-		// we don't track those globals yet.
+	// Mirror C++ database.cpp:1239-1253: when a reward-pending account is
+	// drained, decrement both pending-pool counters by the per-account
+	// reward_vests / reward_vesting_hive contribution, and zero both
+	// account-side fields. Without this the dgpo pending counters drift
+	// upward by the drained amount on every null-clear.
+	if a.RewardVests > 0 || a.RewardVestingHive > 0 {
+		if dgpo, err := objects.GetDGPO(s); err == nil {
+			if a.RewardVests > 0 {
+				dgpo.PendingRewardedVestingShares -= a.RewardVests
+			}
+			if a.RewardVestingHive > 0 {
+				dgpo.PendingRewardedVestingHive -= a.RewardVestingHive
+			}
+			objects.PutDGPO(s, &dgpo)
+		}
 		a.RewardVests = 0
+		a.RewardVestingHive = 0
 	}
 
 	objects.PutAccount(s, &a)

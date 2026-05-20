@@ -169,6 +169,15 @@ func clearAccount(s *state.Session, name string) error {
 
 	// --- VESTING_SHARES → HIVE at vesting_share_price → treasury.
 	if account.VestingShares > 0 {
+		// Mirror C++ database.cpp:1536: BEFORE clearing the vesting
+		// field, call adjust_proxied_witness_votes(account, -vesting)
+		// so the cleared account's witness votes are removed from every
+		// witness it voted for (and from any proxy chain). Without this,
+		// the ~40 HF23 cleared accounts' votes (often 50M+ VESTS each)
+		// remain in the witness tallies, distorting top-21 election at
+		// the very next schedule rebuild — cascade-divergent producers
+		// thereafter.
+		objects.AdjustProxiedWitnessVotes(s, &account, -account.VestingShares)
 		hiveValue := vestsToHive(account.VestingShares, &dgpo)
 		dgpo.TotalVestingFundHive -= hiveValue
 		dgpo.TotalVestingShares -= account.VestingShares
@@ -346,14 +355,19 @@ func clearAccount(s *state.Session, name string) error {
 		objects.AdjustHBDBalance(s, &treasury, blockTime, account.RewardHBD)
 		account.RewardHBD = 0
 	}
-	if account.RewardVests > 0 {
-		hiveFromRewards := vestsToHive(account.RewardVests, &dgpo)
-		treasury.Balance += hiveFromRewards
-		// Note: hived also decrements gpo.pending_rewarded_vesting_shares /
-		// pending_rewarded_vesting_hive here (database.cpp:2521); the Go
-		// DGPO does not yet track those fields. The parity tests below do
-		// not observe pending rewarded vests, so this remains a TODO.
+	if account.RewardVests > 0 || account.RewardVestingHive > 0 {
+		// Mirror C++ database.cpp:1604-1612 / 2517-2525: the treasury
+		// receives the per-account HIVE backing (account.get_vest_rewards_as_hive
+		// = account.RewardVestingHive) directly — NOT vestsToHive() at the
+		// current vesting price, since the per-account pending price has
+		// long since diverged from the regular price by HF23. Then
+		// decrement both pending-pool counters and zero both account-side
+		// reward-vest fields.
+		treasury.Balance += account.RewardVestingHive
+		dgpo.PendingRewardedVestingShares -= account.RewardVests
+		dgpo.PendingRewardedVestingHive -= account.RewardVestingHive
 		account.RewardVests = 0
+		account.RewardVestingHive = 0
 	}
 
 	// Snapshot for restore_accounts (HF24). hived's vop records
@@ -473,6 +487,11 @@ func consolidateTreasuryBalance(s *state.Session, blockTime uint32) {
 	old.SavingsHBDBalance = 0
 
 	if old.VestingShares > 0 {
+		// Defensive parity with C++: even though treasury accounts are
+		// locked and have VoteRevoked=true (so AdjustProxiedWitnessVotes
+		// is normally a no-op), call it before zeroing VestingShares so
+		// any edge-case dangling vote is removed cleanly.
+		objects.AdjustProxiedWitnessVotes(s, &old, -old.VestingShares)
 		dgpo, _ := objects.GetDGPO(s)
 		hiveValue := vestsToHive(old.VestingShares, &dgpo)
 		newAcct.Balance += hiveValue

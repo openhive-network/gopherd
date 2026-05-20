@@ -123,10 +123,28 @@ func processCommentCashouts(s *state.Session, blockTime, blockNum uint32, hooks 
 	curationPct := curationPercentForBlock(blockNum)
 	hf := hardfork.SetForBlock(blockNum)
 	if hf.Has(hardfork.HF17) {
+		// HF17_771+: decay fund.recent_claims linearly, then ADD every
+		// due comment's curve to recent_claims BEFORE the cashout loop.
+		// The augmented value is what each cashout reads — and we no
+		// longer subtract per-cashout. Mirrors C++
+		// database_comment.cpp:395-446 (decay + pre-add) +
+		// database_comment.cpp:471 (cashout uses funds[id].recent_claims).
+		decayPreAddRecentClaims(s, blockTime, blockNum, *ready, hf)
+		// Snapshot fund.reward_balance ONCE here. Each cashout in the
+		// block uses this same value as its denominator-side input —
+		// matching C++'s `ctx.total_reward_fund_hive = funds[id].reward_balance`
+		// where funds[id] is read once per cashout but the underlying
+		// reward_balance isn't decremented until ALL block cashouts run
+		// (database_comment.cpp:471 + :527 batch-subtract). Without this,
+		// later same-block cashouts see a drained pool and under-pay.
+		var snapshotBalance int64
+		if fund, err := objects.GetRewardFund(s, objects.PostRewardFundName); err == nil {
+			snapshotBalance = fund.RewardBalance
+		}
 		// HF17+: pay each due comment individually (matches
 		// database_comment.cpp:466-481).
 		for _, p := range *ready {
-			processOneCashout(s, blockTime, blockNum, p.cashoutTime, p.commentID, p.author, p.permlink, curationPct, hooks)
+			processOneCashout(s, blockTime, blockNum, p.cashoutTime, p.commentID, p.author, p.permlink, curationPct, hooks, snapshotBalance)
 		}
 		return
 	}
@@ -190,7 +208,7 @@ func processCommentCashouts(s *state.Session, blockTime, blockNum uint32, hooks 
 				continue
 			}
 			paid[key] = struct{}{}
-			processOneCashout(s, blockTime, blockNum, sib.cashoutTime, sib.id, sib.author, sib.permlink, curationPct, hooks)
+			processOneCashout(s, blockTime, blockNum, sib.cashoutTime, sib.id, sib.author, sib.permlink, curationPct, hooks, 0)
 		}
 	}
 }
@@ -210,7 +228,12 @@ func processCommentCashouts(s *state.Session, blockTime, blockNum uint32, hooks 
 //
 // adjust_rshares2 then subtracts the comment's curve value from
 // total_reward_shares2 so the next comment's slice excludes this one.
-func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint32, commentID uint64, author, permlink string, curationPct int64, hooks *blockHookScratch) {
+// snapshotBalance > 0 selects the C++ HF17_771+ "snapshot fund balance
+// at block start" path: each cashout in the block uses this value as
+// its reward-fund denominator instead of fund.RewardBalance (which is
+// being decremented across the loop). When 0 (or pre-HF17), the
+// per-cashout fund.RewardBalance read is the legacy behavior.
+func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint32, commentID uint64, author, permlink string, curationPct int64, hooks *blockHookScratch, snapshotBalance int64) {
 	objects.DeleteCommentCashoutSchedule(s, scheduledTime, commentID)
 
 	// processOneCashout runs in the per-block hooks (after the tx
@@ -313,15 +336,30 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 	if rf, ferr := objects.GetRewardFund(s, objects.PostRewardFundName); ferr == nil {
 		usingFund = true
 		fund = rf
-		fundBalance = fund.RewardBalance
+		// HF17_771+: prefer the block-start snapshot so same-block
+		// cashouts see the same reward-pool value (matches C++).
+		if snapshotBalance > 0 {
+			fundBalance = snapshotBalance
+		} else {
+			fundBalance = fund.RewardBalance
+		}
 		shares2 = reward.Uint128FromBytes(fund.RecentClaims)
 	} else {
 		fundBalance = dgpo.TotalRewardFundHive
 	}
+	// C++ database_comment.cpp:417-424 always runs c.on_payout() (zero
+	// accumulators) and deletes ALL comment_vote rows at end of cashout,
+	// OUTSIDE the reward gate. Early-returning here without zero+delete
+	// leaves stale rshares + cv rows that turn the next vote into a
+	// recast-shaped path in Go but a fresh-vote-shaped path in C++.
 	if fundBalance <= 0 {
+		zero()
+		deleteCommentVotes(s, author, permlink)
 		return
 	}
 	if shares2.IsZero() {
+		zero()
+		deleteCommentVotes(s, author, permlink)
 		return
 	}
 
@@ -335,6 +373,8 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 		commentCurve = reward.EvaluateRewardCurveQuadratic(c.NetRshares)
 	}
 	if commentCurve.IsZero() {
+		zero()
+		deleteCommentVotes(s, author, permlink)
 		return
 	}
 
@@ -365,13 +405,26 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 		ghiveDiff("GHIVEDIFF CASHOUT-CALC block=%d author=%s permlink=%s id=%d cashoutTime=%d rshares=%d fundBalance=%d shares2_hi=%d shares2_lo=%d claimed_pre_clip=%d\n",
 			blockNum, author, permlink, c.ID, scheduledTime, c.NetRshares, fundBalance, shares2.Hi, shares2.Lo, claimed)
 	}
-	// MaxAcceptedPayout is denominated in HBD (HBD_asset in C++); to clip
-	// against `claimed` (HIVE-sat), convert via the median feed.
-	// Mirrors libraries/chain/util/reward.cpp:27-29 + database_comment.cpp:219:
-	// `max_hive = to_hive(current_hive_price, max_hbd); payout = min(payout, max_hive)`.
-	// One GetFeedHistory lookup, reused below for the min-payout gate.
+	// Mirror C++ get_rshare_reward (libraries/chain/util/reward.cpp:24-29)
+	// EXACTLY: (1) dust-check on RAW claimed first, (2) min(claimed,
+	// max_hive). No clip against fund balance — C++ never does this in
+	// get_rshare_reward; the fund decrement happens later via the caller.
+	// Prior order (min → fund-clip → dust-check) could zero payouts that
+	// C++ paid and vice-versa near the dust threshold, and the fund clip
+	// silently under-paid the last cashouts of a heavily-loaded block.
 	feedHistoryFetched, feedHistoryOK := objects.GetFeedHistory(s)
 	feedReady := feedHistoryOK == nil && !priceIsZero(feedHistoryFetched.CurrentMedianHistory)
+	// HIVE_MIN_PAYOUT_HBD = 20 satoshi (= 0.020 HBD). Dust check on RAW
+	// payout, BEFORE the max-payout min-clip.
+	if claimed > 0 && feedReady {
+		if convertHiveToHBD(claimed, feedHistoryFetched.CurrentMedianHistory) < 20 {
+			claimed = 0
+		}
+	}
+	// MaxAcceptedPayout is denominated in HBD; convert via the median
+	// feed for the HIVE-sat min-clip. Mirrors libraries/chain/util/reward.cpp:27-29
+	// + database_comment.cpp:219: `max_hive = to_hive(current_hive_price,
+	// max_hbd); payout = min(payout, max_hive)`.
 	maxClaim := c.MaxAcceptedPayout
 	if feedReady {
 		maxClaim = convertHBDToHive(c.MaxAcceptedPayout, feedHistoryFetched.CurrentMedianHistory)
@@ -382,36 +435,20 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 	if claimed > maxClaim {
 		claimed = maxClaim
 	}
-	if claimed > fundBalance {
-		claimed = fundBalance
-	}
-	// HIVE_MIN_PAYOUT_HBD = 20 satoshi (= 0.020 HBD). If the payout
-	// expressed in HBD via the median feed is below this threshold,
-	// hived zeroes the payout (libraries/chain/util/reward.cpp:24).
-	if claimed > 0 && feedReady {
-		if convertHiveToHBD(claimed, feedHistoryFetched.CurrentMedianHistory) < 20 {
-			claimed = 0
-		}
-	}
 
-	// adjust_rshares2 / recent_claims: drop this comment's curve from the
-	// running total. Pre-HF17 the cashout helper explicitly calls
-	// `adjust_rshares2(curve(net_rshares), 0)` at
-	// database_comment.cpp:350-351; HF17+ the per-fund recent_claims
-	// snapshot is decremented analogously.
-	// Mirror C++ database.cpp:1673-1674 — uint128 wraps mod 2^128 on
-	// transient underflow. Uint128ToBytes performs the mod, no clamp.
-	shares2 = shares2.Sub(commentCurve)
-	if usingFund {
-		fund.RecentClaims = reward.Uint128ToBytes(shares2)
-	} else {
+	// Pre-HF17 only: subtract this comment's curve from
+	// dgpo.total_reward_shares2 (mirrors
+	// database_comment.cpp:328-329 adjust_rshares2(curve, 0)). HF17_771+
+	// switches to the per-block pre-add model handled by
+	// decayPreAddRecentClaims; the per-cashout subtract is removed there
+	// so recent_claims stays consistent with C++.
+	if !usingFund {
+		shares2 = shares2.Sub(commentCurve)
 		dgpo.TotalRewardShares2 = reward.Uint128ToBytes(shares2)
 	}
 
 	if claimed <= 0 {
-		if usingFund {
-			objects.PutRewardFund(s, &fund)
-		} else {
+		if !usingFund {
 			objects.PutDGPO(s, &dgpo)
 		}
 		// C++ cashout_comment_helper runs comment_cashout_ex::on_payout
@@ -509,8 +546,23 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 			totalBeneficiary += share
 			continue
 		}
-		hbdSlice := share * int64(c.PercentHbd) / 20000
-		vestingSlice := share - hbdSlice
+		// Hived (database_comment.cpp:244-266): pre-HF20, beneficiaries
+		// receive 100 % of their `benefactor_tokens` slice as VESTS via
+		// create_vesting2 — no HBD/HIVE leg at all. The HBD split
+		// (`percent_hbd / (2 × 100 %)`) only kicks in at HF20. We were
+		// splitting unconditionally, which over the HF17→HF20 window
+		// (block 10,629,455 → 26,256,743) under-credited every
+		// beneficiary's reward_vests by exactly one HIVE-of-VESTS per
+		// cashout slice (≈2,073,317 VESTS at HF17-era share price) and
+		// over-credited reward_hbd by the matching amount. This is the
+		// dominant systemic drift the auto-correction loop has been
+		// papering over.
+		hbdSlice := int64(0)
+		vestingSlice := share
+		if hfBene.Has(hardfork.HF20) {
+			hbdSlice = share * int64(c.PercentHbd) / 20000
+			vestingSlice = share - hbdSlice
+		}
 		// HF17+ routes author/beneficiary payouts through reward_* fields
 		// that the user later moves to liquid via claim_reward_balance.
 		toReward := hfBene.Has(hardfork.HF17)
@@ -519,7 +571,10 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 			objects.PutAccount(s, &bAcct)
 		}
 		if vestingSlice > 0 {
-			_, _ = CreateVesting_via_chain(s, b.Account, vestingSlice, toReward)
+			if _, err := CreateVesting_via_chain(s, b.Account, vestingSlice, toReward); err != nil {
+				ghiveDiff("GHIVEDIFF CREATE-VESTING-FAIL site=comment_cashout.beneficiary block=%d author=%s permlink=%s beneficiary=%s amount=%d err=%v\n",
+					blockNum, c.Author, c.Permlink, b.Account, vestingSlice, err)
+			}
 		}
 		totalBeneficiary += share
 	}
@@ -545,7 +600,10 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 		}
 	}
 	if vestingHive > 0 {
-		_, _ = CreateVesting_via_chain(s, author, vestingHive, authorToReward)
+		if _, err := CreateVesting_via_chain(s, author, vestingHive, authorToReward); err != nil {
+			ghiveDiff("GHIVEDIFF CREATE-VESTING-FAIL site=comment_cashout.author block=%d author=%s permlink=%s amount=%d err=%v\n",
+				blockNum, author, permlink, vestingHive, err)
+		}
 	}
 	if traceAccount(author) {
 		if a, gerr := objects.GetAccount(s, author); gerr == nil {
@@ -561,6 +619,114 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 	// so this cleanup is mostly a memory hygiene measure.
 	deleteCommentVotes(s, author, permlink)
 	zero()
+
+	// HF19+ deletes the cashout row after payout (database_comment.cpp:482).
+	// Our unified Comment row carries both cashout AND identity; deleting it
+	// is the only way to release the ~9 GiB CommentStore retention we
+	// observed at block 21.5M. Subsequent voters/repliers will see "comment
+	// not found", which is the correct post-payout behavior (mirrors
+	// has_hardfork(HF19) + cashout-row removed in C++ — vote/reply
+	// evaluators bail there too).
+	if hfReschedule.Has(hardfork.HF19) && rescheduleTime == 0 {
+		objects.DeleteComment(s, auth.AccountName(author), permlink)
+	}
+}
+
+// decayPreAddRecentClaims mirrors hived's per-block recent_claims
+// maintenance for HF17_771+ (database_comment.cpp:395-446):
+//
+//  1. Decay each fund's recent_claims by elapsed / decay_time, where
+//     decay_time is 30d pre-HF19 and 15d post-HF19.
+//  2. For each comment cashing out this block with NetRshares > 0,
+//     ADD its curve value to recent_claims BEFORE any cashout runs.
+//
+// Each cashout in the loop then reads the augmented recent_claims as a
+// constant denominator. The per-cashout subtract that worked pre-HF17
+// is removed in the HF17_771+ branch above.
+//
+// Without this hook, votes wrongly fed recent_claims via the legacy
+// adjust_rshares2 path and per-cashout subtractions drained it,
+// drifting our recent_claims ~1%+ relative to hived's and shrinking
+// every post-HF17 author/curator payout — surface symptom is the
+// `claim_reward_balance: insufficient balance` mismatch first hit at
+// block 10,635,691 for account "ocrdu".
+func decayPreAddRecentClaims(s *state.Session, blockTime, blockNum uint32, ready []blockHookCashoutPending, hf hardfork.Set) {
+	fund, err := objects.GetRewardFund(s, objects.PostRewardFundName)
+	if err != nil {
+		return
+	}
+	const (
+		decayHF17Sec uint32 = 30 * 24 * 60 * 60
+		decayHF19Sec uint32 = 15 * 24 * 60 * 60
+	)
+	decaySec := decayHF17Sec
+	if hf.Has(hardfork.HF19) {
+		decaySec = decayHF19Sec
+	}
+	if fund.LastUpdate != 0 && blockTime > fund.LastUpdate {
+		elapsed := blockTime - fund.LastUpdate
+		if elapsed >= decaySec {
+			// More than a full window — clear. C++ comments this as
+			// "should never happen unless chain inactive for decay_time".
+			fund.RecentClaims = reward.Uint128ToBytes(math128.U128{})
+		} else {
+			cur := reward.Uint128FromBytes(fund.RecentClaims)
+			// recent_claims -= recent_claims * elapsed / decay_time.
+			// 128 × 64 → up to 192 bits, divide by 64 → 128. Use the
+			// existing U128 × u64 / u64 helpers.
+			shed := mulDivU128(cur, uint64(elapsed), uint64(decaySec))
+			cur = cur.Sub(shed)
+			fund.RecentClaims = reward.Uint128ToBytes(cur)
+		}
+	}
+	fund.LastUpdate = blockTime
+
+	// Pre-add curves of all due comments with NetRshares > 0.
+	cur := reward.Uint128FromBytes(fund.RecentClaims)
+	for _, p := range ready {
+		c, ok := objects.GetCommentRef(s, p.author, p.permlink)
+		if !ok || c.NetRshares <= 0 {
+			continue
+		}
+		cur = cur.Add(evaluateCurveForRewardFund(c.NetRshares, &fund))
+	}
+	fund.RecentClaims = reward.Uint128ToBytes(cur)
+	objects.PutRewardFund(s, &fund)
+}
+
+// mulDivU128 returns floor(a * b / d) for U128 a and uint64 b, d.
+// Used by the recent_claims decay step where elapsed/decay_time scales
+// a U128 accumulator.
+func mulDivU128(a math128.U128, b, d uint64) math128.U128 {
+	if d == 0 || b == 0 || a.IsZero() {
+		return math128.U128{}
+	}
+	// (hi, lo) = a × b — produces up to 192 bits. Reduce by dividing
+	// the top half first, propagating remainder into the bottom.
+	hiHi, hiLo := bits.Mul64(a.Hi, b)
+	loHi, loLo := bits.Mul64(a.Lo, b)
+	midHi, carry := bits.Add64(hiLo, loHi, 0)
+	hiHi += carry
+	// Now full product: (hiHi << 128) | (midHi << 64) | loLo, as 192-bit
+	// little-endian. Divide by d:
+	q2, r2 := bits.Div64(0, hiHi, d)
+	q1, r1 := bits.Div64(r2, midHi, d)
+	q0, _ := bits.Div64(r1, loLo, d)
+	if q2 != 0 {
+		// Overflow: result doesn't fit in 128 bits. Cap.
+		return math128.U128{Hi: ^uint64(0), Lo: ^uint64(0)}
+	}
+	return math128.U128{Hi: q1, Lo: q0}
+}
+
+// evaluateCurveForRewardFund applies the fund's selected reward curve
+// to the comment's net_rshares. Wrapper around evaluateRewardCurveU128
+// so decayPreAddRecentClaims doesn't reach into the cashout helper.
+func evaluateCurveForRewardFund(netRshares int64, fund *objects.RewardFund) math128.U128 {
+	if netRshares <= 0 {
+		return math128.U128{}
+	}
+	return evaluateRewardCurveU128(netRshares, fund.AuthorRewardCurve, fund.ContentConstant)
 }
 
 // deleteCommentVotes drops every vote row on (author, permlink). Uses
@@ -865,7 +1031,15 @@ func distributeCuratorPool(s *state.Session, author, permlink string, pool int64
 			ghiveDiff("GHIVEDIFF CASHOUT-CURATOR block=%d author=%s permlink=%s voter=%s weight=%d total_weight=%d pool=%d claim=%d\n",
 				headBlockNum, author, permlink, p.Voter, p.Weight, c.TotalVoteWeight, pool, p.Share)
 		}
-		_, _ = CreateVesting_via_chain(s, p.Voter, p.Share, toReward)
+		if _, err := CreateVesting_via_chain(s, p.Voter, p.Share, toReward); err != nil {
+			// Skip `paid += p.Share` on failure — the curator pool stays
+			// accounted for the actual paid amount so the residual flows
+			// back correctly to the author (matches C++ which would have
+			// asserted the voter exists).
+			ghiveDiff("GHIVEDIFF CREATE-VESTING-FAIL site=comment_cashout.curator block=%d author=%s permlink=%s voter=%s amount=%d err=%v\n",
+				headBlockNum, author, permlink, p.Voter, p.Share, err)
+			continue
+		}
 		paid += p.Share
 	}
 	if paid > pool {

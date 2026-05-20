@@ -170,6 +170,16 @@ func applyHardfork(s *state.Session, id hardfork.ID) {
 			fund.RecentClaims = recent
 			objects.PutRewardFund(s, &fund)
 		}
+		// Mirror database::remove_old_cashouts (database_comment.cpp:102).
+		// At HF19 hived clears the entire comment_cashout_ex_index AND
+		// removes every comment_cashout row whose cashout_time is at
+		// maximum (= already paid / frozen). C++ keeps comment_object
+		// itself; we collapse both into one Comment row, so we delete
+		// the whole row for paid/frozen comments. The ~9 GiB CommentStore
+		// growth on a full mainnet replay traces back to never having
+		// run this cleanup — by block 21.5M the store held millions of
+		// post-paid rows that hived had already dropped.
+		removeOldCashouts(s)
 	case hardfork.HF20:
 		if dgpo, err := objects.GetDGPO(s); err == nil {
 			dgpo.HBDStartPercent = 900                     // 9 %
@@ -188,6 +198,19 @@ func applyHardfork(s *state.Session, id hardfork.ID) {
 			objects.PutWitness(s, &cp)
 			return true, nil
 		})
+		// Mirror the rest of database_hardfork.cpp:325-353: bump the
+		// median schedule's account_creation_fee by 30 (so existing
+		// account_create_with_delegation ops cost the new minimum) and
+		// reset dgpo.available_account_subsidies to 0 (the new RC pool
+		// starts empty and fills via process_subsidy each block).
+		if ws, werr := objects.GetWitnessSchedule(s); werr == nil {
+			ws.MedianAccountCreationFee *= 30
+			objects.PutWitnessSchedule(s, &ws)
+		}
+		if dgpo2, derr := objects.GetDGPO(s); derr == nil {
+			dgpo2.AvailableAccountSubsidies = 0
+			objects.PutDGPO(s, &dgpo2)
+		}
 		// Initialize voting manabar to full for every existing account
 		// since pre-HF20 the field was a percentage; HF20 reinterprets
 		// it as raw mana with a vesting-derived cap. We mirror by
@@ -382,20 +405,61 @@ func applyHardfork17(s *state.Session) {
 	for i := 0; i < 8; i++ {
 		recent[8+i] = byte(low >> (56 - i*8))
 	}
+	// HF17 reward-fund transition. In hived the reward_fund_object is
+	// created at genesis (database_init.cpp:258) with reward_balance = 0;
+	// pre-HF17 process_funds (database.cpp:1794) routes content_reward
+	// through pay_reward_funds, which adds to fund.reward_balance. The
+	// HF17 handler (database_hardfork.cpp:276-281) only writes
+	// recent_claims = HIVE_HF_17_RECENT_CLAIMS; reward_balance is not
+	// touched. We don't have a fund pre-HF17 so we accumulate the same
+	// content_reward stream in dgpo.TotalRewardFundHive and pre-HF17
+	// cashouts draw from it.
+	//
+	// Migrate the pre-HF17 accumulator into the new fund. In hived the
+	// reward_fund_object exists from genesis and grows continuously via
+	// pay_reward_funds; the HF17 handler does NOT reset reward_balance.
+	// gopherd accumulated the same stream in dgpo.TotalRewardFundHive
+	// (drained by pre-HF17 cashouts at comment_cashout.go:478). At the
+	// transition whatever's left in that accumulator becomes the seed
+	// for fund.RewardBalance — without it, post-HF17 cashouts start
+	// from 0 and systematically under-pay the head of the post-HF17
+	// window. Zero the dgpo accumulator after migrating so subsequent
+	// reads see the moved value.
+	seedBalance := dgpo.TotalRewardFundHive
+	dgpo.TotalRewardFundHive = 0
 	objects.PutRewardFund(s, &objects.RewardFund{
 		Name:                   objects.PostRewardFundName,
-		RewardBalance:          dgpo.TotalRewardFundHive,
+		RewardBalance:          seedBalance,
 		RecentClaims:           recent,
-		LastUpdate:             dgpo.Time,
-		ContentConstant:        2_000_000_000_000, // HIVE_CONTENT_CONSTANT_HF0
-		PercentCurationRewards: 2500,              // 25 %
+		LastUpdate:             1458835200, // HIVE_GENESIS_TIME
+		ContentConstant:        2_000_000_000_000,
+		PercentCurationRewards: 2500,
 		PercentContentRewards:  10000,
 		AuthorRewardCurve:      objects.CurveQuadratic,
 		CurationRewardCurve:    objects.CurveQuadratic,
 	})
-	dgpo.TotalRewardFundHive = 0
-	dgpo.TotalRewardShares2 = [16]byte{}
 	objects.PutDGPO(s, &dgpo)
+
+	// Witness slot reallocation. Hived's HF17 (database_hardfork.cpp:269-274)
+	// drops the dedicated miner slot — moving its weight into the elected
+	// pool — and keeps a single timeshare slot:
+	//   HIVE_MAX_VOTED_WITNESSES_HF17  = 20
+	//   HIVE_MAX_MINER_WITNESSES_HF17  =  0
+	//   HIVE_MAX_RUNNER_WITNESSES_HF17 =  1
+	// The pay_norm factor is computed from the actual ACTIVE counts at
+	// schedule rebuild, so 1×20 + 1×0 + 5×1 = 25 — the same value as
+	// pre-HF17's 1×19 + 1×1 + 5×1 = 25. But the witness IDENTITIES in
+	// the active set change because the schedule fills max-voted slots
+	// from the top-N elected pool, and a 20-slot pool pulls in one more
+	// elected candidate than a 19-slot pool. Without this update, the
+	// schedule rebuilder keeps the 19/1/1 split and the miner slot stays
+	// populated with a pow-miner candidate that mainnet has retired.
+	if wso, err := objects.GetWitnessSchedule(s); err == nil {
+		wso.MaxVotedWitnesses = 20
+		wso.MaxMinerWitnesses = 0
+		wso.MaxRunnerWitnesses = 1
+		objects.PutWitnessSchedule(s, &wso)
+	}
 }
 
 // performVestingShareSplit mirrors database::perform_vesting_share_split
@@ -632,30 +696,87 @@ func applyHardfork12CommentCashoutFix(s *state.Session) {
 	}
 }
 
+// removeOldCashouts mirrors database::remove_old_cashouts
+// (database_comment.cpp:102), invoked from the HF19 hardfork handler.
+// Iterates every comment and drops the ones whose CashoutTime is the
+// "frozen / paid" sentinel (0 in our model, time_point_sec::maximum in
+// C++). C++ separately retains the long-lived comment_object; our
+// schema is unified, so this is a stronger purge but consistent with
+// post-HF19 reality (paid comments are unreachable via cashout-time
+// lookups anyway).
+func removeOldCashouts(s *state.Session) {
+	type victim struct {
+		author   string
+		permlink string
+	}
+	var victims []victim
+	_ = objects.RangeAllComments(s, func(c *objects.Comment) (bool, error) {
+		if c.CashoutTime == 0 {
+			victims = append(victims, victim{string(c.Author), c.Permlink})
+		}
+		return true, nil
+	})
+	for _, v := range victims {
+		objects.DeleteComment(s, auth.AccountName(v.author), v.permlink)
+	}
+}
+
 // applyHardfork17CommentCashoutFix mirrors
 // database::apply_hardfork_17_comment_cashout_fix
-// (database_comment.cpp:529). At HF17 every scheduled root post AND
-// every reply gets its cashout time extended to
-// max(creation + 7d, current_cashout). Replies were frozen pre-HF17
-// and now get a real cashout time.
+// (database_comment.cpp:533-581). Two passes:
+//
+//	1. Root posts:  cashout = max(creation + 7d, old_cashout)
+//	2. Replies:     cashout = max(root.cashout_AFTER_pass_1, creation + 7d)
+//
+// The C++ replies pass calls calculate_discussion_payout_time, which
+// returns the ROOT's (just-updated) cashout_time — so replies share
+// their thread root's cashout schedule. Earlier Go applied the root
+// formula to replies too, which under-delays threaded posts and
+// triggers `claim_reward_balance: insufficient balance` mismatches at
+// the first post-HF17 author cashouts (e.g. block 10,635,691 "ocrdu").
 func applyHardfork17CommentCashoutFix(s *state.Session) {
 	const sevenDays uint32 = 60 * 60 * 24 * 7
 	type pending struct {
 		author, permlink string
+		rootAuthor       string
+		rootPermlink     string
 		oldCashout       uint32
 		created          uint32
+		netRshares       int64
+		id               uint64
+		isRoot           bool
 	}
-	var queue []pending
+	var roots []pending
+	var replies []pending
 	_ = objects.RangeAllComments(s, func(c *objects.Comment) (bool, error) {
-		queue = append(queue, pending{
-			author:     string(c.Author),
-			permlink:   c.Permlink,
-			oldCashout: c.CashoutTime,
-			created:    c.Created,
-		})
+		isRoot := string(c.RootAuthor) == string(c.Author) && c.RootPermlink == c.Permlink
+		// Treat empty root fields (legacy rows) as root-itself, matching
+		// the ReadAccount fallback path.
+		if string(c.RootAuthor) == "" && c.RootPermlink == "" {
+			isRoot = true
+		}
+		p := pending{
+			author:       string(c.Author),
+			permlink:     c.Permlink,
+			rootAuthor:   string(c.RootAuthor),
+			rootPermlink: c.RootPermlink,
+			oldCashout:   c.CashoutTime,
+			created:      c.Created,
+			netRshares:   c.NetRshares,
+			id:           c.ID,
+			isRoot:       isRoot,
+		}
+		if isRoot {
+			roots = append(roots, p)
+		} else {
+			replies = append(replies, p)
+		}
 		return true, nil
 	})
-	for _, p := range queue {
+
+	// Pass 1: root posts. cashout = max(creation + 7d, old_cashout).
+	newRootCashout := make(map[string]uint32, len(roots))
+	for _, p := range roots {
 		c, err := objects.GetComment(s, p.author, p.permlink)
 		if err != nil {
 			continue
@@ -663,24 +784,49 @@ func applyHardfork17CommentCashoutFix(s *state.Session) {
 		if p.oldCashout != 0 {
 			objects.DeleteCommentCashoutSchedule(s, p.oldCashout, c.ID)
 		}
-		// Skip already-fully-paid comments (CashoutTime == 0 AND no
-		// further activity expected). For replies that were frozen
-		// (CashoutTime == 0 because hasParent was true), schedule a
-		// fresh 7d cashout. For root posts already cashed out, leave
-		// frozen if hived would have.
+		var newCashout uint32
 		if p.oldCashout == 0 && c.NetRshares <= 0 {
-			// Frozen reply or empty post — schedule fresh.
-			c.CashoutTime = p.created + sevenDays
+			// Frozen / empty root — schedule fresh 7d.
+			newCashout = p.created + sevenDays
 		} else {
-			candidate := p.created + sevenDays
-			if p.oldCashout > candidate {
-				candidate = p.oldCashout
+			newCashout = p.created + sevenDays
+			if p.oldCashout > newCashout {
+				newCashout = p.oldCashout
 			}
-			c.CashoutTime = candidate
 		}
+		c.CashoutTime = newCashout
 		objects.PutComment(s, &c)
-		if c.CashoutTime != 0 {
-			objects.PutCommentCashoutSchedule(s, c.CashoutTime, c.ID, p.author, p.permlink)
+		if newCashout != 0 {
+			objects.PutCommentCashoutSchedule(s, newCashout, c.ID, p.author, p.permlink)
+		}
+		newRootCashout[p.author+"\x00"+p.permlink] = newCashout
+	}
+
+	// Pass 2: replies. cashout = max(root.new_cashout, creation + 7d).
+	// Replies whose root no longer exists fall back to creation+7d.
+	for _, p := range replies {
+		c, err := objects.GetComment(s, p.author, p.permlink)
+		if err != nil {
+			continue
+		}
+		if p.oldCashout != 0 {
+			objects.DeleteCommentCashoutSchedule(s, p.oldCashout, c.ID)
+		}
+		floor := p.created + sevenDays
+		rootCashout, ok := newRootCashout[p.rootAuthor+"\x00"+p.rootPermlink]
+		if !ok {
+			// Root missing from this pass — likely the reply has stale
+			// Root* fields. Treat as orphan: floor at creation+7d.
+			rootCashout = 0
+		}
+		newCashout := floor
+		if rootCashout > newCashout {
+			newCashout = rootCashout
+		}
+		c.CashoutTime = newCashout
+		objects.PutComment(s, &c)
+		if newCashout != 0 {
+			objects.PutCommentCashoutSchedule(s, newCashout, c.ID, p.author, p.permlink)
 		}
 	}
 }

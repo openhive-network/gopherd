@@ -60,13 +60,20 @@ func clearExpiredDelegations(s *state.Session, blockTime uint32) {
 		if err != nil {
 			continue
 		}
-		if a, gerr := objects.GetAccount(s, exp.Delegator); gerr == nil {
-			a.DelegatedVestingShares -= exp.VestingShares
-			if a.DelegatedVestingShares < 0 {
-				a.DelegatedVestingShares = 0
-			}
-			objects.PutAccount(s, &a)
+		a, gerr := objects.GetAccount(s, exp.Delegator)
+		if gerr != nil {
+			// Skip the expiration record entirely if the delegator is
+			// missing — deleting it without crediting back the
+			// delegated_vesting_shares leaks the delegated amount and
+			// blocks the delegator from ever delegating that VESTS chunk
+			// again. The row will be retried on the next sweep.
+			continue
 		}
+		a.DelegatedVestingShares -= exp.VestingShares
+		if a.DelegatedVestingShares < 0 {
+			a.DelegatedVestingShares = 0
+		}
+		objects.PutAccount(s, &a)
 		objects.DeleteVestingDelegationExpirationFull(s, &exp)
 	}
 	if nextExp == 0 {

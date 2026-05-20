@@ -853,9 +853,12 @@ func updateMedianWitnessProps(s *state.Session, ws *objects.WitnessSchedule) {
 	// GetWitnessRef returns a read-only pointer — skips three ~hundred-
 	// byte Witness value copies per witness.
 	var (
-		acf  [21]int64
-		size [21]uint32
-		rate [21]uint16
+		acf    [21]int64
+		size   [21]uint32
+		rate   [21]uint16
+		budget [21]int32
+		decay  [21]uint32
+		subs   [21]int64
 	)
 	n := 0
 	limit := int(ws.NumScheduledWitnesses)
@@ -873,6 +876,9 @@ func updateMedianWitnessProps(s *state.Session, ws *objects.WitnessSchedule) {
 		acf[n] = w.AccountCreationFee
 		size[n] = w.MaximumBlockSize
 		rate[n] = w.HBDInterestRate
+		budget[n] = w.AccountSubsidyBudget
+		decay[n] = w.AccountSubsidyDecay
+		subs[n] = w.AvailableWitnessAccountSubsidies
 		n++
 	}
 	if n == 0 {
@@ -903,9 +909,36 @@ func updateMedianWitnessProps(s *state.Session, ws *objects.WitnessSchedule) {
 		}
 		rate[j] = x
 	}
+	for i := 1; i < n; i++ {
+		x := budget[i]
+		j := i
+		for ; j > 0 && budget[j-1] > x; j-- {
+			budget[j] = budget[j-1]
+		}
+		budget[j] = x
+	}
+	for i := 1; i < n; i++ {
+		x := decay[i]
+		j := i
+		for ; j > 0 && decay[j-1] > x; j-- {
+			decay[j] = decay[j-1]
+		}
+		decay[j] = x
+	}
+	for i := 1; i < n; i++ {
+		x := subs[i]
+		j := i
+		for ; j > 0 && subs[j-1] > x; j-- {
+			subs[j] = subs[j-1]
+		}
+		subs[j] = x
+	}
 	ws.MedianAccountCreationFee = acf[n/2]
 	ws.MedianMaximumBlockSize = size[n/2]
 	ws.MedianHBDInterestRate = rate[n/2]
+	ws.MedianAccountSubsidyBudget = budget[n/2]
+	ws.MedianAccountSubsidyDecay = decay[n/2]
+	ws.MedianAvailableWitnessAccountSubsidies = subs[n/2]
 }
 
 // decodeBE64 reads 8 big-endian bytes as a uint64.

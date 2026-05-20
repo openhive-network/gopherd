@@ -41,6 +41,14 @@ func processConversions(s *state.Session, blockTime uint32, hooks *blockHookScra
 		})
 	}
 
+	// Mirror C++ database_conversion.cpp:30-133: aggregate net_hive and
+	// net_hbd across BOTH regular and collateralized settles, then apply
+	// ONE incremental dgpo update at the end. Per-request adjust_supply
+	// calls (which would snap virtual_supply each time) diverge from
+	// C++'s aggregated `virtual_supply += net_hive + net_hbd × median`
+	// when state has accumulated any rounding drift, producing ~1 sat
+	// drift per convert-settle.
+	var netHive, netHbd int64
 	for _, p := range *ready {
 		req, gerr := objects.GetConvertRequest(s, auth.AccountName(p.owner), p.requestID)
 		if gerr != nil {
@@ -57,18 +65,8 @@ func processConversions(s *state.Session, blockTime uint32, hooks *blockHookScra
 				objects.PutAccount(s, &a)
 			}
 		}
-		// Mirror C++ database_conversion.cpp adjust_supply pair:
-		// adjust_supply(-req.Amount HBD) → recompute virtual_supply, then
-		// adjust_supply(+hiveAmount HIVE) → incremental virtual_supply +=.
-		// Net VS change is ~0 (HBD removed equals HIVE added at median),
-		// but doing each side correctly keeps intra-block readers
-		// (process_funds, etc.) and the next-block percent_hbd ratio in
-		// sync with C++.
-		if dgpo, derr := objects.GetDGPO(s); derr == nil {
-			adjustSupplyHbd(s, &dgpo, -req.Amount)
-			adjustSupplyHive(s, &dgpo, hiveAmount)
-			objects.PutDGPO(s, &dgpo)
-		}
+		netHive += hiveAmount
+		netHbd -= req.Amount
 		objects.DeleteConvertRequestFull(s, &req)
 	}
 
@@ -88,15 +86,30 @@ func processConversions(s *state.Session, blockTime uint32, hooks *blockHookScra
 		if sErr != nil {
 			continue
 		}
-		// current_supply -= requiredHIVE (the collateral that's burned);
-		// virtual_supply -= requiredHIVE too. HBD was already minted at
-		// op-apply, so HBD supply needs no further adjustment.
+		// current_supply -= requiredHIVE (the collateral that's burned).
+		// HBD was already minted at op-apply, so HBD supply needs no
+		// further adjustment.
+		netHive -= requiredHIVE
+		objects.DeleteCollateralizedConvert(s, req.Owner, req.RequestID)
+	}
+
+	// One aggregated dgpo update, matching C++ database_conversion.cpp:124-133:
+	//   current_supply     += net_hive
+	//   current_hbd_supply += net_hbd
+	//   virtual_supply     += net_hive
+	//   virtual_supply     += net_hbd × current_median_history
+	if netHive != 0 || netHbd != 0 {
 		if dgpo, derr := objects.GetDGPO(s); derr == nil {
-			dgpo.CurrentSupply -= requiredHIVE
-			dgpo.VirtualSupply -= requiredHIVE
+			dgpo.CurrentSupply += netHive
+			dgpo.CurrentHBDSupply += netHbd
+			dgpo.VirtualSupply += netHive
+			if netHbd != 0 {
+				// netHbd × median, in HIVE-sat. convertHBDToHive handles
+				// the sign by inheriting it through mulDiv.
+				dgpo.VirtualSupply += convertHBDToHive(netHbd, fh.CurrentMedianHistory)
+			}
 			objects.PutDGPO(s, &dgpo)
 		}
-		objects.DeleteCollateralizedConvert(s, req.Owner, req.RequestID)
 	}
 }
 

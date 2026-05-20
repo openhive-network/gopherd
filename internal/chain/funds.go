@@ -90,6 +90,18 @@ func percentRewardPerHour(virtualSupply, aprPercent int64) int64 {
 // applies the C++ witness_reward * 21 * schedule_weight / pay_norm
 // formula. Falls back to the unweighted slice if the schedule object
 // or this witness aren't loadable (early chain or stub state).
+//
+// KNOWN LATENT BUG (tracked as task #22): when the producer's
+// witness.Schedule field doesn't match what hived's schedule had for
+// that slot — e.g. because gopherd's schedule rebuild diverged due to
+// account_name_type ordering (task #21) or the missing median fields
+// (task #24) — this function multiplies by the WRONG weight (5× or
+// 1/5×). The chain still pays the correct producer (hdr.Witness), but
+// by the wrong amount. Detection: instrument by dumping per-block
+// (witness, schedule_field, expected_slot_type) to a TSV and grep for
+// divergences. Fix path: pass the EXPECTED slot's schedule type
+// (looked up via ws.ScheduledWitnessForSlot at applyBlock time) into
+// this function rather than reading the witness's stored Schedule.
 func applyWitnessRewardWeighting(s *state.Session, witnessReward int64, witnessName string) int64 {
 	wso, err := objects.GetWitnessSchedule(s)
 	if err != nil {
@@ -332,6 +344,22 @@ func processFundsHF16(s *state.Session, dgpo *objects.DynamicGlobalProperty, blo
 		virtualSupply = dgpo.CurrentSupply
 	}
 
+	// HF21+: use virtual_supply_without_treasury for new_hive inflation
+	// (database.cpp:1716-1726). Treasury-held HBD is excluded from the
+	// inflation base so the dhf budget doesn't compound on its own
+	// holdings. Pre-HF21 the full virtual_supply is correct.
+	hfInfl := hardfork.SetForBlock(blockNum)
+	if hfInfl.Has(hardfork.HF21) {
+		if treasury, terr := objects.GetAccount(s, currentTreasuryName(s, hfInfl)); terr == nil && treasury.HBDBalance > 0 {
+			if fh, ferr := objects.GetFeedHistory(s); ferr == nil && !priceIsZero(fh.CurrentMedianHistory) {
+				treasuryAsHive := convertHBDToHive(treasury.HBDBalance, fh.CurrentMedianHistory)
+				if treasuryAsHive > 0 && treasuryAsHive < virtualSupply {
+					virtualSupply -= treasuryAsHive
+				}
+			}
+		}
+	}
+
 	// new_hive = virtual_supply × rate / (10000 × blocks_per_year). C++
 	// (database.cpp:1738) does this with HIVE_asset arithmetic that
 	// internally widens the multiply to uint128 — the
@@ -457,6 +485,14 @@ func processFundsHF16(s *state.Session, dgpo *objects.DynamicGlobalProperty, blo
 	// path (we skip processProducerReward in that branch). The witness
 	// is the producer of THIS block (passed in via witnessName).
 	if witnessReward > 0 && witnessName != "" {
-		_, _ = CreateVesting_via_chain(s, witnessName, witnessReward, false)
+		if _, err := CreateVesting_via_chain(s, witnessName, witnessReward, false); err != nil {
+			// Silent failure here historically dropped the per-block witness
+			// VESTS credit while leaving CurrentSupply / TotalVestingFundHive
+			// already incremented above — the source of the steem-account
+			// +301k VESTS drift cluster in blocks 12014697-12019198. Surface
+			// it so any future divergence is observable in logs.
+			ghiveDiff("GHIVEDIFF CREATE-VESTING-FAIL site=funds.processFunds block=%d witness=%s amount=%d err=%v\n",
+				blockNum, witnessName, witnessReward, err)
+		}
 	}
 }

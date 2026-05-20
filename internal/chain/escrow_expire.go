@@ -60,8 +60,14 @@ func expireEscrowRatifications(s *state.Session, blockTime uint32) {
 		}
 		from, ferr := objects.GetAccount(s, esc.From)
 		if ferr == nil {
-			from.Balance += esc.HiveAmount + esc.PendingFee
-			objects.AdjustHBDBalance(s, &from, blockTime, esc.HBDAmount)
+			from.Balance += esc.HiveAmount
+			hbdRefund := esc.HBDAmount
+			if esc.PendingFeeIsHBD {
+				hbdRefund += esc.PendingFee
+			} else {
+				from.Balance += esc.PendingFee
+			}
+			objects.AdjustHBDBalance(s, &from, blockTime, hbdRefund)
 			objects.PutAccount(s, &from)
 		}
 		objects.DeleteEscrowFull(s, &esc)

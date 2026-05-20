@@ -1,13 +1,43 @@
 package chain
 
 import (
+	"fmt"
 	"math/big"
+	"os"
+	"strings"
 
 	"hived-go/internal/protocol/auth"
 	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
 )
+
+// envBalanceTraceWithdraw + balanceTraceMatchAccount gate the WITHDRAW
+// trace emitted from processOneWithdrawal. Reuses the ACCOUNT_TRACE env
+// list so callers only set one variable.
+var (
+	envBalanceTraceList2 = func() []string {
+		v := os.Getenv("ACCOUNT_TRACE")
+		if v == "" {
+			return nil
+		}
+		out := strings.Split(v, ",")
+		for i := range out {
+			out[i] = strings.TrimSpace(out[i])
+		}
+		return out
+	}()
+	envBalanceTraceWithdraw = len(envBalanceTraceList2) > 0
+)
+
+func balanceTraceMatchAccount(name string) bool {
+	for _, n := range envBalanceTraceList2 {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
 
 // HIVE_VESTING_WITHDRAW_INTERVAL_SECONDS — 1 week between payouts at
 // every hardfork. See evaluator/vesting.go for the C++ rationale; only
@@ -154,6 +184,14 @@ func processOneWithdrawal(s *state.Session, accountName string, scheduledTime ui
 	}
 	toConvertToHive := toWithdraw - depositedVests
 	convertedHive := vestsToHive(toConvertToHive, &dgpo)
+	if envBalanceTraceWithdraw && balanceTraceMatchAccount(accountName) {
+		fmt.Fprintf(os.Stderr,
+			"GHIVEDIFF WITHDRAW name=%s block=%d toWithdraw=%d depositedVests=%d toConvert=%d F=%d S=%d converted=%d acct_vests=%d acct_to_withdraw=%d acct_withdrawn=%d acct_rate=%d\n",
+			accountName, dgpo.HeadBlockNumber, toWithdraw, depositedVests, toConvertToHive,
+			dgpo.TotalVestingFundHive, dgpo.TotalVestingShares, convertedHive,
+			a.VestingShares, a.ToWithdraw, a.Withdrawn, a.VestingWithdrawRate,
+		)
+	}
 
 	a.VestingShares -= toWithdraw
 	a.Balance += convertedHive
