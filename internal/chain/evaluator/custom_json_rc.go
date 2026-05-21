@@ -244,16 +244,16 @@ func applyDelegateRC(ctx *Context, cj op.CustomJSON, args json.RawMessage) error
 	}
 	p.Delegatees = uniq
 
-	// 2. Posting-auth gate.
-	hasFrom := false
-	for _, n := range cj.RequiredPostingAuths {
-		if string(n) == p.From {
-			hasFrom = true
-			break
-		}
-	}
-	if !hasFrom {
-		return fmt.Errorf("delegate_rc: from %q not in required_posting_auths", p.From)
+	// 2. Posting-auth gate. hived's rc_custom_operation requires
+	// required_posting_auths to be EXACTLY {from} — size == 1 and the
+	// sole entry equals from. (rc_custom_operation_interpreter at
+	// libraries/chain/rc/rc_utility.cpp:725 dispatches through the
+	// generic_custom_operation_interpreter, which enforces
+	// op.required_posting_auths == {signer} before do_apply runs.)
+	// Membership-only acceptance let multi-account custom_jsons with
+	// `from` plus other auths pass; hived rejects them.
+	if len(cj.RequiredPostingAuths) != 1 || string(cj.RequiredPostingAuths[0]) != p.From {
+		return fmt.Errorf("delegate_rc: required_posting_auths must be exactly {%q}", p.From)
 	}
 
 	// 3. min_delegation check.

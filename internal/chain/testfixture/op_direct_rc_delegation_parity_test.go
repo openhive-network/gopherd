@@ -518,15 +518,16 @@ func TestUpdateOutdelOverflowDelegatee(t *testing.T) {
 	if bob.DelegatedRCOut != 0 {
 		t.Fatalf("bob.DelegatedRCOut after vest withdrawal: got %d, want 0", bob.DelegatedRCOut)
 	}
-	// The expired-row carries the full clipped amount (sum of bob's
-	// out-delegations at the moment alice yanked her vest delegation).
+	// Hived drains rc_expired_delegation rows every block in
+	// resource_credits::handle_expired_delegations (rc_utility.cpp:598),
+	// so by the time the test reads state after ApplyOp the row has
+	// been drained and deleted in the same block as the cascade. The
+	// structural outcome (DelegatedRCOut == 0, both direct delegations
+	// gone) is the meaningful invariant; the row's transient existence
+	// is an implementation detail that we don't observe here.
 	s := state.NewSession(f.State)
-	exp, err := objects.GetRCExpiredDelegation(s, "bob")
-	if err != nil {
-		t.Fatalf("bob RCExpiredDelegation row should exist after cascade: %v", err)
-	}
-	if exp.RemainingExpired != wantOut {
-		t.Fatalf("bob.expired.RemainingExpired: got %d, want %d", exp.RemainingExpired, wantOut)
+	if _, err := objects.GetRCExpiredDelegation(s, "bob"); err == nil {
+		t.Fatalf("bob RCExpiredDelegation row should have been drained by rcFinalizeBlock")
 	}
 
 	// Both delegations should be removed entirely.

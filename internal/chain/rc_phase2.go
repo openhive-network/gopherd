@@ -53,37 +53,46 @@ const (
 // rcMaxAccountsPerDelegationOp mirrors HIVE_RC_MAX_ACCOUNTS_PER_DELEGATION_OP.
 const rcMaxAccountsPerDelegationOp = 100
 
-// processRCExpiredDelegations drains rc_expired_delegation_object rows
-// whose ExpiryTime is at or before `now`. Each drained row reduces the
-// owner's DelegatedRCOut by RemainingExpired (clamped at 0) and removes
-// the row.
+// processRCExpiredDelegations drains rc_expired_delegation_object rows.
+// Hived drains every block (rc_plugin::on_finish_block →
+// resource_credits::handle_expired_delegations at rc_utility.cpp:598):
+// the row is a continuation token saying "this account still has
+// over-delegation that needs clipping". Pre-fix gopherd gated drains
+// on ExpiryTime (a 5-day timer) and then refunded DelegatedRCOut by
+// the row amount — both wrong:
 //
-// Rate-limit: at most rcMaxAccountsPerDelegationOp entries are drained
-// per block (across all delegators). This mirrors the C++ paced
-// cleanup; in practice the queue rarely exceeds 100 in a single block
-// since each delegate_rc op can produce at most that many entries.
+//   - The 5-day gate let rows linger indefinitely; hived clears them
+//     every block as the remove_threshold allows.
+//   - The DelegatedRCOut refund double-decremented: gopherd's
+//     HandleVestingWithdrawalRCImpact already clips rc_direct_delegation
+//     rows AND decrements the delegator's DelegatedRCOut by the same
+//     totalExpired amount. Refunding here ran the same delta twice.
+//     (Symptom was masked by the `< 0 → 0` clamp.)
 //
-// Mirrors hive::chain::rc_plugin::handle_expired_direct_delegations and
-// the per-block sweep in rc_plugin.cpp on_finish_block.
+// Current behavior: drain every block. Since gopherd's
+// HandleVestingWithdrawalRCImpact already performs the full clip in
+// one pass (no per-block remove_limit), the row carries no further
+// work — just delete it. The row remains for snapshot/state-dump
+// parity with hived's rc_expired_delegation_index, and for future
+// callers that may need to record residue when the clip pass hits a
+// remove_threshold.
+//
+// Rate-limit retained at rcMaxAccountsPerDelegationOp (100) per block
+// to bound per-block scan cost.
+//
+// Mirrors hive::chain::resource_credits::handle_expired_delegations.
 func processRCExpiredDelegations(s *state.Session, now uint32) {
 	type entry struct {
 		row objects.RCExpiredDelegation
 	}
 	var batch []entry
-	// Primary index of RCExpiredDelegation is keyed by account name,
-	// which is unordered relative to ExpiryTime. Scan everything and
-	// filter — the table is small (≤100 active entries in steady state).
 	_ = s.Range(objects.RCExpiredDelegationTable, state.PrimaryIndex, nil,
 		func(_, val []byte) (bool, error) {
 			r, err := objects.ReadRCExpiredDelegation(val)
 			if err != nil {
 				return true, nil
 			}
-			if r.ExpiryTime > now {
-				return true, nil
-			}
 			batch = append(batch, entry{row: r})
-			// Rate-limit batch size: at most 100 per block.
 			if len(batch) >= rcMaxAccountsPerDelegationOp {
 				return false, nil
 			}
@@ -92,15 +101,7 @@ func processRCExpiredDelegations(s *state.Session, now uint32) {
 	for _, e := range batch {
 		acct, err := objects.GetAccount(s, e.row.From)
 		if err == nil {
-			refund := e.row.RemainingExpired
-			if refund < 0 {
-				refund = 0
-			}
-			acct.DelegatedRCOut -= refund
-			if acct.DelegatedRCOut < 0 {
-				acct.DelegatedRCOut = 0
-			}
-			// Bump last_max_rc to reflect newly freed delegatable RC.
+			// Bump last_max_rc to reflect post-clip state.
 			acct.LastMaxRC = acct.VestingShares - acct.DelegatedVestingShares +
 				acct.ReceivedVestingShares - acct.DelegatedRCOut + acct.DelegatedRCIn
 			if acct.LastMaxRC < 0 {
