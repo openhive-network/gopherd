@@ -267,6 +267,13 @@ func applyHardfork(s *state.Session, id hardfork.ID) {
 			objects.PutAccount(s, a)
 			return true, nil
 		})
+		// HF20 RC subsystem state-object bootstrap. Mirrors
+		// database_hardfork.cpp:355-390 — creates rc_resource_param,
+		// rc_pool seeded to pool_eq, 24 staggered rc_usage_buckets,
+		// and the two rc_stats rows. Per-account rc_adjustment +
+		// initial mana seed was the loop above; this is the rest of
+		// the C++ HF20 init block.
+		initRCBootstrapHF20(s, hf20Time)
 	case hardfork.HF21:
 		if dgpo, err := objects.GetDGPO(s); err == nil {
 			dgpo.ContentRewardPercent = 6500    // 65 %

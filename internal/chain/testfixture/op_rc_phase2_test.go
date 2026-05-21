@@ -275,9 +275,17 @@ func TestRCPoolPendingDataReset(t *testing.T) {
 	if err := s.Commit(false); err != nil {
 		t.Fatalf("noop fire: %v", err)
 	}
+	// At HF20 activation hived seeds BOTH stats rows (pending +
+	// archive) via create<rc_stats_object> in database_hardfork.cpp:
+	// 389-390, so the archive ALWAYS exists post-HF20. Before the
+	// first day-boundary, however, it should still be the zero row
+	// (no Regen / Budget data promoted into it yet).
 	s = state.NewSession(f.State)
-	if _, err := objects.GetRCStats(s, objects.RCStatsIDArchive); err == nil {
-		t.Fatalf("archive should not exist before boundary")
+	if arch, err := objects.GetRCStats(s, objects.RCStatsIDArchive); err == nil {
+		if arch.Regen != 0 || arch.Budget != ([objects.RCNumResources]int64{}) {
+			t.Fatalf("archive should be empty pre-boundary, got Regen=%d Budget=%v",
+				arch.Regen, arch.Budget)
+		}
 	}
 
 	// Fire at the boundary block (= 9600).
