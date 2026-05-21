@@ -946,22 +946,31 @@ func (voteEvaluator) Apply(ctx *Context, opArg op.Op) error {
 			q, _ := bits.Div64(hi, lo, uint64(reverseAuction))
 			voteCurationWeight = q
 		}
-		// HF21+ three-phase discount past the reverse-auction window.
-		// Mirror C++ hive_evaluator_social.cpp:810-826: once a vote is
-		// past early_voting_seconds, weight /= 2 (mid window) or /= 8
-		// (late window). Constants HIVE_EARLY_VOTING_SECONDS = 24h,
-		// HIVE_MID_VOTING_SECONDS = 48h (HF21 defaults; HF25 raised
-		// these). Pre-HF21 the old linear reverse-auction ramp above
-		// is the only discount; HF21+ keeps that ramp (with the
-		// 5-minute reverse_auction window) AND adds mid/late phases.
-		if ctx.Hardforks.Has(hardfork.HF21) && voteCurationWeight > 0 {
+		// HF25+ three-phase discount past the reverse-auction window.
+		// Mirrors C++ hive_evaluator_social.cpp:810-826: the discount
+		// only fires when `dgpo.get_early_voting_seconds() > 0`, which
+		// hived sets ONLY at HF25 activation (database_hardfork.cpp:
+		// 480-481). HF21 set reverse_auction_seconds = 5min but left
+		// early_voting_seconds / mid_voting_seconds at struct default
+		// 0, so the entire HF21→HF25 window relies on the linear
+		// reverse-auction ramp ABOVE without the additional /=2 / /=8
+		// phases. Keying the gate off HF25 (not HF21) avoids
+		// double-discounting curation in the HF21–HF25 window (blocks
+		// ~33M–62M).
+		//
+		// Constants HIVE_EARLY_VOTING_SECONDS_HF25 = 24h,
+		// HIVE_MID_VOTING_SECONDS_HF25 = 48h (config.hpp:186-187).
+		if ctx.Hardforks.Has(hardfork.HF25) && voteCurationWeight > 0 {
 			const earlyVotingSeconds uint32 = 24 * 3600
 			const midVotingSeconds uint32 = 48 * 3600
 			elapsed := uint32(0)
 			if ctx.HeadBlockTime > c.Created {
 				elapsed = ctx.HeadBlockTime - c.Created
 			}
-			if elapsed >= midVotingSeconds {
+			// Hived gates on `_seconds >= early_voting_seconds`. The
+			// elapsed >= mid path subsumes elapsed >= early so the
+			// branching maps to the same set partition.
+			if elapsed >= earlyVotingSeconds+midVotingSeconds {
 				voteCurationWeight /= 8
 			} else if elapsed >= earlyVotingSeconds {
 				voteCurationWeight /= 2

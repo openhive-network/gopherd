@@ -361,17 +361,28 @@ func applyHardfork(s *state.Session, id hardfork.ID) {
 			consolidateTreasuryBalance(s, dgpo.Time)
 		}
 	case hardfork.HF25:
-		// HF25 (libraries/chain/database_hardfork.cpp:481): switch the
-		// post fund's curves to linear/linear, set new reverse_auction
-		// window. Liquid HBD interest is gated separately in
-		// AdjustHBDBalance via head_block_number ≥ HF25 block.
+		// HF25 (libraries/chain/database_hardfork.cpp:470-483): switch
+		// the post fund's curves to linear/linear and DISABLE the
+		// reverse-auction discount in favor of the new
+		// early_voting / mid_voting phase scheme. From the C++ comment
+		// at hive_evaluator_social.cpp:797: "In HF25
+		// dgpo.reverse_auction_seconds is set to zero. It's replaced
+		// by dgpo.early_voting_seconds and dgpo.mid_voting_seconds."
+		//
+		// HF21 set the early/mid voting fields to 0 (struct default),
+		// so the /=2 and /=8 discount branches in the curation weight
+		// computation never fire pre-HF25 — hived gates them on
+		// `dgpo.get_early_voting_seconds() > 0`. The gopherd vote
+		// evaluator now mirrors that gate (comment.go:957+), keying
+		// off hardfork.HF25 rather than HF21 to avoid double-discounting
+		// the HF21→HF25 window (~33M-62M blocks).
 		if fund, err := objects.GetRewardFund(s, objects.PostRewardFundName); err == nil {
 			fund.AuthorRewardCurve = objects.CurveLinear
 			fund.CurationRewardCurve = objects.CurveLinear
 			objects.PutRewardFund(s, &fund)
 		}
 		if dgpo, err := objects.GetDGPO(s); err == nil {
-			dgpo.ReverseAuctionSeconds = 5 * 60 // unchanged from HF21
+			dgpo.ReverseAuctionSeconds = 0 // disabled at HF25
 			objects.PutDGPO(s, &dgpo)
 		}
 	case hardfork.HF26:
