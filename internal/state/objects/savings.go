@@ -106,6 +106,39 @@ func HasSavingsWithdraw(s *state.Session, from auth.AccountName, requestID uint3
 	return s.Has(SavingsWithdrawTable, state.PrimaryIndex, savingsWithdrawKey(from, requestID))
 }
 
+// CountSavingsWithdrawsFor counts the active savings_withdraw rows
+// owned by `from`. Mirrors hived's account_object.savings_withdraw_requests
+// counter; gopherd derives the count on demand instead of caching it.
+//
+// Used by transfer_from_savings_evaluator to enforce
+// HIVE_SAVINGS_WITHDRAW_REQUEST_LIMIT (100). The cap is rarely
+// approached, so the O(N) scan with early-exit at the limit is
+// cheap in practice.
+func CountSavingsWithdrawsFor(s *state.Session, from auth.AccountName, stopAt int) int {
+	count := 0
+	prefix := state.AppendAccountName(nil, from)
+	_ = s.Range(SavingsWithdrawTable, state.PrimaryIndex, prefix,
+		func(key, _ []byte) (bool, error) {
+			// Range with a prefix returns entries lexically ≥ prefix; we
+			// must check the key still starts with `from` so we don't
+			// count rows from later accounts.
+			if len(key) < len(prefix) {
+				return false, nil
+			}
+			for i, b := range prefix {
+				if key[i] != b {
+					return false, nil
+				}
+			}
+			count++
+			if stopAt > 0 && count >= stopAt {
+				return false, nil
+			}
+			return true, nil
+		})
+	return count
+}
+
 func DeleteSavingsWithdraw(s *state.Session, from auth.AccountName, requestID uint32) {
 	s.Delete(SavingsWithdrawTable, state.PrimaryIndex, savingsWithdrawKey(from, requestID))
 }

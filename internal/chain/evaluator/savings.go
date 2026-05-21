@@ -127,6 +127,16 @@ func (transferFromSavingsEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	} else if has {
 		return fmt.Errorf("%w: %q/%d", ErrSavingsWithdrawExists, t.From, t.RequestID)
 	}
+	// HIVE_SAVINGS_WITHDRAW_REQUEST_LIMIT = 100 active per account.
+	// Mirrors hive_evaluator_transfer.cpp:606. Hived stores a
+	// running counter on account_object; gopherd derives the count
+	// on demand by scanning the savings_withdraw primary index
+	// keyed by (from, request_id) with early-exit at the cap.
+	const savingsWithdrawRequestLimit = 100
+	if n := objects.CountSavingsWithdrawsFor(ctx.DB, t.From, savingsWithdrawRequestLimit); n >= savingsWithdrawRequestLimit {
+		return fmt.Errorf("transfer_from_savings: %q already has %d pending withdraw requests (limit %d)",
+			t.From, n, savingsWithdrawRequestLimit)
+	}
 	objects.PutAccount(ctx.DB, &from)
 	objects.PutSavingsWithdraw(ctx.DB, &objects.SavingsWithdraw{
 		From:      t.From,

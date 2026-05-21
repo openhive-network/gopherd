@@ -2,6 +2,8 @@ package evaluator
 
 import (
 	"fmt"
+	"math"
+	"math/bits"
 
 	"hived-go/internal/protocol/asset"
 	"hived-go/internal/protocol/hardfork"
@@ -193,6 +195,50 @@ func (delegateVestingSharesEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	}
 	delta := d.VestingShares.Amount - prevAmt
 
+	// Min-delegation + min-update enforcement. Mirrors hived
+	// hive_evaluator_transfer.cpp:764-769:
+	//
+	//   min_delegation = (HF20+ ? fee/3 : fee*10) * vesting_share_price
+	//   min_update     = (HF20+ ? fee/30: fee   ) * vesting_share_price
+	//
+	// where vesting_share_price = total_vesting_shares / total_vesting_fund_hive
+	// (with the 1:1000 genesis fallback when either is zero). HF20 scaled
+	// the fee meaning by 30×, so the thresholds were divided by ~10× to
+	// keep the absolute minimum in line.
+	minDelegation, minUpdate, vesterr := computeDelegationMinima(ctx)
+	if vesterr == nil {
+		isCreate := prevAmt == 0
+		switch {
+		case isCreate:
+			if d.VestingShares.Amount < minDelegation {
+				return fmt.Errorf("delegate_vesting_shares: minimum delegation is %d VESTS (got %d)",
+					minDelegation, d.VestingShares.Amount)
+			}
+		case delta > 0:
+			if delta < minUpdate {
+				return fmt.Errorf("delegate_vesting_shares: minimum increase is %d VESTS (got %d)",
+					minUpdate, delta)
+			}
+		case delta < 0:
+			// Decreasing: delta < 0. Hived checks `delta >= min_update`
+			// where delta is the POSITIVE difference (prev - new).
+			absDelta := -delta
+			if d.VestingShares.Amount > 0 {
+				if absDelta < minUpdate {
+					return fmt.Errorf("delegate_vesting_shares: minimum decrease is %d VESTS (got %d)",
+						minUpdate, absDelta)
+				}
+				if d.VestingShares.Amount < minDelegation {
+					return fmt.Errorf("delegate_vesting_shares: cannot reduce below min_delegation (%d) — either remove (set 0) or leave ≥ %d",
+						minDelegation, minDelegation)
+				}
+			} else {
+				// Setting to 0 — full removal. Hived requires prev > 0
+				// (which is already implied by delta < 0 here).
+			}
+		}
+	}
+
 	if delta > 0 {
 		// Increasing delegation requires the delegator's available VESTS.
 		available := delegator.VestingShares - delegator.DelegatedVestingShares
@@ -272,6 +318,60 @@ func (delegateVestingSharesEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		})
 	}
 	return nil
+}
+
+// computeDelegationMinima returns (min_delegation, min_update) in VESTS
+// satoshi. Mirrors hived's HF20 reduction by 10× (fee meaning went up
+// 30× at HF20, so the delegation thresholds compensate):
+//
+//	HF20+: min_delegation = fee/3   * price; min_update = fee/30 * price
+//	pre-HF20: min_delegation = fee*10 * price; min_update = fee    * price
+//
+// `price` = total_vesting_shares / total_vesting_fund_hive (1:1000
+// genesis fallback). Returns (0, 0, err) when the witness median fee
+// is unknown — callers gracefully skip the check in that case.
+func computeDelegationMinima(ctx *Context) (int64, int64, error) {
+	ws, err := objects.GetWitnessSchedule(ctx.DB)
+	if err != nil {
+		return 0, 0, err
+	}
+	dgpo, err := objects.GetDGPO(ctx.DB)
+	if err != nil {
+		return 0, 0, err
+	}
+	fee := ws.MedianAccountCreationFee
+	if fee <= 0 {
+		return 0, 0, nil
+	}
+	var feeMin, feeUpd int64
+	if ctx.Hardforks.Has(hardfork.HF20) {
+		feeMin = fee / 3
+		feeUpd = fee / 30
+	} else {
+		feeMin = fee * 10
+		feeUpd = fee
+	}
+	// Convert HIVE→VESTS at current price = total_vesting_shares /
+	// total_vesting_fund_hive. Use the 1:1000 genesis fallback when
+	// either total is zero (matches createVestingImpl semantics).
+	priceVests := dgpo.TotalVestingShares
+	priceFund := dgpo.TotalVestingFundHive
+	convert := func(hivePortion int64) int64 {
+		if priceFund == 0 || priceVests == 0 {
+			return hivePortion * 1000
+		}
+		// hivePortion * priceVests / priceFund via 128-bit math.
+		hi, lo := bits.Mul64(uint64(hivePortion), uint64(priceVests))
+		if hi >= uint64(priceFund) {
+			return math.MaxInt64
+		}
+		q, _ := bits.Div64(hi, lo, uint64(priceFund))
+		if q > uint64(math.MaxInt64) {
+			return math.MaxInt64
+		}
+		return int64(q)
+	}
+	return convert(feeMin), convert(feeUpd), nil
 }
 
 func init() {
