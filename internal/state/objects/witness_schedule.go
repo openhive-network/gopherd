@@ -90,6 +90,49 @@ type WitnessSchedule struct {
 	MedianAvailableWitnessAccountSubsidies int64
 }
 
+// CopyValuesFrom mirrors hived's witness_schedule_object::copy_values_from
+// (witness_schedule.hpp, used in update_witness_schedule.cpp:423 and at
+// HF26 activation). Copies every field of `src` into the receiver,
+// including the variable-length CurrentShuffledWitnesses (deep-copied
+// so the caller's slice can be safely mutated thereafter).
+//
+// Used by the HF26+ round-boundary promotion path: future→current.
+// RecentBlockProducers is not part of hived's copy_values_from, but
+// since gopherd treats it as a sliding window owned by the current
+// schedule, we DO copy it to keep promotion idempotent on re-runs.
+func (w *WitnessSchedule) CopyValuesFrom(src *WitnessSchedule) {
+	w.CurrentVirtualTime = src.CurrentVirtualTime
+	w.NextShuffleBlockNum = src.NextShuffleBlockNum
+	if cap(w.CurrentShuffledWitnesses) < len(src.CurrentShuffledWitnesses) {
+		w.CurrentShuffledWitnesses = make([]auth.AccountName, len(src.CurrentShuffledWitnesses))
+	} else {
+		w.CurrentShuffledWitnesses = w.CurrentShuffledWitnesses[:len(src.CurrentShuffledWitnesses)]
+	}
+	copy(w.CurrentShuffledWitnesses, src.CurrentShuffledWitnesses)
+	w.NumScheduledWitnesses = src.NumScheduledWitnesses
+	w.MedianAccountCreationFee = src.MedianAccountCreationFee
+	w.MedianMaximumBlockSize = src.MedianMaximumBlockSize
+	w.MedianHBDInterestRate = src.MedianHBDInterestRate
+	w.MaxVotedWitnesses = src.MaxVotedWitnesses
+	w.MaxMinerWitnesses = src.MaxMinerWitnesses
+	w.TimeshareWeight = src.TimeshareWeight
+	w.MinerWeight = src.MinerWeight
+	w.ElectedWeight = src.ElectedWeight
+	w.WitnessPayNormalizationFactor = src.WitnessPayNormalizationFactor
+	if cap(w.RecentBlockProducers) < len(src.RecentBlockProducers) {
+		w.RecentBlockProducers = make([]auth.AccountName, len(src.RecentBlockProducers))
+	} else {
+		w.RecentBlockProducers = w.RecentBlockProducers[:len(src.RecentBlockProducers)]
+	}
+	copy(w.RecentBlockProducers, src.RecentBlockProducers)
+	w.MajorityVersion = src.MajorityVersion
+	w.HardforkRequiredWitnesses = src.HardforkRequiredWitnesses
+	w.MaxRunnerWitnesses = src.MaxRunnerWitnesses
+	w.MedianAccountSubsidyBudget = src.MedianAccountSubsidyBudget
+	w.MedianAccountSubsidyDecay = src.MedianAccountSubsidyDecay
+	w.MedianAvailableWitnessAccountSubsidies = src.MedianAvailableWitnessAccountSubsidies
+}
+
 // AppendWitnessSchedule serializes the schedule.
 func AppendWitnessSchedule(dst []byte, w *WitnessSchedule) []byte {
 	dst = append(dst, w.CurrentVirtualTime[:]...)

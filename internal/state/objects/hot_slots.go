@@ -21,5 +21,6 @@ const (
 	hotSlotCommentCashout   = 11
 	hotSlotTransaction      = 12
 	hotSlotBlockSummary     = 13
-	hotSlotLimitOrder       = 14
+	hotSlotLimitOrder            = 14
+	hotSlotFutureWitnessSchedule = 15
 )

@@ -97,6 +97,7 @@ func main() {
 		objects.EnsureCommentVoteStore(boot)
 		objects.EnsureBlockSummaryStore(boot)
 		objects.EnsureWitnessScheduleStore(boot)
+		objects.EnsureFutureWitnessScheduleStore(boot)
 		objects.EnsureDGPOStore(boot)
 		objects.EnsureCommentCashoutScheduleStore(boot)
 		objects.EnsureLimitOrderStore(boot)

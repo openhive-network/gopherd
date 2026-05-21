@@ -196,7 +196,30 @@ func updateWitnessSchedule(s *state.Session, blockNum uint32, scratch *witnessSc
 		return
 	}
 
-	if hf.Has(hardfork.HF4) {
+	// HF26+ future_witness_schedule rotation. Mirrors hived
+	// witness_schedule.cpp:410-432: on each round boundary, promote the
+	// future schedule to current (copy_values_from), then recompute the
+	// new future via update_witness_schedule_4 applied to the future
+	// object. Pre-HF26 path runs update_witness_schedule_4 against
+	// `ws` directly.
+	//
+	// The promotion shortcut: at the FIRST round boundary after HF26
+	// activation, the seeded future schedule is exactly equal to
+	// current (copy_values_from at activation), so the promotion is a
+	// no-op and we still run update_witness_schedule_4 once. Subsequent
+	// rounds promote a precomputed future, then recompute the next.
+	if hf.Has(hardfork.HF26) {
+		// Promote future → current.
+		if fws, err := objects.GetFutureWitnessSchedule(s); err == nil {
+			ws.CopyValuesFrom(&fws)
+		}
+		// Recompute future schedule (working copy of ws, then write to
+		// future store).
+		future := ws
+		scratch.reset()
+		updateWitnessSchedule4(s, &future, &dgpo, blockNum, hf, scratch)
+		objects.PutFutureWitnessSchedule(s, &future)
+	} else if hf.Has(hardfork.HF4) {
 		scratch.reset()
 		updateWitnessSchedule4(s, &ws, &dgpo, blockNum, hf, scratch)
 	} else {

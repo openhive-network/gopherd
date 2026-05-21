@@ -342,6 +342,15 @@ func applyHardfork(s *state.Session, id hardfork.ID) {
 			dgpo.HBDStopPercent = 2000  // 20 %
 			objects.PutDGPO(s, &dgpo)
 		}
+		// Seed the future_witness_schedule_object as a copy of the
+		// current one. Mirrors C++ database_hardfork.cpp:492-496 — at
+		// HF26 activation, hived creates a second witness_schedule_object
+		// initialized via copy_values_from(get_witness_schedule_object()).
+		// Thereafter each round-boundary update_witness_schedule swaps
+		// future→current and recomputes the new future.
+		if ws, err := objects.GetWitnessSchedule(s); err == nil {
+			objects.PutFutureWitnessSchedule(s, &ws)
+		}
 	case hardfork.HF27:
 		// HF27 (block 69,050,084) — no consensus-state mutation in
 		// hived's hardfork hook beyond hardfork_property_object update.
