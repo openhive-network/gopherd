@@ -511,3 +511,57 @@ func consolidateTreasuryBalance(s *state.Session, blockTime uint32) {
 	objects.PutAccount(s, &old)
 	objects.PutAccount(s, &newAcct)
 }
+
+// lockAccount mirrors C++ database::lock_account (database.cpp:1379-1411)
+// — replaces an account's owner/active/posting authorities with a
+// 1-threshold empty authority (no keys, no account auths), self-assigns
+// the recovery_account, zeroes the memo_key, and removes any pending
+// recovery / change-recovery requests.
+//
+// hived calls this at:
+//   - HF21 after creating the steem.dao treasury (database_hardfork.cpp:427)
+//   - HF24 after creating the hive.fund treasury (database_hardfork.cpp:528)
+//
+// Locking renders the treasury account permanently non-spendable:
+// signing any tx requires meeting the authority threshold (1) with
+// either a key or an account auth, neither of which the locked
+// authority offers.
+func lockAccount(s *state.Session, accountName auth.AccountName, blockTime uint32) {
+	// Empty authority — weight_threshold = 1 but no signers can meet it.
+	locked := auth.Authority{WeightThreshold: 1}
+
+	authObj, err := objects.GetAccountAuthority(s, accountName)
+	if err != nil {
+		// Create a fresh locked authority record.
+		objects.PutAccountAuthority(s, &objects.AccountAuthority{
+			Account:             accountName,
+			Owner:               locked,
+			Active:              locked,
+			Posting:             locked,
+			LastOwnerUpdate:     blockTime,
+			PreviousOwnerUpdate: blockTime,
+		})
+	} else {
+		authObj.Owner = locked
+		authObj.Active = locked
+		authObj.Posting = locked
+		authObj.PreviousOwnerUpdate = authObj.LastOwnerUpdate
+		authObj.LastOwnerUpdate = blockTime
+		objects.PutAccountAuthority(s, &authObj)
+	}
+
+	// Self-assign recovery_account + zero memo_key on the account record.
+	a, err := objects.GetAccount(s, accountName)
+	if err == nil {
+		a.RecoveryAccount = accountName
+		a.MemoKey = [33]byte{}
+		a.PreviousOwnerUpdate = a.LastOwnerUpdate
+		a.LastOwnerUpdate = blockTime
+		objects.PutAccount(s, &a)
+	}
+	// Note: gopherd does not yet store account_recovery_request or
+	// change_recovery_account_request as standalone tables — those
+	// rows are derived from in-flight evaluator state. If/when that
+	// changes, remove pending requests for `accountName` here to
+	// mirror C++ database.cpp:1404-1410.
+}

@@ -341,6 +341,13 @@ func applyHardfork(s *state.Session, id hardfork.ID) {
 				})
 			}
 		}
+		// Lock the treasury account so its authorities can never
+		// authorize an op (no key, no account auth, threshold=1).
+		// Mirrors C++ database_hardfork.cpp:427 lock_account(get_treasury())
+		// at HF21 activation.
+		if dgpo, err := objects.GetDGPO(s); err == nil {
+			lockAccount(s, "steem.dao", dgpo.Time)
+		}
 		if fund, err := objects.GetRewardFund(s, objects.PostRewardFundName); err == nil {
 			fund.AuthorRewardCurve = objects.CurveConvergentLinear
 			fund.CurationRewardCurve = objects.CurveConvergentSquareRoot
@@ -371,6 +378,12 @@ func applyHardfork(s *state.Session, id hardfork.ID) {
 		restoreAccounts(s, hf24RestoreAccounts)
 		if dgpo, err := objects.GetDGPO(s); err == nil {
 			consolidateTreasuryBalance(s, dgpo.Time)
+			// Lock the new treasury (hive.fund). Mirrors C++
+			// database_hardfork.cpp:528 lock_account(get_treasury())
+			// at HF24 activation, called AFTER consolidation so the
+			// rotated treasury balance is preserved before the
+			// authority freeze.
+			lockAccount(s, "hive.fund", dgpo.Time)
 		}
 	case hardfork.HF25:
 		// HF25 (libraries/chain/database_hardfork.cpp:470-483): switch
