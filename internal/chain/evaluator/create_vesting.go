@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"hived-go/internal/protocol/auth"
+	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
 )
@@ -205,6 +206,22 @@ func createVestingImpl(s *state.Session, accountName string, hiveSatoshi int64, 
 	// pass it directly — saves one AccountStore.Get per CreateVesting.
 	if adjustVotes && !toReward && vestsAmount != 0 {
 		objects.AdjustProxiedWitnessVotes(s, aSlot, vestsAmount)
+	}
+	// HF20+ manabar wire-up: when an account's effective_vesting grows
+	// (non-reward vesting credit), regen its voting_manabar to the new
+	// cap. Mirrors hived's util::update_manabar called from
+	// create_vesting → adjust_balance. aSlot already points at the
+	// post-mutation account; UpdateVotingManabar refreshes
+	// VotingManaCurrent in place.
+	if !toReward && vestsAmount > 0 && aSlot != nil && dgpoRef != nil {
+		hf := hardfork.SetForBlock(dgpoRef.HeadBlockNumber)
+		if hf.Has(hardfork.HF20) {
+			var dvPoolPct uint16
+			if hf.Has(hardfork.HF21) {
+				dvPoolPct = dgpoRef.DownvotePoolPercent
+			}
+			objects.UpdateVotingManabar(aSlot, dgpoRef.Time, dvPoolPct)
+		}
 	}
 	return vestsAmount, nil
 }

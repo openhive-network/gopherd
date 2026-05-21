@@ -258,12 +258,43 @@ func applyHardfork(s *state.Session, id hardfork.ID) {
 			hf20Time = dgpoNow.Time
 		}
 		const rcHistoricalAdjustment int64 = 2020748973
+		// HF20 voting manabar migration: pre-HF20 the voting_manabar
+		// is in percent units (0..10000); HF20+ it switches to VESTS
+		// units (0..effective_vesting_shares). Hived doesn't do an
+		// explicit migration — it just changes how the field is
+		// interpreted — but we need to convert the persisted value
+		// because gopherd's HF20+ vote evaluator reads it as VESTS.
+		//
+		// Conversion:
+		//
+		//	current_mana_vests = effective_vesting * current_mana_pct / 10000
+		//
+		// Pre-HF21 the downvote_manabar doesn't exist (DownvotePoolPercent
+		// was 0); HF21 activation seeds it. So at HF20 migration we only
+		// touch voting_manabar.
+		var hf20DowntvotePoolPct uint16 = 0
+		_ = hf20DowntvotePoolPct
 		_ = objects.RangeAccounts(s, func(a *objects.Account) (bool, error) {
 			a.RCAdjustment = rcHistoricalAdjustment
 			a.RCManaLastUpdate = hf20Time
 			maxRC := a.MaximumRC()
 			a.RCManaCurrent = maxRC
 			a.LastMaxRC = maxRC
+			// Voting manabar migration. Pre-HF20 the field holds 0..10000.
+			// Scale to VESTS = effective_vesting * pct / 10000.
+			effVests := a.EffectiveVestingSharesExclWithdraw()
+			if effVests > 0 && a.VotingManaCurrent > 0 {
+				pct := a.VotingManaCurrent
+				if pct > 10000 {
+					pct = 10000
+				}
+				a.VotingManaCurrent = effVests * pct / 10000
+			} else if effVests == 0 {
+				a.VotingManaCurrent = 0
+			}
+			a.VotingManaLastUpdate = hf20Time
+			a.DownvoteManaCurrent = 0
+			a.DownvoteManaLastUpdate = hf20Time
 			objects.PutAccount(s, a)
 			return true, nil
 		})

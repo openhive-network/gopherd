@@ -164,6 +164,40 @@ func InitRCManabar(a *Account, now uint32) {
 	a.LastMaxRC = a.MaximumRC()
 }
 
+// HIVE_VOTING_MANA_REGENERATION_SECONDS = 5 days. Same as RC regen.
+const VotingManaRegenSec uint32 = 5 * 24 * 60 * 60
+
+// UpdateVotingManabar mirrors hived's util::update_manabar
+// (chain/util/manabar.hpp) — regenerates the account's
+// voting_manabar (and HF21+ downvote_manabar) to the current
+// effective-vesting cap. Called at HF20+ before every vote and
+// after any operation that changes effective_vesting_shares
+// (claim_reward_balance, create_vesting, fill_vesting_withdraw,
+// delegate_vesting_shares).
+//
+// downvotePoolPercent is dgpo.DownvotePoolPercent (0 pre-HF21,
+// 2500 = 25% at HF21+). When non-zero the downvote_manabar's max
+// is max_voting * pct / HIVE_100_PERCENT and the voting_manabar's
+// max stays at max_voting; pre-HF21 the voting_manabar carries
+// the entire pool.
+//
+// The manabar is in VESTS units post-HF20 — caller has already
+// migrated from percent at the HF20 activation hook.
+func UpdateVotingManabar(a *Account, now uint32, downvotePoolPercent uint16) {
+	maxMana := a.EffectiveVestingSharesExclWithdraw()
+	regen := ManabarParams{MaxMana: maxMana, RegenTime: VotingManaRegenSec}
+	newMana, newUpdate := RegenerateMana(a.VotingManaCurrent, a.VotingManaLastUpdate, regen, now, false)
+	a.VotingManaCurrent = newMana
+	a.VotingManaLastUpdate = newUpdate
+	if downvotePoolPercent > 0 {
+		dvMax := maxMana * int64(downvotePoolPercent) / 10000
+		dvRegen := ManabarParams{MaxMana: dvMax, RegenTime: VotingManaRegenSec}
+		newDV, newDVUpdate := RegenerateMana(a.DownvoteManaCurrent, a.DownvoteManaLastUpdate, dvRegen, now, false)
+		a.DownvoteManaCurrent = newDV
+		a.DownvoteManaLastUpdate = newDVUpdate
+	}
+}
+
 const int64Max = int64(^uint64(0) >> 1)
 
 func saturatedAdd(a, b int64) int64 {

@@ -528,6 +528,27 @@ func (f *Fixture) FundVesting(account string, hive int64) {
 		dgpo.CurrentSupply += hive
 		objects.PutDGPO(s, &dgpo)
 	}
+	// HF20+ manabar wire-up: voting_manabar uses VESTS units; the
+	// CreateVesting evaluator updates the manabar inline when called
+	// inside a block apply (via Context.Hardforks), but the
+	// fixture's direct CreateVesting bypass doesn't carry hardfork
+	// context. Refresh here so test accounts have full mana to vote
+	// with after funding. Pre-HF20 leaves VotingManaCurrent alone
+	// (percent-scale).
+	hf := hardfork.SetForBlock(f.BlockNum + 1)
+	if hf.Has(hardfork.HF20) {
+		a, err := objects.GetAccount(s, auth.AccountName(account))
+		if err == nil {
+			// Snap mana to max so subsequent votes have full capacity
+			// (mirrors hived's HF20 _fill_mana=true ctor for newly-
+			// vested accounts).
+			a.VotingManaCurrent = a.EffectiveVestingSharesExclWithdraw()
+			a.VotingManaLastUpdate = f.curBlockTime
+			a.DownvoteManaCurrent = 0
+			a.DownvoteManaLastUpdate = f.curBlockTime
+			objects.PutAccount(s, &a)
+		}
+	}
 	if err := s.Commit(false); err != nil {
 		f.t.Fatalf("testfixture: vest commit: %v", err)
 	}

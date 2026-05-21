@@ -145,12 +145,20 @@ func (accountCreateEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	// runs `db.create_vesting(new_account, o.fee)` immediately after,
 	// converting the creator's fee into starter VESTS for the new
 	// account at the current vesting price.
+	// VotingManaCurrent: pre-HF20 = 10000 (percent units, full mana);
+	// HF20+ = 0 (VESTS units, no vesting at creation so no mana).
+	// account_create_with_delegation may bump this immediately after via
+	// UpdateVotingManabar once the delegation lands.
+	initialMana := int64(10000)
+	if ctx.Hardforks.Has(hardfork.HF20) {
+		initialMana = 0
+	}
 	newAcct := objects.Account{
 		Name:                 ac.NewAccountName,
 		Created:              ctx.HeadBlockTime,
 		MemoKey:              ac.MemoKey,
 		JSONMetadata:         ac.JSONMetadata,
-		VotingManaCurrent:    10000, // full mana at creation
+		VotingManaCurrent:    initialMana,
 		VotingManaLastUpdate: ctx.HeadBlockTime,
 		// Mirror C++ hive_evaluator_account.cpp:134-142: recovery_account
 		// defaults to "steem" pre-HF11, creator account post-HF11, or

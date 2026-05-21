@@ -128,12 +128,18 @@ func (createClaimedAccountEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	} else if has {
 		return fmt.Errorf("%w: %q", ErrAccountAlreadyExists, cc.NewAccountName)
 	}
+	// HF20+ VotingManaCurrent is VESTS (no vesting at creation = 0);
+	// pre-HF20 it is percent (10000 = full).
+	initialManaCC := int64(10000)
+	if ctx.Hardforks.Has(hardfork.HF20) {
+		initialManaCC = 0
+	}
 	newAcct := objects.Account{
 		Name:                 cc.NewAccountName,
 		Created:              ctx.HeadBlockTime,
 		MemoKey:              cc.MemoKey,
 		JSONMetadata:         cc.JSONMetadata,
-		VotingManaCurrent:    10000,
+		VotingManaCurrent:    initialManaCC,
 		VotingManaLastUpdate: ctx.HeadBlockTime,
 		RecoveryAccount:      defaultRecoveryAccount(ctx, cc.Creator),
 	}

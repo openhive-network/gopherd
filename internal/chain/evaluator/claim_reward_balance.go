@@ -89,9 +89,18 @@ func (claimRewardBalanceEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	a.RewardVests -= cr.RewardVests.Amount
 	a.RewardVestingHive -= rewardVestingHiveToMove
 	a.VestingShares += cr.RewardVests.Amount
-	// Refresh again so LastMaxRC tracks the post-claim cap.
+	// Refresh again so LastMaxRC tracks the post-claim cap, and bring
+	// the voting_manabar up to the new effective-vesting cap at HF20+.
+	// Mirrors hived's claim_reward_balance_evaluator wiring of
+	// util::update_manabar after the vest credit.
 	if ctx.Hardforks.Has(hardfork.HF20) {
 		objects.RegenerateRCMana(&a, ctx.HeadBlockTime)
+		dgpoRef, _ := objects.GetDGPORef(ctx.DB)
+		var dvPoolPct uint16
+		if ctx.Hardforks.Has(hardfork.HF21) && dgpoRef != nil {
+			dvPoolPct = dgpoRef.DownvotePoolPercent
+		}
+		objects.UpdateVotingManabar(&a, ctx.HeadBlockTime, dvPoolPct)
 	}
 	objects.PutAccount(ctx.DB, &a)
 
