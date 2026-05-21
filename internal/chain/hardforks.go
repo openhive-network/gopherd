@@ -313,6 +313,18 @@ func applyHardfork(s *state.Session, id hardfork.ID) {
 			// HIVE_DOWNVOTE_POOL_PERCENT_HF21 = 25 × HIVE_1_PERCENT
 			// = 2500 (25 %). Mirrors database_hardfork.cpp HF21 init.
 			dgpo.DownvotePoolPercent = 2500
+			// DHF: don't seed LastBudgetTime here. hived leaves
+			// last_budget_time at its HIVE_GENESIS_TIME default until
+			// the first dhf_processor::run call (which calls
+			// update_settings → sets last_budget_time = head_time).
+			// On mainnet, that first call sees an empty treasury
+			// (steem.dao was just created in this same HF21 hook with
+			// 0 HBD), so the resulting huge passed_time × 0 = 0
+			// payout is benign. From the second tick onward,
+			// passed_time = 3600 in steady state. processProposals
+			// has a fallback to proposalMaintenancePeriodSec when
+			// LastBudgetTime == 0, so the first-tick math matches
+			// the historical hardcoded-3600 behavior.
 			objects.PutDGPO(s, &dgpo)
 		}
 		// HF21 also creates the treasury account ("steem.dao") if absent

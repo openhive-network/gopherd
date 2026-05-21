@@ -66,11 +66,21 @@ func TestProposalDailyPaymentBasic(t *testing.T) {
 		t.Fatalf("treasury HBD should drop after payout: pre=%d post=%d",
 			preTreas, treas)
 	}
-	// Bob's payout should equal daily_pay × period / day = 10000 × 3600 / 86400.
-	wantBob := int64(10_000) * 3600 / 86400
+	// Bob's payout uses hived's pre-HF25 ratio formula
+	// (dhf_processor.cpp:197-198):
+	//   ratio = (passed_time * HIVE_100_PERCENT) / 86400
+	//   period_pay = (ratio * daily_pay) / HIVE_100_PERCENT
+	// On the first DHF tick post-HF21, gopherd's processProposals
+	// falls back to proposalMaintenancePeriodSec (3600s) because
+	// LastBudgetTime is still zero (mirrors hived behavior where the
+	// field stays at HIVE_GENESIS_TIME default; the first tick on
+	// mainnet sees an empty treasury so the resulting payout is 0).
+	// In this test the treasury is seeded so we observe the formula.
+	ratio := int64(3600) * 10000 / 86400
+	wantBob := ratio * 10_000 / 10000
 	deltaBob := bob - preBob
 	if deltaBob != wantBob {
-		t.Fatalf("bob's payment: got %d, want %d", deltaBob, wantBob)
+		t.Fatalf("bob's payment: got %d, want %d (pre-HF25 ratio formula)", deltaBob, wantBob)
 	}
 	// Treasury delta is approximately wantBob minus the interest
 	// credited to the treasury over the maintenance interval —

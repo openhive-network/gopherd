@@ -128,11 +128,43 @@ func processProposals(s *state.Session, blockTime uint32, blockNum uint32) {
 		}
 	}
 
-	// Maintenance budget = treasury × period / day / 100.
-	periodSec := int64(proposalMaintenancePeriodSec)
+	// Maintenance budget per hived dhf_processor::calculate_maintenance_budget
+	// (dhf_processor.cpp:145-159):
+	//
+	//	passed_time_seconds = head_time - dgpo.last_budget_time
+	//	daily_budget_limit  = treasury.hbd / total_amount_divider
+	//	daily_budget_limit  = passed_time_seconds * daily_budget_limit / 86400
+	//
+	// last_budget_time is set by set_next_maintenance_time(head_time, …) at
+	// every maintenance tick. The first time hived enters this code path
+	// (HF21 activation) last_budget_time has the genesis default — so on
+	// first tick passed_time_seconds is potentially years. To match,
+	// gopherd updates LastBudgetTime at HF21 activation (hardforks.go HF21
+	// case) so the first DHF tick computes a one-hour passed_time.
+	//
+	// Fallback: if LastBudgetTime is 0 (never seeded — e.g., snapshot
+	// that predates the field), treat the period as the canonical
+	// HIVE_PROPOSAL_MAINTENANCE_PERIOD (3600s) to avoid spending the
+	// entire treasury in one tick.
+	var passedTime int64
+	if dgpo, derr := objects.GetDGPO(s); derr == nil && dgpo.LastBudgetTime > 0 && blockTime > dgpo.LastBudgetTime {
+		passedTime = int64(blockTime - dgpo.LastBudgetTime)
+	} else {
+		passedTime = int64(proposalMaintenancePeriodSec)
+	}
+	// Sanity clamp: a single tick budget shouldn't exceed a full day
+	// (catches stale LastBudgetTime after a long node downtime).
+	if passedTime > dailySecondsConst {
+		passedTime = dailySecondsConst
+	}
 	dailyBudget := treasury.HBDBalance / proposalTotalAmountDivider
-	budget := dailyBudget * periodSec / dailySecondsConst
+	budget := dailyBudget * passedTime / dailySecondsConst
 	if budget <= 0 {
+		// Even when budget == 0 we still need to refresh LastBudgetTime
+		// so the next tick computes correctly.
+		objects.MutateDGPO(s, func(d *objects.DynamicGlobalProperty) {
+			d.LastBudgetTime = blockTime
+		})
 		return
 	}
 
@@ -144,7 +176,20 @@ func processProposals(s *state.Session, blockTime uint32, blockNum uint32) {
 		if budget <= 0 || treasury.HBDBalance <= 0 {
 			break
 		}
-		periodPay := p.DailyPay * periodSec / dailySecondsConst
+		// Per-proposal payment formula differs pre/post HF25
+		// (dhf_processor.cpp:191-199):
+		//   HF25+:  period_pay = passed_time * daily_pay / 86400
+		//   pre-HF25: ratio = (passed_time * HIVE_100_PERCENT) / 86400
+		//            period_pay = (ratio * daily_pay) / HIVE_100_PERCENT
+		// The pre-HF25 form retains precision via the 100% intermediate.
+		var periodPay int64
+		if hf.Has(hardfork.HF25) {
+			periodPay = passedTime * p.DailyPay / dailySecondsConst
+		} else {
+			const hivePct = int64(10000)
+			ratio := (passedTime * hivePct) / dailySecondsConst
+			periodPay = (ratio * p.DailyPay) / hivePct
+		}
 		if periodPay > budget {
 			periodPay = budget
 		}
@@ -166,6 +211,11 @@ func processProposals(s *state.Session, blockTime uint32, blockNum uint32) {
 		budget -= periodPay
 	}
 	objects.PutAccount(s, &treasury)
+	// Bump LastBudgetTime so the next tick's passed_time is correct.
+	// Mirrors dhf_processor::update_settings (dhf_processor.cpp:214-222).
+	objects.MutateDGPO(s, func(d *objects.DynamicGlobalProperty) {
+		d.LastBudgetTime = blockTime
+	})
 }
 
 // convertProposalFunds mirrors sps_processor::convert_funds — once per

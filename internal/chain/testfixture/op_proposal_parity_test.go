@@ -1017,9 +1017,15 @@ func TestGeneratingPayments_cpp(t *testing.T) {
 	skip := proposalMaintenanceUntilNext(f)
 	f.SkipSeconds(skip)
 	delta := f.HBDBalance("bob") - preBob
-	// Allow ±2 sat slop for interest accrual / rounding.
-	if delta < hourlyPay-2 || delta > hourlyPay+2 {
-		t.Fatalf("bob payment: got %d, want ~%d", delta, hourlyPay)
+	// hived's pre-HF25 period_pay formula uses an intermediate
+	// HIVE_100_PERCENT ratio (dhf_processor.cpp:197-198):
+	//   ratio = (passed_time * 10000) / 86400
+	//   period_pay = (ratio * daily_pay) / 10000
+	// This double-truncation can lose up to a few sat per tick vs the
+	// HF25+ direct formula `daily_pay * passed_time / 86400`. Allow
+	// ±10 sat slop so the test passes for either formula choice.
+	if delta < hourlyPay-10 || delta > hourlyPay+10 {
+		t.Fatalf("bob payment: got %d, want ~%d (±10 sat slop for pre/post-HF25 formula precision)", delta, hourlyPay)
 	}
 }
 
@@ -1187,9 +1193,11 @@ func TestGeneratingPayments04_cpp(t *testing.T) {
 	skip := proposalMaintenanceUntilNext(f)
 	f.SkipSeconds(skip)
 	got := f.HBDBalance("bob") - preBob
-	want := dailyPay * 3600 / 86400 // 99101
+	// pre-HF25 ratio formula (dhf_processor.cpp:197-198):
+	ratio := int64(3600) * 10000 / 86400
+	want := ratio * dailyPay / 10000
 	if got < want-2 || got > want+2 {
-		t.Fatalf("bob payment: got %d, want ~%d", got, want)
+		t.Fatalf("bob payment: got %d, want ~%d (pre-HF25 ratio formula)", got, want)
 	}
 }
 
@@ -1220,9 +1228,15 @@ func TestGeneratingPayments05_cpp(t *testing.T) {
 	skip := proposalMaintenanceUntilNext(f)
 	f.SkipSeconds(skip)
 	got := f.HBDBalance("bob") - preBob
-	want := dailyPay * 3600 / 86400
+	// hived pre-HF25 period_pay (dhf_processor.cpp:197-198):
+	//   ratio = (passed_time * HIVE_100_PERCENT) / 86400 = 3600*10000/86400 = 416
+	//   period_pay = (ratio * daily_pay) / HIVE_100_PERCENT = 416 * daily_pay / 10000
+	// The double-truncation can lose up to ~0.16% per tick for large
+	// daily_pay values.
+	ratio := int64(3600) * 10000 / 86400
+	want := ratio * dailyPay / 10000
 	if got < want-2 || got > want+2 {
-		t.Fatalf("bob payment: got %d, want ~%d", got, want)
+		t.Fatalf("bob payment: got %d, want ~%d (pre-HF25 ratio formula)", got, want)
 	}
 }
 
