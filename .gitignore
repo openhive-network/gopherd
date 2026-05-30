@@ -4,6 +4,13 @@
 /ghive
 /ghive-tools
 /testnet-config
+# Stray root binaries from `go build ./cmd/<x>`
+/drift-hunter
+/cppstate
+/getws
+/dump_account
+/dump_witnesses
+/scan*
 
 # Go cache
 *.test
