@@ -103,5 +103,18 @@ func applyHardfork9CompromisedAccounts(s *state.Session) {
 		ao.Active = hf9Auth
 		ao.Posting = hf9Auth
 		objects.PutAccountAuthority(s, &ao)
+
+		// Keep the Account's redundant LastOwnerUpdate/PreviousOwnerUpdate
+		// copy in sync with the authority object. account_update and
+		// recover_account already update both; HF9 only touched the
+		// authority, leaving the Account copy stale. (C++ holds
+		// last_owner_update solely on account_authority_object; Go mirrors
+		// it onto the account, so the two must not diverge — confirmed vs
+		// hived for the 11 HF9-reset brand accounts, block 3,186,477.)
+		if a, aerr := objects.GetAccount(s, acct); aerr == nil {
+			a.PreviousOwnerUpdate = a.LastOwnerUpdate
+			a.LastOwnerUpdate = lastValidTime
+			objects.PutAccount(s, &a)
+		}
 	}
 }
