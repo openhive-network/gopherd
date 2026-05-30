@@ -138,16 +138,52 @@ func identKey(line []byte) string {
 		return string(line)
 	}
 	t := unquoteJSON(m["_type"])
+	f := func(k string) string { return unquoteJSON(m[k]) }
 	switch t {
 	case "account":
-		return "account/" + unquoteJSON(m["name"])
+		return "account/" + f("name")
 	case "witness":
-		return "witness/" + unquoteJSON(m["owner"])
+		return "witness/" + f("owner")
+	case "reward_fund":
+		return "reward_fund/" + f("name")
 	case "comment":
-		return "comment/" + unquoteJSON(m["author"]) + "/" + unquoteJSON(m["permlink"])
+		return "comment/" + f("author") + "/" + f("permlink")
+	case "limit_order":
+		return "limit_order/" + f("owner") + "/" + padNum(f("order_id"))
+	case "escrow":
+		return "escrow/" + f("from") + "/" + padNum(f("escrow_id"))
+	case "convert_request":
+		return "convert_request/" + f("owner") + "/" + padNum(f("request_id"))
+	case "collateralized_convert":
+		return "collateralized_convert/" + f("owner") + "/" + padNum(f("request_id"))
+	case "savings_withdraw":
+		return "savings_withdraw/" + f("from") + "/" + padNum(f("request_id"))
+	case "vesting_delegation_expiration":
+		return "vesting_delegation_expiration/" + f("delegator") + "/" + padNum(f("id"))
+	case "proposal":
+		return "proposal/" + padNum(f("id"))
 	default:
+		// Singletons (dgpo, feed_history) and any future bare type.
 		return t
 	}
+}
+
+// padNum left-pads a decimal string to 20 chars so lexical order equals
+// numeric order ("order/9" must sort before "order/10"). Non-numeric
+// input is returned unchanged.
+func padNum(s string) string {
+	if s == "" {
+		return s
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return s
+		}
+	}
+	if len(s) >= 20 {
+		return s
+	}
+	return "00000000000000000000"[:20-len(s)] + s
 }
 
 // diffJSON returns a one-line description of differing fields between

@@ -1,24 +1,26 @@
 package main
 
 // state-jsonl dumps the chainbase-equivalent state from a ghive Pebble
-// data dir as DETERMINISTIC JSONL — sorted by primary key, stable
-// field order, ready for line-by-line diffing against another dump
-// (either another ghive dump for regression testing, or a hived
-// state_snapshot output run through `hive-snapshot-to-jsonl`).
+// data dir as DETERMINISTIC JSONL — sorted by identifier, stable field
+// order, ready for line-by-line diffing against another dump (either
+// another ghive dump for regression testing, or a hived-derived dump
+// produced by `ghive-tools hived-jsonl`).
 //
 // Output format (one line per object):
 //
 //	{"_type":"account","name":"alice","balance":12345,"hbd_balance":-50,...}
 //
-// Field order matches the JSON struct tag order in the helper structs
-// below. Objects within a type are sorted by name; types are emitted
-// in a fixed order: dgpo, feed_history, accounts, witnesses, proposals,
-// reward_funds, comments (optional).
+// Every row's sort key is computed by the SAME identKey() the differ
+// uses (both live in package main), so the file is always in the exact
+// order the lockstep snapshot-diff reader expects — no matter which
+// object types are present. That is what makes a FULL-state diff (every
+// account, order, escrow, proposal, …) align correctly, surfacing the
+// diverging (object, field) for objects nobody thought to name.
 //
-// This is the foundation for P1's "zero divergence" verification: run
-// it on our state at HF1/HF20/HF28 boundaries, run hived's state
-// dumper at the same heights, line-diff. Differences point at exactly
-// which (account, field) is wrong.
+// Covered types: dgpo, feed_history, accounts, witnesses, reward_funds,
+// limit_orders, escrows, convert_requests, collateralized_converts,
+// savings_withdraws, vesting_delegation_expirations, proposals, and
+// (optional) comments.
 
 import (
 	"bufio"
@@ -29,28 +31,70 @@ import (
 	"os"
 	"sort"
 
-	"hived-go/internal/protocol/auth"
+	"hived-go/internal/protocol/asset"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
+	"hived-go/internal/state/snapshot"
 )
+
+// registerAllStores pre-registers every typed subsystem on a freshly
+// opened Database so a directory snapshot loads its full store set
+// (accounts, witnesses, comments, limit orders, …, which live in memory
+// rather than pebble K/V). Mirrors replay's snapshot-load bootstrap.
+func registerAllStores(db *state.Database) {
+	boot := state.NewSession(db)
+	objects.EnsureWitnessStore(boot)
+	objects.EnsureWitnessVoteStore(boot)
+	objects.EnsureAccountStore(boot)
+	objects.EnsureCommentStore(boot)
+	objects.EnsureCommentVoteStore(boot)
+	objects.EnsureBlockSummaryStore(boot)
+	objects.EnsureWitnessScheduleStore(boot)
+	objects.EnsureFutureWitnessScheduleStore(boot)
+	objects.EnsureDGPOStore(boot)
+	objects.EnsureCommentCashoutScheduleStore(boot)
+	objects.EnsureLimitOrderStore(boot)
+	objects.EnsureVestingWithdrawalScheduleStore(boot)
+	objects.EnsureTransactionStore(boot)
+	objects.EnsureConvertRequestStore(boot)
+}
+
+// jrow is a marshaled object paired with its canonical identKey for
+// sorting. Shared by state-jsonl and hived-jsonl.
+type jrow struct {
+	key  string
+	data []byte
+}
 
 func cmdStateJSONL(args []string) int {
 	fs := flag.NewFlagSet("state-jsonl", flag.ContinueOnError)
-	dataDir := fs.String("data-dir", "", "Pebble data dir (required)")
+	dataDir := fs.String("data-dir", "", "Pebble data dir (raw K/V only — misses typed stores; prefer --snapshot)")
+	snapDir := fs.String("snapshot", "", "directory snapshot produced by `replay --snapshot-every` (loads full typed-store state; the correct input for a full-state diff)")
 	out := fs.String("out", "-", "output file path (or '-' for stdout)")
 	includeComments := fs.Bool("comments", false, "include comments (LARGE)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if *dataDir == "" {
-		fmt.Fprintln(os.Stderr, "state-jsonl: --data-dir required")
+	if *dataDir == "" && *snapDir == "" {
+		fmt.Fprintln(os.Stderr, "state-jsonl: --snapshot (preferred) or --data-dir required")
 		return 2
 	}
 
-	db, err := state.Open(*dataDir, 256<<20)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "state-jsonl: %v\n", err)
-		return 1
+	var db *state.Database
+	if *snapDir != "" {
+		db = state.OpenMem()
+		registerAllStores(db)
+		if _, err := snapshot.Load(db, *snapDir); err != nil {
+			fmt.Fprintf(os.Stderr, "state-jsonl: load snapshot %s: %v\n", *snapDir, err)
+			return 1
+		}
+	} else {
+		var err error
+		db, err = state.Open(*dataDir, 256<<20)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "state-jsonl: %v\n", err)
+			return 1
+		}
 	}
 	defer db.Close()
 
@@ -67,48 +111,70 @@ func cmdStateJSONL(args []string) int {
 		w = bufio.NewWriter(f)
 	}
 	defer w.Flush()
-	enc := json.NewEncoder(w)
 
 	s := state.NewSession(db)
 
+	// Unified collect → sort → emit. Sort key = identKey(marshaled row),
+	// the same function the differ aligns on.
+	var rows []jrow
+	add := func(v any) {
+		b, err := json.Marshal(v)
+		if err != nil {
+			return
+		}
+		rows = append(rows, jrow{key: identKey(b), data: append([]byte(nil), b...)})
+	}
+
 	// --- DGPO ---
 	if p, err := objects.GetDGPO(s); err == nil {
-		_ = enc.Encode(dgpoRow{
-			Type:                      "dgpo",
-			HeadBlockNumber:           p.HeadBlockNumber,
-			HeadBlockID:               hex.EncodeToString(p.HeadBlockID[:]),
-			Time:                      p.Time,
-			CurrentWitness:            p.CurrentWitness,
-			CurrentSupply:             p.CurrentSupply,
-			CurrentHBDSupply:          p.CurrentHBDSupply,
-			TotalVestingShares:        p.TotalVestingShares,
-			TotalVestingFundHive:      p.TotalVestingFundHive,
-			TotalRewardFundHive:       p.TotalRewardFundHive,
-			VirtualSupply:             p.VirtualSupply,
-			HBDInterestRate:           p.HBDInterestRate,
-			HBDPrintRate:              p.HBDPrintRate,
-			HBDStartPercent:           p.HBDStartPercent,
-			HBDStopPercent:            p.HBDStopPercent,
-			ContentRewardPercent:      p.ContentRewardPercent,
-			VestingRewardPercent:      p.VestingRewardPercent,
-			ProposalFundPercent:       p.ProposalFundPercent,
-			ReverseAuctionSeconds:     p.ReverseAuctionSeconds,
-			DelegationReturnPeriod:    p.DelegationReturnPeriod,
-			AvailableAccountSubsidies: p.AvailableAccountSubsidies,
+		add(dgpoRow{
+			Type:                         "dgpo",
+			HeadBlockNumber:              p.HeadBlockNumber,
+			HeadBlockID:                  hex.EncodeToString(p.HeadBlockID[:]),
+			Time:                         p.Time,
+			CurrentWitness:               p.CurrentWitness,
+			CurrentSupply:                p.CurrentSupply,
+			CurrentHBDSupply:             p.CurrentHBDSupply,
+			TotalVestingShares:           p.TotalVestingShares,
+			TotalVestingFundHive:         p.TotalVestingFundHive,
+			TotalRewardFundHive:          p.TotalRewardFundHive,
+			VirtualSupply:                p.VirtualSupply,
+			PendingRewardedVestingShares: p.PendingRewardedVestingShares,
+			PendingRewardedVestingHive:   p.PendingRewardedVestingHive,
+			DHFIntervalLedger:            p.DHFIntervalLedger,
+			HBDInterestRate:              p.HBDInterestRate,
+			HBDPrintRate:                 p.HBDPrintRate,
+			HBDStartPercent:              p.HBDStartPercent,
+			HBDStopPercent:               p.HBDStopPercent,
+			ContentRewardPercent:         p.ContentRewardPercent,
+			VestingRewardPercent:         p.VestingRewardPercent,
+			ProposalFundPercent:          p.ProposalFundPercent,
+			ReverseAuctionSeconds:        p.ReverseAuctionSeconds,
+			DelegationReturnPeriod:       p.DelegationReturnPeriod,
+			AvailableAccountSubsidies:    p.AvailableAccountSubsidies,
 		})
 	}
 
-	// --- Accounts (sorted) ---
-	type acct struct {
-		row accountRow
-	}
-	var accts []acct
-	_ = s.Range(objects.AccountTable, state.PrimaryIndex, nil, func(_, value []byte) (bool, error) {
-		a, err := objects.ReadAccount(value)
-		if err != nil {
-			return true, nil
+	// --- feed_history (singleton) ---
+	if fh, err := objects.GetFeedHistory(s); err == nil {
+		var last priceJSON
+		if n := len(fh.PriceHistory); n > 0 {
+			last = priceRow(fh.PriceHistory[n-1])
 		}
-		accts = append(accts, acct{row: accountRow{
+		add(feedHistoryRow{
+			Type:             "feed_history",
+			CurrentMedian:    priceRow(fh.CurrentMedianHistory),
+			MarketMedian:     priceRow(fh.MarketMedianHistory),
+			CurrentMin:       priceRow(fh.CurrentMinHistory),
+			CurrentMax:       priceRow(fh.CurrentMaxHistory),
+			PriceHistoryLen:  len(fh.PriceHistory),
+			PriceHistoryLast: last,
+		})
+	}
+
+	// --- Accounts (typed store) ---
+	_ = objects.RangeAccounts(s, func(a *objects.Account) (bool, error) {
+		add(accountRow{
 			Type:                          "account",
 			Name:                          string(a.Name),
 			Created:                       a.Created,
@@ -140,25 +206,13 @@ func cmdStateJSONL(args []string) int {
 			DelegatedRCOut:                a.DelegatedRCOut,
 			LastOwnerUpdate:               a.LastOwnerUpdate,
 			SumDelayedVotes:               a.SumDelayedVotes,
-		}})
+		})
 		return true, nil
 	})
-	sort.Slice(accts, func(i, j int) bool { return accts[i].row.Name < accts[j].row.Name })
-	for i := range accts {
-		_ = enc.Encode(accts[i].row)
-	}
 
-	// --- Witnesses (sorted) ---
-	type witnessEntry struct {
-		row witnessRow
-	}
-	var witnesses []witnessEntry
-	_ = s.Range(objects.WitnessTable, state.PrimaryIndex, nil, func(_, value []byte) (bool, error) {
-		wo, err := objects.ReadWitness(value)
-		if err != nil {
-			return true, nil
-		}
-		witnesses = append(witnesses, witnessEntry{row: witnessRow{
+	// --- Witnesses (typed store) ---
+	_ = objects.EnsureWitnessStore(s).RangePrimary(func(wo *objects.Witness) (bool, error) {
+		add(witnessRow{
 			Type:                "witness",
 			Owner:               string(wo.Owner),
 			Created:             wo.Created,
@@ -173,23 +227,158 @@ func cmdStateJSONL(args []string) int {
 			HardforkTimeVote:    wo.HardforkTimeVote,
 			RunningVersion:      wo.RunningVersion,
 			AvailableSubsidies:  wo.AvailableWitnessAccountSubsidies,
-		}})
+		})
 		return true, nil
 	})
-	sort.Slice(witnesses, func(i, j int) bool { return witnesses[i].row.Owner < witnesses[j].row.Owner })
-	for i := range witnesses {
-		_ = enc.Encode(witnesses[i].row)
-	}
 
-	// --- Comments (optional, very large) ---
+	// --- Reward funds ---
+	_ = s.Range(objects.RewardFundTable, state.PrimaryIndex, nil, func(_, value []byte) (bool, error) {
+		rf, err := objects.ReadRewardFund(value)
+		if err != nil {
+			return true, nil
+		}
+		add(rewardFundRow{
+			Type:                  "reward_fund",
+			Name:                  rf.Name,
+			RewardBalance:         rf.RewardBalance,
+			RecentClaims:          hex.EncodeToString(rf.RecentClaims[:]),
+			LastUpdate:            rf.LastUpdate,
+			ContentConstant:       rf.ContentConstant,
+			PercentCuration:       rf.PercentCurationRewards,
+			PercentContent:        rf.PercentContentRewards,
+			AuthorRewardCurve:     uint8(rf.AuthorRewardCurve),
+			CurationRewardCurve:   uint8(rf.CurationRewardCurve),
+			DownvoteRewardBalance: rf.DownvoteRewardBalance,
+		})
+		return true, nil
+	})
+
+	// --- Limit orders ---
+	_ = objects.EnsureLimitOrderStore(s).RangeByExpiration(func(lo *objects.LimitOrder) (bool, error) {
+		add(limitOrderRow{
+			Type:          "limit_order",
+			Owner:         string(lo.Owner),
+			OrderID:       lo.OrderID,
+			Created:       lo.Created,
+			Expiration:    lo.Expiration,
+			ForSale:       lo.ForSaleAmount,
+			ForSaleSym:    lo.ForSaleSymbol,
+			MinReceive:    lo.MinReceiveAmt,
+			MinReceiveSym: lo.MinReceiveSym,
+			SellPriceBase: lo.SellPriceBaseAmount,
+		})
+		return true, nil
+	})
+
+	// --- Escrows ---
+	_ = s.Range(objects.EscrowTable, state.PrimaryIndex, nil, func(_, value []byte) (bool, error) {
+		e, err := objects.ReadEscrow(value)
+		if err != nil {
+			return true, nil
+		}
+		add(escrowRow{
+			Type:                 "escrow",
+			From:                 string(e.From),
+			To:                   string(e.To),
+			Agent:                string(e.Agent),
+			EscrowID:             e.EscrowID,
+			HBDAmount:            e.HBDAmount,
+			HiveAmount:           e.HiveAmount,
+			PendingFee:           e.PendingFee,
+			PendingFeeIsHBD:      e.PendingFeeIsHBD,
+			RatificationDeadline: e.RatificationDeadline,
+			Expiration:           e.EscrowExpiration,
+			ToApproved:           e.ToApproved,
+			AgentApproved:        e.AgentApproved,
+			Disputed:             e.Disputed,
+		})
+		return true, nil
+	})
+
+	// --- Convert requests ---
+	objects.EnsureConvertRequestStore(s).RangeDueBefore(^uint32(0), func(c objects.ConvertRequest) bool {
+		add(convertRow{
+			Type:       "convert_request",
+			Owner:      string(c.Owner),
+			RequestID:  c.RequestID,
+			Amount:     c.Amount,
+			Conversion: c.Conversion,
+		})
+		return true
+	})
+
+	// --- Collateralized converts ---
+	_ = objects.RangeAllCollateralizedConvert(s, func(c objects.CollateralizedConvert) bool {
+		add(collConvertRow{
+			Type:       "collateralized_convert",
+			Owner:      string(c.Owner),
+			RequestID:  c.RequestID,
+			Collateral: c.Collateral,
+			HBDOut:     c.HBDOut,
+			Conversion: c.Conversion,
+		})
+		return true
+	})
+
+	// --- Savings withdrawals ---
+	_ = s.Range(objects.SavingsWithdrawTable, state.PrimaryIndex, nil, func(_, value []byte) (bool, error) {
+		sw, err := objects.ReadSavingsWithdraw(value)
+		if err != nil {
+			return true, nil
+		}
+		add(savingsWithdrawRow{
+			Type:      "savings_withdraw",
+			From:      string(sw.From),
+			RequestID: sw.RequestID,
+			To:        string(sw.To),
+			Amount:    sw.Amount,
+			Symbol:    sw.Symbol,
+			Complete:  sw.Complete,
+		})
+		return true, nil
+	})
+
+	// --- Vesting-delegation return objects ---
+	_ = s.Range(objects.VestingDelegationExpirationTable, state.PrimaryIndex, nil, func(_, value []byte) (bool, error) {
+		e, err := objects.ReadVestingDelegationExpiration(value)
+		if err != nil {
+			return true, nil
+		}
+		add(vdeRow{
+			Type:          "vesting_delegation_expiration",
+			ID:            e.ID,
+			Delegator:     string(e.Delegator),
+			VestingShares: e.VestingShares,
+			Expiration:    e.Expiration,
+		})
+		return true, nil
+	})
+
+	// --- Proposals (DHF) ---
+	_ = s.Range(objects.ProposalTable, state.PrimaryIndex, nil, func(_, value []byte) (bool, error) {
+		p, err := objects.ReadProposal(value)
+		if err != nil {
+			return true, nil
+		}
+		add(proposalRow{
+			Type:       "proposal",
+			ID:         p.ID,
+			Creator:    string(p.Creator),
+			Receiver:   string(p.Receiver),
+			StartDate:  p.StartDate,
+			EndDate:    p.EndDate,
+			DailyPay:   p.DailyPay,
+			Subject:    p.Subject,
+			Permlink:   p.Permlink,
+			TotalVotes: p.TotalVotes,
+		})
+		return true, nil
+	})
+
+	// --- Comments (optional, very large; typed store) ---
 	if *includeComments {
-		var comms []commentRow
-		_ = s.Range(objects.CommentTable, state.PrimaryIndex, nil, func(_, value []byte) (bool, error) {
-			c, err := objects.ReadComment(value)
-			if err != nil {
-				return true, nil
-			}
-			comms = append(comms, commentRow{
+		_ = objects.EnsureCommentStore(s).RangePrimary(func(c *objects.Comment) (bool, error) {
+			add(commentRow{
 				Type:            "comment",
 				Author:          string(c.Author),
 				Permlink:        c.Permlink,
@@ -208,46 +397,71 @@ func cmdStateJSONL(args []string) int {
 			})
 			return true, nil
 		})
-		sort.Slice(comms, func(i, j int) bool {
-			if comms[i].Author != comms[j].Author {
-				return comms[i].Author < comms[j].Author
-			}
-			return comms[i].Permlink < comms[j].Permlink
-		})
-		for i := range comms {
-			_ = enc.Encode(comms[i])
-		}
 	}
 
-	_ = auth.AccountName("") // suppress unused-warn in some build configs
+	sort.Slice(rows, func(i, j int) bool { return rows[i].key < rows[j].key })
+	for i := range rows {
+		w.Write(rows[i].data)
+		w.WriteByte('\n')
+	}
 	return 0
+}
+
+// priceRow flattens an asset.Price into comparable scalar fields.
+func priceRow(p asset.Price) priceJSON {
+	return priceJSON{
+		BaseAmount:  p.Base.Amount,
+		BaseSym:     uint32(p.Base.Symbol.Num),
+		QuoteAmount: p.Quote.Amount,
+		QuoteSym:    uint32(p.Quote.Symbol.Num),
+	}
 }
 
 // JSON-tagged row types — fields appear in struct-declaration order in
 // Go's encoding/json output, so the canonical output is deterministic.
 
+type priceJSON struct {
+	BaseAmount  int64  `json:"base_amount"`
+	BaseSym     uint32 `json:"base_sym"`
+	QuoteAmount int64  `json:"quote_amount"`
+	QuoteSym    uint32 `json:"quote_sym"`
+}
+
 type dgpoRow struct {
-	Type                      string `json:"_type"`
-	HeadBlockNumber           uint32 `json:"head_block_number"`
-	HeadBlockID               string `json:"head_block_id"`
-	Time                      uint32 `json:"time"`
-	CurrentWitness            string `json:"current_witness"`
-	CurrentSupply             int64  `json:"current_supply"`
-	CurrentHBDSupply          int64  `json:"current_hbd_supply"`
-	TotalVestingShares        int64  `json:"total_vesting_shares"`
-	TotalVestingFundHive      int64  `json:"total_vesting_fund_hive"`
-	TotalRewardFundHive       int64  `json:"total_reward_fund_hive"`
-	VirtualSupply             int64  `json:"virtual_supply"`
-	HBDInterestRate           uint16 `json:"hbd_interest_rate"`
-	HBDPrintRate              uint16 `json:"hbd_print_rate"`
-	HBDStartPercent           uint16 `json:"hbd_start_percent"`
-	HBDStopPercent            uint16 `json:"hbd_stop_percent"`
-	ContentRewardPercent      uint16 `json:"content_reward_percent"`
-	VestingRewardPercent      uint16 `json:"vesting_reward_percent"`
-	ProposalFundPercent       uint16 `json:"proposal_fund_percent"`
-	ReverseAuctionSeconds     uint32 `json:"reverse_auction_seconds"`
-	DelegationReturnPeriod    uint32 `json:"delegation_return_period"`
-	AvailableAccountSubsidies int64  `json:"available_account_subsidies"`
+	Type                         string `json:"_type"`
+	HeadBlockNumber              uint32 `json:"head_block_number"`
+	HeadBlockID                  string `json:"head_block_id"`
+	Time                         uint32 `json:"time"`
+	CurrentWitness               string `json:"current_witness"`
+	CurrentSupply                int64  `json:"current_supply"`
+	CurrentHBDSupply             int64  `json:"current_hbd_supply"`
+	TotalVestingShares           int64  `json:"total_vesting_shares"`
+	TotalVestingFundHive         int64  `json:"total_vesting_fund_hive"`
+	TotalRewardFundHive          int64  `json:"total_reward_fund_hive"`
+	VirtualSupply                int64  `json:"virtual_supply"`
+	PendingRewardedVestingShares int64  `json:"pending_rewarded_vesting_shares"`
+	PendingRewardedVestingHive   int64  `json:"pending_rewarded_vesting_hive"`
+	DHFIntervalLedger            int64  `json:"dhf_interval_ledger"`
+	HBDInterestRate              uint16 `json:"hbd_interest_rate"`
+	HBDPrintRate                 uint16 `json:"hbd_print_rate"`
+	HBDStartPercent              uint16 `json:"hbd_start_percent"`
+	HBDStopPercent               uint16 `json:"hbd_stop_percent"`
+	ContentRewardPercent         uint16 `json:"content_reward_percent"`
+	VestingRewardPercent         uint16 `json:"vesting_reward_percent"`
+	ProposalFundPercent          uint16 `json:"proposal_fund_percent"`
+	ReverseAuctionSeconds        uint32 `json:"reverse_auction_seconds"`
+	DelegationReturnPeriod       uint32 `json:"delegation_return_period"`
+	AvailableAccountSubsidies    int64  `json:"available_account_subsidies"`
+}
+
+type feedHistoryRow struct {
+	Type             string    `json:"_type"`
+	CurrentMedian    priceJSON `json:"current_median"`
+	MarketMedian     priceJSON `json:"market_median"`
+	CurrentMin       priceJSON `json:"current_min"`
+	CurrentMax       priceJSON `json:"current_max"`
+	PriceHistoryLen  int       `json:"price_history_len"`
+	PriceHistoryLast priceJSON `json:"price_history_last"`
 }
 
 type accountRow struct {
@@ -299,6 +513,98 @@ type witnessRow struct {
 	HardforkTimeVote    uint32 `json:"hardfork_time_vote"`
 	RunningVersion      uint32 `json:"running_version"`
 	AvailableSubsidies  int64  `json:"available_subsidies"`
+}
+
+type rewardFundRow struct {
+	Type                  string `json:"_type"`
+	Name                  string `json:"name"`
+	RewardBalance         int64  `json:"reward_balance"`
+	RecentClaims          string `json:"recent_claims"`
+	LastUpdate            uint32 `json:"last_update"`
+	ContentConstant       int64  `json:"content_constant"`
+	PercentCuration       uint16 `json:"percent_curation_rewards"`
+	PercentContent        uint16 `json:"percent_content_rewards"`
+	AuthorRewardCurve     uint8  `json:"author_reward_curve"`
+	CurationRewardCurve   uint8  `json:"curation_reward_curve"`
+	DownvoteRewardBalance int64  `json:"downvote_reward_balance"`
+}
+
+type limitOrderRow struct {
+	Type          string `json:"_type"`
+	Owner         string `json:"owner"`
+	OrderID       uint32 `json:"order_id"`
+	Created       uint32 `json:"created"`
+	Expiration    uint32 `json:"expiration"`
+	ForSale       int64  `json:"for_sale"`
+	ForSaleSym    uint32 `json:"for_sale_sym"`
+	MinReceive    int64  `json:"min_receive"`
+	MinReceiveSym uint32 `json:"min_receive_sym"`
+	SellPriceBase int64  `json:"sell_price_base"`
+}
+
+type escrowRow struct {
+	Type                 string `json:"_type"`
+	From                 string `json:"from"`
+	To                   string `json:"to"`
+	Agent                string `json:"agent"`
+	EscrowID             uint32 `json:"escrow_id"`
+	HBDAmount            int64  `json:"hbd_amount"`
+	HiveAmount           int64  `json:"hive_amount"`
+	PendingFee           int64  `json:"pending_fee"`
+	PendingFeeIsHBD      bool   `json:"pending_fee_is_hbd"`
+	RatificationDeadline uint32 `json:"ratification_deadline"`
+	Expiration           uint32 `json:"expiration"`
+	ToApproved           bool   `json:"to_approved"`
+	AgentApproved        bool   `json:"agent_approved"`
+	Disputed             bool   `json:"disputed"`
+}
+
+type convertRow struct {
+	Type       string `json:"_type"`
+	Owner      string `json:"owner"`
+	RequestID  uint32 `json:"request_id"`
+	Amount     int64  `json:"amount"`
+	Conversion uint32 `json:"conversion"`
+}
+
+type collConvertRow struct {
+	Type       string `json:"_type"`
+	Owner      string `json:"owner"`
+	RequestID  uint32 `json:"request_id"`
+	Collateral int64  `json:"collateral"`
+	HBDOut     int64  `json:"hbd_out"`
+	Conversion uint32 `json:"conversion"`
+}
+
+type savingsWithdrawRow struct {
+	Type      string `json:"_type"`
+	From      string `json:"from"`
+	RequestID uint32 `json:"request_id"`
+	To        string `json:"to"`
+	Amount    int64  `json:"amount"`
+	Symbol    uint32 `json:"symbol"`
+	Complete  uint32 `json:"complete"`
+}
+
+type vdeRow struct {
+	Type          string `json:"_type"`
+	ID            uint32 `json:"id"`
+	Delegator     string `json:"delegator"`
+	VestingShares int64  `json:"vesting_shares"`
+	Expiration    uint32 `json:"expiration"`
+}
+
+type proposalRow struct {
+	Type       string `json:"_type"`
+	ID         int64  `json:"id"`
+	Creator    string `json:"creator"`
+	Receiver   string `json:"receiver"`
+	StartDate  uint32 `json:"start_date"`
+	EndDate    uint32 `json:"end_date"`
+	DailyPay   int64  `json:"daily_pay"`
+	Subject    string `json:"subject"`
+	Permlink   string `json:"permlink"`
+	TotalVotes int64  `json:"total_votes"`
 }
 
 type commentRow struct {
