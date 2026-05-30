@@ -98,7 +98,18 @@ func processCommentCashouts(s *state.Session, blockTime, blockNum uint32, hooks 
 		return
 	}
 	store := objects.EnsureCommentCashoutScheduleStore(s)
-	// Skip the entire hook when the earliest queued cashout is still
+	// hived decays every reward fund's recent_claims and stamps
+	// last_update = head_block_time on EVERY block at the top of
+	// process_comment_cashout (database_comment.cpp:395-413), regardless
+	// of whether any comment is due. This MUST run before the EarliestDue
+	// early-return below: skipping it on no-cashout blocks decays
+	// recent_claims in fewer/larger steps than hived (the decay is
+	// elapsed-linear, so step granularity changes the integer result),
+	// drifting the reward denominator and every downstream payout.
+	if hardfork.SetForBlock(blockNum).Has(hardfork.HF17) {
+		decayRecentClaims(s, blockTime, hardfork.SetForBlock(blockNum))
+	}
+	// Skip the rest of the hook when the earliest queued cashout is still
 	// in the future — most blocks land here.
 	if earliest, has := store.EarliestDue(); !has || earliest > blockTime {
 		return
@@ -129,7 +140,9 @@ func processCommentCashouts(s *state.Session, blockTime, blockNum uint32, hooks 
 		// longer subtract per-cashout. Mirrors C++
 		// database_comment.cpp:395-446 (decay + pre-add) +
 		// database_comment.cpp:471 (cashout uses funds[id].recent_claims).
-		decayPreAddRecentClaims(s, blockTime, blockNum, *ready, hf)
+		// The per-block decay already ran above (decayRecentClaims); here
+		// we only pre-add the due comments' curves (database_comment.cpp:437).
+		preAddRecentClaims(s, *ready)
 		// Snapshot fund.reward_balance ONCE here. Each cashout in the
 		// block uses this same value as its denominator-side input —
 		// matching C++'s `ctx.total_reward_fund_hive = funds[id].reward_balance`
@@ -650,7 +663,7 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 // every post-HF17 author/curator payout — surface symptom is the
 // `claim_reward_balance: insufficient balance` mismatch first hit at
 // block 10,635,691 for account "ocrdu".
-func decayPreAddRecentClaims(s *state.Session, blockTime, blockNum uint32, ready []blockHookCashoutPending, hf hardfork.Set) {
+func decayRecentClaims(s *state.Session, blockTime uint32, hf hardfork.Set) {
 	fund, err := objects.GetRewardFund(s, objects.PostRewardFundName)
 	if err != nil {
 		return
@@ -680,8 +693,19 @@ func decayPreAddRecentClaims(s *state.Session, blockTime, blockNum uint32, ready
 		}
 	}
 	fund.LastUpdate = blockTime
+	objects.PutRewardFund(s, &fund)
+}
 
-	// Pre-add curves of all due comments with NetRshares > 0.
+// preAddRecentClaims augments fund.recent_claims with the curve value of
+// every due comment with NetRshares > 0 BEFORE the cashout loop reads it
+// (database_comment.cpp:437). The per-block decay+stamp already ran in
+// decayRecentClaims, so this only adds; the augmented value is the
+// constant denominator each same-block cashout divides by.
+func preAddRecentClaims(s *state.Session, ready []blockHookCashoutPending) {
+	fund, err := objects.GetRewardFund(s, objects.PostRewardFundName)
+	if err != nil {
+		return
+	}
 	cur := reward.Uint128FromBytes(fund.RecentClaims)
 	for _, p := range ready {
 		c, ok := objects.GetCommentRef(s, p.author, p.permlink)

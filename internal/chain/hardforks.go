@@ -562,16 +562,30 @@ func applyHardfork17(s *state.Session) {
 	// reads see the moved value.
 	seedBalance := dgpo.TotalRewardFundHive
 	dgpo.TotalRewardFundHive = 0
+	// C++ also zeroes total_reward_shares2 here (database_hardfork.cpp:296);
+	// post-HF17 cashouts use fund.recent_claims instead, so this is dead
+	// state, but keep it faithful.
+	dgpo.TotalRewardShares2 = [16]byte{}
 	objects.PutRewardFund(s, &objects.RewardFund{
 		Name:                   objects.PostRewardFundName,
 		RewardBalance:          seedBalance,
 		RecentClaims:           recent,
-		LastUpdate:             1458835200, // HIVE_GENESIS_TIME
+		// C++ reward_fund_object ctor stamps last_update = head_block_time()
+		// (database_hardfork.cpp:283). It must NOT be genesis: the very first
+		// post-HF17 decayPreAddRecentClaims computes elapsed = blockTime -
+		// last_update; with genesis that's ~374 days >= the 30-day decay
+		// window, which CLEARS recent_claims to 0 and makes every subsequent
+		// cashout divide by a near-empty denominator (~1700x over-credit of
+		// reward_hive/hbd/vests across ~1100 accounts; first hard failure at
+		// block 10,771,813 dantheman 2-sat short).
+		LastUpdate:             dgpo.Time,
 		ContentConstant:        2_000_000_000_000,
 		PercentCurationRewards: 2500,
 		PercentContentRewards:  10000,
 		AuthorRewardCurve:      objects.CurveQuadratic,
-		CurationRewardCurve:    objects.CurveQuadratic,
+		// C++ default curation_reward_curve = bounded_curation (curve_id 1),
+		// not quadratic. reward_fund_object.hpp:33.
+		CurationRewardCurve:    objects.CurveBoundedCurve,
 	})
 	objects.PutDGPO(s, &dgpo)
 
