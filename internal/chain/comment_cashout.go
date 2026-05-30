@@ -28,7 +28,30 @@ var (
 	envGhivediffVsts     = os.Getenv("GHIVEDIFF_VSTS")
 	envGhivediffPowbump  = os.Getenv("GHIVEDIFF_POWBUMP")
 	envGhivediffReset    = os.Getenv("GHIVEDIFF_RESET")
+	// GHIVEDIFF_CALC_FROM/TO: emit CASHOUT-CALC for all cashouts in the
+	// [from,to] block range (drift localization without recompiling).
+	envCalcFrom = parseUintEnv("GHIVEDIFF_CALC_FROM")
+	envCalcTo   = parseUintEnv("GHIVEDIFF_CALC_TO")
 )
+
+func parseUintEnv(k string) uint32 {
+	v := os.Getenv(k)
+	if v == "" {
+		return 0
+	}
+	var n uint64
+	for _, c := range v {
+		if c < '0' || c > '9' {
+			return 0
+		}
+		n = n*10 + uint64(c-'0')
+	}
+	return uint32(n)
+}
+
+func calcTraceWindow(blockNum uint32) bool {
+	return envCalcTo != 0 && blockNum >= envCalcFrom && blockNum <= envCalcTo
+}
 
 func ghiveDiff(format string, args ...any) {
 	if envGhivediff == "" {
@@ -316,13 +339,22 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 		}
 	}()
 
-	if !c.AllowCurationRewards || c.NetRshares <= 0 {
+	if c.NetRshares <= 0 {
 		// Frozen / no-payout comment: zero the on_payout fields AND
 		// delete cv rows. C++ database_comment.cpp:417-424 deletes ALL
 		// comment_vote rows at the end of cashout_helper, OUTSIDE the
 		// `if (net_rshares > 0)` reward gate. Without this, NetRshares<=0
 		// cashouts leave stale cv rows behind, so subsequent votes look
 		// like recasts in our state but NEW votes in C++.
+		//
+		// NOTE: !AllowCurationRewards is NOT a skip condition. hived only
+		// zeroes the CURATION pool for such comments (pay_curators,
+		// database_comment.cpp:146-150); the AUTHOR is still paid
+		// reward×(1-curation_pct) and the fund drains by that. Skipping the
+		// whole payout left the fund over-funded — e.g. webdev/testing-more-
+		// things at block 13,059,401 (author owed ~4697, paid 0), drifting
+		// reward_balance and cascading into the post-HF19 sat-level reward
+		// cluster + markrmorrisjr's claim failure at 13,060,794.
 		zero()
 		deleteCommentVotes(s, author, permlink)
 		return
@@ -414,7 +446,7 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 		qClaim = 1<<63 - 1
 	}
 	claimed := int64(qClaim)
-	if traceAccount(author) || (envGhivediffAll != "" && ((blockNum >= 2888500 && blockNum <= 2910000) || (blockNum >= 9640246 && blockNum <= 9640246))) {
+	if traceAccount(author) || (envGhivediffAll != "" && ((blockNum >= 2888500 && blockNum <= 2910000) || (blockNum >= 9640246 && blockNum <= 9640246))) || calcTraceWindow(blockNum) {
 		ghiveDiff("GHIVEDIFF CASHOUT-CALC block=%d author=%s permlink=%s id=%d cashoutTime=%d rshares=%d fundBalance=%d shares2_hi=%d shares2_lo=%d claimed_pre_clip=%d\n",
 			blockNum, author, permlink, c.ID, scheduledTime, c.NetRshares, fundBalance, shares2.Hi, shares2.Lo, claimed)
 	}
@@ -485,23 +517,32 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 		return
 	}
 
-	// Decrement the source pool.
-	if usingFund {
-		fund.RewardBalance -= claimed
-		objects.PutRewardFund(s, &fund)
-	} else {
-		dgpo.TotalRewardFundHive -= claimed
-		objects.PutDGPO(s, &dgpo)
-	}
-
 	// HF17+ honors the reward_fund's per-curation share; pre-HF17 we
 	// fall back to the legacy curationPct gate (50/50 pre-HF8, 25/75
-	// post-HF8).
+	// post-HF8). Compute the split BEFORE draining the pool: when curation
+	// is disallowed the curation share is forfeited (never paid, never
+	// drained), so only authorPool comes out of the fund.
 	if usingFund && fund.PercentCurationRewards > 0 {
 		curationPct = int64(fund.PercentCurationRewards)
 	}
 	curatorPool := claimed * curationPct / 10000
 	authorPool := claimed - curatorPool
+
+	// Decrement the source pool. hived drains hive_awarded = claimed_reward,
+	// which is the full reward normally but only author_tokens (= claimed -
+	// curation_tokens) when allows_curation_rewards is false — the forfeited
+	// curation stays in the fund.
+	drain := claimed
+	if !c.AllowCurationRewards {
+		drain = authorPool
+	}
+	if usingFund {
+		fund.RewardBalance -= drain
+		objects.PutRewardFund(s, &fund)
+	} else {
+		dgpo.TotalRewardFundHive -= drain
+		objects.PutDGPO(s, &dgpo)
+	}
 
 	// Mirror C++ cashout_comment_helper order (database_comment.cpp:259-310):
 	// CURATORS FIRST (so authors / beneficiaries see the post-curator
@@ -512,9 +553,13 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 	// share prices for any post with both — dormant pre-HF17 (no
 	// beneficiaries) but visible later.
 	curatorRemainder := int64(0)
-	if curatorPool > 0 {
+	if c.AllowCurationRewards && curatorPool > 0 {
 		curatorRemainder = distributeCuratorPool(s, c.Author, c.Permlink, curatorPool, hooks)
 	}
+	// When curation is disallowed, curatorRemainder stays 0 — the curation
+	// share is forfeited (already excluded from `drain` above), NOT forwarded
+	// to the author. Mirrors hived pay_curators zeroing max_rewards so
+	// curation_remainder = 0 and author_tokens = reward - curation_tokens.
 	hf := hardfork.SetForBlock(blockNum)
 	if !hf.Has(hardfork.HF20) && curatorRemainder > 0 {
 		authorPool += curatorRemainder
@@ -600,7 +645,7 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 	// half VESTS at the dynamic price.
 	hbdHive := authorPool * int64(c.PercentHbd) / 20000
 	vestingHive := authorPool - hbdHive
-	if traceAccount(author) || (envGhivediffAll != "" && ((blockNum >= 2888500 && blockNum <= 2910000) || (blockNum >= 9640246 && blockNum <= 9640246))) {
+	if traceAccount(author) || (envGhivediffAll != "" && ((blockNum >= 2888500 && blockNum <= 2910000) || (blockNum >= 9640246 && blockNum <= 9640246))) || calcTraceWindow(blockNum) {
 		ghiveDiff("GHIVEDIFF CASHOUT-AUTHOR block=%d author=%s permlink=%s author_tokens=%d hbd_hive=%d vesting_hive=%d curator_remainder=%d\n",
 			blockNum, author, permlink, authorPool, hbdHive, vestingHive, curatorRemainder)
 	}
