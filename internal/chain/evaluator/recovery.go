@@ -239,28 +239,31 @@ func (changeRecoveryAccountEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	} else if !has {
 		return fmt.Errorf("%w: new_recovery_account=%q", ErrAccountNotFound, cr.NewRecoveryAccount)
 	}
-	// Mirror C++ 3-branch logic (hive_evaluator_account.cpp:565-591):
+	// Mirror C++ 3-branch logic (hive_evaluator_account.cpp:565-591),
+	// which branches on whether a pending request EXISTS, NOT on whether
+	// new == current:
 	//
-	// (a) If target's current recovery_account ALREADY equals the new one:
-	//     - if a pending request exists → REMOVE it (the user is
-	//       cancelling a previous change).
-	//     - if no pending request → reject (no-op edge case).
-	// (b) Otherwise: upsert a pending request with effective_on = now + 30d.
+	// (a) No pending request → CREATE one — even when new == current
+	//     ("it is possible to request change to currently set recovery
+	//     agent (empty operation)"). This is the case Go got wrong: it
+	//     rejected new==current with no request, but C++ creates a
+	//     (30-day) request. Frontier block 4,284,590: everest →steem.
+	// (b) Request exists AND current != new → MODIFY (reset timer + agent;
+	//     Put upserts).
+	// (c) Request exists AND current == new → REMOVE (cancel the change
+	//     back to the current agent).
 	hasReq, _ := objects.HasChangeRecoveryRequest(ctx.DB, cr.AccountToRecover)
-	if acct.RecoveryAccount == cr.NewRecoveryAccount {
-		if !hasReq {
-			return fmt.Errorf("change_recovery_account: %q already has recovery_account=%q and no pending change", cr.AccountToRecover, cr.NewRecoveryAccount)
-		}
-		if req, gerr := objects.GetChangeRecoveryRequest(ctx.DB, cr.AccountToRecover); gerr == nil {
-			objects.DeleteChangeRecoveryRequestFull(ctx.DB, &req)
-		}
+	if !hasReq || acct.RecoveryAccount != cr.NewRecoveryAccount {
+		objects.PutChangeRecoveryRequest(ctx.DB, &objects.ChangeRecoveryAccountRequest{
+			AccountToRecover: cr.AccountToRecover,
+			RecoveryAccount:  cr.NewRecoveryAccount,
+			EffectiveOn:      ctx.HeadBlockTime + changeRecoveryEffectiveDelaySec,
+		})
 		return nil
 	}
-	objects.PutChangeRecoveryRequest(ctx.DB, &objects.ChangeRecoveryAccountRequest{
-		AccountToRecover: cr.AccountToRecover,
-		RecoveryAccount:  cr.NewRecoveryAccount,
-		EffectiveOn:      ctx.HeadBlockTime + changeRecoveryEffectiveDelaySec,
-	})
+	if req, gerr := objects.GetChangeRecoveryRequest(ctx.DB, cr.AccountToRecover); gerr == nil {
+		objects.DeleteChangeRecoveryRequestFull(ctx.DB, &req)
+	}
 	return nil
 }
 
