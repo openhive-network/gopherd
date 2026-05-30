@@ -86,13 +86,31 @@ func (requestAccountRecoveryEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		}
 		return aerr
 	}
-	// Mirror C++ hive_evaluator_account.cpp:479-489 — the op's
-	// recovery_account must match the account's stored
-	// recovery_account. Without this check, any account could file
-	// a recovery request for any target.
-	if rr.RecoveryAccount != acct.RecoveryAccount {
-		return fmt.Errorf("request_account_recovery: signer %q does not match %q's recovery_account %q",
-			rr.RecoveryAccount, rr.AccountToRecover, acct.RecoveryAccount)
+	// Mirror C++ hive_evaluator_account.cpp:502-514. Two cases:
+	//   (a) account HAS a recovery_account (non-empty) → the op's
+	//       recovery_account must equal it.
+	//   (b) account has NO recovery_account (empty; C++ stores id 0,
+	//       Go stores "") → recovery defaults to the TOP witness
+	//       (by_vote_name: highest total_votes_vests, tie-break by name).
+	//       This branch was missing: e.g. the "temp" account has no
+	//       recovery partner, so the top witness recovers it. Without it,
+	//       every such request was wrongly rejected (frontier block
+	//       3,297,829: arhag recovering "temp").
+	if acct.RecoveryAccount != "" {
+		if rr.RecoveryAccount != acct.RecoveryAccount {
+			return fmt.Errorf("request_account_recovery: signer %q does not match %q's recovery_account %q",
+				rr.RecoveryAccount, rr.AccountToRecover, acct.RecoveryAccount)
+		}
+	} else {
+		var top auth.AccountName
+		_ = objects.EnsureWitnessStore(ctx.DB).RangeByVote(func(w *objects.Witness) (bool, error) {
+			top = w.Owner
+			return false, nil // first entry = top witness by_vote_name
+		})
+		if rr.RecoveryAccount != top {
+			return fmt.Errorf("request_account_recovery: top witness %q must recover %q (no recovery partner), got %q",
+				top, rr.AccountToRecover, rr.RecoveryAccount)
+		}
 	}
 	// 3-branch shape (hive_evaluator_account.cpp:499-527):
 	// (a) new_owner_authority is "impossible" (weight_threshold 0) →
