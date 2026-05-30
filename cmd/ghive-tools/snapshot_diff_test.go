@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"hived-go/internal/statejsonl"
 )
 
 // identKey extracts type+identifier; verify the few cases used in
@@ -16,9 +18,11 @@ func TestSnapshotDiffIdentKey(t *testing.T) {
 		{`{"_type":"witness","owner":"bob","url":"x"}`, "witness/bob"},
 		{`{"_type":"comment","author":"a","permlink":"p"}`, "comment/a/p"},
 		{`{"_type":"dgpo","head_block_number":42}`, "dgpo"},
+		{`{"_type":"limit_order","owner":"al","order_id":9}`, "limit_order/al/00000000000000000009"},
+		{`{"_type":"proposal","id":12}`, "proposal/00000000000000000012"},
 	}
 	for _, c := range cases {
-		got := identKey([]byte(c.line))
+		got := statejsonl.IdentKey([]byte(c.line))
 		if got != c.want {
 			t.Errorf("%s → %q, want %q", c.line, got, c.want)
 		}

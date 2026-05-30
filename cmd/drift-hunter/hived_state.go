@@ -30,6 +30,8 @@ type hivedDGPO struct {
 	TotalVestingFundHive          hivedAsset      `json:"total_vesting_fund_hive"`
 	TotalVestingShares            hivedAsset      `json:"total_vesting_shares"`
 	TotalRewardFundHive           hivedAsset      `json:"total_reward_fund_hive"`
+	PendingRewardedVestingShares  hivedAsset      `json:"pending_rewarded_vesting_shares"`
+	PendingRewardedVestingHive    hivedAsset      `json:"pending_rewarded_vesting_hive"`
 	TotalRewardShares2            json.RawMessage `json:"total_reward_shares2"`
 	HBDInterestRate               uint16          `json:"hbd_interest_rate"`
 	HBDPrintRate                  uint16          `json:"hbd_print_rate"`

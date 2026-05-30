@@ -53,6 +53,7 @@ type runFlags struct {
 	topN        int
 	skipWitness bool
 	accounts    string // comma-separated account names to compare
+	dumpJSONL   string // if set, dump full hived state as canonical JSONL to this path and exit
 }
 
 func parseFlags() *runFlags {
@@ -66,6 +67,7 @@ func parseFlags() *runFlags {
 	flag.IntVar(&f.topN, "top-witnesses", 21, "compare the top-N witnesses by votes")
 	flag.BoolVar(&f.skipWitness, "skip-witness", false, "skip per-witness comparators (DGPO/schedule/feed/funds only)")
 	flag.StringVar(&f.accounts, "account", "", "comma-separated account names to compare (balances + vesting)")
+	flag.StringVar(&f.dumpJSONL, "dump-jsonl", "", "dump FULL hived state from --hived-url as canonical JSONL to this path, then exit (pair with `ghive-tools state-jsonl` + `snapshot-diff`)")
 	flag.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: drift-hunter [flags]")
 		fmt.Fprintln(os.Stderr, "  --block=N                 single block")
@@ -341,6 +343,23 @@ func summarize(block uint32, drifts []drift) {
 
 func main() {
 	f := parseFlags()
+
+	// --dump-jsonl is a standalone mode: it only needs hived, not a Go
+	// snapshot or a target block.
+	if f.dumpJSONL != "" {
+		rpc := newRPCClient(f.hivedURL)
+		if err := rpc.probe(); err != nil {
+			fmt.Fprintf(os.Stderr, "drift-hunter: hived API at %s not responding: %v\n", f.hivedURL, err)
+			fmt.Fprintln(os.Stderr, "Did you start scripts/hived-serve-checkpoint.sh <block>?")
+			os.Exit(1)
+		}
+		if err := dumpHivedJSONL(rpc, f.dumpJSONL); err != nil {
+			fmt.Fprintln(os.Stderr, "drift-hunter: dump-jsonl:", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	if f.block == 0 && f.rangeSpec == "" {
 		fmt.Fprintln(os.Stderr, "drift-hunter: must pass --block=N or --range=A:B:S")
 		os.Exit(2)

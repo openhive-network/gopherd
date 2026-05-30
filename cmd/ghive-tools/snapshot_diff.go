@@ -19,13 +19,18 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	"hived-go/internal/statejsonl"
 )
 
 func cmdSnapshotDiff(args []string) int {
 	fs := flag.NewFlagSet("snapshot-diff", flag.ContinueOnError)
 	maxDiffs := fs.Int("max-diffs", 50, "stop after this many diff lines (0 = unlimited)")
-	skipFields := fs.String("skip-fields", "rc_mana_current,rc_mana_last_update,last_max_rc,voting_mana_current,voting_mana_last_update",
-		"comma-separated field names to ignore (post-replay these often drift legitimately)")
+	skipFields := fs.String("skip-fields",
+		"rc_mana_current,rc_mana_last_update,last_max_rc,delegated_rc_in,delegated_rc_out,"+
+			"voting_mana_current,voting_mana_last_update,hbd_last_interest_payment,"+
+			"savings_hbd_last_interest_payment,signing_key,hardfork_version_vote,running_version",
+		"comma-separated field names to ignore. Default drops fields the hived dump-jsonl can't populate from account_api (RC manabar, interest stamps) and encoding-divergent ones (signing_key b58-vs-hex, packed versions). Pass an empty value for a strict Go-vs-Go regression diff.")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -94,8 +99,8 @@ func cmdSnapshotDiff(args []string) int {
 			bHas = advanceB()
 			diffs++
 		default:
-			ka := identKey(aLine)
-			kb := identKey(bLine)
+			ka := statejsonl.IdentKey(aLine)
+			kb := statejsonl.IdentKey(bLine)
 			switch {
 			case ka < kb:
 				fmt.Printf("- %s\n", string(aLine))
@@ -127,63 +132,6 @@ func cmdSnapshotDiff(args []string) int {
 	}
 	fmt.Printf("FAIL — %d differences\n", diffs)
 	return 1
-}
-
-// identKey extracts the type+identifier from a JSONL row used to align
-// streams. For an account row it's "account/<name>"; for a witness it's
-// "witness/<owner>"; for dgpo just "dgpo".
-func identKey(line []byte) string {
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(line, &m); err != nil {
-		return string(line)
-	}
-	t := unquoteJSON(m["_type"])
-	f := func(k string) string { return unquoteJSON(m[k]) }
-	switch t {
-	case "account":
-		return "account/" + f("name")
-	case "witness":
-		return "witness/" + f("owner")
-	case "reward_fund":
-		return "reward_fund/" + f("name")
-	case "comment":
-		return "comment/" + f("author") + "/" + f("permlink")
-	case "limit_order":
-		return "limit_order/" + f("owner") + "/" + padNum(f("order_id"))
-	case "escrow":
-		return "escrow/" + f("from") + "/" + padNum(f("escrow_id"))
-	case "convert_request":
-		return "convert_request/" + f("owner") + "/" + padNum(f("request_id"))
-	case "collateralized_convert":
-		return "collateralized_convert/" + f("owner") + "/" + padNum(f("request_id"))
-	case "savings_withdraw":
-		return "savings_withdraw/" + f("from") + "/" + padNum(f("request_id"))
-	case "vesting_delegation_expiration":
-		return "vesting_delegation_expiration/" + f("delegator") + "/" + padNum(f("id"))
-	case "proposal":
-		return "proposal/" + padNum(f("id"))
-	default:
-		// Singletons (dgpo, feed_history) and any future bare type.
-		return t
-	}
-}
-
-// padNum left-pads a decimal string to 20 chars so lexical order equals
-// numeric order ("order/9" must sort before "order/10"). Non-numeric
-// input is returned unchanged.
-func padNum(s string) string {
-	if s == "" {
-		return s
-	}
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			return s
-		}
-	}
-	if len(s) >= 20 {
-		return s
-	}
-	return "00000000000000000000"[:20-len(s)] + s
 }
 
 // diffJSON returns a one-line description of differing fields between

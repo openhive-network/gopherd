@@ -35,6 +35,7 @@ import (
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
 	"hived-go/internal/state/snapshot"
+	"hived-go/internal/statejsonl"
 )
 
 // registerAllStores pre-registers every typed subsystem on a freshly
@@ -122,12 +123,12 @@ func cmdStateJSONL(args []string) int {
 		if err != nil {
 			return
 		}
-		rows = append(rows, jrow{key: identKey(b), data: append([]byte(nil), b...)})
+		rows = append(rows, jrow{key: statejsonl.IdentKey(b), data: append([]byte(nil), b...)})
 	}
 
 	// --- DGPO ---
 	if p, err := objects.GetDGPO(s); err == nil {
-		add(dgpoRow{
+		add(statejsonl.DGPORow{
 			Type:                         "dgpo",
 			HeadBlockNumber:              p.HeadBlockNumber,
 			HeadBlockID:                  hex.EncodeToString(p.HeadBlockID[:]),
@@ -157,11 +158,11 @@ func cmdStateJSONL(args []string) int {
 
 	// --- feed_history (singleton) ---
 	if fh, err := objects.GetFeedHistory(s); err == nil {
-		var last priceJSON
+		var last statejsonl.PriceJSON
 		if n := len(fh.PriceHistory); n > 0 {
 			last = priceRow(fh.PriceHistory[n-1])
 		}
-		add(feedHistoryRow{
+		add(statejsonl.FeedHistoryRow{
 			Type:             "feed_history",
 			CurrentMedian:    priceRow(fh.CurrentMedianHistory),
 			MarketMedian:     priceRow(fh.MarketMedianHistory),
@@ -174,7 +175,7 @@ func cmdStateJSONL(args []string) int {
 
 	// --- Accounts (typed store) ---
 	_ = objects.RangeAccounts(s, func(a *objects.Account) (bool, error) {
-		add(accountRow{
+		add(statejsonl.AccountRow{
 			Type:                          "account",
 			Name:                          string(a.Name),
 			Created:                       a.Created,
@@ -212,7 +213,7 @@ func cmdStateJSONL(args []string) int {
 
 	// --- Witnesses (typed store) ---
 	_ = objects.EnsureWitnessStore(s).RangePrimary(func(wo *objects.Witness) (bool, error) {
-		add(witnessRow{
+		add(statejsonl.WitnessRow{
 			Type:                "witness",
 			Owner:               string(wo.Owner),
 			Created:             wo.Created,
@@ -237,7 +238,7 @@ func cmdStateJSONL(args []string) int {
 		if err != nil {
 			return true, nil
 		}
-		add(rewardFundRow{
+		add(statejsonl.RewardFundRow{
 			Type:                  "reward_fund",
 			Name:                  rf.Name,
 			RewardBalance:         rf.RewardBalance,
@@ -408,8 +409,8 @@ func cmdStateJSONL(args []string) int {
 }
 
 // priceRow flattens an asset.Price into comparable scalar fields.
-func priceRow(p asset.Price) priceJSON {
-	return priceJSON{
+func priceRow(p asset.Price) statejsonl.PriceJSON {
+	return statejsonl.PriceJSON{
 		BaseAmount:  p.Base.Amount,
 		BaseSym:     uint32(p.Base.Symbol.Num),
 		QuoteAmount: p.Quote.Amount,
@@ -419,115 +420,9 @@ func priceRow(p asset.Price) priceJSON {
 
 // JSON-tagged row types — fields appear in struct-declaration order in
 // Go's encoding/json output, so the canonical output is deterministic.
-
-type priceJSON struct {
-	BaseAmount  int64  `json:"base_amount"`
-	BaseSym     uint32 `json:"base_sym"`
-	QuoteAmount int64  `json:"quote_amount"`
-	QuoteSym    uint32 `json:"quote_sym"`
-}
-
-type dgpoRow struct {
-	Type                         string `json:"_type"`
-	HeadBlockNumber              uint32 `json:"head_block_number"`
-	HeadBlockID                  string `json:"head_block_id"`
-	Time                         uint32 `json:"time"`
-	CurrentWitness               string `json:"current_witness"`
-	CurrentSupply                int64  `json:"current_supply"`
-	CurrentHBDSupply             int64  `json:"current_hbd_supply"`
-	TotalVestingShares           int64  `json:"total_vesting_shares"`
-	TotalVestingFundHive         int64  `json:"total_vesting_fund_hive"`
-	TotalRewardFundHive          int64  `json:"total_reward_fund_hive"`
-	VirtualSupply                int64  `json:"virtual_supply"`
-	PendingRewardedVestingShares int64  `json:"pending_rewarded_vesting_shares"`
-	PendingRewardedVestingHive   int64  `json:"pending_rewarded_vesting_hive"`
-	DHFIntervalLedger            int64  `json:"dhf_interval_ledger"`
-	HBDInterestRate              uint16 `json:"hbd_interest_rate"`
-	HBDPrintRate                 uint16 `json:"hbd_print_rate"`
-	HBDStartPercent              uint16 `json:"hbd_start_percent"`
-	HBDStopPercent               uint16 `json:"hbd_stop_percent"`
-	ContentRewardPercent         uint16 `json:"content_reward_percent"`
-	VestingRewardPercent         uint16 `json:"vesting_reward_percent"`
-	ProposalFundPercent          uint16 `json:"proposal_fund_percent"`
-	ReverseAuctionSeconds        uint32 `json:"reverse_auction_seconds"`
-	DelegationReturnPeriod       uint32 `json:"delegation_return_period"`
-	AvailableAccountSubsidies    int64  `json:"available_account_subsidies"`
-}
-
-type feedHistoryRow struct {
-	Type             string    `json:"_type"`
-	CurrentMedian    priceJSON `json:"current_median"`
-	MarketMedian     priceJSON `json:"market_median"`
-	CurrentMin       priceJSON `json:"current_min"`
-	CurrentMax       priceJSON `json:"current_max"`
-	PriceHistoryLen  int       `json:"price_history_len"`
-	PriceHistoryLast priceJSON `json:"price_history_last"`
-}
-
-type accountRow struct {
-	Type                          string `json:"_type"`
-	Name                          string `json:"name"`
-	Created                       uint32 `json:"created"`
-	Balance                       int64  `json:"balance"`
-	HBDBalance                    int64  `json:"hbd_balance"`
-	VestingShares                 int64  `json:"vesting_shares"`
-	DelegatedVestingShares        int64  `json:"delegated_vesting_shares"`
-	ReceivedVestingShares         int64  `json:"received_vesting_shares"`
-	RewardHive                    int64  `json:"reward_hive"`
-	RewardHBD                     int64  `json:"reward_hbd"`
-	RewardVests                   int64  `json:"reward_vests"`
-	SavingsBalance                int64  `json:"savings_balance"`
-	SavingsHBDBalance             int64  `json:"savings_hbd_balance"`
-	VestingWithdrawRate           int64  `json:"vesting_withdraw_rate"`
-	NextVestingWithdrawal         uint32 `json:"next_vesting_withdrawal"`
-	ToWithdraw                    int64  `json:"to_withdraw"`
-	Withdrawn                     int64  `json:"withdrawn"`
-	Proxy                         string `json:"proxy"`
-	WitnessesVotedFor             uint16 `json:"witnesses_voted_for"`
-	PendingClaimedAccounts        uint16 `json:"pending_claimed_accounts"`
-	VotingManaCurrent             int64  `json:"voting_mana_current"`
-	VotingManaLastUpdate          uint32 `json:"voting_mana_last_update"`
-	HBDLastInterestPayment        uint32 `json:"hbd_last_interest_payment"`
-	SavingsHBDLastInterestPayment uint32 `json:"savings_hbd_last_interest_payment"`
-	RCManaCurrent                 int64  `json:"rc_mana_current"`
-	RCManaLastUpdate              uint32 `json:"rc_mana_last_update"`
-	LastMaxRC                     int64  `json:"last_max_rc"`
-	DelegatedRCIn                 int64  `json:"delegated_rc_in"`
-	DelegatedRCOut                int64  `json:"delegated_rc_out"`
-	LastOwnerUpdate               uint32 `json:"last_owner_update"`
-	SumDelayedVotes               uint64 `json:"sum_delayed_votes"`
-}
-
-type witnessRow struct {
-	Type                string `json:"_type"`
-	Owner               string `json:"owner"`
-	Created             uint32 `json:"created"`
-	URL                 string `json:"url"`
-	SigningKey          string `json:"signing_key"`
-	AccountCreationFee  int64  `json:"account_creation_fee"`
-	MaximumBlockSize    uint32 `json:"maximum_block_size"`
-	HBDInterestRate     uint16 `json:"hbd_interest_rate"`
-	TotalVotesVests     int64  `json:"total_votes_vests"`
-	TotalMissedBlocks   uint32 `json:"total_missed_blocks"`
-	HardforkVersionVote uint32 `json:"hardfork_version_vote"`
-	HardforkTimeVote    uint32 `json:"hardfork_time_vote"`
-	RunningVersion      uint32 `json:"running_version"`
-	AvailableSubsidies  int64  `json:"available_subsidies"`
-}
-
-type rewardFundRow struct {
-	Type                  string `json:"_type"`
-	Name                  string `json:"name"`
-	RewardBalance         int64  `json:"reward_balance"`
-	RecentClaims          string `json:"recent_claims"`
-	LastUpdate            uint32 `json:"last_update"`
-	ContentConstant       int64  `json:"content_constant"`
-	PercentCuration       uint16 `json:"percent_curation_rewards"`
-	PercentContent        uint16 `json:"percent_content_rewards"`
-	AuthorRewardCurve     uint8  `json:"author_reward_curve"`
-	CurationRewardCurve   uint8  `json:"curation_reward_curve"`
-	DownvoteRewardBalance int64  `json:"downvote_reward_balance"`
-}
+// The shared types (dgpo, feed_history, account, witness, reward_fund,
+// price) live in internal/statejsonl so the hived-side dumper emits a
+// byte-identical format. The types below are ghive-only for now.
 
 type limitOrderRow struct {
 	Type          string `json:"_type"`
