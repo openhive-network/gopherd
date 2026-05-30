@@ -47,6 +47,8 @@ func cmdReplay(args []string) int {
 	saveDirSnapshotTo := fs.String("save-dir-snapshot-to", "", "directory snapshot root (block-N/ subdir is created; used with --save-dir-snapshot-at)")
 	snapshotEvery := fs.Uint("snapshot-every", 0, "save a directory snapshot every N applied blocks (0 = off)")
 	snapshotDir := fs.String("snapshot-dir", "", "directory under which periodic snapshots are saved (block-<N>/ subdir per snapshot, used with --snapshot-every)")
+	checkInvariants := fs.Uint("check-invariants", 0, "verify HIVE/HBD/VESTS conservation laws every N blocks (0 = off); aborts at the first block where the books don't balance — catches silent drift WITHOUT a reference hived")
+	checkInvariantsStop := fs.Bool("check-invariants-stop", true, "stop replay at the first invariant violation (set false to log and continue)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -258,6 +260,19 @@ func cmdReplay(args []string) int {
 					prevSnap.savings, cur.savings,
 					prevSnap.savingsHBD, cur.savingsHBD)
 				prevSnap = cur
+			}
+		}
+		if *checkInvariants != 0 && uint64(n)%uint64(*checkInvariants) == 0 {
+			chkSess := state.NewSession(stateDB)
+			r, cerr := chain.CheckInvariants(chkSess)
+			if cerr != nil {
+				fmt.Fprintf(os.Stderr, "block %d invariants: %v\n", n, cerr)
+			} else if !r.OK() {
+				fmt.Fprintf(os.Stderr, "INVARIANT FAIL block=%d accounts=%d%s\n", n, r.Accounts, r.FailString())
+				if *checkInvariantsStop {
+					fmt.Printf("replay: aborting at first invariant violation (block %d)\n", n)
+					return 1
+				}
 			}
 		}
 		if uint64(n)%uint64(*progressEvery) == 0 {
