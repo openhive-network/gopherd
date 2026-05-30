@@ -278,12 +278,21 @@ func (delegateVestingSharesEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		if prev.MinDelegation > expiration {
 			expiration = prev.MinDelegation
 		}
-		// Use the (delegator, blockTime) pair as a coarse ID; if
-		// the delegator does multiple reductions in the same block
-		// they'll collide. Hived uses a monotonic id; we use a hash
-		// of (delegator, blockTime, returned) to keep collisions
-		// improbable.
-		id := uint32(returned ^ int64(ctx.HeadBlockTime))
+		// Assign a monotonic id from dgpo (mirrors hived's chainbase
+		// per-object id). The primary key is (delegator, id); the old
+		// `uint32(returned ^ blockTime)` hash COLLIDED when a delegator
+		// reduced multiple equal-sized delegations in the same block,
+		// overwriting the expiration row and losing those returns —
+		// delegated_vesting_shares stayed too high (steem +65.5T VESTS at
+		// block 12.014M). A monotonic counter is collision-free.
+		var id uint32
+		if dgpo, derr := objects.GetDGPO(ctx.DB); derr == nil {
+			id = dgpo.NextVestingDelegationExpirationID
+			dgpo.NextVestingDelegationExpirationID++
+			objects.PutDGPO(ctx.DB, &dgpo)
+		} else {
+			id = uint32(returned ^ int64(ctx.HeadBlockTime))
+		}
 		objects.PutVestingDelegationExpiration(ctx.DB, &objects.VestingDelegationExpiration{
 			ID:            id,
 			Delegator:     d.Delegator,

@@ -127,6 +127,16 @@ type DynamicGlobalProperty struct {
 	// by (owner, user_orderid) — different match sequences than hived,
 	// drifts account balances over time.
 	NextLimitOrderID uint64
+	// NextVestingDelegationExpirationID is a monotonic counter assigned to
+	// each vesting_delegation_expiration_object, mirroring hived's chainbase
+	// per-object id. The primary key is (delegator, id); a collision-free id
+	// is REQUIRED — the earlier `uint32(returned ^ blockTime)` hash collided
+	// when an account reduced multiple equal-sized delegations in one block
+	// (e.g. steem onboarding: many 220G-VEST reductions/block), overwriting
+	// the expiration row so those returns were lost and delegated_vesting_shares
+	// stayed too high (steem +65.5T VESTS / undelegated short, failing
+	// account_create_with_delegation at block 12,014,688).
+	NextVestingDelegationExpirationID uint32
 	// LastIrreversibleBlockNum is the chain-wide irreversibility height.
 	// Recomputed each block from the median of the active witness
 	// schedule's last_confirmed_block_num values (75% threshold). Mirrors
@@ -235,6 +245,7 @@ func AppendDGPO(dst []byte, p *DynamicGlobalProperty) []byte {
 	dst = appendI64LE(dst, p.PendingRewardedVestingHive)
 	dst = appendU32LE(dst, p.NextMaintenanceTime)
 	dst = appendU32LE(dst, p.LastBudgetTime)
+	dst = appendU32LE(dst, p.NextVestingDelegationExpirationID)
 	return dst
 }
 
@@ -408,6 +419,14 @@ func ReadDGPO(src []byte) (DynamicGlobalProperty, error) {
 	}
 	if p.LastBudgetTime, err = r.ReadUint32(); err != nil {
 		return p, fmt.Errorf("dgpo.last_budget_time: %w", err)
+	}
+	// NextVestingDelegationExpirationID is a later schema addition — tolerate
+	// EOF for pre-schema snapshots (counter resumes at 0).
+	if r.AtEnd() {
+		return p, nil
+	}
+	if p.NextVestingDelegationExpirationID, err = r.ReadUint32(); err != nil {
+		return p, fmt.Errorf("dgpo.next_vesting_delegation_expiration_id: %w", err)
 	}
 	if !r.AtEnd() {
 		return p, errors.New("dgpo: trailing bytes after decode (schema mismatch?)")
