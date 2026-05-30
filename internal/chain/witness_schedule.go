@@ -632,9 +632,14 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 
 	updateMedianWitnessProps(s, ws)
 
-	if ws.MedianHBDInterestRate > 0 {
-		dgpo.HBDInterestRate = ws.MedianHBDInterestRate
-	}
+	// C++ update_global_witness_properties (witness_schedule.cpp:51-55)
+	// assigns dgpo.hbd_interest_rate = median UNCONDITIONALLY — including
+	// when the median is 0. The earlier `> 0` guard left the rate stuck at
+	// its last positive value once witnesses voted it to 0 (mainnet: the
+	// median hit 0 between blocks 10.77M and 11.42M; Go held 10 while hived
+	// dropped to 0), causing Go to pay HBD interest hived never paid
+	// (+15,417 sat current_hbd_supply / ~34 accounts by block 11.42M).
+	dgpo.HBDInterestRate = ws.MedianHBDInterestRate
 
 	// Persist grown capacities back into the scratch — next round
 	// resets to len=0 but keeps cap.
