@@ -633,16 +633,23 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 	deleteCommentVotes(s, author, permlink)
 	zero()
 
-	// HF19+ deletes the cashout row after payout (database_comment.cpp:482).
-	// Our unified Comment row carries both cashout AND identity; deleting it
-	// is the only way to release the ~9 GiB CommentStore retention we
-	// observed at block 21.5M. Subsequent voters/repliers will see "comment
-	// not found", which is the correct post-payout behavior (mirrors
-	// has_hardfork(HF19) + cashout-row removed in C++ — vote/reply
-	// evaluators bail there too).
-	if hfReschedule.Has(hardfork.HF19) && rescheduleTime == 0 {
-		objects.DeleteComment(s, auth.AccountName(author), permlink)
-	}
+	// HF19+ removes only the comment_cashout_object after payout
+	// (database_comment.cpp:478-481 `remove(*_current)` — _current is the
+	// comment_cashout_object). The comment_object IDENTITY PERSISTS, so
+	// post-cashout replies still resolve their parent and the comment can
+	// still be referenced (vote/edit, gated by WasPaid+CashoutTime).
+	//
+	// We must NOT delete our unified Comment row here: it carries the
+	// identity (author/permlink/parent/root) too. Deleting it broke every
+	// reply/vote/edit referencing a paid comment from HF19 (block
+	// 12,988,978) onward — first failure at 12,988,981, parent
+	// "aatablantel/buenos-dias" not found. The heavy cashout fields are
+	// already cleared above (zero() + deleteCommentVotes), so the retained
+	// row mirrors hived's lightweight comment_object. WasPaid=true +
+	// CashoutTime=0 (set during this cashout) make the vote/comment/delete
+	// evaluators treat it as fully-paid, matching hived's
+	// removed-comment_cashout_object semantics.
+	_ = rescheduleTime
 }
 
 // decayPreAddRecentClaims mirrors hived's per-block recent_claims

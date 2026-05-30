@@ -847,27 +847,22 @@ func applyHardfork12CommentCashoutFix(s *state.Session) {
 
 // removeOldCashouts mirrors database::remove_old_cashouts
 // (database_comment.cpp:102), invoked from the HF19 hardfork handler.
-// Iterates every comment and drops the ones whose CashoutTime is the
-// "frozen / paid" sentinel (0 in our model, time_point_sec::maximum in
-// C++). C++ separately retains the long-lived comment_object; our
-// schema is unified, so this is a stronger purge but consistent with
-// post-HF19 reality (paid comments are unreachable via cashout-time
-// lookups anyway).
+// C++ removes only the comment_cashout_object (and the comment_cashout_ex
+// index) for frozen/paid comments — the long-lived comment_object IDENTITY
+// PERSISTS so post-HF19 replies/votes/edits can still resolve it.
+//
+// Our Comment row is unified (identity + cashout). The cashout-tracking
+// state is already cleared at each payout (zero() in comment_cashout.go) and
+// the cashout-schedule entry removed there too, so there is NOTHING left for
+// this HF19 sweep to do — it must NOT delete the comment identity.
+//
+// The earlier version deleted every CashoutTime==0 (paid) comment here,
+// which wiped all paid-comment identities at HF19 (block 12,988,978) and
+// broke every subsequent reply/vote referencing a paid comment — first
+// failure at 12,988,981, parent "aatablantel/buenos-dias" not found.
 func removeOldCashouts(s *state.Session) {
-	type victim struct {
-		author   string
-		permlink string
-	}
-	var victims []victim
-	_ = objects.RangeAllComments(s, func(c *objects.Comment) (bool, error) {
-		if c.CashoutTime == 0 {
-			victims = append(victims, victim{string(c.Author), c.Permlink})
-		}
-		return true, nil
-	})
-	for _, v := range victims {
-		objects.DeleteComment(s, auth.AccountName(v.author), v.permlink)
-	}
+	// no-op: paid comments are already frozen (CashoutTime==0) and off the
+	// cashout schedule; their identities must be retained to match hived.
 }
 
 // applyHardfork17CommentCashoutFix mirrors
