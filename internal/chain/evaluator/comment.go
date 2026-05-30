@@ -1250,10 +1250,17 @@ func curationWeightCurve(ctx *Context, c *objects.Comment, voteRshares uint64) u
 			// Mirror C++ hive_evaluator_social.cpp:522-523: comments
 			// authored in the 7-day window before HF19 activation use
 			// the square_root curve regardless of fund.curation_curve.
-			// HIVE_HF_19_SQRT_PRE_CALC = HF19_TIME - 7d (cashout window).
-			// Once HF19 (HF19_1052) activates the override stops; the
-			// fund's curve takes over.
-			const hf19SqrtPreCalc uint32 = 1497970800 - 7*86400
+			// HIVE_HF_19_SQRT_PRE_CALC = HIVE_HARDFORK_0_19_ACTUAL_TIME -
+			// HIVE_CASHOUT_WINDOW_SECONDS (0_19.hf:23-24). Critically the
+			// ACTUAL_TIME is 1497970809 (15:00:09 UTC), NOT the nominal
+			// HF19_TIME 1497970800 — they differ by 9 seconds. Using TIME
+			// put the boundary 9s early, so comments created in
+			// [1497366000,1497366009] got square_root in Go but
+			// bounded_curation in hived → mixed-sign curation-weight drift
+			// on comments cashing out at HF19 (block 12,988,978); richbaek's
+			// curation share came out 4 sat-HIVE short, failing his
+			// claim_reward_balance at 12,989,015.
+			const hf19SqrtPreCalc uint32 = 1497970809 - 7*86400
 			if !ctx.Hardforks.Has(hardfork.HF19) && c.Created > hf19SqrtPreCalc {
 				// Mirror C++ util/reward.cpp:58 — sqrt uses
 				// fc::uint128_approx_sqrt (mantissa approximation),
