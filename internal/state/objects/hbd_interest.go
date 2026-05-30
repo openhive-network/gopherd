@@ -54,12 +54,18 @@ const secondsPerYear int64 = 60 * 60 * 24 * 365
 // shadow into dgpo.HBDInterestRate.
 const defaultHBDInterestRate uint16 = 1000
 
-// rateForDGPO returns the HBD interest rate basis points to use, falling
-// back to the genesis default when dgpo hasn't been seeded yet.
+// rateForDGPO returns the HBD interest rate (basis points) straight from
+// the dgpo, matching hived's get_hbd_interest_rate() (database.cpp:3214)
+// which has NO fallback. dgpo.HBDInterestRate is seeded to 1000 at genesis
+// (genesis.go) and tracked from the witness median every schedule update,
+// so it is only 0 when witnesses have legitimately voted the rate to 0 —
+// in which case hived pays ZERO interest. The earlier
+// `if == 0 { return defaultHBDInterestRate (1000) }` fallback treated a
+// valid 0 as "unseeded" and paid 10% APR interest that hived never paid,
+// inflating current_hbd_supply → virtual_supply → new_hive → producer +
+// vesting rewards (the +564M VESTS / ~272 sat-HIVE over-credit across all
+// witnesses observed at block 11.30M; mainnet rate fell to 0 by ~11.3M).
 func rateForDGPO(dgpo *DynamicGlobalProperty) int64 {
-	if dgpo.HBDInterestRate == 0 {
-		return int64(defaultHBDInterestRate)
-	}
 	return int64(dgpo.HBDInterestRate)
 }
 
