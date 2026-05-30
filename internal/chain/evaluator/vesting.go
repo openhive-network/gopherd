@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"math/bits"
+	"os"
 
 	"hived-go/internal/protocol/asset"
 	"hived-go/internal/protocol/hardfork"
@@ -195,6 +196,11 @@ func (delegateVestingSharesEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	}
 	delta := d.VestingShares.Amount - prevAmt
 
+	if vestTraceAccount(string(d.Delegator)) || vestTraceAccount(string(d.Delegatee)) {
+		fmt.Fprintf(os.Stderr, "GHIVEDIFF DELEG block=%d t=%d delegator=%s delegatee=%s new=%d prev=%d delta=%d deleg_out_pre=%d\n",
+			ctx.BlockNum, ctx.HeadBlockTime, d.Delegator, d.Delegatee, d.VestingShares.Amount, prevAmt, delta, delegator.DelegatedVestingShares)
+	}
+
 	// Min-delegation + min-update enforcement. Mirrors hived
 	// hive_evaluator_transfer.cpp:764-769:
 	//
@@ -319,11 +325,27 @@ func (delegateVestingSharesEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	if d.VestingShares.Amount == 0 {
 		objects.DeleteVestingDelegation(ctx.DB, d.Delegator, d.Delegatee)
 	} else {
+		// min_delegation_time: hived sets it ONCE at create =
+		// head_block_time() (hive_evaluator_transfer.cpp:767) and PRESERVES
+		// it on every modify (837-891 only touch vesting_shares). The old
+		// code wrote `now + 5 days` on EVERY put, which (a) used the wrong
+		// base for new regular delegations and (b) CLOBBERED the head+30d
+		// anchor that account_create_with_delegation sets — so a later
+		// reduction's return expiration (max(now+return_period,
+		// min_delegation_time)) matured ~weeks too early, dropping
+		// delegated_vesting_shares ahead of hived. That inflated the
+		// delegator's effective vesting → vote rshares → comment net_rshares
+		// → recent_claims, the systematic post-HF19 reward drift (reggaemuffin
+		// vote on steemcleaners/...-june-18 too high by 1,631,775,600).
+		minDelegationTime := ctx.HeadBlockTime
+		if prevAmt > 0 {
+			minDelegationTime = prev.MinDelegation // preserve across updates
+		}
 		objects.PutVestingDelegation(ctx.DB, &objects.VestingDelegation{
 			Delegator:     d.Delegator,
 			Delegatee:     d.Delegatee,
 			VestingShares: d.VestingShares.Amount,
-			MinDelegation: ctx.HeadBlockTime + 60*60*24*5, // ~5 day cooldown
+			MinDelegation: minDelegationTime,
 		})
 	}
 	return nil

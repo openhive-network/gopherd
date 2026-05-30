@@ -30,8 +30,10 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 
 	"hived-go/internal/protocol/asset"
+	"hived-go/internal/protocol/auth"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
 	"hived-go/internal/state/snapshot"
@@ -73,6 +75,7 @@ func cmdStateJSONL(args []string) int {
 	snapDir := fs.String("snapshot", "", "directory snapshot produced by `replay --snapshot-every` (loads full typed-store state; the correct input for a full-state diff)")
 	out := fs.String("out", "-", "output file path (or '-' for stdout)")
 	includeComments := fs.Bool("comments", false, "include comments (LARGE)")
+	votesOf := fs.String("votes-of", "", "if set as author/permlink, dump just that comment's votes (voter,rshares,weight%,curation_weight) and exit")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -114,6 +117,27 @@ func cmdStateJSONL(args []string) int {
 	defer w.Flush()
 
 	s := state.NewSession(db)
+
+	// --votes-of: dump one comment's votes and exit (curation-weight drill).
+	if *votesOf != "" {
+		slash := strings.IndexByte(*votesOf, '/')
+		if slash < 0 {
+			fmt.Fprintln(os.Stderr, "state-jsonl: --votes-of must be author/permlink")
+			return 2
+		}
+		va := auth.AccountName((*votesOf)[:slash])
+		vp := (*votesOf)[slash+1:]
+		if c, ok := objects.GetCommentRef(s, va, vp); ok {
+			fmt.Printf("comment %s/%s net_rshares=%d vote_rshares=%d total_vote_weight=%d vote_count=%d cashout=%d\n",
+				va, vp, c.NetRshares, c.VoteRshares, c.TotalVoteWeight, c.VoteCount, c.CashoutTime)
+		}
+		_ = objects.RangeCommentVotesByComment(s, va, vp, func(cv *objects.CommentVote) (bool, error) {
+			fmt.Printf("VOTE voter=%s rshares=%d weight_pct=%d curation_weight=%d last_update=%d num_changes=%d\n",
+				cv.Voter, cv.Rshares, cv.Weight, cv.CurationWeight, cv.LastUpdate, cv.NumChanges)
+			return true, nil
+		})
+		return 0
+	}
 
 	// Unified collect → sort → emit. Sort key = identKey(marshaled row),
 	// the same function the differ aligns on.
