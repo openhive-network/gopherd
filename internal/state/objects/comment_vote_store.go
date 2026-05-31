@@ -56,6 +56,17 @@ type CommentVoteStore struct {
 	// CommitPoint/RestoreToPoint. Put pulls from here before allocating
 	// a fresh struct, eliminating the per-Put heap allocation.
 	freeCV []*CommentVote
+
+	// cold is the on-disk tier (nil = disabled, all-RAM behavior). Votes
+	// evicted from RAM live here, keyed by commentVoteKey (primary) and
+	// commentVoteByCommentKey (secondary). See coldkv.go +
+	// project_disk_backed_stores_2026_05_31.
+	cold *coldKV
+	// coldCount[cKey] = number of this comment's votes currently resident
+	// only in the cold tier. RangeByComment/DeleteAllForComment skip the
+	// cold scan entirely when the count is 0 (the live-comment common case),
+	// so hot threads pay zero disk overhead.
+	coldCount map[commentPK]int
 }
 
 type commentVoteUndo struct {
@@ -93,7 +104,106 @@ func newCommentVoteStore() *CommentVoteStore {
 		byComment: make(map[commentPK][]*CommentVote, 1024),
 		undoLog:   make([]commentVoteUndo, 0, 64),
 		freeCV:    make([]*CommentVote, 0, 512),
+		coldCount: make(map[commentPK]int),
 	}
+}
+
+// SetColdTier attaches (or detaches, with nil) the on-disk cold tier. Must be
+// called before any eviction. Safe to leave unset → pure in-RAM behavior.
+func (s *CommentVoteStore) SetColdTier(c *coldKV) { s.cold = c }
+
+// coldHas reports whether any of this comment's votes are in the cold tier.
+func (s *CommentVoteStore) coldHas(cKey commentPK) bool {
+	return s.cold != nil && s.coldCount[cKey] > 0
+}
+
+// coldGetVote fetches a single vote from the cold tier by primary key.
+func (s *CommentVoteStore) coldGetVote(voter, author auth.AccountName, permlink string) (CommentVote, bool) {
+	if s.cold == nil {
+		return CommentVote{}, false
+	}
+	k := tableKey(coldTableVotePrimary, commentVoteKey(voter, author, permlink))
+	blob, ok := s.cold.get(k)
+	if !ok {
+		return CommentVote{}, false
+	}
+	cv, err := ReadCommentVote(blob)
+	if err != nil {
+		return CommentVote{}, false
+	}
+	return cv, true
+}
+
+// coldPutVote writes a vote into the cold tier (primary + by-comment index)
+// and bumps the per-comment cold counter.
+func (s *CommentVoteStore) coldPutVote(cv *CommentVote) {
+	blob := AppendCommentVote(nil, cv)
+	s.cold.set(tableKey(coldTableVotePrimary, commentVoteKey(cv.Voter, cv.Author, cv.Permlink)), blob)
+	s.cold.set(tableKey(coldTableVoteByComment, commentVoteByCommentKey(cv.Author, cv.Permlink, cv.Voter)), blob)
+	s.coldCount[newCommentPK(cv.Author, cv.Permlink)]++
+}
+
+// coldDelVote removes a single vote from the cold tier and decrements the
+// per-comment counter.
+func (s *CommentVoteStore) coldDelVote(voter, author auth.AccountName, permlink string) {
+	if s.cold == nil {
+		return
+	}
+	cKey := newCommentPK(author, permlink)
+	if s.coldCount[cKey] == 0 {
+		return
+	}
+	s.cold.del(tableKey(coldTableVotePrimary, commentVoteKey(voter, author, permlink)))
+	s.cold.del(tableKey(coldTableVoteByComment, commentVoteByCommentKey(author, permlink, voter)))
+	if n := s.coldCount[cKey] - 1; n <= 0 {
+		delete(s.coldCount, cKey)
+	} else {
+		s.coldCount[cKey] = n
+	}
+}
+
+// Evict moves a single vote from the RAM tier to the cold tier. No-op if the
+// vote is not resident or the cold tier is disabled. MUST be called only at a
+// safe point (CommitPoint / block boundary, UndoEnabled==false, no outstanding
+// savepoint) so no undo entry or caller alias references the evicted slot.
+// Returns true if a vote was evicted.
+func (s *CommentVoteStore) Evict(voter, author auth.AccountName, permlink string) bool {
+	if s.cold == nil {
+		return false
+	}
+	key := newCommentVotePK(voter, author, permlink)
+	cv, ok := s.primary[key]
+	if !ok {
+		return false
+	}
+	cKey := newCommentPK(author, permlink)
+	s.coldPutVote(cv)
+	s.byCommentRemove(cKey, cv)
+	delete(s.primary, key)
+	s.freeCV = append(s.freeCV, cv)
+	return true
+}
+
+// EvictComment moves every RAM-resident vote on (author, permlink) to the cold
+// tier. Used by the coordinated eviction pass when a comment is frozen/paid.
+// Safe-point only (see Evict). Returns the number of votes evicted.
+func (s *CommentVoteStore) EvictComment(author auth.AccountName, permlink string) int {
+	if s.cold == nil {
+		return 0
+	}
+	cKey := newCommentPK(author, permlink)
+	list := s.byComment[cKey]
+	n := len(list)
+	if n == 0 {
+		return 0
+	}
+	for _, cv := range list {
+		s.coldPutVote(cv)
+		delete(s.primary, newCommentVotePK(cv.Voter, cv.Author, cv.Permlink))
+		s.freeCV = append(s.freeCV, cv)
+	}
+	delete(s.byComment, cKey)
+	return n
 }
 
 func (s *CommentVoteStore) SnapshotPoint() int { return len(s.undoLog) }
@@ -175,19 +285,105 @@ func (s *CommentVoteStore) byCommentRemove(commentKey commentPK, target *Comment
 	}
 }
 
-// Has reports whether (voter, author, permlink) has a vote row.
-func (s *CommentVoteStore) Has(voter, author auth.AccountName, permlink string) bool {
-	_, ok := s.primary[newCommentVotePK(voter, author, permlink)]
-	return ok
+// promoteVote pulls a vote from the cold tier into RAM (primary + byComment),
+// removes it from the cold tier, and returns the resident slot. Returns
+// (nil,false) if the vote is not in the cold tier. The promoted slot is a real
+// RAM pointer so callers can alias-and-mutate it exactly as for a vote that
+// was resident all along.
+func (s *CommentVoteStore) promoteVote(voter, author auth.AccountName, permlink string) (*CommentVote, bool) {
+	cv, ok := s.coldGetVote(voter, author, permlink)
+	if !ok {
+		return nil, false
+	}
+	var cp *CommentVote
+	if n := len(s.freeCV); n > 0 {
+		cp = s.freeCV[n-1]
+		s.freeCV = s.freeCV[:n-1]
+	} else {
+		cp = new(CommentVote)
+	}
+	*cp = cv
+	key := newCommentVotePK(voter, author, permlink)
+	cKey := newCommentPK(author, permlink)
+	s.primary[key] = cp
+	s.byComment[cKey] = append(s.byComment[cKey], cp)
+	s.coldDelVote(voter, author, permlink)
+	return cp, true
 }
 
-// Get returns a value-copy of the vote.
+// coldDelAllForComment removes every cold-tier vote on (author, permlink),
+// both the primary and by-comment index entries, and clears the counter.
+func (s *CommentVoteStore) coldDelAllForComment(author auth.AccountName, permlink string) {
+	if s.cold == nil {
+		return
+	}
+	cKey := newCommentPK(author, permlink)
+	if s.coldCount[cKey] == 0 {
+		return
+	}
+	// Enumerate voters via the by-comment index (its blobs decode to the
+	// vote, giving the voter) so we can delete the matching primary keys.
+	byCommentPrefix := tableKey(coldTableVoteByComment, CommentVoteByCommentPrefix(author, permlink))
+	var voters []auth.AccountName
+	s.cold.rangePrefix(byCommentPrefix, func(_, val []byte) bool {
+		if cv, err := ReadCommentVote(val); err == nil {
+			voters = append(voters, cv.Voter)
+		}
+		return true
+	})
+	for _, v := range voters {
+		s.cold.del(tableKey(coldTableVotePrimary, commentVoteKey(v, author, permlink)))
+	}
+	s.cold.deletePrefix(byCommentPrefix)
+	delete(s.coldCount, cKey)
+}
+
+// promoteAllForComment pulls every cold-tier vote on (author, permlink) into
+// RAM. Used by DeleteAllForComment under UndoEnabled so the subsequent RAM
+// delete loop captures undo entries for them.
+func (s *CommentVoteStore) promoteAllForComment(author auth.AccountName, permlink string) {
+	if s.cold == nil {
+		return
+	}
+	cKey := newCommentPK(author, permlink)
+	if s.coldCount[cKey] == 0 {
+		return
+	}
+	byCommentPrefix := tableKey(coldTableVoteByComment, CommentVoteByCommentPrefix(author, permlink))
+	var voters []auth.AccountName
+	s.cold.rangePrefix(byCommentPrefix, func(_, val []byte) bool {
+		if cv, err := ReadCommentVote(val); err == nil {
+			voters = append(voters, cv.Voter)
+		}
+		return true
+	})
+	for _, v := range voters {
+		s.promoteVote(v, author, permlink)
+	}
+}
+
+// Has reports whether (voter, author, permlink) has a vote row.
+func (s *CommentVoteStore) Has(voter, author auth.AccountName, permlink string) bool {
+	if _, ok := s.primary[newCommentVotePK(voter, author, permlink)]; ok {
+		return true
+	}
+	if s.coldHas(newCommentPK(author, permlink)) {
+		return s.cold.has(tableKey(coldTableVotePrimary, commentVoteKey(voter, author, permlink)))
+	}
+	return false
+}
+
+// Get returns a value-copy of the vote. Consults the cold tier on a RAM miss
+// (read-only; does not promote).
 func (s *CommentVoteStore) Get(voter, author auth.AccountName, permlink string) (CommentVote, bool) {
 	cv, ok := s.primary[newCommentVotePK(voter, author, permlink)]
-	if !ok {
-		return CommentVote{}, false
+	if ok {
+		return *cv, true
 	}
-	return *cv, true
+	if s.coldHas(newCommentPK(author, permlink)) {
+		return s.coldGetVote(voter, author, permlink)
+	}
+	return CommentVote{}, false
 }
 
 // GetRef returns a read-only pointer to the CommentVote slot — skips
@@ -200,10 +396,14 @@ func (s *CommentVoteStore) Get(voter, author auth.AccountName, permlink string) 
 // ~75-byte copies × 9.5M votes ≈ 700 MB cum on an 8M replay.
 func (s *CommentVoteStore) GetRef(voter, author auth.AccountName, permlink string) (*CommentVote, bool) {
 	cv, ok := s.primary[newCommentVotePK(voter, author, permlink)]
-	if !ok {
-		return nil, false
+	if ok {
+		return cv, true
 	}
-	return cv, true
+	// RAM miss — promote from cold so the caller gets a real mutable slot.
+	if s.coldHas(newCommentPK(author, permlink)) {
+		return s.promoteVote(voter, author, permlink)
+	}
+	return nil, false
 }
 
 // Put inserts or replaces a vote. Maintains byComment membership.
@@ -213,6 +413,15 @@ func (s *CommentVoteStore) GetRef(voter, author auth.AccountName, permlink strin
 func (s *CommentVoteStore) Put(cv *CommentVote) {
 	key := newCommentVotePK(cv.Voter, cv.Author, cv.Permlink)
 	prev := s.primary[key]
+
+	// RAM miss but the vote exists in the cold tier (recast of an evicted
+	// vote): promote it so `prev` is the true prior row. This makes undo
+	// capture the correct prev and keeps byComment membership consistent.
+	if prev == nil && s.coldHas(newCommentPK(cv.Author, cv.Permlink)) {
+		if p, ok := s.promoteVote(cv.Voter, cv.Author, cv.Permlink); ok {
+			prev = p
+		}
+	}
 
 	// Fast path: modify-in-place when there's no outstanding savepoint
 	// + the row already exists. Skips the freelist pop, the byComment
@@ -267,7 +476,23 @@ func (s *CommentVoteStore) Delete(voter, author auth.AccountName, permlink strin
 	key := newCommentVotePK(voter, author, permlink)
 	prev, ok := s.primary[key]
 	if !ok {
-		return
+		// Not resident — it may be in the cold tier.
+		if s.coldHas(newCommentPK(author, permlink)) {
+			if s.db.UndoEnabled {
+				// Promote so the delete is captured in the undo log with the
+				// real prev pointer; then fall through to the RAM delete path.
+				if p, pok := s.promoteVote(voter, author, permlink); pok {
+					prev, ok = p, true
+				}
+			} else {
+				// No undo needed — delete directly from cold.
+				s.coldDelVote(voter, author, permlink)
+				return
+			}
+		}
+		if !ok {
+			return
+		}
 	}
 	cKey := newCommentPK(author, permlink)
 	s.byCommentRemove(cKey, prev)
@@ -299,6 +524,33 @@ func (s *CommentVoteStore) RangeByComment(author auth.AccountName, permlink stri
 			return nil
 		}
 	}
+	// Cold-resident votes for this comment (order unspecified, so we just
+	// continue after the RAM members). Skipped entirely when none are cold.
+	if s.coldHas(cKey) {
+		var rerr error
+		stop := false
+		s.cold.rangePrefix(tableKey(coldTableVoteByComment, CommentVoteByCommentPrefix(author, permlink)), func(_, val []byte) bool {
+			cv, err := ReadCommentVote(val)
+			if err != nil {
+				rerr = err
+				return false
+			}
+			ok, ferr := fn(&cv)
+			if ferr != nil {
+				rerr = ferr
+				return false
+			}
+			if !ok {
+				stop = true
+				return false
+			}
+			return true
+		})
+		if rerr != nil {
+			return rerr
+		}
+		_ = stop
+	}
 	return nil
 }
 
@@ -307,6 +559,18 @@ func (s *CommentVoteStore) RangeByComment(author auth.AccountName, permlink stri
 // per-vote Delete since we can drop the slice in one shot.
 func (s *CommentVoteStore) DeleteAllForComment(author auth.AccountName, permlink string) {
 	cKey := newCommentPK(author, permlink)
+	// Cold-resident votes for this comment (rare — only when a paid/old
+	// comment had votes evicted then receives this cleanup). DeleteAllForComment
+	// is only ever called at cashout where UndoEnabled is false, so a direct
+	// cold range-delete is correct (no undo to capture). Promote-then-delete if
+	// that invariant ever changes.
+	if s.coldHas(cKey) {
+		if s.db.UndoEnabled {
+			s.promoteAllForComment(author, permlink) // makes them resident → deleted by loop below
+		} else {
+			s.coldDelAllForComment(author, permlink)
+		}
+	}
 	list := s.byComment[cKey]
 	for _, cv := range list {
 		// Per the store invariant, `cv` IS the pointer stored in primary,
@@ -329,9 +593,11 @@ func (s *CommentVoteStore) DeleteAllForComment(author auth.AccountName, permlink
 	delete(s.byComment, cKey)
 }
 
-// CountForComment returns the number of votes on (author, permlink).
+// CountForComment returns the number of votes on (author, permlink) across
+// both tiers.
 func (s *CommentVoteStore) CountForComment(author auth.AccountName, permlink string) int {
-	return len(s.byComment[newCommentPK(author, permlink)])
+	cKey := newCommentPK(author, permlink)
+	return len(s.byComment[cKey]) + s.coldCount[cKey]
 }
 
 var commentVoteStoreSnapshotMagic = [4]byte{'C', 'V', 'O', 'T'}
@@ -346,12 +612,20 @@ func (s *CommentVoteStore) MarshalSnapshot(w io.Writer) error {
 	if _, err := w.Write(commentVoteStoreSnapshotMagic[:]); err != nil {
 		return err
 	}
+	total := len(s.primary)
+	for _, n := range s.coldCount {
+		total += n
+	}
 	var hdr [8]byte
 	binary.LittleEndian.PutUint32(hdr[0:4], commentVoteStoreSnapshotVersion)
-	binary.LittleEndian.PutUint32(hdr[4:8], uint32(len(s.primary)))
+	binary.LittleEndian.PutUint32(hdr[4:8], uint32(total))
 	if _, err := w.Write(hdr[:]); err != nil {
 		return err
 	}
+
+	// RAM side: sorted (voter, author, permlink) keys + their encoded key
+	// bytes, so the merge can compare RAM vs cold by the same byte ordering
+	// the cold tier uses (voter fixed-16 | author fixed-16 | permlink).
 	keys := make([]commentVotePK, 0, len(s.primary))
 	for k := range s.primary {
 		keys = append(keys, k)
@@ -365,19 +639,68 @@ func (s *CommentVoteStore) MarshalSnapshot(w io.Writer) error {
 		}
 		return keys[i].permlink < keys[j].permlink
 	})
+
 	var (
 		varBuf [binary.MaxVarintLen64]byte
 		recBuf []byte
 	)
-	for _, k := range keys {
-		cv := s.primary[k]
-		recBuf = AppendCommentVote(recBuf[:0], cv)
-		n := binary.PutUvarint(varBuf[:], uint64(len(recBuf)))
+	writeRec := func(rec []byte) error {
+		n := binary.PutUvarint(varBuf[:], uint64(len(rec)))
 		if _, err := w.Write(varBuf[:n]); err != nil {
 			return err
 		}
-		if _, err := w.Write(recBuf); err != nil {
-			return err
+		_, err := w.Write(rec)
+		return err
+	}
+
+	// Fast path: no cold tier → emit RAM in sorted order (unchanged format).
+	if s.cold == nil {
+		for _, k := range keys {
+			recBuf = AppendCommentVote(recBuf[:0], s.primary[k])
+			if err := writeRec(recBuf); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	// Two-way streaming merge of the sorted RAM keys and the cold primary
+	// prefix scan (also ascending by the same encoded key). Disjoint sets;
+	// emit in global ascending order so the byte stream is identical to an
+	// all-RAM snapshot of the same logical contents.
+	it, err := s.cold.newPrefixIter(tableKey(coldTableVotePrimary, nil))
+	if err != nil {
+		return err
+	}
+	defer it.Close()
+	ri := 0
+	ramKeyBytes := func(k commentVotePK) []byte {
+		return commentVoteKey(auth.AccountName(k.voter), auth.AccountName(k.author), k.permlink)
+	}
+	for ri < len(keys) || it.valid() {
+		emitRAM := false
+		if ri < len(keys) && it.valid() {
+			rk := ramKeyBytes(keys[ri])
+			ck := it.key()[1:] // strip table prefix
+			emitRAM = bytesLess(rk, ck)
+		} else {
+			emitRAM = ri < len(keys)
+		}
+		if emitRAM {
+			recBuf = AppendCommentVote(recBuf[:0], s.primary[keys[ri]])
+			if err := writeRec(recBuf); err != nil {
+				return err
+			}
+			ri++
+		} else {
+			v, err := it.val()
+			if err != nil {
+				return err
+			}
+			if err := writeRec(v); err != nil {
+				return err
+			}
+			it.next()
 		}
 	}
 	return nil
@@ -406,6 +729,8 @@ func (s *CommentVoteStore) UnmarshalSnapshot(r io.Reader) error {
 	s.primary = make(map[commentVotePK]*CommentVote, count)
 	s.byComment = make(map[commentPK][]*CommentVote, count/8+1)
 	s.undoLog = s.undoLog[:0]
+	// Everything loads into RAM; the cold tier starts empty after a load.
+	s.coldCount = make(map[commentPK]int)
 	for i := uint32(0); i < count; i++ {
 		recLen, err := binary.ReadUvarint(br)
 		if err != nil {

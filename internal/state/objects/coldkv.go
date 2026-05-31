@@ -148,6 +148,43 @@ func (c *coldKV) rangePrefix(prefix []byte, fn func(key, val []byte) bool) error
 	return it.Error()
 }
 
+// coldIter is a pull-style ascending iterator over a key prefix, used by the
+// snapshot merge (which needs to interleave the cold stream with the sorted
+// RAM keys without materializing the whole cold set in RAM).
+type coldIter struct {
+	it *pebble.Iterator
+}
+
+// newPrefixIter returns an iterator positioned before the first key with the
+// given prefix; call Next to advance. Caller must Close.
+func (c *coldKV) newPrefixIter(prefix []byte) (*coldIter, error) {
+	it, err := c.db.NewIter(&pebble.IterOptions{
+		LowerBound: prefix,
+		UpperBound: prefixUpperBound(prefix),
+	})
+	if err != nil {
+		return nil, err
+	}
+	it.First()
+	return &coldIter{it: it}, nil
+}
+
+// valid reports whether the iterator is positioned on a live entry.
+func (i *coldIter) valid() bool { return i.it.Valid() }
+
+// key returns the current full key (table prefix + record key); aliases
+// iterator storage.
+func (i *coldIter) key() []byte { return i.it.Key() }
+
+// val returns the current value; aliases iterator storage.
+func (i *coldIter) val() ([]byte, error) { return i.it.ValueAndErr() }
+
+// next advances to the next entry.
+func (i *coldIter) next() { i.it.Next() }
+
+// Close releases the iterator.
+func (i *coldIter) Close() error { return i.it.Close() }
+
 // Close flushes and closes the store, removing the directory if we created it.
 func (c *coldKV) Close() error {
 	if c == nil || c.db == nil {
@@ -174,6 +211,21 @@ func prefixUpperBound(prefix []byte) []byte {
 		}
 	}
 	return nil
+}
+
+// bytesLess reports a < b in lexicographic byte order (avoids importing
+// "bytes" into the store files just for Compare).
+func bytesLess(a, b []byte) bool {
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	for i := 0; i < n; i++ {
+		if a[i] != b[i] {
+			return a[i] < b[i]
+		}
+	}
+	return len(a) < len(b)
 }
 
 // coldDirFor returns the on-disk path for a named cold sub-store under base,
