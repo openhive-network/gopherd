@@ -3,6 +3,7 @@ package evaluator
 import (
 	"errors"
 	"fmt"
+	"os"
 
 	"hived-go/internal/protocol/asset"
 	"hived-go/internal/protocol/hardfork"
@@ -260,6 +261,10 @@ func (accountCreateWithDelegationEvaluator) Apply(ctx *Context, opArg op.Op) err
 			VestingShares: ac.Delegation.Amount,
 			MinDelegation: ctx.HeadBlockTime + createAccountDelegationTimeSec,
 		})
+		if vestTraceAccount(string(ac.Creator)) {
+			fmt.Fprintf(os.Stderr, "GHIVEDIFF DELEG-ACWD block=%d t=%d creator=%s new=%s amount=%d minDeleg=%d\n",
+				ctx.BlockNum, ctx.HeadBlockTime, ac.Creator, ac.NewAccountName, ac.Delegation.Amount, ctx.HeadBlockTime+createAccountDelegationTimeSec)
+		}
 	}
 	// Refresh the new account's RC cap now that VESTS (delegated +
 	// from fee) are in place.

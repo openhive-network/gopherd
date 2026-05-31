@@ -189,8 +189,10 @@ func (delegateVestingSharesEvaluator) Apply(ctx *Context, opArg op.Op) error {
 
 	prev, err := objects.GetVestingDelegation(ctx.DB, d.Delegator, d.Delegatee)
 	prevAmt := int64(0)
+	prevExists := false
 	if err == nil {
 		prevAmt = prev.VestingShares
+		prevExists = true
 	} else if err != state.ErrNotFound {
 		return err
 	}
@@ -284,6 +286,10 @@ func (delegateVestingSharesEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		if prev.MinDelegation > expiration {
 			expiration = prev.MinDelegation
 		}
+		if vestTraceAccount(string(d.Delegator)) {
+			fmt.Fprintf(os.Stderr, "GHIVEDIFF DELEG-REDUCE block=%d t=%d delegator=%s delegatee=%s returned=%d prevMinDeleg=%d retSec=%d expiration=%d\n",
+				ctx.BlockNum, ctx.HeadBlockTime, d.Delegator, d.Delegatee, returned, prev.MinDelegation, retSec, expiration)
+		}
 		// Assign a monotonic id from dgpo (mirrors hived's chainbase
 		// per-object id). The primary key is (delegator, id); the old
 		// `uint32(returned ^ blockTime)` hash COLLIDED when a delegator
@@ -337,8 +343,24 @@ func (delegateVestingSharesEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		// delegator's effective vesting → vote rshares → comment net_rshares
 		// → recent_claims, the systematic post-HF19 reward drift (reggaemuffin
 		// vote on steemcleaners/...-june-18 too high by 1,631,775,600).
+		// hived sets min_delegation_time ONLY in the create branch
+		// (`delegation == nullptr`); every modify (`delegation != nullptr`)
+		// leaves it untouched — even when the existing row has
+		// vesting_shares == 0. account_create_with_delegation creates the
+		// delegation row with amount 0 (pre-HF19, or HF19+ when the create
+		// carries a delegation) and min_delegation_time = head + 30 days;
+		// a later delegate_vesting_shares to that account is a MODIFY, so it
+		// must preserve that 30-day anchor. Gating on `prevAmt > 0` instead
+		// of "a row exists" reset min_delegation_time to head_block_time for
+		// these amount-0 ACWD rows, so a subsequent reduction's return
+		// expiration (max(now+return_period, min_delegation_time)) matured
+		// ~2 weeks early — dropping delegated_vesting_shares below hived,
+		// inflating effective vesting → vote rshares → comment net_rshares
+		// (raymonjohnstone vote on janiko/balloons-to-nk too high by
+		// 3,585,744,600; reward_balance over-drained 31 sat at block
+		// 13,190,204).
 		minDelegationTime := ctx.HeadBlockTime
-		if prevAmt > 0 {
+		if prevExists {
 			minDelegationTime = prev.MinDelegation // preserve across updates
 		}
 		objects.PutVestingDelegation(ctx.DB, &objects.VestingDelegation{
