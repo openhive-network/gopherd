@@ -54,6 +54,18 @@ type CommentStore struct {
 	// a fresh struct, eliminating the per-Put heap allocation that
 	// dominated the cashout-heavy alloc profile (~2 GB / 4M blocks).
 	freeComment []*Comment
+
+	// cold is the on-disk tier (nil = disabled, all-RAM behavior). Frozen/
+	// paid comments evicted from RAM live here, keyed by commentKey (primary,
+	// table 0x01) and commentByRootKey (by-root index, table 0x02).
+	cold *coldKV
+	// coldTotal counts all comments resident only in the cold tier; a RAM
+	// miss probes the cold tier only when coldTotal > 0 (so the all-RAM and
+	// eviction-off paths pay zero disk overhead).
+	coldTotal int
+	// coldRoot[rootKey] = number of this thread's comments in the cold tier;
+	// RangeByRoot skips the cold by-root scan when 0 (live threads → pure RAM).
+	coldRoot map[commentPK]int
 }
 
 type commentUndo struct {
@@ -104,7 +116,98 @@ func newCommentStore() *CommentStore {
 		byRoot:      make(map[commentPK][]*Comment, 1024),
 		undoLog:     make([]commentUndo, 0, 64),
 		freeComment: make([]*Comment, 0, 256),
+		coldRoot:    make(map[commentPK]int),
 	}
+}
+
+// SetColdTier attaches (or detaches, with nil) the on-disk cold tier. Must be
+// called before any eviction. Unset → pure in-RAM behavior.
+func (s *CommentStore) SetColdTier(c *coldKV) { s.cold = c }
+
+// coldKeyOf / coldRootKeyOf build the table-prefixed cold keys for a comment.
+func coldPrimaryKey(author auth.AccountName, permlink string) []byte {
+	return tableKey(coldTableCommentPrimary, commentKey(author, permlink))
+}
+
+func (s *CommentStore) coldByRootKeyOf(c *Comment) []byte {
+	rootAuthor, rootPermlink := c.RootAuthor, c.RootPermlink
+	if rootAuthor == "" {
+		rootAuthor, rootPermlink = c.Author, c.Permlink
+	}
+	return tableKey(coldTableCommentByRoot, commentByRootKey(rootAuthor, rootPermlink, c.Author, c.Permlink))
+}
+
+// coldGet fetches a comment from the cold tier by primary key.
+func (s *CommentStore) coldGet(author auth.AccountName, permlink string) (Comment, bool) {
+	if s.cold == nil || s.coldTotal == 0 {
+		return Comment{}, false
+	}
+	blob, ok := s.cold.get(coldPrimaryKey(author, permlink))
+	if !ok {
+		return Comment{}, false
+	}
+	c, err := ReadComment(blob)
+	if err != nil {
+		return Comment{}, false
+	}
+	return c, true
+}
+
+// promote pulls a comment from the cold tier into a real RAM slot (primary +
+// byRoot), removes its cold entries, and returns the slot. (nil,false) if not
+// cold. The returned pointer is a genuine RAM slot so callers can
+// alias-and-mutate it exactly as for an always-resident comment.
+func (s *CommentStore) promote(author auth.AccountName, permlink string) (*Comment, bool) {
+	c, ok := s.coldGet(author, permlink)
+	if !ok {
+		return nil, false
+	}
+	var cp *Comment
+	if n := len(s.freeComment); n > 0 {
+		cp = s.freeComment[n-1]
+		s.freeComment = s.freeComment[:n-1]
+	} else {
+		cp = new(Comment)
+	}
+	*cp = c
+	key := newCommentPK(author, permlink)
+	rootKey := s.rootKeyOf(cp)
+	s.primary[key] = cp
+	s.byRoot[rootKey] = append(s.byRoot[rootKey], cp)
+	// Drop cold entries + counters.
+	s.cold.del(coldPrimaryKey(author, permlink))
+	s.cold.del(s.coldByRootKeyOf(cp))
+	s.coldTotal--
+	if n := s.coldRoot[rootKey] - 1; n <= 0 {
+		delete(s.coldRoot, rootKey)
+	} else {
+		s.coldRoot[rootKey] = n
+	}
+	return cp, true
+}
+
+// Evict moves one RAM-resident comment to the cold tier. Safe-point only
+// (CommitPoint / block boundary, UndoEnabled==false, no alias held). Returns
+// true if evicted.
+func (s *CommentStore) Evict(author auth.AccountName, permlink string) bool {
+	if s.cold == nil {
+		return false
+	}
+	key := newCommentPK(author, permlink)
+	c, ok := s.primary[key]
+	if !ok {
+		return false
+	}
+	rootKey := s.rootKeyOf(c)
+	blob := AppendComment(nil, c)
+	s.cold.set(coldPrimaryKey(author, permlink), blob)
+	s.cold.set(s.coldByRootKeyOf(c), blob)
+	s.byRootRemove(rootKey, c)
+	delete(s.primary, key)
+	s.freeComment = append(s.freeComment, c)
+	s.coldTotal++
+	s.coldRoot[rootKey]++
+	return true
 }
 
 func (s *CommentStore) SnapshotPoint() int { return len(s.undoLog) }
@@ -205,19 +308,25 @@ func (s *CommentStore) byRootRemove(rootKey commentPK, target *Comment) {
 	}
 }
 
-// Has reports whether (author, permlink) has a comment row.
+// Has reports whether (author, permlink) has a comment row in either tier.
 func (s *CommentStore) Has(author auth.AccountName, permlink string) bool {
-	_, ok := s.primary[newCommentPK(author, permlink)]
-	return ok
+	if _, ok := s.primary[newCommentPK(author, permlink)]; ok {
+		return true
+	}
+	if s.cold != nil && s.coldTotal > 0 {
+		return s.cold.has(coldPrimaryKey(author, permlink))
+	}
+	return false
 }
 
-// Get returns a value-copy of the comment for (author, permlink).
+// Get returns a value-copy of the comment for (author, permlink). Consults the
+// cold tier on a RAM miss (read-only; does not promote).
 func (s *CommentStore) Get(author auth.AccountName, permlink string) (Comment, bool) {
 	c, ok := s.primary[newCommentPK(author, permlink)]
-	if !ok {
-		return Comment{}, false
+	if ok {
+		return *c, true
 	}
-	return *c, true
+	return s.coldGet(author, permlink)
 }
 
 // GetRef returns a read-only pointer to the comment slot. Caller MUST
@@ -225,7 +334,15 @@ func (s *CommentStore) Get(author auth.AccountName, permlink string) (Comment, b
 // storage. Skips the ~256-byte Comment value-copy that Get pays.
 func (s *CommentStore) GetRef(author auth.AccountName, permlink string) (*Comment, bool) {
 	c, ok := s.primary[newCommentPK(author, permlink)]
-	return c, ok
+	if ok {
+		return c, true
+	}
+	// RAM miss — promote from cold so the caller gets a real mutable slot
+	// (preserves the alias-and-mutate-then-Put contract).
+	if s.cold != nil && s.coldTotal > 0 {
+		return s.promote(author, permlink)
+	}
+	return nil, false
 }
 
 // Mutate fetches the live *Comment for (author, permlink) and calls fn
@@ -246,7 +363,14 @@ func (s *CommentStore) Mutate(author auth.AccountName, permlink string, fn func(
 	key := newCommentPK(author, permlink)
 	cur, ok := s.primary[key]
 	if !ok {
-		return false
+		// Promote from cold so the in-place mutate + undo snapshot operate on
+		// a real RAM slot.
+		if s.cold != nil && s.coldTotal > 0 {
+			cur, ok = s.promote(author, permlink)
+		}
+		if !ok {
+			return false
+		}
 	}
 	if s.db.UndoEnabled {
 		s.undoLog = append(s.undoLog, commentUndo{
@@ -271,6 +395,15 @@ func (s *CommentStore) Put(c *Comment) {
 	}
 	key := newCommentPK(c.Author, c.Permlink)
 	prev := s.primary[key]
+
+	// RAM miss but present in cold (edit/vote on an evicted comment): promote
+	// so `prev` is the true prior row — undo captures it and byRoot stays
+	// consistent.
+	if prev == nil && s.cold != nil && s.coldTotal > 0 {
+		if p, ok := s.promote(c.Author, c.Permlink); ok {
+			prev = p
+		}
+	}
 
 	// Fast path: modify-in-place when prev exists AND rootKey didn't
 	// change. Skips the freelist pop, the *cp = *c struct copy, the
@@ -359,7 +492,31 @@ func (s *CommentStore) Delete(author auth.AccountName, permlink string) {
 	key := newCommentPK(author, permlink)
 	prev, ok := s.primary[key]
 	if !ok {
-		return
+		// Maybe cold.
+		if s.cold != nil && s.coldTotal > 0 && s.cold.has(coldPrimaryKey(author, permlink)) {
+			if s.db.UndoEnabled {
+				// Promote so the delete is undoable; fall through to RAM path.
+				if p, pok := s.promote(author, permlink); pok {
+					prev, ok = p, true
+				}
+			} else {
+				// Delete directly from cold (primary + by-root).
+				c, _ := s.coldGet(author, permlink)
+				rootKey := s.rootKeyOf(&c)
+				s.cold.del(coldPrimaryKey(author, permlink))
+				s.cold.del(s.coldByRootKeyOf(&c))
+				s.coldTotal--
+				if n := s.coldRoot[rootKey] - 1; n <= 0 {
+					delete(s.coldRoot, rootKey)
+				} else {
+					s.coldRoot[rootKey] = n
+				}
+				return
+			}
+		}
+		if !ok {
+			return
+		}
 	}
 	prevRoot := s.rootKeyOf(prev)
 	s.byRootRemove(prevRoot, prev)
@@ -398,13 +555,88 @@ func (s *CommentStore) RangeByRoot(rootAuthor auth.AccountName, rootPermlink str
 		}
 		return sorted[i].Permlink < sorted[j].Permlink
 	})
-	for _, c := range sorted {
-		ok, err := fn(c)
-		if err != nil {
-			return err
+
+	// Pure-RAM fast path: no cold members for this thread.
+	if s.cold == nil || s.coldRoot[rootKey] == 0 {
+		for _, c := range sorted {
+			ok, err := fn(c)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return nil
+			}
 		}
-		if !ok {
-			return nil
+		return nil
+	}
+
+	// Merge the sorted RAM members with the cold by-root prefix scan (also
+	// ascending by (author, permlink) — commentByRootKey orders that way).
+	// Disjoint sets → global (author, permlink) order, byte-for-byte the same
+	// sequence as an all-RAM RangeByRoot of the same logical thread.
+	it, err := s.cold.newPrefixIter(tableKey(coldTableCommentByRoot, CommentByRootPrefix(rootAuthor, rootPermlink)))
+	if err != nil {
+		return err
+	}
+	defer it.Close()
+	var coldC Comment
+	haveCold := false
+	peekCold := func() error {
+		if it.valid() {
+			v, e := it.val()
+			if e != nil {
+				return e
+			}
+			c, e := ReadComment(v)
+			if e != nil {
+				return e
+			}
+			coldC = c
+			haveCold = true
+		} else {
+			haveCold = false
+		}
+		return nil
+	}
+	if err := peekCold(); err != nil {
+		return err
+	}
+	ri := 0
+	for ri < len(sorted) || haveCold {
+		emitRAM := false
+		if ri < len(sorted) && haveCold {
+			r := sorted[ri]
+			ra, ca := string(r.Author), string(coldC.Author)
+			if ra != ca {
+				emitRAM = ra < ca
+			} else {
+				emitRAM = r.Permlink < coldC.Permlink
+			}
+		} else {
+			emitRAM = ri < len(sorted)
+		}
+		if emitRAM {
+			ok, err := fn(sorted[ri])
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return nil
+			}
+			ri++
+		} else {
+			cc := coldC // stable address for fn (transient; must not be retained)
+			ok, err := fn(&cc)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return nil
+			}
+			it.next()
+			if err := peekCold(); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -423,20 +655,90 @@ func (s *CommentStore) RangePrimary(fn func(c *Comment) (bool, error)) error {
 		}
 		return keys[i].permlink < keys[j].permlink
 	})
-	for _, k := range keys {
-		ok, err := fn(s.primary[k])
-		if err != nil {
-			return err
+
+	if s.cold == nil || s.coldTotal == 0 {
+		for _, k := range keys {
+			ok, err := fn(s.primary[k])
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return nil
+			}
 		}
-		if !ok {
-			return nil
+		return nil
+	}
+
+	// Merge sorted RAM keys with the cold primary prefix scan (both ascending
+	// by (author, permlink); cold primary key = author(16)|permlink).
+	it, err := s.cold.newPrefixIter(tableKey(coldTableCommentPrimary, nil))
+	if err != nil {
+		return err
+	}
+	defer it.Close()
+	var coldC Comment
+	haveCold := false
+	peekCold := func() error {
+		if it.valid() {
+			v, e := it.val()
+			if e != nil {
+				return e
+			}
+			c, e := ReadComment(v)
+			if e != nil {
+				return e
+			}
+			coldC, haveCold = c, true
+		} else {
+			haveCold = false
+		}
+		return nil
+	}
+	if err := peekCold(); err != nil {
+		return err
+	}
+	ri := 0
+	for ri < len(keys) || haveCold {
+		emitRAM := false
+		if ri < len(keys) && haveCold {
+			k := keys[ri]
+			if k.author != string(coldC.Author) {
+				emitRAM = k.author < string(coldC.Author)
+			} else {
+				emitRAM = k.permlink < coldC.Permlink
+			}
+		} else {
+			emitRAM = ri < len(keys)
+		}
+		if emitRAM {
+			ok, err := fn(s.primary[keys[ri]])
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return nil
+			}
+			ri++
+		} else {
+			cc := coldC
+			ok, err := fn(&cc)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return nil
+			}
+			it.next()
+			if err := peekCold(); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
 }
 
-// Count returns the comment count.
-func (s *CommentStore) Count() int { return len(s.primary) }
+// Count returns the comment count across both tiers.
+func (s *CommentStore) Count() int { return len(s.primary) + s.coldTotal }
 
 var commentStoreSnapshotMagic = [4]byte{'C', 'M', 'N', 'T'}
 
@@ -456,7 +758,7 @@ func (s *CommentStore) MarshalSnapshot(w io.Writer) error {
 	}
 	var hdr [8]byte
 	binary.LittleEndian.PutUint32(hdr[0:4], commentStoreSnapshotVersion)
-	binary.LittleEndian.PutUint32(hdr[4:8], uint32(len(s.primary)))
+	binary.LittleEndian.PutUint32(hdr[4:8], uint32(len(s.primary)+s.coldTotal))
 	if _, err := w.Write(hdr[:]); err != nil {
 		return err
 	}
@@ -474,15 +776,59 @@ func (s *CommentStore) MarshalSnapshot(w io.Writer) error {
 		varBuf [binary.MaxVarintLen64]byte
 		recBuf []byte
 	)
-	for _, k := range keys {
-		cp := s.primary[k]
-		recBuf = AppendComment(recBuf[:0], cp)
-		n := binary.PutUvarint(varBuf[:], uint64(len(recBuf)))
+	writeRec := func(rec []byte) error {
+		n := binary.PutUvarint(varBuf[:], uint64(len(rec)))
 		if _, err := w.Write(varBuf[:n]); err != nil {
 			return err
 		}
-		if _, err := w.Write(recBuf); err != nil {
-			return err
+		_, err := w.Write(rec)
+		return err
+	}
+
+	if s.cold == nil || s.coldTotal == 0 {
+		for _, k := range keys {
+			recBuf = AppendComment(recBuf[:0], s.primary[k])
+			if err := writeRec(recBuf); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	// Streaming 2-way merge of sorted RAM keys + cold primary scan (both
+	// ascending by (author, permlink)) → byte-identical to an all-RAM
+	// snapshot of the same logical contents. Cold blobs are passed through
+	// verbatim (already AppendComment bytes).
+	it, err := s.cold.newPrefixIter(tableKey(coldTableCommentPrimary, nil))
+	if err != nil {
+		return err
+	}
+	defer it.Close()
+	ri := 0
+	for ri < len(keys) || it.valid() {
+		emitRAM := false
+		if ri < len(keys) && it.valid() {
+			rk := commentKey(auth.AccountName(keys[ri].author), keys[ri].permlink)
+			ck := it.key()[1:] // strip table prefix
+			emitRAM = bytesLess(rk, ck)
+		} else {
+			emitRAM = ri < len(keys)
+		}
+		if emitRAM {
+			recBuf = AppendComment(recBuf[:0], s.primary[keys[ri]])
+			if err := writeRec(recBuf); err != nil {
+				return err
+			}
+			ri++
+		} else {
+			v, err := it.val()
+			if err != nil {
+				return err
+			}
+			if err := writeRec(v); err != nil {
+				return err
+			}
+			it.next()
 		}
 	}
 	return nil
@@ -511,6 +857,9 @@ func (s *CommentStore) UnmarshalSnapshot(r io.Reader) error {
 	s.primary = make(map[commentPK]*Comment, count)
 	s.byRoot = make(map[commentPK][]*Comment, count/8+1)
 	s.undoLog = s.undoLog[:0]
+	// Everything loads into RAM; cold tier starts empty after a load.
+	s.coldRoot = make(map[commentPK]int)
+	s.coldTotal = 0
 	for i := uint32(0); i < count; i++ {
 		recLen, err := binary.ReadUvarint(br)
 		if err != nil {
