@@ -71,6 +71,13 @@ func openColdKV(dir string) (*coldKV, error) {
 	return &coldKV{db: db, dir: dir, owned: owned}, nil
 }
 
+// OpenColdKV is the exported constructor used by cmd/ to open the shared
+// cold tier (dir="" → tempdir removed on Close).
+func OpenColdKV(dir string) (*coldKV, error) { return openColdKV(dir) }
+
+// Dir returns the on-disk directory backing the cold store.
+func (c *coldKV) Dir() string { return c.dir }
+
 // tableKey prepends the table byte to a key built by the comment.go helpers.
 func tableKey(table byte, key []byte) []byte {
 	out := make([]byte, 1+len(key))

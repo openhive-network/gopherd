@@ -40,6 +40,9 @@ func cmdReplay(args []string) int {
 	memProfile := fs.String("memprofile", "", "if set, write heap memory profile to this file at end of replay")
 	cacheMB := fs.Int("cache-mb", 256, "Pebble block cache size in MiB (ignored for --backend=mem)")
 	backend := fs.String("backend", "pebble", "state backend: pebble (persistent) or mem (in-memory btree, faster)")
+	residentCap := fs.Int("comment-resident-cap", 0, "if >0, cap RAM-resident comments to this many; frozen comments (and their votes) spill to an on-disk scratch cold tier. Breaks the RAM ceiling for long replays (e.g. 4000000 keeps the cashout window hot).")
+	coldDir := fs.String("cold-dir", "", "directory for the scratch cold tier (default: a tempdir, removed on exit). Only used when --comment-resident-cap>0.")
+	evictBudget := fs.Int("evict-budget", 20000, "max comments evicted per block when over the resident cap")
 	loadSnapshot := fs.String("load-snapshot", "", "if set, load state from this snapshot path (file = legacy single-file format; directory = block-N dir produced by --snapshot-every; skips genesis + replay before snapshot block)")
 	saveSnapshotAt := fs.Uint("save-snapshot-at", 0, "block number after which to save a single-file snapshot (0 = don't save)")
 	saveSnapshotTo := fs.String("save-snapshot-to", "", "single-file snapshot output path (used with --save-snapshot-at)")
@@ -187,6 +190,29 @@ func cmdReplay(args []string) int {
 	}
 	fmt.Printf("replay: applying %d..%d (head=%d)\n", *startBlock, end, bl.Head())
 
+	// Cold tier: spill frozen comments + their votes to an on-disk scratch
+	// store so the RAM working set stays bounded on long replays. Attached
+	// AFTER any snapshot load (the store objects persist across sessions, so
+	// the attachment survives). Disabled when --comment-resident-cap=0.
+	var commentStoreForEvict *objects.CommentStore
+	var voteStoreForEvict *objects.CommentVoteStore
+	if *residentCap > 0 {
+		cold, cerr := objects.OpenColdKV(*coldDir)
+		if cerr != nil {
+			fmt.Fprintf(os.Stderr, "replay: open cold tier: %v\n", cerr)
+			return 1
+		}
+		defer cold.Close()
+		boot := state.NewSession(stateDB)
+		commentStoreForEvict = objects.EnsureCommentStore(boot)
+		voteStoreForEvict = objects.EnsureCommentVoteStore(boot)
+		commentStoreForEvict.SetColdTier(cold)
+		commentStoreForEvict.SetResidentCap(*residentCap)
+		voteStoreForEvict.SetColdTier(cold)
+		fmt.Printf("replay: cold tier ON — resident cap %d comments, evict budget %d/block, dir %s\n",
+			*residentCap, *evictBudget, cold.Dir())
+	}
+
 	cdb := chain.New(stateDB)
 	start := time.Now()
 	var (
@@ -249,6 +275,11 @@ func cmdReplay(args []string) int {
 			continue
 		}
 		applied++
+		// Post-commit safe point: spill frozen comments + votes to the cold
+		// tier if over the resident cap (no-op when the cold tier is off).
+		if commentStoreForEvict != nil {
+			commentStoreForEvict.EvictFrozen(voteStoreForEvict, *evictBudget)
+		}
 		if *watchAccount != "" {
 			cur := snapshotAccount(*watchAccount)
 			if cur != prevSnap {

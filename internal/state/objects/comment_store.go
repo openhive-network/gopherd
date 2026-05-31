@@ -66,6 +66,13 @@ type CommentStore struct {
 	// coldRoot[rootKey] = number of this thread's comments in the cold tier;
 	// RangeByRoot skips the cold by-root scan when 0 (live threads → pure RAM).
 	coldRoot map[commentPK]int
+	// evictQueue holds resident comments that are eviction CANDIDATES, in
+	// roughly creation/freeze order. Populated on new-comment Put and on
+	// promote (so a re-accessed cold comment becomes a candidate again).
+	// Bounded: entries are popped when evicted, so the queue size tracks the
+	// resident-but-not-yet-evicted population, not the full comment count.
+	evictQueue []commentPK
+	residentCap int
 }
 
 type commentUndo struct {
@@ -124,6 +131,61 @@ func newCommentStore() *CommentStore {
 // called before any eviction. Unset → pure in-RAM behavior.
 func (s *CommentStore) SetColdTier(c *coldKV) { s.cold = c }
 
+// SetResidentCap sets the soft cap on RAM-resident comments. 0 disables
+// eviction (the queue is not populated). EvictFrozen evicts down toward this
+// cap at block boundaries.
+func (s *CommentStore) SetResidentCap(n int) { s.residentCap = n }
+
+// EvictFrozen evicts frozen (CashoutTime==0) comments — and their votes via
+// cvs — from RAM to the cold tier until the resident count is at/under the cap
+// or the per-call budget is spent. MUST be called only at a safe point (after
+// a block commit: UndoEnabled false, undo log empty, no live *Comment alias).
+// Returns the number of comments evicted.
+//
+// Candidates come from evictQueue (creation/freeze order). A popped key that is
+// no longer resident is dropped; one that is resident but still live
+// (CashoutTime!=0) is re-queued at the back. Because comments freeze in roughly
+// creation order, the queue front is overwhelmingly frozen, so re-queues are
+// rare. iterCap bounds total work so a run of live front entries can't spin.
+func (s *CommentStore) EvictFrozen(cvs *CommentVoteStore, budget int) int {
+	if s.cold == nil || s.residentCap <= 0 {
+		return 0
+	}
+	evicted := 0
+	iters := 0
+	iterCap := budget * 4
+	for len(s.primary) > s.residentCap && evicted < budget && iters < iterCap && len(s.evictQueue) > 0 {
+		iters++
+		key := s.evictQueue[0]
+		s.evictQueue = s.evictQueue[1:]
+		c, ok := s.primary[key]
+		if !ok {
+			continue // already gone (deleted or evicted via another path)
+		}
+		if c.CashoutTime != 0 {
+			s.evictQueue = append(s.evictQueue, key) // still live → try later
+			continue
+		}
+		author, permlink := auth.AccountName(key.author), key.permlink
+		if s.Evict(author, permlink) {
+			if cvs != nil {
+				cvs.EvictComment(author, permlink)
+			}
+			evicted++
+		}
+	}
+	// Periodically compact the queue's backing array so the sliced-off front
+	// doesn't pin unbounded memory.
+	if len(s.evictQueue) == 0 {
+		s.evictQueue = nil
+	} else if cap(s.evictQueue) > 4096 && cap(s.evictQueue) > 4*len(s.evictQueue) {
+		q := make([]commentPK, len(s.evictQueue))
+		copy(q, s.evictQueue)
+		s.evictQueue = q
+	}
+	return evicted
+}
+
 // coldKeyOf / coldRootKeyOf build the table-prefixed cold keys for a comment.
 func coldPrimaryKey(author auth.AccountName, permlink string) []byte {
 	return tableKey(coldTableCommentPrimary, commentKey(author, permlink))
@@ -174,6 +236,10 @@ func (s *CommentStore) promote(author auth.AccountName, permlink string) (*Comme
 	rootKey := s.rootKeyOf(cp)
 	s.primary[key] = cp
 	s.byRoot[rootKey] = append(s.byRoot[rootKey], cp)
+	if s.residentCap > 0 {
+		// Re-accessed cold comment is an eviction candidate again.
+		s.evictQueue = append(s.evictQueue, key)
+	}
 	// Drop cold entries + counters.
 	s.cold.del(coldPrimaryKey(author, permlink))
 	s.cold.del(s.coldByRootKeyOf(cp))
@@ -468,6 +534,10 @@ func (s *CommentStore) Put(c *Comment) {
 		s.byRoot[curRoot] = append(s.byRoot[curRoot], cp)
 	}
 	s.primary[key] = cp
+	if prev == nil && s.residentCap > 0 {
+		// New comment → eviction candidate (popped once it freezes + evicts).
+		s.evictQueue = append(s.evictQueue, key)
+	}
 
 	if s.db.UndoEnabled {
 		s.undoLog = append(s.undoLog, commentUndo{
