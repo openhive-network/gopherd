@@ -73,6 +73,12 @@ type CommentStore struct {
 	// resident-but-not-yet-evicted population, not the full comment count.
 	evictQueue []commentPK
 	residentCap int
+	// coldBloom answers "is this comment DEFINITELY not in the cold tier?"
+	// so the hot path (every new comment does Has() → RAM-miss) skips the
+	// Pebble probe for genuinely-new keys. Add-only (promotion leaves a
+	// false-positive that costs one wasted, correct probe). nil until cold
+	// tier attached.
+	bloom *coldBloom
 }
 
 type commentUndo struct {
@@ -129,7 +135,26 @@ func newCommentStore() *CommentStore {
 
 // SetColdTier attaches (or detaches, with nil) the on-disk cold tier. Must be
 // called before any eviction. Unset → pure in-RAM behavior.
-func (s *CommentStore) SetColdTier(c *coldKV) { s.cold = c }
+func (s *CommentStore) SetColdTier(c *coldKV) {
+	s.cold = c
+	if c != nil && s.bloom == nil {
+		s.bloom = newColdBloom(100_000_000) // ~120MB, ~1% FP at 100M cold keys
+	}
+}
+
+// coldMaybe reports whether (author, permlink) might be in the cold tier.
+// false ⇒ definitely absent ⇒ skip the Pebble probe. Always true when no
+// bloom (shouldn't happen once cold attached) so correctness never depends
+// on the bloom.
+func (s *CommentStore) coldMaybe(author auth.AccountName, permlink string) bool {
+	if s.coldTotal == 0 {
+		return false
+	}
+	if s.bloom == nil {
+		return true
+	}
+	return s.bloom.maybePresent(commentKey(author, permlink))
+}
 
 // SetResidentCap sets the soft cap on RAM-resident comments. 0 disables
 // eviction (the queue is not populated). EvictFrozen evicts down toward this
@@ -152,19 +177,17 @@ func (s *CommentStore) EvictFrozen(cvs *CommentVoteStore, budget int) int {
 		return 0
 	}
 	evicted := 0
-	iters := 0
-	iterCap := budget * 4
-	for len(s.primary) > s.residentCap && evicted < budget && iters < iterCap && len(s.evictQueue) > 0 {
-		iters++
+	// evictQueue holds only frozen candidates (populated on freeze transition
+	// + promote), so there is nothing to spin on: each popped key is either
+	// gone (drop) or evictable. When live-comment count exceeds the cap the
+	// queue simply empties and resident stays at the (un-evictable) live count
+	// — no wasted work.
+	for len(s.primary) > s.residentCap && evicted < budget && len(s.evictQueue) > 0 {
 		key := s.evictQueue[0]
 		s.evictQueue = s.evictQueue[1:]
 		c, ok := s.primary[key]
-		if !ok {
-			continue // already gone (deleted or evicted via another path)
-		}
-		if c.CashoutTime != 0 {
-			s.evictQueue = append(s.evictQueue, key) // still live → try later
-			continue
+		if !ok || c.CashoutTime != 0 {
+			continue // stale entry (deleted, already evicted, or re-activated)
 		}
 		author, permlink := auth.AccountName(key.author), key.permlink
 		if s.Evict(author, permlink) {
@@ -201,7 +224,7 @@ func (s *CommentStore) coldByRootKeyOf(c *Comment) []byte {
 
 // coldGet fetches a comment from the cold tier by primary key.
 func (s *CommentStore) coldGet(author auth.AccountName, permlink string) (Comment, bool) {
-	if s.cold == nil || s.coldTotal == 0 {
+	if s.cold == nil || !s.coldMaybe(author, permlink) {
 		return Comment{}, false
 	}
 	blob, ok := s.cold.get(coldPrimaryKey(author, permlink))
@@ -268,6 +291,9 @@ func (s *CommentStore) Evict(author auth.AccountName, permlink string) bool {
 	blob := AppendComment(nil, c)
 	s.cold.set(coldPrimaryKey(author, permlink), blob)
 	s.cold.set(s.coldByRootKeyOf(c), blob)
+	if s.bloom != nil {
+		s.bloom.add(commentKey(author, permlink))
+	}
 	s.byRootRemove(rootKey, c)
 	delete(s.primary, key)
 	s.freeComment = append(s.freeComment, c)
@@ -379,7 +405,7 @@ func (s *CommentStore) Has(author auth.AccountName, permlink string) bool {
 	if _, ok := s.primary[newCommentPK(author, permlink)]; ok {
 		return true
 	}
-	if s.cold != nil && s.coldTotal > 0 {
+	if s.cold != nil && s.coldMaybe(author, permlink) {
 		return s.cold.has(coldPrimaryKey(author, permlink))
 	}
 	return false
@@ -405,7 +431,7 @@ func (s *CommentStore) GetRef(author auth.AccountName, permlink string) (*Commen
 	}
 	// RAM miss — promote from cold so the caller gets a real mutable slot
 	// (preserves the alias-and-mutate-then-Put contract).
-	if s.cold != nil && s.coldTotal > 0 {
+	if s.cold != nil && s.coldMaybe(author, permlink) {
 		return s.promote(author, permlink)
 	}
 	return nil, false
@@ -431,7 +457,7 @@ func (s *CommentStore) Mutate(author auth.AccountName, permlink string, fn func(
 	if !ok {
 		// Promote from cold so the in-place mutate + undo snapshot operate on
 		// a real RAM slot.
-		if s.cold != nil && s.coldTotal > 0 {
+		if s.cold != nil && s.coldMaybe(author, permlink) {
 			cur, ok = s.promote(author, permlink)
 		}
 		if !ok {
@@ -445,7 +471,12 @@ func (s *CommentStore) Mutate(author auth.AccountName, permlink string, fn func(
 			snap:          *cur,
 		})
 	}
+	oldCT := cur.CashoutTime
 	fn(cur)
+	// Freeze transition → eviction candidate (see Put).
+	if s.residentCap > 0 && oldCT != 0 && cur.CashoutTime == 0 {
+		s.evictQueue = append(s.evictQueue, key)
+	}
 	return true
 }
 
@@ -465,10 +496,18 @@ func (s *CommentStore) Put(c *Comment) {
 	// RAM miss but present in cold (edit/vote on an evicted comment): promote
 	// so `prev` is the true prior row — undo captures it and byRoot stays
 	// consistent.
-	if prev == nil && s.cold != nil && s.coldTotal > 0 {
+	if prev == nil && s.cold != nil && s.coldMaybe(c.Author, c.Permlink) {
 		if p, ok := s.promote(c.Author, c.Permlink); ok {
 			prev = p
 		}
+	}
+
+	// Freeze transition: a comment whose CashoutTime drops to 0 (paid out /
+	// frozen) becomes an eviction candidate. Queuing ONLY on freeze (not on
+	// creation) keeps evictQueue free of live comments, so EvictFrozen never
+	// spins re-queueing un-evictable (CashoutTime!=0) entries.
+	if s.residentCap > 0 && c.CashoutTime == 0 && (prev == nil || prev.CashoutTime != 0) {
+		s.evictQueue = append(s.evictQueue, key)
 	}
 
 	// Fast path: modify-in-place when prev exists AND rootKey didn't
@@ -534,10 +573,6 @@ func (s *CommentStore) Put(c *Comment) {
 		s.byRoot[curRoot] = append(s.byRoot[curRoot], cp)
 	}
 	s.primary[key] = cp
-	if prev == nil && s.residentCap > 0 {
-		// New comment → eviction candidate (popped once it freezes + evicts).
-		s.evictQueue = append(s.evictQueue, key)
-	}
 
 	if s.db.UndoEnabled {
 		s.undoLog = append(s.undoLog, commentUndo{
@@ -563,7 +598,7 @@ func (s *CommentStore) Delete(author auth.AccountName, permlink string) {
 	prev, ok := s.primary[key]
 	if !ok {
 		// Maybe cold.
-		if s.cold != nil && s.coldTotal > 0 && s.cold.has(coldPrimaryKey(author, permlink)) {
+		if s.cold != nil && s.coldMaybe(author, permlink) && s.cold.has(coldPrimaryKey(author, permlink)) {
 			if s.db.UndoEnabled {
 				// Promote so the delete is undoable; fall through to RAM path.
 				if p, pok := s.promote(author, permlink); pok {

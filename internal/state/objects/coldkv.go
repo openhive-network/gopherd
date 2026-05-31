@@ -220,6 +220,73 @@ func prefixUpperBound(prefix []byte) []byte {
 	return nil
 }
 
+// coldBloom is a fixed-size counting-free Bloom filter over the keys present
+// in the cold tier. It answers "is this key DEFINITELY absent from cold?" so
+// the hot path (every new comment does a Has() that RAM-misses) can skip the
+// Pebble probe for the overwhelmingly common case of a genuinely new key.
+//
+// add-only: promotion removes a key from Pebble but NOT from the bloom, so a
+// promoted key stays a false-positive → an occasional wasted (correct) probe.
+// Correctness is preserved: a key in cold is always "maybe present"; only
+// "definitely absent" short-circuits. Sized for ~100M keys at ~1% FP.
+type coldBloom struct {
+	bits []uint64
+	mask uint64 // numBits-1, numBits a power of two
+	k    int    // hash count
+}
+
+func newColdBloom(expectedKeys int) *coldBloom {
+	if expectedKeys < 1<<20 {
+		expectedKeys = 1 << 20
+	}
+	// ~10 bits/key → ~1% FP at k=7. Round numBits up to a power of two.
+	numBits := uint64(1)
+	target := uint64(expectedKeys) * 10
+	for numBits < target {
+		numBits <<= 1
+	}
+	return &coldBloom{bits: make([]uint64, numBits/64), mask: numBits - 1, k: 7}
+}
+
+// fnv1a64 of b, used as the base hash; the k probes are derived by mixing.
+func bloomHash(b []byte) (uint64, uint64) {
+	const off = 1469598103934665603
+	const prime = 1099511628211
+	h := uint64(off)
+	for _, c := range b {
+		h ^= uint64(c)
+		h *= prime
+	}
+	// second independent hash (different seed) for double hashing.
+	h2 := uint64(1099511628211)
+	for _, c := range b {
+		h2 = (h2 ^ uint64(c)) * 0x100000001b3
+		h2 += 0x9e3779b97f4a7c15
+	}
+	return h, h2
+}
+
+func (bf *coldBloom) add(key []byte) {
+	h1, h2 := bloomHash(key)
+	for i := 0; i < bf.k; i++ {
+		p := (h1 + uint64(i)*h2) & bf.mask
+		bf.bits[p>>6] |= 1 << (p & 63)
+	}
+}
+
+// maybePresent returns false only if the key is DEFINITELY not in the cold
+// tier. A true result means "maybe" (probe Pebble to be sure).
+func (bf *coldBloom) maybePresent(key []byte) bool {
+	h1, h2 := bloomHash(key)
+	for i := 0; i < bf.k; i++ {
+		p := (h1 + uint64(i)*h2) & bf.mask
+		if bf.bits[p>>6]&(1<<(p&63)) == 0 {
+			return false
+		}
+	}
+	return true
+}
+
 // bytesLess reports a < b in lexicographic byte order (avoids importing
 // "bytes" into the store files just for Compare).
 func bytesLess(a, b []byte) bool {
