@@ -56,29 +56,31 @@ func TestEvictFrozenPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Run eviction. 4 frozen (ids 2,4,6,8) are candidates; cap=3 with 8
-	// resident means it wants to evict 5, but only 4 are frozen → evicts 4.
+	// Run eviction. Policy is AGE-based (oldest first), NOT frozen-only — a
+	// consensus node pages out cold comments regardless of cashout window.
+	// 8 resident, cap=3 → evict the 5 oldest (ids 1..5), incl. LIVE ones.
 	n := csC.EvictFrozen(cvsC, 100)
-	if n != 4 {
-		t.Fatalf("evicted %d, want 4 (only frozen ones)", n)
+	if n != 5 {
+		t.Fatalf("evicted %d, want 5 (oldest down to cap)", n)
 	}
-	if got := len(csC.primary); got != 4 {
-		t.Fatalf("resident comments after evict: %d want 4 (the live ones)", got)
+	if got := len(csC.primary); got != 3 {
+		t.Fatalf("resident comments after evict: %d want 3 (newest)", got)
 	}
-	// Live (odd) comments still resident; frozen (even) ones cold.
+	// Newest 3 (ids 6,7,8) resident; oldest 5 (ids 1..5) cold — including LIVE
+	// ones (odd ids 1,3,5), proving live comments are evictable.
 	for i := 1; i <= 8; i++ {
 		_, residentC := csC.primary[newCommentPK("auth", permOf(i))]
-		wantResident := i%2 == 1
+		wantResident := i > 5
 		if residentC != wantResident {
 			t.Fatalf("comment %d resident=%v want %v", i, residentC, wantResident)
 		}
 	}
-	// Votes on frozen comments evicted too.
-	if cvsC.CountForComment("auth", permOf(2)) != 1 {
-		t.Fatalf("frozen comment vote count via tiers: %d want 1", cvsC.CountForComment("auth", permOf(2)))
+	// Votes on an evicted live comment (id 5, odd) went cold too, still counted.
+	if cvsC.CountForComment("auth", permOf(5)) != 1 {
+		t.Fatalf("evicted-comment vote count via tiers: %d want 1", cvsC.CountForComment("auth", permOf(5)))
 	}
-	if _, resident := cvsC.primary[newCommentVotePK("voter", "auth", permOf(2))]; resident {
-		t.Fatal("vote on frozen comment 2 should have been evicted from RAM")
+	if _, resident := cvsC.primary[newCommentVotePK("voter", "auth", permOf(5))]; resident {
+		t.Fatal("vote on evicted comment 5 should have been evicted from RAM")
 	}
 
 	// Byte-identical snapshots (both stores).

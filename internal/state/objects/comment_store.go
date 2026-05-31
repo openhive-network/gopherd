@@ -161,33 +161,37 @@ func (s *CommentStore) coldMaybe(author auth.AccountName, permlink string) bool 
 // cap at block boundaries.
 func (s *CommentStore) SetResidentCap(n int) { s.residentCap = n }
 
-// EvictFrozen evicts frozen (CashoutTime==0) comments — and their votes via
-// cvs — from RAM to the cold tier until the resident count is at/under the cap
-// or the per-call budget is spent. MUST be called only at a safe point (after
-// a block commit: UndoEnabled false, undo log empty, no live *Comment alias).
-// Returns the number of comments evicted.
+// EvictFrozen evicts the OLDEST comments — and their votes via cvs — from RAM
+// to the cold tier until the resident count is at/under the cap or the budget
+// is spent. MUST be called only at a safe point (after a block commit:
+// UndoEnabled false, undo log empty, no live *Comment alias). Returns the
+// number evicted.
 //
-// Candidates come from evictQueue (creation/freeze order). A popped key that is
-// no longer resident is dropped; one that is resident but still live
-// (CashoutTime!=0) is re-queued at the back. Because comments freeze in roughly
-// creation order, the queue front is overwhelmingly frozen, so re-queues are
-// rare. iterCap bounds total work so a run of live front entries can't spin.
+// Eviction is by AGE, NOT by frozen status — exactly as a hived consensus node
+// lets the OS page out cold pages of its memory-mapped shared_memory regardless
+// of whether a comment is still in its cashout window. Pinning every live
+// (CashoutTime!=0) comment in the Go heap is what blew RAM up to the ~8M-live-
+// comment working set; a consensus node does not need them resident. A live
+// comment that is later voted on or cashed out is promoted back on access
+// (GetRef/Mutate/RangeByRoot all promote from cold) — bit-identically. The
+// resident set therefore tracks the genuinely-hot comments (recent + currently
+// cashing out), bounded by the cap.
+//
+// evictQueue holds comments in creation/promotion order (oldest at the front),
+// so popping the front evicts the oldest — the least likely to be touched
+// (vote activity is on recent posts; a due comment is promoted at cashout).
+// Stale entries (already evicted / deleted) are dropped. No spin: every
+// resident pop evicts.
 func (s *CommentStore) EvictFrozen(cvs *CommentVoteStore, budget int) int {
 	if s.cold == nil || s.residentCap <= 0 {
 		return 0
 	}
 	evicted := 0
-	// evictQueue holds only frozen candidates (populated on freeze transition
-	// + promote), so there is nothing to spin on: each popped key is either
-	// gone (drop) or evictable. When live-comment count exceeds the cap the
-	// queue simply empties and resident stays at the (un-evictable) live count
-	// — no wasted work.
 	for len(s.primary) > s.residentCap && evicted < budget && len(s.evictQueue) > 0 {
 		key := s.evictQueue[0]
 		s.evictQueue = s.evictQueue[1:]
-		c, ok := s.primary[key]
-		if !ok || c.CashoutTime != 0 {
-			continue // stale entry (deleted, already evicted, or re-activated)
+		if _, ok := s.primary[key]; !ok {
+			continue // stale (already evicted/deleted) — drop
 		}
 		author, permlink := auth.AccountName(key.author), key.permlink
 		if s.Evict(author, permlink) {
@@ -477,12 +481,7 @@ func (s *CommentStore) Mutate(author auth.AccountName, permlink string, fn func(
 			snap:          *cur,
 		})
 	}
-	oldCT := cur.CashoutTime
 	fn(cur)
-	// Freeze transition → eviction candidate (see Put).
-	if s.residentCap > 0 && oldCT != 0 && cur.CashoutTime == 0 {
-		s.evictQueue = append(s.evictQueue, key)
-	}
 	return true
 }
 
@@ -508,11 +507,9 @@ func (s *CommentStore) Put(c *Comment) {
 		}
 	}
 
-	// Freeze transition: a comment whose CashoutTime drops to 0 (paid out /
-	// frozen) becomes an eviction candidate. Queuing ONLY on freeze (not on
-	// creation) keeps evictQueue free of live comments, so EvictFrozen never
-	// spins re-queueing un-evictable (CashoutTime!=0) entries.
-	if s.residentCap > 0 && c.CashoutTime == 0 && (prev == nil || prev.CashoutTime != 0) {
+	// New comment → eviction candidate (creation order = age order; EvictFrozen
+	// evicts oldest-first). Re-accessed cold comments are re-queued by promote.
+	if s.residentCap > 0 && prev == nil {
 		s.evictQueue = append(s.evictQueue, key)
 	}
 
