@@ -411,6 +411,15 @@ func buildInMemoryIndex(p *part) error {
 		return fmt.Errorf("main file too small: %d bytes", p.mainSize)
 	}
 
+	// A partially-downloaded block_log ends mid-block, so the final 8 bytes
+	// are block payload, not a valid trailer — decoding them yields a bogus
+	// start offset (often >> file size) and the backward walk dies with EOF.
+	// Recover the last fully-written block by scanning the tail for the
+	// highest self-consistent trailer and treating that as the effective EOF.
+	if validEnd, ok := recoverValidEnd(p); ok && validEnd != p.mainSize {
+		p.mainSize = validEnd
+	}
+
 	// Start by reading the very last 8 bytes — that's the head block's trailer.
 	trailerPos := p.mainSize - trailerSize
 	if trailerPos < 0 {
@@ -463,6 +472,69 @@ func buildInMemoryIndex(p *part) error {
 	p.indexMem = trailers
 	p.count = uint32(len(trailers))
 	return nil
+}
+
+// recoverValidEnd returns the byte offset just past the last fully-written
+// block when the file's final 8 bytes are not a valid trailer (i.e. the log
+// was truncated mid-block, as in a partial download). It returns (size, true)
+// where size is the effective EOF to use, or (0, false) if the tail trailer is
+// already valid (the common case) or no recovery point can be found.
+//
+// A trailer at position tp encodes the start offset of the block whose last 8
+// bytes it occupies; that block spans [blockOffset, tp+8). A valid head trailer
+// therefore has 0 <= blockOffset < tp and a sane block length. To avoid latching
+// onto a coincidental match in random payload bytes, we require the chain to be
+// self-consistent for two hops (the preceding block's trailer must also decode
+// in range, or the block must be block 1 with blockOffset 0).
+func recoverValidEnd(p *part) (int64, bool) {
+	const (
+		maxBlockLen = 8 << 20    // generous upper bound on one serialized block
+		maxScan     = 64 << 20   // how far back from EOF to hunt for the boundary
+	)
+	valid := func(tp int64) bool {
+		if tp < 0 || tp+trailerSize > p.mainSize {
+			return false
+		}
+		var buf [trailerSize]byte
+		if _, err := p.main.ReadAt(buf[:], tp); err != nil {
+			return false
+		}
+		off, _ := decodeTrailer(binary.LittleEndian.Uint64(buf[:]))
+		bo := int64(off)
+		if bo < 0 || bo >= tp || tp+trailerSize-bo > maxBlockLen {
+			return false
+		}
+		if bo == 0 {
+			return true // block 1
+		}
+		// One more hop: the preceding block's trailer sits at bo-8.
+		prevTp := bo - trailerSize
+		if prevTp < 0 || prevTp+trailerSize > p.mainSize {
+			return false
+		}
+		if _, err := p.main.ReadAt(buf[:], prevTp); err != nil {
+			return false
+		}
+		poff, _ := decodeTrailer(binary.LittleEndian.Uint64(buf[:]))
+		pbo := int64(poff)
+		return pbo >= 0 && pbo < prevTp && prevTp+trailerSize-pbo <= maxBlockLen
+	}
+
+	// Tail already valid → no recovery needed.
+	if valid(p.mainSize - trailerSize) {
+		return 0, false
+	}
+	// Scan backward for the highest self-consistent trailer position.
+	lo := p.mainSize - maxScan
+	if lo < 0 {
+		lo = 0
+	}
+	for tp := p.mainSize - trailerSize - 1; tp >= lo; tp-- {
+		if valid(tp) {
+			return tp + trailerSize, true
+		}
+	}
+	return 0, false
 }
 
 // writeSidecarIndex atomically writes the in-memory index (packed
