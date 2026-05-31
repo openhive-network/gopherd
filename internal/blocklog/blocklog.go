@@ -93,6 +93,13 @@ type part struct {
 	first uint32 // first block num in this part
 	count uint32 // number of blocks in this part
 
+	// readSinceAdvise accumulates bytes read from main since the last
+	// FADV_DONTNEED. Forward replay over a huge block_log (e.g. the 420 GB
+	// mainnet log) would otherwise fill the page cache with consumed block
+	// pages and evict the replayer's multi-GB heap, sending the box into
+	// swap thrash. We periodically drop the already-consumed page cache.
+	readSinceAdvise int64
+
 	// indexFile is non-nil when an on-disk .index sidecar was found.
 	indexFile *os.File
 
@@ -254,6 +261,7 @@ func (r *Reader) blockInto(blockNum uint32, rawScratch, outScratch []byte) ([]by
 	if _, err := p.main.ReadAt(raw, int64(off)); err != nil {
 		return nil, raw, fmt.Errorf("blocklog: read block %d: %w", blockNum, err)
 	}
+	p.adviseConsumed(int64(size), int64(endOff))
 
 	if !attr.Compressed {
 		// Uncompressed block: we have to return owned bytes. Avoid handing
@@ -385,6 +393,21 @@ func (p *part) lookupTrailer(blockIdx uint32) (uint64, error) {
 		return 0, fmt.Errorf("block index %d past end (count=%d)", blockIdx, len(p.indexMem))
 	}
 	return p.indexMem[blockIdx], nil
+}
+
+// adviseConsumed tracks bytes read and, every ~256 MB of forward progress,
+// asks the kernel to drop the page cache for the already-consumed prefix of
+// the block_log [0, upTo). This keeps a multi-hundred-GB block_log from
+// crowding the replayer's heap out of RAM (see readSinceAdvise). It is a hint;
+// errors are ignored and it is a no-op on non-Linux.
+func (p *part) adviseConsumed(n, upTo int64) {
+	const adviseEvery = 256 << 20
+	p.readSinceAdvise += n
+	if p.readSinceAdvise < adviseEvery {
+		return
+	}
+	p.readSinceAdvise = 0
+	dropCacheUpTo(p.main, upTo)
 }
 
 // endOffset returns the byte offset just past the blockIdx-th block in this
