@@ -97,6 +97,12 @@ func PutAccountRecoveryRequest(s *state.Session, r *AccountRecoveryRequest) {
 	s.Put(AccountRecoveryRequestTable, state.PrimaryIndex, recoveryRequestKey(r.AccountToRecover), AppendAccountRecoveryRequest(nil, r))
 	s.Put(AccountRecoveryRequestTable, AccountRecoveryByExpirationIndex,
 		accountRecoveryByExpirationKey(r.Expiration, r.AccountToRecover), nil)
+	// Lower the expiration hint so the per-block sweep can't skip this
+	// newly-inserted row. Without it, a sweep that previously found nothing
+	// pending leaves the hint at max and this request becomes invisible
+	// forever (every other expiring-table Put — savings, escrow,
+	// decline_voting_rights, vesting_delegation_expiration — does this).
+	s.NudgeExpHint(AccountRecoveryRequestTable, AccountRecoveryByExpirationIndex, r.Expiration)
 }
 
 func DeleteAccountRecoveryRequest(s *state.Session, account auth.AccountName) {
@@ -162,6 +168,13 @@ func PutChangeRecoveryRequest(s *state.Session, r *ChangeRecoveryAccountRequest)
 	s.Put(ChangeRecoveryAccountRequestTable, state.PrimaryIndex, recoveryRequestKey(r.AccountToRecover), AppendChangeRecoveryRequest(nil, r))
 	s.Put(ChangeRecoveryAccountRequestTable, ChangeRecoveryByEffectiveDateIndex,
 		changeRecoveryByEffectiveDateKey(r.EffectiveOn, r.AccountToRecover), nil)
+	// Lower the effective-date hint so applyEffectiveRecoveryAccountChanges
+	// can't skip this newly-inserted request. Without it, a sweep that
+	// previously found nothing pending leaves the hint at max and the change
+	// never matures — account.recovery_account stays stale (paidsteemvoter
+	// kept "steem" instead of rotating to "pz13"; request_account_recovery
+	// then failed at block 18,481,234).
+	s.NudgeExpHint(ChangeRecoveryAccountRequestTable, ChangeRecoveryByEffectiveDateIndex, r.EffectiveOn)
 }
 
 // DeleteChangeRecoveryRequestFull removes both indices.
