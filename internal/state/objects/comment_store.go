@@ -296,7 +296,13 @@ func (s *CommentStore) Evict(author auth.AccountName, permlink string) bool {
 	}
 	s.byRootRemove(rootKey, c)
 	delete(s.primary, key)
-	s.freeComment = append(s.freeComment, c)
+	// Do NOT recycle the evicted slot into freeComment. The freelist is
+	// reused by Put and trimmed only at CommitPoint; under eviction (millions
+	// evicted, few promoted back) it would grow without bound and retain every
+	// evicted *Comment (and its strings) forever — the dominant heap leak
+	// (CommentStore.Put 3.94GB + ReadString 2.07GB at block 16M). Dropping the
+	// reference lets GC reclaim the slot + its strings immediately; the cold
+	// blob on disk is the retained copy.
 	s.coldTotal++
 	s.coldRoot[rootKey]++
 	return true

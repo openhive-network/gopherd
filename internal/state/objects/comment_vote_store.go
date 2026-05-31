@@ -180,7 +180,9 @@ func (s *CommentVoteStore) Evict(voter, author auth.AccountName, permlink string
 	s.coldPutVote(cv)
 	s.byCommentRemove(cKey, cv)
 	delete(s.primary, key)
-	s.freeCV = append(s.freeCV, cv)
+	// Do NOT recycle into freeCV — under eviction the freelist would grow
+	// unbounded and retain every evicted vote. Let GC reclaim it (cold blob
+	// is the retained copy).
 	return true
 }
 
@@ -200,7 +202,8 @@ func (s *CommentVoteStore) EvictComment(author auth.AccountName, permlink string
 	for _, cv := range list {
 		s.coldPutVote(cv)
 		delete(s.primary, newCommentVotePK(cv.Voter, cv.Author, cv.Permlink))
-		s.freeCV = append(s.freeCV, cv)
+		// Not recycled into freeCV (would grow unbounded under eviction) —
+		// GC reclaims; cold blob is the retained copy.
 	}
 	delete(s.byComment, cKey)
 	return n
