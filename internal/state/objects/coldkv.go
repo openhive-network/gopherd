@@ -29,6 +29,9 @@ type coldKV struct {
 	db    *pebble.DB
 	dir   string
 	owned bool // dir was created by us → remove it on Close
+	// wb accumulates eviction-pass writes; committed by flushBatch (end of
+	// pass) or implicitly before any read (reads don't see an open batch).
+	wb *pebble.Batch
 }
 
 // Cold-tier table prefixes. One shared Pebble instance, namespaced by a
@@ -59,16 +62,57 @@ func openColdKV(dir string) (*coldKV, error) {
 		}
 	}
 	db, err := pebble.Open(dir, &pebble.Options{
-		// Generous in-process cache; the cold tier is read-rarely
-		// (only on cold-comment access) but write-heavy at eviction.
-		Cache:        pebble.NewCache(256 << 20),
-		DisableWAL:   true, // scratch store; snapshots are the source of truth
-		MaxOpenFiles: 1024,
+		// Large cache so promote-back reads hit memory; the cold tier is
+		// write-heavy at eviction and read on promotion.
+		Cache: pebble.NewCache(1 << 30), // 1 GiB
+		// Big memtable + headroom so the eviction write stream rarely stalls
+		// on flush; this is the dominant cost when eviction engages.
+		MemTableSize:                64 << 20, // 64 MiB
+		MemTableStopWritesThreshold: 8,
+		L0CompactionThreshold:       8,
+		L0StopWritesThreshold:       48,
+		DisableWAL:                  true, // scratch store; snapshots are the source of truth
+		MaxOpenFiles:                4096,
 	})
 	if err != nil {
 		return nil, err
 	}
 	return &coldKV{db: db, dir: dir, owned: owned}, nil
+}
+
+// bset/bdel/flushBatch provide a batched write path for the eviction pass.
+// Per-key Set was the dominant eviction cost (memtable insert + frequent
+// flush/compaction); batching one Pebble Batch per block's eviction pass and
+// committing once cuts that sharply. Reads (get/has/rangePrefix) do NOT see an
+// uncommitted batch, so flushBatch() MUST be called at the end of the eviction
+// pass (a block boundary) before any subsequent promote-back read.
+func (c *coldKV) bset(key, val []byte) {
+	if c.wb == nil {
+		c.wb = c.db.NewBatch()
+	}
+	_ = c.wb.Set(key, val, nil)
+	if c.wb.Len() > 48<<20 {
+		c.flushBatch()
+	}
+}
+
+func (c *coldKV) bdel(key []byte) {
+	if c.wb == nil {
+		c.wb = c.db.NewBatch()
+	}
+	_ = c.wb.Delete(key, nil)
+	if c.wb.Len() > 48<<20 {
+		c.flushBatch()
+	}
+}
+
+func (c *coldKV) flushBatch() {
+	if c.wb == nil {
+		return
+	}
+	_ = c.db.Apply(c.wb, pebble.NoSync)
+	_ = c.wb.Close()
+	c.wb = nil
 }
 
 // OpenColdKV is the exported constructor used by cmd/ to open the shared
@@ -89,6 +133,9 @@ func tableKey(table byte, key []byte) []byte {
 // get returns the value for a full (table-prefixed) key. ok=false on miss.
 // The returned slice is a copy owned by the caller.
 func (c *coldKV) get(key []byte) ([]byte, bool) {
+	if c.wb != nil {
+		c.flushBatch() // make pending eviction writes visible to reads
+	}
 	v, closer, err := c.db.Get(key)
 	if err != nil {
 		if errors.Is(err, pebble.ErrNotFound) {
@@ -108,6 +155,9 @@ func (c *coldKV) get(key []byte) ([]byte, bool) {
 
 // has reports whether a full key exists without copying the value.
 func (c *coldKV) has(key []byte) bool {
+	if c.wb != nil {
+		c.flushBatch()
+	}
 	_, closer, err := c.db.Get(key)
 	if err != nil {
 		return false
@@ -128,6 +178,9 @@ func (c *coldKV) del(key []byte) error {
 
 // deletePrefix removes every key with the given (table-prefixed) prefix.
 func (c *coldKV) deletePrefix(prefix []byte) error {
+	if c.wb != nil {
+		c.flushBatch()
+	}
 	return c.db.DeleteRange(prefix, prefixUpperBound(prefix), pebble.NoSync)
 }
 
@@ -135,6 +188,9 @@ func (c *coldKV) deletePrefix(prefix []byte) error {
 // ascending key order. fn returns false to stop. The key and value passed to
 // fn alias iterator-internal storage and MUST NOT be retained.
 func (c *coldKV) rangePrefix(prefix []byte, fn func(key, val []byte) bool) error {
+	if c.wb != nil {
+		c.flushBatch()
+	}
 	it, err := c.db.NewIter(&pebble.IterOptions{
 		LowerBound: prefix,
 		UpperBound: prefixUpperBound(prefix),
@@ -165,6 +221,9 @@ type coldIter struct {
 // newPrefixIter returns an iterator positioned before the first key with the
 // given prefix; call Next to advance. Caller must Close.
 func (c *coldKV) newPrefixIter(prefix []byte) (*coldIter, error) {
+	if c.wb != nil {
+		c.flushBatch()
+	}
 	it, err := c.db.NewIter(&pebble.IterOptions{
 		LowerBound: prefix,
 		UpperBound: prefixUpperBound(prefix),
@@ -197,6 +256,7 @@ func (c *coldKV) Close() error {
 	if c == nil || c.db == nil {
 		return nil
 	}
+	c.flushBatch()
 	err := c.db.Close()
 	c.db = nil
 	if c.owned && c.dir != "" {

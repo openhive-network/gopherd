@@ -138,8 +138,8 @@ func (s *CommentVoteStore) coldGetVote(voter, author auth.AccountName, permlink 
 // and bumps the per-comment cold counter.
 func (s *CommentVoteStore) coldPutVote(cv *CommentVote) {
 	blob := AppendCommentVote(nil, cv)
-	s.cold.set(tableKey(coldTableVotePrimary, commentVoteKey(cv.Voter, cv.Author, cv.Permlink)), blob)
-	s.cold.set(tableKey(coldTableVoteByComment, commentVoteByCommentKey(cv.Author, cv.Permlink, cv.Voter)), blob)
+	s.cold.bset(tableKey(coldTableVotePrimary, commentVoteKey(cv.Voter, cv.Author, cv.Permlink)), blob)
+	s.cold.bset(tableKey(coldTableVoteByComment, commentVoteByCommentKey(cv.Author, cv.Permlink, cv.Voter)), blob)
 	s.coldCount[newCommentPK(cv.Author, cv.Permlink)]++
 }
 

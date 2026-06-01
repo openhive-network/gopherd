@@ -201,6 +201,12 @@ func (s *CommentStore) EvictFrozen(cvs *CommentVoteStore, budget int) int {
 			evicted++
 		}
 	}
+	// Commit this pass's batched cold-tier writes (comments + their votes) in
+	// one Pebble Apply — far cheaper than per-key Set + flush. Must happen
+	// before the next block's promote-back reads (those also flush defensively).
+	if evicted > 0 {
+		s.cold.flushBatch()
+	}
 	// Periodically compact the queue's backing array so the sliced-off front
 	// doesn't pin unbounded memory.
 	if len(s.evictQueue) == 0 {
@@ -293,8 +299,8 @@ func (s *CommentStore) Evict(author auth.AccountName, permlink string) bool {
 	}
 	rootKey := s.rootKeyOf(c)
 	blob := AppendComment(nil, c)
-	s.cold.set(coldPrimaryKey(author, permlink), blob)
-	s.cold.set(s.coldByRootKeyOf(c), blob)
+	s.cold.bset(coldPrimaryKey(author, permlink), blob)
+	s.cold.bset(s.coldByRootKeyOf(c), blob)
 	if s.bloom != nil {
 		s.bloom.add(commentKey(author, permlink))
 	}
