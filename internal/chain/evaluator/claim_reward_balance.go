@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"math/bits"
+	"os"
 
 	"hived-go/internal/protocol/asset"
 	"hived-go/internal/protocol/hardfork"
@@ -45,6 +46,17 @@ func (claimRewardBalanceEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		}
 		return err
 	}
+	// Drift-localization trace: a claim_reward_balance op's amounts equal
+	// hived's reward_* balances at this block (the op must match the chain),
+	// so logging (claimed vs Go's a.Reward*) at each traced account's claim
+	// pinpoints the FIRST claim where Go diverges — localizing a reward drift
+	// to the cashout window before it, with NO hived node. Enable with
+	// GHIVEDIFF=<account> (e.g. kennybll for the 21,539,933 drift).
+	if vestTraceAccount(string(cr.Account)) {
+		fmt.Fprintf(os.Stderr, "GHIVEDIFF CLAIM block=%d account=%s claim_vests=%d go_reward_vests=%d claim_hbd=%d go_reward_hbd=%d claim_hive=%d go_reward_hive=%d\n",
+			ctx.BlockNum, cr.Account, cr.RewardVests.Amount, a.RewardVests, cr.RewardHbd.Amount, a.RewardHBD, cr.RewardHive.Amount, a.RewardHive)
+	}
+
 	if cr.RewardHive.Amount > a.RewardHive {
 		return fmt.Errorf("%w: %q reward_hive %d, claim %d", ErrInsufficientBalance, cr.Account, a.RewardHive, cr.RewardHive.Amount)
 	}
