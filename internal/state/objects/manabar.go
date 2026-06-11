@@ -88,9 +88,12 @@ func (a *Account) MaximumRC() int64 {
 // Returns the updated current_mana and last_update_time (the caller
 // is expected to write them back to the account).
 func RegenerateMana(current int64, lastUpdate uint32, params ManabarParams, now uint32, skipCapRegen bool) (int64, uint32) {
-	if params.RegenTime == 0 || params.MaxMana <= 0 {
+	if params.RegenTime == 0 {
 		return current, now
 	}
+	// C++ clamps current to max BEFORE the dt==0 check — this is also the
+	// path that zeroes a stale manabar when effective vests drop to 0
+	// (max_mana=0), so it must not be short-circuited for MaxMana<=0.
 	if current >= params.MaxMana {
 		return params.MaxMana, now
 	}
@@ -181,21 +184,39 @@ const VotingManaRegenSec uint32 = 5 * 24 * 60 * 60
 // max stays at max_voting; pre-HF21 the voting_manabar carries
 // the entire pool.
 //
-// The manabar is in VESTS units post-HF20 — caller has already
-// migrated from percent at the HF20 activation hook.
-func UpdateVotingManabar(a *Account, now uint32, downvotePoolPercent uint16) {
+// newMana is the just-credited VESTS delta (C++ update_manabar's
+// new_mana): the voting bar gains the full delta and the downvote bar
+// gains delta×pool_pct/10000, both applied AFTER regeneration via
+// use_mana(-new_mana), so they can temporarily exceed the cap until
+// the next regen clamps them. Callers crediting vests must invoke this
+// BEFORE adding the vests to the account so the regen cap reflects
+// pre-credit effective shares (mirrors adjust_account_vesting_balance).
+//
+// The manabar is in VESTS units post-HF20 — at HF20 activation hived
+// reinterprets the stored pre-HF20 percent value as VESTS without
+// migration.
+func UpdateVotingManabar(a *Account, now uint32, downvotePoolPercent uint16, newMana int64) {
 	maxMana := a.EffectiveVestingSharesExclWithdraw()
 	regen := ManabarParams{MaxMana: maxMana, RegenTime: VotingManaRegenSec}
-	newMana, newUpdate := RegenerateMana(a.VotingManaCurrent, a.VotingManaLastUpdate, regen, now, false)
-	a.VotingManaCurrent = newMana
+	cur, newUpdate := RegenerateMana(a.VotingManaCurrent, a.VotingManaLastUpdate, regen, now, false)
+	a.VotingManaCurrent = UseMana(cur, -newMana, 0)
 	a.VotingManaLastUpdate = newUpdate
 	if downvotePoolPercent > 0 {
-		dvMax := maxMana * int64(downvotePoolPercent) / 10000
+		dvMax := int64(u128MulDiv10000(maxMana, downvotePoolPercent))
 		dvRegen := ManabarParams{MaxMana: dvMax, RegenTime: VotingManaRegenSec}
 		newDV, newDVUpdate := RegenerateMana(a.DownvoteManaCurrent, a.DownvoteManaLastUpdate, dvRegen, now, false)
-		a.DownvoteManaCurrent = newDV
+		a.DownvoteManaCurrent = UseMana(newDV, (-newMana*int64(downvotePoolPercent))/10000, 0)
 		a.DownvoteManaLastUpdate = newDVUpdate
 	}
+}
+
+// u128MulDiv10000 computes v×pct/10000 in 128-bit like C++'s post-stall
+// downvote max_mana (manabar.hpp uint128_t path); v×2500 overflows
+// int64 for v ≳ 3.7e15 VESTS-sat, which whale accounts exceed.
+func u128MulDiv10000(v int64, pct uint16) uint64 {
+	hi, lo := bits.Mul64(uint64(v), uint64(pct))
+	q, _ := bits.Div64(hi, lo, 10000)
+	return q
 }
 
 const int64Max = int64(^uint64(0) >> 1)

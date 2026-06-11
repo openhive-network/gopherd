@@ -155,6 +155,19 @@ func createVestingImpl(s *state.Session, accountName string, hiveSatoshi int64, 
 		}
 	}
 
+	// HF20+ non-reward credits bump the voting manabar by the new vests,
+	// with the regen cap taken from PRE-credit effective shares — so the
+	// update runs inside the mutate closure before the balance change
+	// (mirrors adjust_account_vesting_balance, database.cpp:1028-1031).
+	manabarHF20 := false
+	var dvPoolPct uint16
+	if !toReward && dgpoRef != nil {
+		if hardfork.SetForBlock(dgpoRef.HeadBlockNumber).Has(hardfork.HF20) {
+			manabarHF20 = true
+			dvPoolPct = dgpoRef.DownvotePoolPercent
+		}
+	}
+
 	// MutateAccount: in-place mutate via slot pointer, captures snap only
 	// under UndoEnabled. Saves the GetAccount value-copy (~3.43s flat on
 	// the hot path, the largest CreateVesting cost beneath
@@ -165,6 +178,9 @@ func createVestingImpl(s *state.Session, accountName string, hiveSatoshi int64, 
 			a.RewardVests += vestsAmount
 			a.RewardVestingHive += hiveSatoshi
 		} else {
+			if manabarHF20 {
+				objects.UpdateVotingManabar(a, dgpoRef.Time, dvPoolPct, vestsAmount)
+			}
 			a.VestingShares += vestsAmount
 		}
 		aSlot = a
@@ -206,22 +222,6 @@ func createVestingImpl(s *state.Session, accountName string, hiveSatoshi int64, 
 	// pass it directly — saves one AccountStore.Get per CreateVesting.
 	if adjustVotes && !toReward && vestsAmount != 0 {
 		objects.AdjustProxiedWitnessVotes(s, aSlot, vestsAmount)
-	}
-	// HF20+ manabar wire-up: when an account's effective_vesting grows
-	// (non-reward vesting credit), regen its voting_manabar to the new
-	// cap. Mirrors hived's util::update_manabar called from
-	// create_vesting → adjust_balance. aSlot already points at the
-	// post-mutation account; UpdateVotingManabar refreshes
-	// VotingManaCurrent in place.
-	if !toReward && vestsAmount > 0 && aSlot != nil && dgpoRef != nil {
-		hf := hardfork.SetForBlock(dgpoRef.HeadBlockNumber)
-		if hf.Has(hardfork.HF20) {
-			var dvPoolPct uint16
-			if hf.Has(hardfork.HF21) {
-				dvPoolPct = dgpoRef.DownvotePoolPercent
-			}
-			objects.UpdateVotingManabar(aSlot, dgpoRef.Time, dvPoolPct)
-		}
 	}
 	return vestsAmount, nil
 }

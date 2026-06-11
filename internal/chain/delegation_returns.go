@@ -1,6 +1,7 @@
 package chain
 
 import (
+	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
 )
@@ -50,6 +51,14 @@ func clearExpiredDelegations(s *state.Session, blockTime uint32) {
 			return true, nil
 		})
 
+	var hf20 bool
+	var dvPoolPct uint16
+	if len(ready) > 0 {
+		if dgpoNow, derr := objects.GetDGPO(s); derr == nil {
+			hf20 = hardfork.SetForBlock(dgpoNow.HeadBlockNumber).Has(hardfork.HF20)
+			dvPoolPct = dgpoNow.DownvotePoolPercent
+		}
+	}
 	for _, p := range ready {
 		v, err := s.Get(objects.VestingDelegationExpirationTable, state.PrimaryIndex,
 			append(state.AppendAccountName(nil, p.delegator), state.AppendUint32BE(nil, p.id)...))
@@ -68,6 +77,13 @@ func clearExpiredDelegations(s *state.Session, blockTime uint32) {
 			// blocks the delegator from ever delegating that VESTS chunk
 			// again. The row will be retried on the next sweep.
 			continue
+		}
+		// HF20+: returned vests re-enter the delegator's voting mana —
+		// regen at the pre-return cap, bump by the returned amount
+		// (database.cpp:3143-3151), before delegated_vesting shrinks.
+		if hf20 {
+			objects.RegenerateRCMana(&a, blockTime)
+			objects.UpdateVotingManabar(&a, blockTime, dvPoolPct, exp.VestingShares)
 		}
 		a.DelegatedVestingShares -= exp.VestingShares
 		if a.DelegatedVestingShares < 0 {

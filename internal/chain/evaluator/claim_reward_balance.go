@@ -100,19 +100,23 @@ func (claimRewardBalanceEvaluator) Apply(ctx *Context, opArg op.Op) error {
 
 	a.RewardVests -= cr.RewardVests.Amount
 	a.RewardVestingHive -= rewardVestingHiveToMove
-	a.VestingShares += cr.RewardVests.Amount
-	// Refresh again so LastMaxRC tracks the post-claim cap, and bring
-	// the voting_manabar up to the new effective-vesting cap at HF20+.
-	// Mirrors hived's claim_reward_balance_evaluator wiring of
-	// util::update_manabar after the vest credit.
+	// HF20+: regen the voting manabar at the PRE-credit effective-vesting
+	// cap and bump it by the claimed vests, before the vests land
+	// (hive_evaluator_transfer.cpp:698-703 runs util::update_manabar with
+	// op_reward_vests ahead of the access_vesting() transfer).
 	if ctx.Hardforks.Has(hardfork.HF20) {
-		objects.RegenerateRCMana(&a, ctx.HeadBlockTime)
 		dgpoRef, _ := objects.GetDGPORef(ctx.DB)
 		var dvPoolPct uint16
-		if ctx.Hardforks.Has(hardfork.HF21) && dgpoRef != nil {
+		if dgpoRef != nil {
 			dvPoolPct = dgpoRef.DownvotePoolPercent
 		}
-		objects.UpdateVotingManabar(&a, ctx.HeadBlockTime, dvPoolPct)
+		objects.UpdateVotingManabar(&a, ctx.HeadBlockTime, dvPoolPct, cr.RewardVests.Amount)
+	}
+	a.VestingShares += cr.RewardVests.Amount
+	// Refresh again so LastMaxRC tracks the post-claim cap (C++
+	// update_account_after_vest_change).
+	if ctx.Hardforks.Has(hardfork.HF20) {
+		objects.RegenerateRCMana(&a, ctx.HeadBlockTime)
 	}
 	objects.PutAccount(ctx.DB, &a)
 
