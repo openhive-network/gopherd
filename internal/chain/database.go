@@ -956,10 +956,11 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	if envGhivediffAll != "" {
 		d, _ := objects.GetDGPO(session)
 		fh, _ := objects.GetFeedHistory(session)
-		fmt.Fprintf(os.Stderr, "GHIVEDIFF GLOBAL block=%d fund=%d vfund=%d vshares=%d supply=%d vsupply=%d hbd_supply=%d median=%d/%d\n",
+		fmt.Fprintf(os.Stderr, "GHIVEDIFF GLOBAL block=%d fund=%d vfund=%d vshares=%d supply=%d vsupply=%d hbd_supply=%d median=%d/%d prvs=%d prvh=%d\n",
 			blockNum, d.TotalRewardFundHive, d.TotalVestingFundHive, d.TotalVestingShares,
 			d.CurrentSupply, d.VirtualSupply, d.CurrentHBDSupply,
-			fh.CurrentMedianHistory.Base.Amount, fh.CurrentMedianHistory.Quote.Amount)
+			fh.CurrentMedianHistory.Base.Amount, fh.CurrentMedianHistory.Quote.Amount,
+			d.PendingRewardedVestingShares, d.PendingRewardedVestingHive)
 	}
 	// (Per-witness VST dump moved into updateWitnessSchedule4 to align
 	// with hived's GHIVEDIFF_VSTS dump location.)
