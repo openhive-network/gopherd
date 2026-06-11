@@ -590,37 +590,54 @@ func (voteEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	maxVoteDenom := voteReserveRate * votingManaRegenerationSec
 	var currentPower int64
 	var usedPower int64
+	var dvPoolPct int64
 	if ctx.Hardforks.Has(hardfork.HF20) {
-		// VESTS-scale manabar: max_mana = effective_vesting (excl
-		// withdraw); regen and used_mana computed in VESTS.
-		maxMana := voter.EffectiveVestingSharesExclWithdraw()
-		elapsed := int64(ctx.HeadBlockTime) - int64(voter.VotingManaLastUpdate)
-		if elapsed < 0 {
-			elapsed = 0
+		// hf20_vote_evaluator:627 — a vote at or past the comment's
+		// cashout_time is rejected ("Comment is actively being
+		// rewarded"); the paid case already returned nil above.
+		if ctx.HeadBlockTime >= c.CashoutTime {
+			return fmt.Errorf("vote: comment is actively being rewarded, cannot vote")
 		}
-		regenerated := int64(0)
-		if maxMana > 0 {
-			regenerated = maxMana * elapsed / votingManaRegenerationSec
+		dgpoRef, _ := objects.GetDGPORef(ctx.DB)
+		if dgpoRef != nil {
+			dvPoolPct = int64(dgpoRef.DownvotePoolPercent) // 0 until HF21
 		}
-		currentPower = voter.VotingManaCurrent + regenerated
-		if currentPower > maxMana {
-			currentPower = maxMana
+		// util::update_manabar(dgpo, a) — proper regen of both bars
+		// (128-bit, dt capped at regen_time, clamped to the effective-
+		// vesting cap). No bump. Note C++ has no "current_mana > 0"
+		// assert here: a zero-mana vote proceeds and lands with
+		// rshares=0 after the dust subtraction.
+		objects.UpdateVotingManabar(voter, ctx.HeadBlockTime, uint16(dvPoolPct), 0)
+		currentPower = voter.VotingManaCurrent
+		// Base mana for the cost formula (hive_evaluator_social.cpp:
+		// 665-684). Downvotes with an active pool (HF21+) price against
+		// max(downvote_mana×10000/pool_pct, voting_mana); otherwise the
+		// voting bar alone.
+		manaForCalc := currentPower
+		if dvPoolPct > 0 && v.Weight < 0 {
+			var scaled int64
+			if ctx.Hardforks.Has(hardfork.HF22) {
+				// HF22__3485: widen to 128-bit before ×10000.
+				hi, lo := bits.Mul64(uint64(voter.DownvoteManaCurrent), uint64(hivePercent))
+				q, _ := bits.Div64(hi, lo, uint64(dvPoolPct))
+				scaled = int64(q)
+			} else {
+				// Pre-HF22 C++ multiplies in int64 first (the overflow
+				// this sub-fork fixed); mirror it bug-for-bug.
+				scaled = (voter.DownvoteManaCurrent * hivePercent) / dvPoolPct
+			}
+			if scaled > manaForCalc {
+				manaForCalc = scaled
+			}
 		}
-		if currentPower <= 0 {
-			return fmt.Errorf("vote: %q has no voting power", v.Voter)
-		}
-		// used_mana = current_mana * abs_weight * 86400 / HIVE_100_PERCENT
-		// then divided (round up) by max_vote_denom = reserve_rate × regen_sec.
-		// Mirrors hf20_vote_evaluator (hive_evaluator_social.cpp:680, :686):
-		//   used_mana = uint128_t(current_mana) * abs_weight * 86400 / HIVE_100_PERCENT
-		//   used_mana = (used_mana + max_vote_denom - 1) / max_vote_denom
-		// Compute via 128-bit since current_mana ≤ ~1e17 and the intermediate
-		// product overflows int64.
+		// used_mana = mana × abs_weight × 86400 / HIVE_100_PERCENT,
+		// then ceil-divided by max_vote_denom = reserve_rate × regen_sec.
+		// 128-bit since mana ≤ ~4e17 and the product overflows int64.
 		if maxVoteDenom <= 0 {
 			return fmt.Errorf("vote: max_vote_denom is zero")
 		}
-		// Step 1: current_mana × abs_weight × 86400 / 10000.
-		hiM1, loM1 := bits.Mul64(uint64(currentPower), uint64(absWeight*secondsPerDay))
+		// Step 1: mana × abs_weight × 86400 / 10000.
+		hiM1, loM1 := bits.Mul64(uint64(manaForCalc), uint64(absWeight*secondsPerDay))
 		// 128-bit / 64-bit yielding 128-bit quotient. We do this via two
 		// Div64s: q_hi = hi/d; remainder feeds into the low half so
 		// q_lo = (rem<<64 + lo) / d.
@@ -637,7 +654,14 @@ func (voteEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		if usedPower < 0 {
 			usedPower = math.MaxInt64
 		}
-		if usedPower > currentPower {
+		// Mana sufficiency (hive_evaluator_social.cpp:690-706): a pooled
+		// downvote checks voting+downvote STRICTLY greater than the cost;
+		// everything else checks the voting bar alone (has_mana).
+		if dvPoolPct > 0 && v.Weight < 0 {
+			if voter.VotingManaCurrent+voter.DownvoteManaCurrent <= usedPower {
+				return fmt.Errorf("vote: %q does not have enough mana to downvote (%d+%d <= %d)", v.Voter, voter.VotingManaCurrent, voter.DownvoteManaCurrent, usedPower)
+			}
+		} else if usedPower > 0 && usedPower > currentPower {
 			return fmt.Errorf("vote: %q does not have enough power (%d > %d)", v.Voter, usedPower, currentPower)
 		}
 	} else {
@@ -706,9 +730,12 @@ func (voteEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	}
 	// Post-HF14 dust threshold: votes with |rshares| <= HIVE_VOTE_DUST_THRESHOLD
 	// are rejected unless weight == 0 (recast-to-zero is allowed for cleanup).
-	// Mirrors hived's hive_evaluator_social.cpp:369-373.
+	// Mirrors hived's hive_evaluator_social.cpp:369-373. HF20+ has NO dust
+	// rejection — hf20_vote_evaluator subtracts the threshold and clamps to 0
+	// instead (the vote proceeds, consuming mana, with rshares possibly 0).
 	const hiveVoteDustThreshold int64 = 50_000_000
-	if ctx.Hardforks.Has(hardfork.HF14) && absRshares <= hiveVoteDustThreshold && v.Weight != 0 {
+	if ctx.Hardforks.Has(hardfork.HF14) && !ctx.Hardforks.Has(hardfork.HF20) &&
+		absRshares <= hiveVoteDustThreshold && v.Weight != 0 {
 		return fmt.Errorf("vote: %q rshares %d below dust threshold", v.Voter, absRshares)
 	}
 	// HF13-only dust assertion (hive_evaluator_social.cpp:371-373):
@@ -731,6 +758,18 @@ func (voteEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		if absRshares < 0 {
 			absRshares = 0
 		}
+		// hf20_vote_evaluator:712-717 — within the last 12h before
+		// cashout, rshares scale linearly toward 0 instead of the
+		// pre-HF20 lockout REJECTION (which no longer applies at HF20+).
+		// cashout_delta ≥ 1 is guaranteed by the now < cashout_time
+		// reject above.
+		const upvoteLockoutSec = 12 * 60 * 60
+		cashoutDelta := int64(c.CashoutTime) - int64(ctx.HeadBlockTime)
+		if cashoutDelta < upvoteLockoutSec {
+			hi, lo := bits.Mul64(uint64(absRshares), uint64(cashoutDelta))
+			q, _ := bits.Div64(hi, lo, uint64(upvoteLockoutSec))
+			absRshares = int64(q)
+		}
 	}
 	rshares := absRshares
 	if v.Weight < 0 {
@@ -746,7 +785,7 @@ func (voteEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	if !isNew {
 		prevRshares = prev.Rshares
 	}
-	if rshares > prevRshares && !c.WasPaid {
+	if rshares > prevRshares && !c.WasPaid && !ctx.Hardforks.Has(hardfork.HF20) {
 		// hived's lockout check runs ONLY on comments that have a live
 		// comment_cashout_object (find_comment_cashout != nullptr). For
 		// already-paid comments the object is deleted in hived, so the
@@ -781,54 +820,28 @@ func (voteEvaluator) Apply(ctx *Context, opArg op.Op) error {
 			}
 		}
 	}
-	// HF20+ downvote routing: a downvote first draws from the
-	// downvote_manabar (capped at downvote_pool_size); only the
-	// remainder hits the upvote pool. Mirrors hived's
-	// hf20_vote_evaluator (hive_evaluator_social.cpp:712-755).
-	//
-	// HF20+ uses VESTS-scale manabar (set above); pre-HF20 paths
-	// don't reach this branch since `v.Weight < 0` is only relevant
-	// when downvote routing is on (HF20+).
-	usedFromUpvote := usedPower
-	if ctx.Hardforks.Has(hardfork.HF20) && v.Weight < 0 {
-		dgpoRef, _ := objects.GetDGPORef(ctx.DB)
-		// HF20+ downvote_manabar max = effective_vesting × pool_pct /
-		// HIVE_100_PERCENT. HF20 = 25%; HF21+ uses dgpo
-		// downvote_pool_percent (post-HF21 set to 2500=25% but settable
-		// by witnesses via account_subsidies-style mechanism).
-		maxMana := voter.EffectiveVestingSharesExclWithdraw()
-		poolPctBp := int64(2500) // HF20 default = 25%
-		if ctx.Hardforks.Has(hardfork.HF21) && dgpoRef != nil && dgpoRef.DownvotePoolPercent > 0 {
-			poolPctBp = int64(dgpoRef.DownvotePoolPercent)
+	// Consume the mana (hive_evaluator_social.cpp:719-746). The
+	// downvote bar participates ONLY while dgpo.downvote_pool_percent
+	// is non-zero (HF21+; it is 0 for the whole HF20→HF21 window, so
+	// HF20-era downvotes draw from the voting bar like upvotes). Both
+	// bars were already regenerated by UpdateVotingManabar above, which
+	// also stamped the last-update times.
+	if ctx.Hardforks.Has(hardfork.HF20) {
+		if dvPoolPct > 0 && v.Weight < 0 {
+			if usedPower > voter.DownvoteManaCurrent {
+				remainder := usedPower - voter.DownvoteManaCurrent
+				voter.DownvoteManaCurrent = 0
+				voter.VotingManaCurrent = objects.UseMana(voter.VotingManaCurrent, remainder, 0)
+			} else {
+				voter.DownvoteManaCurrent = objects.UseMana(voter.DownvoteManaCurrent, usedPower, 0)
+			}
+		} else {
+			voter.VotingManaCurrent = objects.UseMana(voter.VotingManaCurrent, usedPower, 0)
 		}
-		downvotePool := maxMana * poolPctBp / hivePercent
-		// Regenerate downvote_manabar to its (capped) max.
-		dvElapsed := int64(ctx.HeadBlockTime) - int64(voter.DownvoteManaLastUpdate)
-		if dvElapsed < 0 {
-			dvElapsed = 0
-		}
-		dvRegen := int64(0)
-		if downvotePool > 0 {
-			dvRegen = downvotePool * dvElapsed / votingManaRegenerationSec
-		}
-		dvCurrent := voter.DownvoteManaCurrent + dvRegen
-		if dvCurrent > downvotePool {
-			dvCurrent = downvotePool
-		}
-		if dvCurrent < 0 {
-			dvCurrent = 0
-		}
-		take := usedPower
-		if take > dvCurrent {
-			take = dvCurrent
-		}
-		voter.DownvoteManaCurrent = dvCurrent - take
-		voter.DownvoteManaLastUpdate = ctx.HeadBlockTime
-		usedFromUpvote = usedPower - take
+	} else {
+		voter.VotingManaCurrent = currentPower - usedPower
+		voter.VotingManaLastUpdate = ctx.HeadBlockTime
 	}
-	// Update the voter's (upvote) manabar.
-	voter.VotingManaCurrent = currentPower - usedFromUpvote
-	voter.VotingManaLastUpdate = ctx.HeadBlockTime
 
 	// Compute curation weight for this vote — the W(R_N) - W(R_N-1)
 	// increment on the comment's running positive-rshares total.
