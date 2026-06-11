@@ -563,6 +563,20 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 	hf := hardfork.SetForBlock(blockNum)
 	if !hf.Has(hardfork.HF20) && curatorRemainder > 0 {
 		authorPool += curatorRemainder
+	} else if curatorRemainder > 0 {
+		// HF20__1877: the unclaimed curation remainder is no longer
+		// forwarded to the author — and it never leaves the fund. C++
+		// pays out of a temp reward_balance and writes the residue back
+		// (database_comment.cpp:504-509); we drained `claimed` up front,
+		// so restitute the remainder. Intra-block claim math uses the
+		// block-start snapshot, so the timing is equivalent.
+		if usingFund {
+			fund.RewardBalance += curatorRemainder
+			objects.PutRewardFund(s, &fund)
+		} else {
+			dgpo.TotalRewardFundHive += curatorRemainder
+			objects.PutDGPO(s, &dgpo)
+		}
 	}
 
 	// Beneficiaries (HF17+): take their share OFF THE TOP of authorPool.
