@@ -1,7 +1,9 @@
 package chain
 
 import (
-	"hived-go/internal/protocol/hardfork"
+	"math"
+	"math/bits"
+
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
 )
@@ -11,44 +13,101 @@ import (
 // = 10000 internal units.
 const accountSubsidyPrecision int64 = 10000
 
-// HIVE_DEFAULT_ACCOUNT_SUBSIDY_BUDGET — default per-block production
-// rate when the witness schedule hasn't elected one yet.
-// Mirrors libraries/protocol/include/hive/protocol/config.hpp:
-// HIVE_DEFAULT_ACCOUNT_SUBSIDY_BUDGET = 797 (= ~24/day at the median).
-const defaultAccountSubsidyBudget int64 = 797
+// HIVE_DEFAULT_ACCOUNT_SUBSIDY_BUDGET / DECAY — chain_properties
+// defaults (config.hpp:417-419). Every witness row carries these until
+// it publishes custom values via witness_set_properties (HF20+), so
+// the schedule medians equal them for the whole pre-HF20 era.
+const (
+	defaultAccountSubsidyBudget int64 = 797
+	defaultAccountSubsidyDecay  int64 = 347321
+)
 
-// HIVE_DEFAULT_ACCOUNT_SUBSIDY_DECAY = 347321.
-const defaultAccountSubsidyDecay int64 = 347321
-
-// rdDecayDenomShift = 36. The denominator is 2^36.
+// rdDecayDenomShift = HIVE_RD_DECAY_DENOM_SHIFT = 36.
 const rdDecayDenomShift = 36
 
-// processSubsidizedAccounts mirrors database::process_subsidized_accounts
-// (libraries/chain/database.cpp:1819). On every block (post-HF20):
-//
-//   1. Apply rd_apply to dgpo.AvailableAccountSubsidies (global pool).
-//   2. Apply rd_apply to current_witness's
-//      AvailableWitnessAccountSubsidies (per-witness pool).
-//
-// rd_apply formula: new_pool = max(pool − (pool × decay) >> 36, 0) + budget.
-//
-// Pre-HF20 this is a no-op.
-func processSubsidizedAccounts(s *state.Session, blockNum uint32) {
-	if !hardfork.SetForBlock(blockNum).Has(hardfork.HF20) {
-		return
+// Per-witness rd params scale off the medians (config.hpp:409-414):
+// budget × 125%, decay × 2100% (21 witnesses share the global budget,
+// so each one's bucket refills slightly faster and decays 21× harder).
+const (
+	witnessSubsidyBudgetPercentBP int64 = 12500  // HIVE_WITNESS_SUBSIDY_BUDGET_PERCENT
+	witnessSubsidyDecayPercentBP  int64 = 210000 // HIVE_WITNESS_SUBSIDY_DECAY_PERCENT (21×10000)
+	decayBackstopPercentBP        int64 = 9000   // HIVE_DECAY_BACKSTOP_PERCENT
+)
+
+// rdParams mirrors util::rd_dynamics_params — the resolved leaky-bucket
+// parameters hived computes at every schedule rebuild
+// (witness_schedule.cpp:108-144) and stores in the wso. All inputs are
+// the schedule's stored medians, so re-deriving them per block yields
+// the values of the latest rebuild.
+type rdParams struct {
+	budget   int64
+	decay    int64 // decay rate per time unit (>> 36 denominator)
+	maxPool  int64 // pool_eq = ceil((budget << 36) / decay)
+	minDecay int64 // witness-pool backstop; 0 for the global pool
+}
+
+// rdComputePoolDecay mirrors util::rd_compute_pool_decay with dt=1:
+// decay = (u128(decay_rate) × pool) >> 36, capped at pool.
+func rdComputePoolDecay(decayRate, pool int64) int64 {
+	if pool < 0 {
+		return -rdComputePoolDecay(decayRate, -pool)
 	}
-	dgpo, err := objects.GetDGPO(s)
-	if err != nil {
-		return
+	hi, lo := bits.Mul64(uint64(decayRate), uint64(pool))
+	result := hi<<(64-rdDecayDenomShift) | lo>>rdDecayDenomShift
+	if result > uint64(pool) {
+		return pool
 	}
-	// Pull subsidy budget+decay from the active witness schedule's
-	// median fields (hived: wso.account_subsidy_rd / decay_params,
-	// sourced from each witness's witness_object.props.account_subsidy_*
-	// medianed across the active set). Fall back to genesis defaults
-	// when the schedule hasn't produced a median yet (early HF20
-	// boot, before the first schedule rebuild).
+	return int64(result)
+}
+
+// rdApply mirrors util::rd_apply (util/rd.cpp:42-53):
+//
+//	decay    = max(rd_compute_pool_decay(pool), min_decay)
+//	new_pool = clamp(pool + budget − decay, 0, max_pool_size)
+func rdApply(p rdParams, pool int64) int64 {
+	decay := rdComputePoolDecay(p.decay, pool)
+	if decay < p.minDecay {
+		decay = p.minDecay
+	}
+	newPool := pool + p.budget - decay
+	if newPool > p.maxPool {
+		newPool = p.maxPool
+	}
+	if newPool < 0 {
+		newPool = 0
+	}
+	return newPool
+}
+
+// rdPoolEq mirrors rd_setup_dynamics_params' pool_eq:
+// ceil((budget << 36) / decay), computed 128-bit (budget can reach
+// int32 max on the witness side after the 125% scale).
+func rdPoolEq(budget, decay int64) int64 {
+	if decay <= 0 {
+		return math.MaxInt64
+	}
+	hi, lo := bits.Mul64(uint64(budget), 1<<rdDecayDenomShift)
+	lo2, carry := bits.Add64(lo, uint64(decay-1), 0)
+	hi += carry
+	if hi >= uint64(decay) {
+		return math.MaxInt64
+	}
+	q, _ := bits.Div64(hi, lo2, uint64(decay))
+	if q > math.MaxInt64 {
+		return math.MaxInt64
+	}
+	return int64(q)
+}
+
+// subsidyRDParams derives (global, per-witness) rd params from the
+// witness schedule's stored medians, mirroring witness_schedule.cpp:
+// 108-144 including the per-witness 125%/2100% scaling, int32/uint32
+// clamps, pool_eq caps, and the 90% min-decay backstop evaluated at the
+// median per-witness pool level captured at rebuild.
+func subsidyRDParams(s *state.Session) (global, witness rdParams) {
 	budget := defaultAccountSubsidyBudget
 	decay := defaultAccountSubsidyDecay
+	medianAvail := int64(0)
 	if ws, ok := objects.GetWitnessScheduleRef(s); ok {
 		if ws.MedianAccountSubsidyBudget > 0 {
 			budget = int64(ws.MedianAccountSubsidyBudget)
@@ -56,51 +115,52 @@ func processSubsidizedAccounts(s *state.Session, blockNum uint32) {
 		if ws.MedianAccountSubsidyDecay > 0 {
 			decay = int64(ws.MedianAccountSubsidyDecay)
 		}
+		medianAvail = ws.MedianAvailableWitnessAccountSubsidies
 	}
-	dgpo.AvailableAccountSubsidies = rdApply(dgpo.AvailableAccountSubsidies, budget, decay)
+	global = rdParams{budget: budget, decay: decay, maxPool: rdPoolEq(budget, decay)}
+
+	wBudget := budget * witnessSubsidyBudgetPercentBP / 10000
+	if wBudget > math.MaxInt32 {
+		wBudget = math.MaxInt32
+	}
+	wDecay := decay * witnessSubsidyDecayPercentBP / 10000
+	if wDecay > math.MaxUint32 {
+		wDecay = math.MaxUint32
+	}
+	witness = rdParams{budget: wBudget, decay: wDecay, maxPool: rdPoolEq(wBudget, wDecay)}
+	medianDecay := rdComputePoolDecay(wDecay, medianAvail)
+	if medianDecay < 0 {
+		medianDecay = 0
+	}
+	witness.minDecay = medianDecay * decayBackstopPercentBP / 10000
+	return global, witness
+}
+
+// processSubsidizedAccounts mirrors database::process_subsidized_accounts
+// (database.cpp:1865-1879). It runs UNCONDITIONALLY from genesis — NOT
+// HF20-gated: hived fills both the global pool and the per-witness
+// pools for the whole pre-HF20 era. The global pool is zeroed at HF20
+// activation, but the per-witness pools are NOT — elected witnesses
+// arrive at HF20 with their buckets already at pool_eq (~937.97
+// accounts), which is what funds the first fee-0 claim_account ops.
+func processSubsidizedAccounts(s *state.Session, blockNum uint32) {
+	globalRD, witnessRD := subsidyRDParams(s)
+
+	dgpo, err := objects.GetDGPO(s)
+	if err != nil {
+		return
+	}
+	dgpo.AvailableAccountSubsidies = rdApply(globalRD, dgpo.AvailableAccountSubsidies)
 	objects.PutDGPO(s, &dgpo)
 
-	// Per-witness pool: update the current block's producer — but ONLY
-	// for elected witnesses. Mirror C++ database_witness.cpp:210 — the
-	// per-witness rd_apply (update_witness_schedule_for_elected) is
-	// gated on `current_witness.schedule == elected`. Timeshare/miner/
-	// none-scheduled producers don't accumulate the per-witness
-	// subsidy pool because they aren't supposed to be paying for
-	// claim_account from that bucket.
+	// Per-witness pool: update the current block's producer, ONLY when
+	// elected (update_witness_schedule_for_elected,
+	// database_witness.cpp:207-217).
 	if dgpo.CurrentWitness != "" {
 		w, err := objects.GetWitness(s, dgpo.CurrentWitness)
 		if err == nil && w.Schedule == objects.WitnessScheduleElected {
-			// Per-witness budget = 5% of global, decay = 5% of global.
-			// Mirrors HIVE_WITNESS_SUBSIDY_BUDGET_PERCENT / DECAY_PERCENT.
-			wBudget := budget * 5 / 100
-			wDecay := decay * 5 / 100
-			w.AvailableWitnessAccountSubsidies = rdApply(
-				w.AvailableWitnessAccountSubsidies, wBudget, wDecay)
+			w.AvailableWitnessAccountSubsidies = rdApply(witnessRD, w.AvailableWitnessAccountSubsidies)
 			objects.PutWitness(s, &w)
 		}
 	}
-}
-
-// rdApply is the rd_apply leaky-bucket formula:
-//
-//	new_pool = max(pool − (pool × decay) >> 36, 0) + budget
-//
-// Mirrors libraries/chain/util/rd.hpp::rd_apply (the resource-dynamics
-// pump used for account subsidies, RC pool decay, etc.).
-func rdApply(pool, budget, decay int64) int64 {
-	if pool > 0 {
-		var decayed int64
-		// Fast path when pool×decay fits in int64 directly.
-		if pool < (1<<32) && decay < (1<<32) {
-			decayed = (pool * decay) >> rdDecayDenomShift
-		} else {
-			// Approximate via two-step shift to avoid overflow.
-			decayed = (pool >> 18) * decay >> 18
-		}
-		pool -= decayed
-		if pool < 0 {
-			pool = 0
-		}
-	}
-	return pool + budget
 }

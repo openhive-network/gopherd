@@ -327,6 +327,10 @@ func ensureMinerAccountForPow(ctx *Context, worker string, payReward bool, props
 			Owner:           worker,
 			Created:         ctx.HeadBlockTime,
 			BlockSigningKey: signingKey,
+			// chain_properties defaults (witness_objects.hpp:54-61);
+			// these feed the schedule's subsidy medians from HF20 on.
+			AccountSubsidyBudget: 797,
+			AccountSubsidyDecay:  347321,
 		}
 		seedVirtualScheduledTime(ctx, &w)
 	} else {

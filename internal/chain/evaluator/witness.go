@@ -160,6 +160,11 @@ func (witnessUpdateEvaluator) Apply(ctx *Context, opArg op.Op) error {
 			AccountCreationFee: wu.Props.AccountCreationFee.Amount,
 			MaximumBlockSize:   wu.Props.MaximumBlockSize,
 			HBDInterestRate:    wu.Props.HBDInterestRate,
+			// chain_properties defaults (witness_objects.hpp:54-61) —
+			// legacy witness_update can't carry subsidy fields, so they
+			// stay at defaults until witness_set_properties (HF20+).
+			AccountSubsidyBudget: 797,
+			AccountSubsidyDecay:  347321,
 		}
 		// New witness: seed VirtualScheduledTime to
 		// (current_virtual_time + LAP_LENGTH2 / (votes+1)) mod 2^128.

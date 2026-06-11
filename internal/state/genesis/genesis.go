@@ -142,6 +142,8 @@ func Apply(db *state.Database) error {
 		AccountCreationFee:   0,
 		MaximumBlockSize:     65536,
 		HBDInterestRate:      1000,
+		AccountSubsidyBudget: 797,
+		AccountSubsidyDecay:  347321,
 		VirtualScheduledTime: vstMax,
 	})
 
