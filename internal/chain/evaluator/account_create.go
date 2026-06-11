@@ -104,6 +104,29 @@ func (accountCreateEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		return ErrTransferAmountNotPos
 	}
 
+	// Fee-vs-median checks (hive_evaluator_account.cpp:166-181):
+	// HF20__1771+ the fee must EQUAL the schedule median exactly;
+	// HF19__987→HF20 it must be ≥ median×30 (discounted creation went
+	// through account_create_with_delegation in that era); HF1+ ≥ median.
+	// These double as drift detectors: blocks only carry hived-accepted
+	// ops, so a failure here means OUR median diverged from hived's.
+	if ws, wserr := objects.GetWitnessSchedule(ctx.DB); wserr == nil {
+		median := ws.MedianAccountCreationFee
+		if ctx.Hardforks.Has(hardfork.HF20) {
+			if ac.Fee.Amount != median {
+				return fmt.Errorf("account_create: must pay the exact creation fee (paid %d, fee %d)", ac.Fee.Amount, median)
+			}
+		} else if ctx.Hardforks.Has(hardfork.HF19) {
+			if ac.Fee.Amount < median*30 {
+				return fmt.Errorf("account_create: insufficient fee (%d required, %d provided)", median*30, ac.Fee.Amount)
+			}
+		} else if ctx.Hardforks.Has(hardfork.HF1) {
+			if ac.Fee.Amount < median {
+				return fmt.Errorf("account_create: insufficient fee (%d required, %d provided)", median, ac.Fee.Amount)
+			}
+		}
+	}
+
 	// Creator must exist with enough HIVE to cover the fee.
 	creator, err := objects.GetAccount(ctx.DB, ac.Creator)
 	if err != nil {
@@ -188,17 +211,19 @@ func (accountCreateEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		LastOwnerUpdate:     0,
 		PreviousOwnerUpdate: 0,
 	})
-	if ac.Fee.Amount > 0 {
+	if ctx.Hardforks.Has(hardfork.HF20) {
+		// HF20__1762: the fee is burned — credited to @null's liquid
+		// balance (cleared at the next block hook) instead of vesting
+		// to the new account (hive_evaluator_account.cpp:193-196).
+		if ac.Fee.Amount > 0 {
+			if nullAcct, nerr := objects.GetAccount(ctx.DB, "null"); nerr == nil {
+				nullAcct.Balance += ac.Fee.Amount
+				objects.PutAccount(ctx.DB, &nullAcct)
+			}
+		}
+	} else if ac.Fee.Amount > 0 {
 		if _, err := CreateVesting(ctx.DB, ac.NewAccountName, ac.Fee.Amount, false); err != nil {
 			return err
-		}
-		// After CreateVesting credits VESTS to the new account, refresh
-		// its RC cap.
-		if ctx.Hardforks.Has(hardfork.HF20) {
-			if a, err := objects.GetAccount(ctx.DB, ac.NewAccountName); err == nil {
-				objects.RegenerateRCMana(&a, ctx.HeadBlockTime)
-				objects.PutAccount(ctx.DB, &a)
-			}
 		}
 	}
 	return nil

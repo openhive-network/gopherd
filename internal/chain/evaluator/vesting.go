@@ -215,7 +215,11 @@ func (delegateVestingSharesEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	// keep the absolute minimum in line.
 	minDelegation, minUpdate, vesterr := computeDelegationMinima(ctx)
 	if vesterr == nil {
-		isCreate := prevAmt == 0
+		// C++ branches on whether the delegation ROW exists, not on its
+		// amount: an amount-0 row left by account_create_with_delegation
+		// takes the "increase" path (min_update on the delta), NOT the
+		// create path (min_delegation on the full amount).
+		isCreate := !prevExists
 		switch {
 		case isCreate:
 			if d.VestingShares.Amount < minDelegation {
@@ -247,17 +251,88 @@ func (delegateVestingSharesEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		}
 	}
 
+	var dvPoolPct int64 // dgpo.downvote_pool_percent — 0 until HF21
+	if ctx.Hardforks.Has(hardfork.HF20) {
+		if dgpoRef, ok := objects.GetDGPORef(ctx.DB); ok {
+			dvPoolPct = int64(dgpoRef.DownvotePoolPercent)
+		}
+	}
 	if delta > 0 {
-		// Increasing delegation requires the delegator's available VESTS.
-		available := delegator.VestingShares - delegator.DelegatedVestingShares
+		var available, availableDownvote int64
+		if ctx.Hardforks.Has(hardfork.HF20) {
+			// HF20__2539 (hive_evaluator_transfer.cpp:742-790): the
+			// delegatable amount is the delegator's REGENERATED voting
+			// mana, capped at effective_vests − received (received
+			// shares cannot be re-delegated), minus any in-flight
+			// power-down beyond the current week's slice.
+			maxMana := delegator.EffectiveVestingSharesExclWithdraw()
+			objects.UpdateVotingManabar(&delegator, ctx.HeadBlockTime, uint16(dvPoolPct), 0)
+			available = delegator.VotingManaCurrent
+			if dvPoolPct > 0 {
+				// Translate downvote mana back to full-VESTS scale with
+				// the ceil fudge (+10000/pool − 1). HF22__3485 widens
+				// the ×10000 to 128-bit; before that C++ multiplies in
+				// int64 — mirror it bug-for-bug.
+				if ctx.Hardforks.Has(hardfork.HF22) {
+					hi, lo := bits.Mul64(uint64(delegator.DownvoteManaCurrent), 10000)
+					q, _ := bits.Div64(hi, lo, uint64(dvPoolPct))
+					availableDownvote = int64(q) + 10000/dvPoolPct - 1
+				} else {
+					availableDownvote = (delegator.DownvoteManaCurrent*10000)/dvPoolPct + 10000/dvPoolPct - 1
+				}
+			} else {
+				availableDownvote = available
+			}
+			if lim := maxMana - delegator.ReceivedVestingShares; available > lim {
+				available = lim
+			}
+			if lim := maxMana - delegator.ReceivedVestingShares; availableDownvote > lim {
+				availableDownvote = lim
+			}
+			if remaining := delegator.ToWithdraw - delegator.Withdrawn; delegator.NextVestingWithdrawal != 0 &&
+				delegator.VestingWithdrawRate > 0 && remaining > delegator.VestingWithdrawRate {
+				// Cannot delegate ANY powering-down VESTS: subtract the
+				// whole remaining power-down but add back the current
+				// week's slice (already excluded from voting mana).
+				weekly := delegator.VestingWithdrawRate
+				available += weekly - remaining
+				availableDownvote += weekly - remaining
+			}
+		} else {
+			// Pre-HF20: vesting − delegated − remaining power-down
+			// (hive_evaluator_transfer.cpp:793-795).
+			available = delegator.VestingShares - delegator.DelegatedVestingShares -
+				(delegator.ToWithdraw - delegator.Withdrawn)
+			availableDownvote = available
+		}
 		if available < delta {
-			return fmt.Errorf("%w: %q has %d undelegated VESTS", ErrInsufficientBalance, d.Delegator, available)
+			return fmt.Errorf("%w: %q has %d delegatable VESTS, needs %d", ErrInsufficientBalance, d.Delegator, available, delta)
+		}
+		if availableDownvote < delta {
+			return fmt.Errorf("%w: %q has %d delegatable downvote VESTS, needs %d", ErrInsufficientBalance, d.Delegator, availableDownvote, delta)
 		}
 	}
 	if delta >= 0 {
 		// Increasing or initial-set: VESTS are locked immediately.
 		delegator.DelegatedVestingShares += delta
 		delegatee.ReceivedVestingShares += delta
+		if ctx.Hardforks.Has(hardfork.HF20) {
+			// Delegator burns voting mana equal to the delegated delta
+			// (downvote bar too once the pool exists); the delegatee's
+			// bars regen and gain the delta (hive_evaluator_transfer.cpp
+			// :816-845).
+			delegator.VotingManaCurrent = objects.UseMana(delegator.VotingManaCurrent, delta, 0)
+			if dvPoolPct > 0 {
+				if ctx.Hardforks.Has(hardfork.HF22) {
+					hi, lo := bits.Mul64(uint64(delta), uint64(dvPoolPct))
+					q, _ := bits.Div64(hi, lo, 10000)
+					delegator.DownvoteManaCurrent = objects.UseMana(delegator.DownvoteManaCurrent, int64(q), 0)
+				} else if ctx.Hardforks.Has(hardfork.HF21) {
+					delegator.DownvoteManaCurrent = objects.UseMana(delegator.DownvoteManaCurrent, delta, 0)
+				}
+			}
+			objects.UpdateVotingManabar(&delegatee, ctx.HeadBlockTime, uint16(dvPoolPct), delta)
+		}
 	} else {
 		// Decreasing: per HF17 hived schedules the returned VESTS to
 		// land back in the delegator's available pool after the
@@ -266,9 +341,31 @@ func (delegateVestingSharesEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		// delegator's locked pool stays high until the expiration
 		// matures (clearExpiredDelegations decrements it then).
 		returned := -delta
+		// HF22__3485 regens the delegatee's bars before docking them;
+		// HF20/HF21 dock the raw stored values (hive_evaluator_transfer
+		// .cpp:912-934).
+		if ctx.Hardforks.Has(hardfork.HF22) {
+			objects.UpdateVotingManabar(&delegatee, ctx.HeadBlockTime, uint16(dvPoolPct), 0)
+		}
 		delegatee.ReceivedVestingShares -= returned
 		if delegatee.ReceivedVestingShares < 0 {
 			delegatee.ReceivedVestingShares = 0
+		}
+		if ctx.Hardforks.Has(hardfork.HF20) {
+			// The delegatee loses the returned vests' mana immediately
+			// (the delegator only gets it back at expiration).
+			delegatee.VotingManaCurrent = objects.UseMana(delegatee.VotingManaCurrent, returned, 0)
+			if ctx.Hardforks.Has(hardfork.HF21) {
+				if ctx.Hardforks.Has(hardfork.HF22) {
+					hi, lo := bits.Mul64(uint64(returned), uint64(dvPoolPct))
+					q, _ := bits.Div64(hi, lo, 10000)
+					delegatee.DownvoteManaCurrent = objects.UseMana(delegatee.DownvoteManaCurrent, int64(q), 0)
+				} else {
+					// Pre-HF22 C++ quirk: docks the OP amount, not the
+					// delta (hive_evaluator_transfer.cpp:929).
+					delegatee.DownvoteManaCurrent = objects.UseMana(delegatee.DownvoteManaCurrent, d.VestingShares.Amount, 0)
+				}
+			}
 		}
 		// Compute expiration time. Default to 5 days; if DGPO has a
 		// configured DelegationReturnPeriod (HF20+), use that.

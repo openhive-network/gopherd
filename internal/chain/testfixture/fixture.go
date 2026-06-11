@@ -541,10 +541,16 @@ func (f *Fixture) FundVesting(account string, hive int64) {
 		if err == nil {
 			// Snap mana to max so subsequent votes have full capacity
 			// (mirrors hived's HF20 _fill_mana=true ctor for newly-
-			// vested accounts).
+			// vested accounts). The downvote bar fills to its pool max
+			// too once the pool exists (HF21+) — real vest credits bump
+			// it via update_manabar, so a freshly funded account in
+			// hived's tests has a full downvote bar.
 			a.VotingManaCurrent = a.EffectiveVestingSharesExclWithdraw()
 			a.VotingManaLastUpdate = f.curBlockTime
 			a.DownvoteManaCurrent = 0
+			if dgpo, derr := objects.GetDGPO(s); derr == nil && dgpo.DownvotePoolPercent > 0 {
+				a.DownvoteManaCurrent = a.VotingManaCurrent * int64(dgpo.DownvotePoolPercent) / 10000
+			}
 			a.DownvoteManaLastUpdate = f.curBlockTime
 			objects.PutAccount(s, &a)
 		}
@@ -835,6 +841,23 @@ func appendVarUint(dst []byte, v uint32) []byte {
 		v >>= 7
 	}
 	return append(dst, byte(v))
+}
+
+// SetMedianAccountCreationFee force-sets the witness schedule's median
+// account_creation_fee — stand-in for the witness props that feed the
+// median in hived's testnet (where the default witness fee is non-zero,
+// so HF20's exact-fee asserts have a real value to check against).
+func (f *Fixture) SetMedianAccountCreationFee(fee int64) {
+	s := state.NewSession(f.State)
+	ws, err := objects.GetWitnessSchedule(s)
+	if err != nil {
+		f.t.Fatalf("testfixture: get witness schedule: %v", err)
+	}
+	ws.MedianAccountCreationFee = fee
+	objects.PutWitnessSchedule(s, &ws)
+	if err := s.Commit(false); err != nil {
+		f.t.Fatalf("testfixture: set median fee commit: %v", err)
+	}
 }
 
 // SetHardfork is an alias for HardforksUpTo.

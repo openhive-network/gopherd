@@ -171,6 +171,10 @@ func TestClaimAccountApply(t *testing.T) {
 	f.FundLiquid("alice", 100_000)
 	f.GenerateBlock()
 	f.HardforksUpTo(hardfork.HF20)
+	// hived's testnet median fee is 100 pre-HF20, ×30 at HF20 = 3000 —
+	// the exact fee the C++ test pays. Our fixture's initminer fee is 0,
+	// so set the post-HF20 median directly.
+	f.SetMedianAccountCreationFee(3_000)
 
 	t.Log("--- Test claim account paying the fee in HIVE")
 	if err := f.ApplyOp(op.ClaimAccount{
@@ -202,6 +206,7 @@ func TestCreateClaimedAccountApply(t *testing.T) {
 	f.FundLiquid("alice", 100_000)
 	f.GenerateBlock()
 	f.HardforksUpTo(hardfork.HF20)
+	f.SetMedianAccountCreationFee(3_000)
 
 	// First, claim a slot.
 	if err := f.ApplyOp(op.ClaimAccount{

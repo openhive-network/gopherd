@@ -49,36 +49,41 @@ func (claimAccountEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		}
 		return err
 	}
-	// HF20+: Fee=0 ⇒ subsidy. The current block's producer pays
-	// FIRST from THEIR per-witness pool (if creator IS that witness),
-	// else from the global pool. Both pools must have ≥
-	// HIVE_ACCOUNT_SUBSIDY_PRECISION (10000) units.
-	if ca.Fee.Amount == 0 {
-		dgpo, derr := objects.GetDGPO(ctx.DB)
-		if derr == nil {
-			// Try per-witness pool if creator is the current producer.
-			if string(ca.Creator) == dgpo.CurrentWitness {
-				if w, werr := objects.GetWitness(ctx.DB, ca.Creator); werr == nil &&
-					w.AvailableWitnessAccountSubsidies >= 10000 {
-					w.AvailableWitnessAccountSubsidies -= 10000
-					objects.PutWitness(ctx.DB, &w)
-					creator.PendingClaimedAccounts++
-					objects.PutAccount(ctx.DB, &creator)
-					return nil
-				}
-			}
-			// Fallback: global pool.
-			if dgpo.AvailableAccountSubsidies >= 10000 {
-				dgpo.AvailableAccountSubsidies -= 10000
-				objects.PutDGPO(ctx.DB, &dgpo)
-				creator.PendingClaimedAccounts++
-				objects.PutAccount(ctx.DB, &creator)
-				return nil
-			}
-		}
-	}
 	if creator.Balance < ca.Fee.Amount {
 		return fmt.Errorf("%w: %q has %d HIVE, fee %d", ErrInsufficientBalance, ca.Creator, creator.Balance, ca.Fee.Amount)
+	}
+	// hive_evaluator_account.cpp:407-445. Fee=0 ⇒ subsidized claim:
+	// the current block's PRODUCER (not the creator) must be an elected
+	// witness with ≥ HIVE_ACCOUNT_SUBSIDY_PRECISION (10000) in its
+	// per-witness pool, AND the global pool must also cover 10000.
+	// BOTH are decremented; a shortfall in either REJECTS the op (there
+	// is no free fall-through). Fee>0 ⇒ must equal the median exactly.
+	if ca.Fee.Amount == 0 {
+		dgpo, derr := objects.GetDGPO(ctx.DB)
+		if derr != nil {
+			return derr
+		}
+		w, werr := objects.GetWitness(ctx.DB, dgpo.CurrentWitness)
+		if werr != nil {
+			return fmt.Errorf("claim_account: current witness %q not found", dgpo.CurrentWitness)
+		}
+		if w.Schedule != objects.WitnessScheduleElected {
+			return fmt.Errorf("claim_account: subsidized accounts can only be claimed by elected witnesses (current %q)", dgpo.CurrentWitness)
+		}
+		if w.AvailableWitnessAccountSubsidies < 10000 {
+			return fmt.Errorf("claim_account: witness %q does not have enough subsidized accounts to claim (%d)", dgpo.CurrentWitness, w.AvailableWitnessAccountSubsidies)
+		}
+		if dgpo.AvailableAccountSubsidies < 10000 {
+			return fmt.Errorf("claim_account: not enough subsidized accounts to claim (%d)", dgpo.AvailableAccountSubsidies)
+		}
+		w.AvailableWitnessAccountSubsidies -= 10000
+		objects.PutWitness(ctx.DB, &w)
+		dgpo.AvailableAccountSubsidies -= 10000
+		objects.PutDGPO(ctx.DB, &dgpo)
+	} else if ws, wserr := objects.GetWitnessSchedule(ctx.DB); wserr == nil {
+		if ca.Fee.Amount != ws.MedianAccountCreationFee {
+			return fmt.Errorf("claim_account: must pay the exact creation fee or zero (paid %d, fee %d)", ca.Fee.Amount, ws.MedianAccountCreationFee)
+		}
 	}
 	creator.Balance -= ca.Fee.Amount
 	creator.PendingClaimedAccounts++
@@ -88,9 +93,11 @@ func (claimAccountEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	// current_supply next block. Without this credit, sum(balances)
 	// drops while current_supply stays put — drift bucket: small HIVE
 	// positive in dgpo, accumulating one fee per claim_account post-HF20.
-	if nullAcct, nerr := objects.GetAccount(ctx.DB, "null"); nerr == nil {
-		nullAcct.Balance += ca.Fee.Amount
-		objects.PutAccount(ctx.DB, &nullAcct)
+	if ca.Fee.Amount > 0 {
+		if nullAcct, nerr := objects.GetAccount(ctx.DB, "null"); nerr == nil {
+			nullAcct.Balance += ca.Fee.Amount
+			objects.PutAccount(ctx.DB, &nullAcct)
+		}
 	}
 	return nil
 }
