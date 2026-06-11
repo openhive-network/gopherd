@@ -119,15 +119,20 @@ func TestHF14HBDPrintRateInitialized(t *testing.T) {
 }
 
 // TestHF20IncreasesAccountCreationFee ports a slice of HF20 activation:
-// the account_creation_fee on each existing witness is multiplied by
-// HIVE_CREATE_ACCOUNT_WITH_HIVE_MODIFIER (= 30).
+// the account_creation_fee is multiplied by
+// HIVE_CREATE_ACCOUNT_WITH_HIVE_MODIFIER (= 30) — but ONLY for
+// witnesses in wso.current_shuffled_witnesses
+// (database_hardfork.cpp:343-353). Witnesses outside the shuffle keep
+// their 1× props until they next publish.
 func TestHF20IncreasesAccountCreationFee(t *testing.T) {
 	f := New(t)
 	f.HardforksUpTo(hardfork.HF19)
 
-	// Register a witness with fee = 100.
+	// alice registers a witness (fee = 1000) but is NOT in the current
+	// shuffle; initminer (the sole producer) IS.
 	f.Actor("alice")
 	f.MustApplyOp(witnessUpdateOp("alice"))
+	f.MustApplyOp(witnessUpdateOp(InitMiner))
 	f.GenerateBlock()
 
 	pre, err := objects.GetWitness(state.NewSession(f.State), "alice")
@@ -135,16 +140,30 @@ func TestHF20IncreasesAccountCreationFee(t *testing.T) {
 		t.Fatalf("GetWitness: %v", err)
 	}
 	feePre := pre.AccountCreationFee
+	preInit, err := objects.GetWitness(state.NewSession(f.State), InitMiner)
+	if err != nil {
+		t.Fatalf("GetWitness initminer: %v", err)
+	}
+	feePreInit := preInit.AccountCreationFee
 
-	// Activate HF20 — fee should multiply by 30.
+	// Activate HF20 — the shuffled producer's fee multiplies by 30;
+	// alice's stays 1×.
 	f.HardforksUpTo(hardfork.HF20)
 
 	post, err := objects.GetWitness(state.NewSession(f.State), "alice")
 	if err != nil {
 		t.Fatalf("GetWitness post-HF20: %v", err)
 	}
-	if post.AccountCreationFee != feePre*30 {
-		t.Errorf("HF20 fee multiplier: pre=%d post=%d, expected post=pre*30=%d",
-			feePre, post.AccountCreationFee, feePre*30)
+	if post.AccountCreationFee != feePre {
+		t.Errorf("HF20 non-shuffled witness fee: pre=%d post=%d, expected unchanged",
+			feePre, post.AccountCreationFee)
+	}
+	postInit, err := objects.GetWitness(state.NewSession(f.State), InitMiner)
+	if err != nil {
+		t.Fatalf("GetWitness initminer post-HF20: %v", err)
+	}
+	if postInit.AccountCreationFee != feePreInit*30 {
+		t.Errorf("HF20 shuffled witness fee: pre=%d post=%d, expected post=pre*30=%d",
+			feePreInit, postInit.AccountCreationFee, feePreInit*30)
 	}
 }

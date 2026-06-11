@@ -207,22 +207,25 @@ func applyHardfork(s *state.Session, id hardfork.ID) {
 			dgpo.DelegationReturnPeriod = 5 * 24 * 60 * 60 // 5 days
 			objects.PutDGPO(s, &dgpo)
 		}
-		// HF20 also multiplies witness account_creation_fee by
-		// HIVE_CREATE_ACCOUNT_WITH_HIVE_MODIFIER (= 30) since accounts
-		// were previously created at 1× fee but the new RC subsystem
-		// makes that 30× too cheap. Mirrors database_hardfork.cpp:354.
-		_ = objects.EnsureWitnessStore(s).RangePrimary(func(w *objects.Witness) (bool, error) {
-			cp := *w
-			cp.AccountCreationFee *= 30
-			objects.PutWitness(s, &cp)
-			return true, nil
-		})
-		// Mirror the rest of database_hardfork.cpp:325-353: bump the
-		// median schedule's account_creation_fee by 30 (so existing
-		// account_create_with_delegation ops cost the new minimum) and
-		// reset dgpo.available_account_subsidies to 0 (the new RC pool
-		// starts empty and fills via process_subsidy each block).
+		// HF20 multiplies account_creation_fee by
+		// HIVE_CREATE_ACCOUNT_WITH_HIVE_MODIFIER (= 30) — but ONLY for
+		// the 21 witnesses in wso.current_shuffled_witnesses, NOT every
+		// witness row (database_hardfork.cpp:343-353). Witnesses outside
+		// the shuffle keep their 1× props until they next publish; their
+		// stale 1× values legitimately feed later medians.
 		if ws, werr := objects.GetWitnessSchedule(s); werr == nil {
+			for _, name := range ws.CurrentShuffledWitnesses {
+				if name == "" {
+					continue
+				}
+				if w, gerr := objects.GetWitness(s, string(name)); gerr == nil {
+					w.AccountCreationFee *= 30
+					objects.PutWitness(s, &w)
+				}
+			}
+			// database_hardfork.cpp:355-358: the schedule's median fee
+			// is bumped too, so existing creation ops cost the new
+			// minimum immediately.
 			ws.MedianAccountCreationFee *= 30
 			objects.PutWitnessSchedule(s, &ws)
 		}
@@ -230,12 +233,6 @@ func applyHardfork(s *state.Session, id hardfork.ID) {
 			dgpo2.AvailableAccountSubsidies = 0
 			objects.PutDGPO(s, &dgpo2)
 		}
-		// Initialize voting manabar to full for every existing account
-		// since pre-HF20 the field was a percentage; HF20 reinterprets
-		// it as raw mana with a vesting-derived cap. We mirror by
-		// keeping VotingManaCurrent at HIVE_100_PERCENT (10000) which
-		// the vote evaluator clamps appropriately.
-		//
 		// HF20 RC subsystem bootstrap. Mirror C++ database_hardfork.cpp:
 		// 392-403 — walk every account and seed:
 		//   rc_adjustment = HIVE_RC_HISTORICAL_ACCOUNT_CREATION_ADJUSTMENT
@@ -258,43 +255,18 @@ func applyHardfork(s *state.Session, id hardfork.ID) {
 			hf20Time = dgpoNow.Time
 		}
 		const rcHistoricalAdjustment int64 = 2020748973
-		// HF20 voting manabar migration: pre-HF20 the voting_manabar
-		// is in percent units (0..10000); HF20+ it switches to VESTS
-		// units (0..effective_vesting_shares). Hived doesn't do an
-		// explicit migration — it just changes how the field is
-		// interpreted — but we need to convert the persisted value
-		// because gopherd's HF20+ vote evaluator reads it as VESTS.
-		//
-		// Conversion:
-		//
-		//	current_mana_vests = effective_vesting * current_mana_pct / 10000
-		//
-		// Pre-HF21 the downvote_manabar doesn't exist (DownvotePoolPercent
-		// was 0); HF21 activation seeds it. So at HF20 migration we only
-		// touch voting_manabar.
-		var hf20DowntvotePoolPct uint16 = 0
-		_ = hf20DowntvotePoolPct
+		// NO voting-manabar migration: hived's HF20 loop touches only the
+		// RC fields (database_hardfork.cpp:399-410). The pre-HF20 percent
+		// value (0..10000) is REINTERPRETED as VESTS-units mana with its
+		// old last_update_time intact — reproducing the historical HF20
+		// "mana crisis" where every account started with near-zero mana
+		// and regenerated toward the VESTS cap from its last vote time.
 		_ = objects.RangeAccounts(s, func(a *objects.Account) (bool, error) {
 			a.RCAdjustment = rcHistoricalAdjustment
 			a.RCManaLastUpdate = hf20Time
 			maxRC := a.MaximumRC()
 			a.RCManaCurrent = maxRC
 			a.LastMaxRC = maxRC
-			// Voting manabar migration. Pre-HF20 the field holds 0..10000.
-			// Scale to VESTS = effective_vesting * pct / 10000.
-			effVests := a.EffectiveVestingSharesExclWithdraw()
-			if effVests > 0 && a.VotingManaCurrent > 0 {
-				pct := a.VotingManaCurrent
-				if pct > 10000 {
-					pct = 10000
-				}
-				a.VotingManaCurrent = effVests * pct / 10000
-			} else if effVests == 0 {
-				a.VotingManaCurrent = 0
-			}
-			a.VotingManaLastUpdate = hf20Time
-			a.DownvoteManaCurrent = 0
-			a.DownvoteManaLastUpdate = hf20Time
 			objects.PutAccount(s, a)
 			return true, nil
 		})
