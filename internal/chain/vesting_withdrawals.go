@@ -146,7 +146,8 @@ func processOneWithdrawal(s *state.Session, accountName string, scheduledTime ui
 	// differs by 0.769230 VESTS vs 0.000040 VESTS — leaks/locks VESTS
 	// on dgpo.TotalVestingShares which then propagates into witness
 	// vote totals → schedule → median feed.
-	hfWithdraw := hardfork.SetForBlock(scheduledTime / 3)
+	dgpoHF, _ := objects.GetDGPO(s)
+	hfWithdraw := hardfork.SetForBlock(dgpoHF.HeadBlockNumber)
 	if !hfWithdraw.Has(hardfork.HF28) && toWithdraw < a.VestingWithdrawRate && a.VestingWithdrawRate > 0 {
 		toWithdraw = a.ToWithdraw % a.VestingWithdrawRate
 	}
@@ -204,10 +205,6 @@ func processOneWithdrawal(s *state.Session, accountName string, scheduledTime ui
 	// decrements witness votes (those vests had matured + were
 	// counting). Mirrors database_vesting.cpp:288.
 	if toWithdraw > 0 {
-		hf := hardfork.SetForBlock(scheduledTime / 3) // approximation; HF gating is by time too
-		_ = hf
-		// Actual gate: use the hardfork set computed from current
-		// block. We don't carry blockNum here; use the dgpo's head.
 		dgpoNow, _ := objects.GetDGPO(s)
 		hfNow := hardfork.SetForBlock(dgpoNow.HeadBlockNumber)
 		if hfNow.Has(hardfork.HF24) {
