@@ -32,6 +32,10 @@ var (
 	// [from,to] block range (drift localization without recompiling).
 	envCalcFrom = parseUintEnv("GHIVEDIFF_CALC_FROM")
 	envCalcTo   = parseUintEnv("GHIVEDIFF_CALC_TO")
+	// GHIVEDIFF_CURATORS_FROM: emit CASHOUT-CURATOR for EVERY curator
+	// claim from this block on — wholesale diff against the instrumented
+	// hived's identical dump to localize curation-weight drift.
+	envCuratorsFrom = parseUintEnv("GHIVEDIFF_CURATORS_FROM")
 )
 
 func parseUintEnv(k string) uint32 {
@@ -472,10 +476,15 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 	// max_hbd); payout = min(payout, max_hive)`.
 	maxClaim := c.MaxAcceptedPayout
 	if feedReady {
+		// C++ has NO fallback when the conversion floors to zero
+		// (util/reward.cpp:27-29: payout = min(payout, to_hive(price,
+		// max_hbd))) — a sub-sat max_accepted_payout (e.g. 0.001 HBD)
+		// legitimately zeroes the whole payout. A previous defensive
+		// `maxClaim <= 0 → raw HBD amount` fallback paid 1 HIVE-sat on
+		// the.queen/w (max=0.001 HBD) at block 24,211,835 where hived
+		// pays 0, draining the reward fund 1 sat low and flipping
+		// knife-edge claims downstream (joeparys at 24,222,484).
 		maxClaim = convertHBDToHive(c.MaxAcceptedPayout, feedHistoryFetched.CurrentMedianHistory)
-		if maxClaim <= 0 {
-			maxClaim = c.MaxAcceptedPayout
-		}
 	}
 	if claimed > maxClaim {
 		claimed = maxClaim
@@ -1128,7 +1137,8 @@ func distributeCuratorPool(s *state.Session, author, permlink string, pool int64
 	hf := hardfork.SetForBlock(headBlockNum)
 	toReward := hf.Has(hardfork.HF17)
 	for _, p := range *pays {
-		if traceAccount(p.Voter) || traceAccount(author) {
+		if traceAccount(p.Voter) || traceAccount(author) ||
+			(envCuratorsFrom > 0 && headBlockNum >= envCuratorsFrom) {
 			ghiveDiff("GHIVEDIFF CASHOUT-CURATOR block=%d author=%s permlink=%s voter=%s weight=%d total_weight=%d pool=%d claim=%d\n",
 				headBlockNum, author, permlink, p.Voter, p.Weight, c.TotalVoteWeight, pool, p.Share)
 		}
