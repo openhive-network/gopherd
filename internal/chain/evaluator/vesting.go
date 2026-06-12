@@ -335,7 +335,13 @@ func (delegateVestingSharesEvaluator) Apply(ctx *Context, opArg op.Op) error {
 					delegator.DownvoteManaCurrent = objects.UseMana(delegator.DownvoteManaCurrent, delta, 0)
 				}
 			}
+			manaBefore, updBefore := delegatee.VotingManaCurrent, delegatee.VotingManaLastUpdate
 			objects.UpdateVotingManabar(&delegatee, ctx.HeadBlockTime, uint16(dvPoolPct), delta)
+			if vestTraceAccount(string(d.Delegatee)) {
+				ghiveDiff("GHIVEDIFF DELEG-MANA block=%d delegatee=%s now=%d max=%d mana_before=%d upd_before=%d bump=%d mana_after=%d upd_after=%d\n",
+					ctx.BlockNum, d.Delegatee, ctx.HeadBlockTime, delegatee.EffectiveVestingSharesExclWithdraw(),
+					manaBefore, updBefore, delta, delegatee.VotingManaCurrent, delegatee.VotingManaLastUpdate)
+			}
 		}
 		delegatee.ReceivedVestingShares += delta
 	} else {
