@@ -91,6 +91,8 @@ func opSummary(o op.Op) string {
 		return fmt.Sprintf("comment\tauthor=%s\tparent=%s/%s\tperm=%s", o.AsComment().Author, o.AsComment().ParentAuthor, o.AsComment().ParentPermlink, o.AsComment().Permlink)
 	case op.TagCommentOptions:
 		return fmt.Sprintf("comment_options\tauthor=%s\tperm=%s\tmax_payout=%d\tpercent_hbd=%d", o.AsCommentOptions().Author, o.AsCommentOptions().Permlink, o.AsCommentOptions().MaxAcceptedPayout.Amount, o.AsCommentOptions().PercentHbd)
+	case op.TagDeleteComment:
+		return fmt.Sprintf("delete_comment\tauthor=%s\tperm=%s", o.AsDeleteComment().Author, o.AsDeleteComment().Permlink)
 	case op.TagVote:
 		return fmt.Sprintf("vote\tvoter=%s\tauthor=%s\tperm=%s\tweight=%d", o.AsVote().Voter, o.AsVote().Author, o.AsVote().Permlink, o.AsVote().Weight)
 	case op.TagLimitOrderCreate:
