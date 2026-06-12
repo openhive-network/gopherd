@@ -842,6 +842,12 @@ func (voteEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		voter.VotingManaCurrent = currentPower - usedPower
 		voter.VotingManaLastUpdate = ctx.HeadBlockTime
 	}
+	if vestTraceAccount(string(v.Voter)) {
+		ghiveDiff("GHIVEDIFF VOTE-MANA block=%d voter=%s author=%s permlink=%s weight=%d hf20=%v current=%d used=%d rshares=%d mana_after=%d last_update=%d\n",
+			ctx.BlockNum, v.Voter, v.Author, v.Permlink, v.Weight,
+			ctx.Hardforks.Has(hardfork.HF20), currentPower, usedPower, rshares,
+			voter.VotingManaCurrent, voter.VotingManaLastUpdate)
+	}
 
 	// Compute curation weight for this vote — the W(R_N) - W(R_N-1)
 	// increment on the comment's running positive-rshares total.

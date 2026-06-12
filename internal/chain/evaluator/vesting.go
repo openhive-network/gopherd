@@ -315,12 +315,16 @@ func (delegateVestingSharesEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	if delta >= 0 {
 		// Increasing or initial-set: VESTS are locked immediately.
 		delegator.DelegatedVestingShares += delta
-		delegatee.ReceivedVestingShares += delta
 		if ctx.Hardforks.Has(hardfork.HF20) {
 			// Delegator burns voting mana equal to the delegated delta
 			// (downvote bar too once the pool exists); the delegatee's
-			// bars regen and gain the delta (hive_evaluator_transfer.cpp
-			// :816-845).
+			// bars regen at the PRE-credit cap and gain the delta —
+			// C++ runs update_manabar BEFORE received_vesting += delta
+			// (hive_evaluator_transfer.cpp:838-845). Regenerating after
+			// the credit inflates the regen by delta×dt/432000 (caught
+			// at block 26,292,090: blocktrades' 222.6T-vests delegation
+			// to instructor2121 gained ~8.9e12 phantom mana over a
+			// 17,232s gap, flipping his next vote's rshares).
 			delegator.VotingManaCurrent = objects.UseMana(delegator.VotingManaCurrent, delta, 0)
 			if dvPoolPct > 0 {
 				if ctx.Hardforks.Has(hardfork.HF22) {
@@ -333,6 +337,7 @@ func (delegateVestingSharesEvaluator) Apply(ctx *Context, opArg op.Op) error {
 			}
 			objects.UpdateVotingManabar(&delegatee, ctx.HeadBlockTime, uint16(dvPoolPct), delta)
 		}
+		delegatee.ReceivedVestingShares += delta
 	} else {
 		// Decreasing: per HF17 hived schedules the returned VESTS to
 		// land back in the delegator's available pool after the

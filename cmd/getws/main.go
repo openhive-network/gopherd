@@ -29,6 +29,15 @@ func main() {
 		objects.EnsureAccountStore(boot)
 		objects.EnsureCommentStore(boot)
 		objects.EnsureCommentVoteStore(boot)
+		objects.EnsureBlockSummaryStore(boot)
+		objects.EnsureCommentCashoutScheduleStore(boot)
+		objects.EnsureConvertRequestStore(boot)
+		objects.EnsureDGPOStore(boot)
+		objects.EnsureFutureWitnessScheduleStore(boot)
+		objects.EnsureLimitOrderStore(boot)
+		objects.EnsureTransactionStore(boot)
+		objects.EnsureVestingWithdrawalScheduleStore(boot)
+		objects.EnsureWitnessScheduleStore(boot)
 		if _, err := snap.Load(db, os.Args[1]); err != nil {
 			panic(err)
 		}
@@ -77,6 +86,10 @@ func main() {
 			fmt.Printf("%s: balance=%d hbd=%d vesting=%d savings=%d savings_hbd=%d reward_hbd=%d\n",
 				name, a.Balance, a.HBDBalance, a.VestingShares,
 				a.SavingsBalance, a.SavingsHBDBalance, a.RewardHBD)
+			fmt.Printf("  mana: voting_current=%d voting_last_update=%d downvote_current=%d downvote_last_update=%d\n",
+				a.VotingManaCurrent, a.VotingManaLastUpdate, a.DownvoteManaCurrent, a.DownvoteManaLastUpdate)
+			fmt.Printf("  vests: delegated=%d received=%d to_withdraw=%d withdrawn=%d rate=%d reward_vests=%d reward_vesting_hive=%d\n",
+				a.DelegatedVestingShares, a.ReceivedVestingShares, a.ToWithdraw, a.Withdrawn, a.VestingWithdrawRate, a.RewardVests, a.RewardVestingHive)
 			if aa, err := objects.GetAccountAuthority(s, auth.AccountName(name)); err == nil {
 				fmt.Printf("  authority: owner=%d-keys/threshold=%d active=%d-keys/threshold=%d posting=%d-keys/threshold=%d\n",
 					len(aa.Owner.KeyAuths), aa.Owner.WeightThreshold,

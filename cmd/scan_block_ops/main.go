@@ -31,7 +31,7 @@ func main() {
 		if err != nil {
 			continue
 		}
-		_, hdrLen, _ := block.UnmarshalSignedHeader(raw)
+		hdr, hdrLen, _ := block.UnmarshalSignedHeader(raw)
 		rd := fcraw.NewReader(raw[hdrLen:])
 		txCount, _ := rd.ReadVarUint()
 		for i := uint32(0); i < txCount; i++ {
@@ -44,7 +44,7 @@ func main() {
 				if filter != "" && !contains(summary, filter) {
 					continue
 				}
-				fmt.Printf("%d\t%s\n", n, summary)
+				fmt.Printf("%d\t%d\t%s\n", n, hdr.Timestamp, summary)
 			}
 		}
 	}
@@ -91,6 +91,12 @@ func opSummary(o op.Op) string {
 		return fmt.Sprintf("comment\tauthor=%s\tparent=%s/%s\tperm=%s", o.AsComment().Author, o.AsComment().ParentAuthor, o.AsComment().ParentPermlink, o.AsComment().Permlink)
 	case op.TagCommentOptions:
 		return fmt.Sprintf("comment_options\tauthor=%s\tperm=%s\tmax_payout=%d\tpercent_hbd=%d", o.AsCommentOptions().Author, o.AsCommentOptions().Permlink, o.AsCommentOptions().MaxAcceptedPayout.Amount, o.AsCommentOptions().PercentHbd)
+	case op.TagDelegateVestingShares:
+		d := o.AsDelegateVestingShares()
+		return fmt.Sprintf("delegate_vesting_shares\tdelegator=%s\tdelegatee=%s\tvests=%d", d.Delegator, d.Delegatee, d.VestingShares.Amount)
+	case op.TagClaimRewardBalance:
+		c := o.AsClaimRewardBalance()
+		return fmt.Sprintf("claim_reward_balance\tacct=%s\thive=%d\thbd=%d\tvests=%d", c.Account, c.RewardHive.Amount, c.RewardHbd.Amount, c.RewardVests.Amount)
 	case op.TagDeleteComment:
 		return fmt.Sprintf("delete_comment\tauthor=%s\tperm=%s", o.AsDeleteComment().Author, o.AsDeleteComment().Permlink)
 	case op.TagVote:
