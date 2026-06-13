@@ -75,6 +75,7 @@ func cmdStateJSONL(args []string) int {
 	snapDir := fs.String("snapshot", "", "directory snapshot produced by `replay --snapshot-every` (loads full typed-store state; the correct input for a full-state diff)")
 	out := fs.String("out", "-", "output file path (or '-' for stdout)")
 	includeComments := fs.Bool("comments", false, "include comments (LARGE)")
+	accountsOnly := fs.Bool("accounts-only", false, "load ONLY account_store.bin from --snapshot and emit account rows (skips the multi-GB comment store; for manabar/balance diffs)")
 	votesOf := fs.String("votes-of", "", "if set as author/permlink, dump just that comment's votes (voter,rshares,weight%,curation_weight) and exit")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -82,6 +83,17 @@ func cmdStateJSONL(args []string) int {
 	if *dataDir == "" && *snapDir == "" {
 		fmt.Fprintln(os.Stderr, "state-jsonl: --snapshot (preferred) or --data-dir required")
 		return 2
+	}
+
+	// --accounts-only: load just account_store.bin (the full snapshot's
+	// comment_store can be tens of GB and OOM the box; the manabar/balance
+	// diff only needs accounts). Bypasses snapshot.Load entirely.
+	if *accountsOnly {
+		if *snapDir == "" {
+			fmt.Fprintln(os.Stderr, "state-jsonl: --accounts-only requires --snapshot")
+			return 2
+		}
+		return dumpAccountsOnly(*snapDir, *out)
 	}
 
 	var db *state.Database
@@ -542,4 +554,89 @@ type commentRow struct {
 	WasPaid         bool   `json:"was_paid"`
 	VoteRshares     uint64 `json:"vote_rshares"`
 	TotalVoteWeight uint64 `json:"total_vote_weight"`
+}
+
+// dumpAccountsOnly loads ONLY the account_store.bin file from a directory
+// snapshot and emits the canonical account JSONL rows, sorted by ident
+// key — byte-identical to the account subset of a full state-jsonl dump,
+// but without loading the (multi-GB) comment store that OOMs the box.
+func dumpAccountsOnly(snapDir, outPath string) int {
+	f, err := os.Open(snapDir + "/subsystems/account_store.bin")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "state-jsonl: open account_store.bin: %v\n", err)
+		return 1
+	}
+	defer f.Close()
+	db := state.OpenMem()
+	defer db.Close()
+	s := state.NewSession(db)
+	store := objects.EnsureAccountStore(s)
+	if err := store.UnmarshalSnapshot(bufio.NewReaderSize(f, 1<<20)); err != nil {
+		fmt.Fprintf(os.Stderr, "state-jsonl: unmarshal account_store: %v\n", err)
+		return 1
+	}
+
+	var rows []jrow
+	_ = objects.RangeAccounts(s, func(a *objects.Account) (bool, error) {
+		v := statejsonl.AccountRow{
+			Type:                          "account",
+			Name:                          string(a.Name),
+			Created:                       a.Created,
+			Balance:                       a.Balance,
+			HBDBalance:                    a.HBDBalance,
+			VestingShares:                 a.VestingShares,
+			DelegatedVestingShares:        a.DelegatedVestingShares,
+			ReceivedVestingShares:         a.ReceivedVestingShares,
+			RewardHive:                    a.RewardHive,
+			RewardHBD:                     a.RewardHBD,
+			RewardVests:                   a.RewardVests,
+			SavingsBalance:                a.SavingsBalance,
+			SavingsHBDBalance:             a.SavingsHBDBalance,
+			VestingWithdrawRate:           a.VestingWithdrawRate,
+			NextVestingWithdrawal:         a.NextVestingWithdrawal,
+			ToWithdraw:                    a.ToWithdraw,
+			Withdrawn:                     a.Withdrawn,
+			Proxy:                         string(a.Proxy),
+			WitnessesVotedFor:             a.WitnessesVotedFor,
+			PendingClaimedAccounts:        a.PendingClaimedAccounts,
+			VotingManaCurrent:             a.VotingManaCurrent,
+			VotingManaLastUpdate:          a.VotingManaLastUpdate,
+			HBDLastInterestPayment:        a.HBDLastInterestPayment,
+			SavingsHBDLastInterestPayment: a.SavingsHBDLastInterestPayment,
+			RCManaCurrent:                 a.RCManaCurrent,
+			RCManaLastUpdate:              a.RCManaLastUpdate,
+			LastMaxRC:                     a.LastMaxRC,
+			DelegatedRCIn:                 a.DelegatedRCIn,
+			DelegatedRCOut:                a.DelegatedRCOut,
+			LastOwnerUpdate:               a.LastOwnerUpdate,
+			SumDelayedVotes:               a.SumDelayedVotes,
+		}
+		b, merr := json.Marshal(v)
+		if merr != nil {
+			return true, nil
+		}
+		rows = append(rows, jrow{key: statejsonl.IdentKey(b), data: append([]byte(nil), b...)})
+		return true, nil
+	})
+	sort.Slice(rows, func(i, j int) bool { return rows[i].key < rows[j].key })
+
+	var w *bufio.Writer
+	if outPath == "-" {
+		w = bufio.NewWriter(os.Stdout)
+	} else {
+		of, oerr := os.Create(outPath)
+		if oerr != nil {
+			fmt.Fprintf(os.Stderr, "state-jsonl: create out: %v\n", oerr)
+			return 1
+		}
+		defer of.Close()
+		w = bufio.NewWriter(of)
+	}
+	defer w.Flush()
+	for _, r := range rows {
+		w.Write(r.data)
+		w.WriteByte('\n')
+	}
+	fmt.Fprintf(os.Stderr, "state-jsonl: wrote %d account rows\n", len(rows))
+	return 0
 }

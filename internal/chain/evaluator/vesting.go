@@ -257,16 +257,28 @@ func (delegateVestingSharesEvaluator) Apply(ctx *Context, opArg op.Op) error {
 			dvPoolPct = int64(dgpoRef.DownvotePoolPercent)
 		}
 	}
+	// HF20__2539: the delegator's voting manabar is REGENERATED for EVERY
+	// delegate op (the available-mana calc at hive_evaluator_transfer.cpp:
+	// 742-748 runs before the create/increase/decrease branch). Go used
+	// to gate this inside `delta > 0`, so a delegation DECREASE or REMOVAL
+	// (delta <= 0) left the delegator's manabar stale at its pre-HF20
+	// percent-scale value — found via full-state diff vs hived at
+	// 26,423,050 (28 accounts incl. tqn frozen at 10000; their stale mana
+	// then fed wrong rshares into every comment they later voted on,
+	// surfacing as net_rshares ±1 → recent_claims drift → knife-edge claim
+	// failures like vimm.pool @26,423,011). Regen here, unconditionally.
+	if ctx.Hardforks.Has(hardfork.HF20) {
+		objects.UpdateVotingManabar(&delegator, ctx.HeadBlockTime, uint16(dvPoolPct), 0)
+	}
 	if delta > 0 {
 		var available, availableDownvote int64
 		if ctx.Hardforks.Has(hardfork.HF20) {
 			// HF20__2539 (hive_evaluator_transfer.cpp:742-790): the
-			// delegatable amount is the delegator's REGENERATED voting
-			// mana, capped at effective_vests − received (received
+			// delegatable amount is the delegator's (already-regenerated)
+			// voting mana, capped at effective_vests − received (received
 			// shares cannot be re-delegated), minus any in-flight
 			// power-down beyond the current week's slice.
 			maxMana := delegator.EffectiveVestingSharesExclWithdraw()
-			objects.UpdateVotingManabar(&delegator, ctx.HeadBlockTime, uint16(dvPoolPct), 0)
 			available = delegator.VotingManaCurrent
 			if dvPoolPct > 0 {
 				// Translate downvote mana back to full-VESTS scale with
