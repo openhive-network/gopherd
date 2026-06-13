@@ -414,22 +414,21 @@ func processFundsHF16(s *state.Session, dgpo *objects.DynamicGlobalProperty, blo
 
 	hf := hardfork.SetForBlock(blockNum)
 	if hf.Has(hardfork.HF17) {
-		// HF17+: content_reward goes into post reward_fund.
-		// HF21+: dgpo.downvote_pool_percent slice is carved into the
-		// fund's downvote_reward_balance instead. Mirrors C++
-		// process_funds (database.cpp) at HF21.
+		// HF17+: the FULL content_reward goes into the post reward_fund's
+		// reward_balance (C++ pay_reward_funds, database.cpp:1949-1970 —
+		// reward_balance += content_reward × percent_content_rewards/100%,
+		// =100% for the single post fund). hived has NO reward-fund
+		// upvote/downvote split: the HF21 "downvote pool" is purely a
+		// VOTING-MANA concept (downvote_manabar), not a carve of the
+		// reward fund (grep confirms no downvote_reward_balance anywhere
+		// in hived). Go previously diverted downvote_pool_percent (25% at
+		// HF21) of content_reward into a phantom DownvoteRewardBalance,
+		// starving the cashout fund by ~one block's 25% every block from
+		// HF21 on — drifting every post-HF21 cashout (a-bot claim short
+		// at block 35,921,981; reward_balance 464 sat low one block after
+		// HF21, accumulating).
 		if fund, err := objects.GetRewardFund(s, objects.PostRewardFundName); err == nil {
-			upvoteShare := contentReward
-			downvoteShare := int64(0)
-			if hf.Has(hardfork.HF21) && dgpo.DownvotePoolPercent > 0 {
-				// reward_split_pct = ((100% - downvote_pool_percent) ×
-				// content_reward + 5000) / 100% — round-half-up.
-				num := int64(hundredPercentBP) - int64(dgpo.DownvotePoolPercent)
-				upvoteShare = (num*contentReward + 5000) / int64(hundredPercentBP)
-				downvoteShare = contentReward - upvoteShare
-			}
-			fund.RewardBalance += upvoteShare
-			fund.DownvoteRewardBalance += downvoteShare
+			fund.RewardBalance += contentReward
 			objects.PutRewardFund(s, &fund)
 		}
 	} else {
