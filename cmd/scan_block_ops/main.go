@@ -94,6 +94,14 @@ func opSummary(o op.Op) string {
 	case op.TagDelegateVestingShares:
 		d := o.AsDelegateVestingShares()
 		return fmt.Sprintf("delegate_vesting_shares\tdelegator=%s\tdelegatee=%s\tvests=%d", d.Delegator, d.Delegatee, d.VestingShares.Amount)
+	case op.TagClaimAccount:
+		c := o.AsClaimAccount()
+		return fmt.Sprintf("claim_account\tcreator=%s\tfee=%d", c.Creator, c.Fee.Amount)
+	case op.TagCreateClaimedAccount:
+		c := o.AsCreateClaimedAccount()
+		return fmt.Sprintf("create_claimed_account\tcreator=%s\tnew=%s", c.Creator, c.NewAccountName)
+	case op.TagWitnessSetProperties:
+		return fmt.Sprintf("witness_set_properties\towner=%s", o.AsWitnessSetProperties().Owner)
 	case op.TagClaimRewardBalance:
 		c := o.AsClaimRewardBalance()
 		return fmt.Sprintf("claim_reward_balance\tacct=%s\thive=%d\thbd=%d\tvests=%d", c.Account, c.RewardHive.Amount, c.RewardHbd.Amount, c.RewardVests.Amount)
