@@ -1045,12 +1045,17 @@ func (voteEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		// drifting state from C++ over millions of recasts.
 		c.TotalVoteWeight -= prev.CurationWeight
 		c.NetRshares += rshares - prev.Rshares
-		// HF20+: also update VoteRshares (positive-only accumulator).
-		// Mirror C++ hive_evaluator_social.cpp:757
-		// `c.accumulate_vote_rshares(rshares - prev_rshares,
-		// (rshares>0?rshares:0) - prev_positive_rshares)`. Pre-HF20 C++
-		// passed 0 for the vote_rshares delta, so this only fires HF20+.
-		if ctx.Hardforks.Has(hardfork.HF20) {
+		// HF26+ ONLY: update VoteRshares (positive-only accumulator) on
+		// edits. The HF20 evaluator's pre-HF26 edit branch is
+		// `c.accumulate_vote_rshares(rshares - previous_rshares, 0)`
+		// (hive_evaluator_social.cpp:832-835) — the net moves but the
+		// positive accumulator gets ZERO; only HF26's
+		// NO_VOTE_EDIT_PENALTY routes edits through the fresh-vote
+		// accumulation. Gating this at HF20 nudged vote_rshares on every
+		// post-HF20 recast (first hit: steemsportsfund's 100%→85% recast
+		// at block 26,305,775 on steemsports/dodgers-and-padres-..., which
+		// shifted every later curator's sqrt-curve weight on the comment).
+		if ctx.Hardforks.Has(hardfork.HF26) {
 			posNew := int64(0)
 			if rshares > 0 {
 				posNew = rshares
