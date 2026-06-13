@@ -170,7 +170,7 @@ func TestRemoveProposalNonOwnerRejected(t *testing.T) {
 	// rejects if the proposal exists but is owned by someone else.
 	err := f.ApplyOp(op.RemoveProposal{
 		ProposalOwner: "bob",
-		ProposalIDs:   []int64{1},
+		ProposalIDs:   []int64{0},
 	})
 	if err == nil {
 		t.Fatal("expected rejection: non-owner cannot remove proposal")

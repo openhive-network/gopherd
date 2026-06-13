@@ -43,7 +43,7 @@ func TestProposalDailyPaymentBasic(t *testing.T) {
 		t.Fatalf("create_proposal: %v", err)
 	}
 	if err := f.ApplyOp(op.UpdateProposalVotes{
-		Voter: "carol", ProposalIDs: []int64{1}, Approve: true,
+		Voter: "carol", ProposalIDs: []int64{0}, Approve: true,
 	}); err != nil {
 		t.Fatalf("vote: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestProposalDailyBudgetCap(t *testing.T) {
 		t.Fatalf("create_proposal: %v", err)
 	}
 	if err := f.ApplyOp(op.UpdateProposalVotes{
-		Voter: "carol", ProposalIDs: []int64{1}, Approve: true,
+		Voter: "carol", ProposalIDs: []int64{0}, Approve: true,
 	}); err != nil {
 		t.Fatalf("vote: %v", err)
 	}
@@ -197,12 +197,12 @@ func TestProposalPaymentVoteOrderRanking(t *testing.T) {
 		t.Fatalf("p2: %v", err)
 	}
 	if err := f.ApplyOp(op.UpdateProposalVotes{
-		Voter: "dave", ProposalIDs: []int64{1}, Approve: true,
+		Voter: "dave", ProposalIDs: []int64{0}, Approve: true,
 	}); err != nil {
 		t.Fatalf("dave vote: %v", err)
 	}
 	if err := f.ApplyOp(op.UpdateProposalVotes{
-		Voter: "eve", ProposalIDs: []int64{2}, Approve: true,
+		Voter: "eve", ProposalIDs: []int64{1}, Approve: true,
 	}); err != nil {
 		t.Fatalf("eve vote: %v", err)
 	}

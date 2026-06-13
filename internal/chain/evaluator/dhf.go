@@ -34,10 +34,17 @@ func nextProposalID(ctx *Context) int64 {
 			id |= int64(v[i]) << (i * 8)
 		}
 	}
-	id++
+	// chainbase assigns each new object the CURRENT counter value, then
+	// increments — hived's first proposal_object has id=0. Go was
+	// pre-incrementing (id++ before assigning), making its first proposal
+	// id=1; every update_proposal_votes referencing hived's 0-based ids
+	// then missed. Post-increment: return `id`, persist id+1. First
+	// mainnet hit: update_proposal_votes id=0 at block 35,921,808 (22
+	// blocks after HF21), voting on the chain's first proposal.
+	next := id + 1
 	out := make([]byte, 8)
 	for i := 0; i < 8; i++ {
-		out[i] = byte(id >> (i * 8))
+		out[i] = byte(next >> (i * 8))
 	}
 	ctx.DB.Put(objects.DynamicGlobalPropertyTable, dhfProposalCounterIndex, []byte{0}, out)
 	return id

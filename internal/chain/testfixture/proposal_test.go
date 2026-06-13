@@ -37,7 +37,7 @@ func TestProposalObjectApply(t *testing.T) {
 
 	// Find the proposal — should be ID 1 (counter starts at 1).
 	s := state.NewSession(f.State)
-	p, err := objects.GetProposal(s, 1)
+	p, err := objects.GetProposal(s, 0)
 	if err != nil {
 		t.Fatalf("proposal lookup: %v", err)
 	}
@@ -79,12 +79,12 @@ func TestProposalVoteApply(t *testing.T) {
 	t.Log("--- carol votes for proposal #1")
 	if err := f.ApplyOp(op.UpdateProposalVotes{
 		Voter:       "carol",
-		ProposalIDs: []int64{1},
+		ProposalIDs: []int64{0},
 		Approve:     true,
 	}); err != nil {
 		t.Fatalf("vote: %v", err)
 	}
-	has, _ := objects.HasProposalVote(state.NewSession(f.State), 1, "carol")
+	has, _ := objects.HasProposalVote(state.NewSession(f.State), 0, "carol")
 	if !has {
 		t.Fatal("carol's vote should exist")
 	}
@@ -92,12 +92,12 @@ func TestProposalVoteApply(t *testing.T) {
 	t.Log("--- carol unvotes")
 	if err := f.ApplyOp(op.UpdateProposalVotes{
 		Voter:       "carol",
-		ProposalIDs: []int64{1},
+		ProposalIDs: []int64{0},
 		Approve:     false,
 	}); err != nil {
 		t.Fatalf("unvote: %v", err)
 	}
-	has, _ = objects.HasProposalVote(state.NewSession(f.State), 1, "carol")
+	has, _ = objects.HasProposalVote(state.NewSession(f.State), 0, "carol")
 	if has {
 		t.Fatal("carol's vote should be removed")
 	}
@@ -130,11 +130,11 @@ func TestRemoveProposalApply(t *testing.T) {
 	}
 	if err := f.ApplyOp(op.RemoveProposal{
 		ProposalOwner: "alice",
-		ProposalIDs:   []int64{1},
+		ProposalIDs:   []int64{0},
 	}); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
-	has, _ := objects.HasProposal(state.NewSession(f.State), 1)
+	has, _ := objects.HasProposal(state.NewSession(f.State), 0)
 	if has {
 		t.Fatal("proposal should be removed")
 	}
@@ -149,7 +149,7 @@ func TestRemoveProposalApply(t *testing.T) {
 	}
 	if err := f.ApplyOp(op.RemoveProposal{
 		ProposalOwner: "bob", // not the creator
-		ProposalIDs:   []int64{2},
+		ProposalIDs:   []int64{1},
 	}); err == nil {
 		t.Fatal("expected ownership failure")
 	}
@@ -174,12 +174,12 @@ func TestUpdateProposalApply(t *testing.T) {
 
 	t.Log("--- update lowers daily_pay (allowed)")
 	if err := f.ApplyOp(op.UpdateProposal{
-		ProposalID: 1, Creator: "alice",
+		ProposalID: 0, Creator: "alice",
 		DailyPay: HBD(50), Subject: "new", Permlink: "p",
 	}); err != nil {
 		t.Fatalf("update: %v", err)
 	}
-	p, _ := objects.GetProposal(state.NewSession(f.State), 1)
+	p, _ := objects.GetProposal(state.NewSession(f.State), 0)
 	if p.DailyPay != 50 {
 		t.Fatalf("DailyPay: got %d, want 50", p.DailyPay)
 	}
@@ -189,7 +189,7 @@ func TestUpdateProposalApply(t *testing.T) {
 
 	t.Log("--- failure raising daily_pay")
 	if err := f.ApplyOp(op.UpdateProposal{
-		ProposalID: 1, Creator: "alice",
+		ProposalID: 0, Creator: "alice",
 		DailyPay: HBD(200),
 	}); err == nil {
 		t.Fatal("expected raise-daily-pay failure")

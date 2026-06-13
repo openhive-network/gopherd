@@ -70,7 +70,7 @@ func TestHF28DeclinedVotingRightsCleanup(t *testing.T) {
 		t.Fatalf("create proposal: %v", err)
 	}
 	if err := f.ApplyOp(op.UpdateProposalVotes{
-		Voter: "carol", ProposalIDs: []int64{1}, Approve: true,
+		Voter: "carol", ProposalIDs: []int64{0}, Approve: true,
 	}); err != nil {
 		t.Fatalf("vote: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestHF28DeclinedVotingRightsCleanup(t *testing.T) {
 
 	// Activate HF28 — the activation hook drops carol's proposal vote.
 	f.HardforksUpTo(hardfork.HF28)
-	has, _ := objects.HasProposalVote(state.NewSession(f.State), 1, "carol")
+	has, _ := objects.HasProposalVote(state.NewSession(f.State), 0, "carol")
 	if has {
 		t.Fatal("carol's proposal vote should be cleared at HF28")
 	}

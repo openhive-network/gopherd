@@ -182,10 +182,10 @@ func TestDeclinedVotingRightsProposalVotes(t *testing.T) {
 
 			f.MustApplyOp(op.UpdateProposalVotes{
 				Voter:       "alice",
-				ProposalIDs: []int64{1},
+				ProposalIDs: []int64{0},
 				Approve:     true,
 			})
-			if has, _ := objects.HasProposalVote(state.NewSession(f.State), 1, "alice"); !has {
+			if has, _ := objects.HasProposalVote(state.NewSession(f.State), 0, "alice"); !has {
 				t.Fatal("alice's proposal vote should exist pre-effective")
 			}
 			f.GenerateBlock()
@@ -194,7 +194,7 @@ func TestDeclinedVotingRightsProposalVotes(t *testing.T) {
 			f.SkipSeconds(60 * 60 * 24 * 30)
 			f.GenerateBlocks(2)
 
-			has, _ := objects.HasProposalVote(state.NewSession(f.State), 1, "alice")
+			has, _ := objects.HasProposalVote(state.NewSession(f.State), 0, "alice")
 			if hf >= hardfork.HF28 {
 				if has {
 					t.Error("HF28+: proposal vote should be removed by process_decline_voting_rights")
