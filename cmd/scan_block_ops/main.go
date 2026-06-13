@@ -91,6 +91,9 @@ func opSummary(o op.Op) string {
 		return fmt.Sprintf("comment\tauthor=%s\tparent=%s/%s\tperm=%s", o.AsComment().Author, o.AsComment().ParentAuthor, o.AsComment().ParentPermlink, o.AsComment().Permlink)
 	case op.TagCommentOptions:
 		return fmt.Sprintf("comment_options\tauthor=%s\tperm=%s\tmax_payout=%d\tpercent_hbd=%d", o.AsCommentOptions().Author, o.AsCommentOptions().Permlink, o.AsCommentOptions().MaxAcceptedPayout.Amount, o.AsCommentOptions().PercentHbd)
+	case op.TagSetWithdrawVestingRoute:
+		r := o.AsSetWithdrawVestingRoute()
+		return fmt.Sprintf("set_withdraw_vesting_route\tfrom=%s\tto=%s\tpercent=%d\tauto_vest=%v", r.FromAccount, r.ToAccount, r.Percent, r.AutoVest)
 	case op.TagDelegateVestingShares:
 		d := o.AsDelegateVestingShares()
 		return fmt.Sprintf("delegate_vesting_shares\tdelegator=%s\tdelegatee=%s\tvests=%d", d.Delegator, d.Delegatee, d.VestingShares.Amount)

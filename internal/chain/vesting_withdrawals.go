@@ -3,6 +3,7 @@ package chain
 import (
 	"fmt"
 	"math/big"
+	"math/bits"
 	"os"
 	"strings"
 
@@ -271,7 +272,18 @@ func processWithdrawRoutes(s *state.Session, fromAccount string, toWithdraw int6
 			if route.AutoVest != autoVest {
 				return true, nil
 			}
-			toDeposit := toWithdraw * int64(route.Percent) / 10000 // HIVE_100_PERCENT = 10000
+			// toWithdraw × percent / HIVE_100_PERCENT. C++ computes this in
+			// uint128 (database_vesting.cpp:174); a plain int64 multiply
+			// overflows once toWithdraw × percent > 2^63-1 — which a
+			// mega-whale power-down hits (steemit's 68.3e15-VESTS power-down
+			// at block 29,408,299 has a weekly chunk ~5.25e15; ×2500 =
+			// 1.31e19 > int64 max → wraps negative → the route credit was
+			// silently skipped, leaving steemit's 25% route recipients
+			// (e.g. backup-bittrex) uncredited → transfer-out failed at
+			// 29,612,472). Use 128-bit math.
+			hiD, loD := bits.Mul64(uint64(toWithdraw), uint64(route.Percent))
+			qD, _ := bits.Div64(hiD, loD, 10000)
+			toDeposit := int64(qD)
 			if toDeposit <= 0 {
 				return true, nil
 			}
