@@ -243,6 +243,12 @@ func (removeProposalEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		p, err := objects.GetProposal(ctx.DB, id)
 		if err != nil {
 			if err == state.ErrNotFound {
+				// HIVE_HARDFORK_1_28_DONT_TRY_REMOVE_NONEXISTENT_PROPOSAL
+				// (dhf_helper.cpp): HF28+ asserts on a missing proposal id;
+				// pre-HF28 silently skips it (continue).
+				if ctx.Hardforks.Has(hardfork.HF28) {
+					return fmt.Errorf("%w: id=%d", ErrProposalNotFound, id)
+				}
 				continue
 			}
 			return err
