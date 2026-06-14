@@ -16,6 +16,11 @@ import (
 // 1 hour past head_block_time is rejected (replay-attack prophylaxis).
 const maxTimeUntilExpirationSec uint32 = 60 * 60
 
+// HIVE_MAX_TIME_UNTIL_SIGNATURE_EXPIRATION = 24h. HF28+ lets tx.expiration
+// reach this for signature/TaPoS validity (runtime inclusion still capped
+// at +1h, a mempool concern not replay state). HIVE_HARDFORK_1_28_EXPIRATION_TIME.
+const maxTimeUntilSignatureExpirationSec uint32 = 24 * 60 * 60
+
 // validateTxPreFlight runs the structural checks hived's
 // _push_transaction performs before evaluator dispatch:
 //
@@ -55,9 +60,13 @@ func validateTxPreFlight(s *state.Session, signed *tx.SignedTransaction, blockNu
 	} else if signed.Expiration < headBlockTime {
 		return fmt.Errorf("transaction expired: expiration=%d head=%d", signed.Expiration, headBlockTime)
 	}
-	if signed.Expiration > headBlockTime+maxTimeUntilExpirationSec {
+	maxDelta := maxTimeUntilExpirationSec
+	if hfTx.Has(hardfork.HF28) {
+		maxDelta = maxTimeUntilSignatureExpirationSec
+	}
+	if signed.Expiration > headBlockTime+maxDelta {
 		return fmt.Errorf("transaction expiration too far in future: expiration=%d head=%d max_delta=%d",
-			signed.Expiration, headBlockTime, maxTimeUntilExpirationSec)
+			signed.Expiration, headBlockTime, maxDelta)
 	}
 
 	// 2) Dedup window: reject duplicate trx_id.
