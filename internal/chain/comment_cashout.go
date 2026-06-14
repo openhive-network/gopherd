@@ -657,6 +657,10 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 					blockNum, c.Author, c.Permlink, b.Account, vestingSlice, err)
 			}
 		}
+		if traceAccount(string(b.Account)) {
+			ghiveDiff("GHIVEDIFF CASHOUT-BENEFICIARY block=%d author=%s permlink=%s beneficiary=%s weight=%d author_pool=%d share=%d hbd_slice=%d vesting_slice=%d percent_hbd=%d\n",
+				blockNum, c.Author, c.Permlink, b.Account, b.Weight, authorPool, share, hbdSlice, vestingSlice, c.PercentHbd)
+		}
 		totalBeneficiary += share
 	}
 	authorPool -= totalBeneficiary
