@@ -184,15 +184,24 @@ func (updateProposalVotesEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		p, err := objects.GetProposal(ctx.DB, id)
 		if err != nil {
 			if err == state.ErrNotFound {
-				return fmt.Errorf("%w: id=%d", ErrProposalNotFound, id)
+				// dhf_evaluator.cpp:178 — only HF28+
+				// (DONT_TRY_VOTE_FOR_NONEXISTENT_PROPOSAL) asserts on a
+				// missing proposal; pre-HF28 hived silently `continue`s
+				// (skips this id). Go was erroring unconditionally.
+				if ctx.Hardforks.Has(hardfork.HF28) {
+					return fmt.Errorf("%w: id=%d", ErrProposalNotFound, id)
+				}
+				continue
 			}
 			return err
 		}
-		// dhf_evaluator.cpp:169 — voting on a proposal whose end_date is
-		// already past is rejected (only for approve=true; un-approving
-		// an existing vote on an expired proposal is silently a no-op,
-		// matching the C++ silent-no-op path).
-		if uv.Approve && p.EndDate <= ctx.HeadBlockTime {
+		// dhf_evaluator.cpp:183-190 — the expiry assert
+		// (HIVE_CHAIN_TIME_ASSERT(head_block_time <= end_date)) is gated on
+		// HIVE_HARDFORK_1_25 and is NOT gated on approve. Pre-HF25 a vote on
+		// an expired proposal is ALLOWED (proposal 16's approve at block
+		// 36,196,594 — pre-HF25 — is accepted by hived; Go was rejecting it).
+		// At HF25+ reject when head_time > end_date (equality is allowed).
+		if ctx.Hardforks.Has(hardfork.HF25) && ctx.HeadBlockTime > p.EndDate {
 			return fmt.Errorf("update_proposal_votes: proposal %d has expired (end_date=%d, head=%d)",
 				id, p.EndDate, ctx.HeadBlockTime)
 		}
