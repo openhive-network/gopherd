@@ -65,23 +65,16 @@ func (d *Delegate) broadcastInv() {
 		return
 	}
 
-	// During catch-up, DON'T advertise at all. We're far behind the
-	// peers' head, so we have nothing they want (sync FETCHES blocks; it
-	// doesn't serve them). Advertising our ancient head via
-	// item_ids_inventory makes peers at the live head reject us with
-	// "you offered me a block that I have deemed to be invalid" and drop
-	// the connection — churning through peers and eventually exhausting
-	// them, stalling the sync (observed stall at block 2,779,937). hived
-	// likewise advertises inventory only once in sync. We resume
-	// advertising when caught up (within catchupGap of every peer) so
-	// locally-applied live blocks still propagate.
-	if d.isFarBehind() {
-		d.idleMu.Lock()
-		d.idleRounds++
-		d.idleMu.Unlock()
-		return
-	}
+	// During catch-up, advertise just our most-recent block — peers
+	// already have everything we have (we're behind their head). The
+	// 200-block-per-round broadcast was burning 22 % of CPU on per-peer
+	// known-map iteration during a multi-thousand-bps catch-up. The
+	// single-block INV is enough to keep peers aware of our head
+	// without the per-block bookkeeping cost.
 	maxAdvertise := d.cfg.MaxBlocksPerInv
+	if d.isFarBehind() {
+		maxAdvertise = 1
+	}
 	if len(nums) > maxAdvertise {
 		nums = nums[len(nums)-maxAdvertise:]
 	}
