@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"math/bits"
+	"os"
 
 	"hived-go/internal/math128"
 	"hived-go/internal/protocol/auth"
@@ -61,6 +62,15 @@ var (
 	ErrCommentExists   = errors.New("comment already exists at this permlink")
 	ErrCommentClosed   = errors.New("comment is no longer accepting votes / edits")
 	ErrVoteWeightZero  = errors.New("vote weight cannot be zero")
+)
+
+// GHIVEDIFF_VOTE_AUTHOR / GHIVEDIFF_VOTE_PERMLINK enable the per-vote
+// GHIVEDIFF VOTE / VOTE-RECAST trace for a specific comment (every voter's
+// rshares / curation_weight / eligibility). Permlink empty → all of the
+// author's comments. Replaces the old hardcoded bitbo target.
+var (
+	voteDebugAuthor   = os.Getenv("GHIVEDIFF_VOTE_AUTHOR")
+	voteDebugPermlink = os.Getenv("GHIVEDIFF_VOTE_PERMLINK")
 )
 
 // commentEvaluator implements comment.
@@ -1014,7 +1024,8 @@ func (voteEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	// recast so the comment's slice of the reward fund reflects the
 	// updated total at cashout.
 	oldNetRshares := c.NetRshares
-	voteDebug := v.Author == "bitbo" && v.Permlink == "some-photos-from-magadan-russia"
+	voteDebug := voteDebugAuthor != "" && string(v.Author) == voteDebugAuthor &&
+		(voteDebugPermlink == "" || string(v.Permlink) == voteDebugPermlink)
 	if isNew {
 		objects.PutCommentVote(ctx.DB, &objects.CommentVote{
 			Voter:          v.Voter,
