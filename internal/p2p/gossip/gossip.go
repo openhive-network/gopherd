@@ -37,12 +37,28 @@
 package gossip
 
 import (
+	"time"
+
 	"hived-go/internal/chain"
 	"hived-go/internal/crypto"
 	p2pnode "hived-go/internal/p2p/node"
 	"hived-go/internal/p2p/proto"
 	"hived-go/internal/protocol/block"
 )
+
+// liveBroadcastWindowSec bounds how far behind wall-clock a block may be
+// and still be gossiped. Blocks are 3s apart; a node receiving live
+// blocks is at most a few seconds behind, while catch-up (initial-sync)
+// blocks are hours-to-years old. Re-broadcasting catch-up blocks to peers
+// — who are at the live head — gets us dropped ("you offered me a block
+// deemed invalid"), so we relay only blocks within this window. 120s
+// (~40 blocks) is a generous live margin that still excludes every
+// catch-up block.
+const liveBroadcastWindowSec = 120
+
+// nowUnix is overridable in tests that feed historical-timestamped blocks
+// through the live broadcast path.
+var nowUnix = func() int64 { return time.Now().Unix() }
 
 // Logger is a minimal logging surface so the gossip layer doesn't have
 // to import os/fmt directly. The daemon hands in *p2pnode.Node.Logf.
@@ -146,6 +162,16 @@ func (s *Service) BroadcastAppliedBlock(rawBlock []byte, blockNum uint32, source
 	if !ok {
 		s.logger.Logf("gossip: re-broadcast block %d — header parse failed", blockNum)
 		return
+	}
+	// Only relay LIVE blocks. During initial catch-up sync we apply
+	// millions of historical blocks fetched from peers; re-broadcasting
+	// them to peers already at the live head gets us dropped. Locally
+	// produced blocks (source==nil) are live by definition and skip the
+	// gate; received blocks (source!=nil) must be within the live window.
+	if source != nil {
+		if ts := blockTimestampHeader(rawBlock); ts != 0 && int64(ts) < nowUnix()-liveBroadcastWindowSec {
+			return
+		}
 	}
 	if !s.seenBlk.add(id) {
 		// We've already broadcast this body (e.g. local witness path
