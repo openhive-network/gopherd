@@ -66,6 +66,13 @@ func (withdrawVestingEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	}
 
 	if w.VestingShares.Amount == 0 {
+		// HIVE_HARDFORK_1_28_FIX_CANCEL_POWER_DOWN (hive_evaluator_transfer.cpp:389):
+		// HF28+ rejects a 0-share cancel when there is no active power-down —
+		// "This operation would not change the vesting withdraw rate."
+		// has_active_power_down() ⟺ a live withdraw rate is set.
+		if ctx.Hardforks.Has(hardfork.HF28) && a.VestingWithdrawRate == 0 {
+			return fmt.Errorf("withdraw_vesting: operation would not change the vesting withdraw rate")
+		}
 		// Cancel the schedule.
 		a.VestingWithdrawRate = 0
 		a.NextVestingWithdrawal = 0
