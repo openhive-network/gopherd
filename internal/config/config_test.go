@@ -62,3 +62,37 @@ private-key = b
 		t.Fatal("expected error on mismatched count")
 	}
 }
+
+func TestValidatePluginsSupported(t *testing.T) {
+	c, err := Parse(strings.NewReader("plugin = chain p2p witness state_snapshot\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if err := c.ValidatePlugins(); err != nil {
+		t.Fatalf("supported plugins rejected: %v", err)
+	}
+}
+
+func TestValidatePluginsUnsupportedRefuses(t *testing.T) {
+	// A real hived mainnet plugin line — gopherd implements only a subset.
+	c, err := Parse(strings.NewReader("plugin = chain p2p witness account_history_rocksdb market_history rc_api webserver json_rpc database_api\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	err = c.ValidatePlugins()
+	if err == nil {
+		t.Fatal("expected ValidatePlugins to refuse unsupported plugins")
+	}
+	for _, want := range []string{"account_history_rocksdb", "market_history", "rc_api", "webserver", "json_rpc", "database_api"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should name unsupported plugin %q: %v", want, err)
+		}
+	}
+}
+
+func TestValidatePluginsEmptyOK(t *testing.T) {
+	c, _ := Parse(strings.NewReader("data-dir = /x\n"))
+	if err := c.ValidatePlugins(); err != nil {
+		t.Fatalf("empty plugin list should be allowed: %v", err)
+	}
+}

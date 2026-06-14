@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 )
 
@@ -53,6 +54,49 @@ type Config struct {
 	// Raw holds every (key, value) pair encountered so callers can
 	// access keys we don't promote to typed fields.
 	Raw map[string][]string
+}
+
+// SupportedPlugins is the set of hived plugin names gopherd actually
+// implements. A config.ini is format-interchangeable with hived (every
+// key parses; unknown keys are kept in Raw and ignored), but gopherd
+// REFUSES to launch if the `plugin =` list names anything outside this
+// set — silently ignoring a plugin hived would run risks consensus or
+// behavioural divergence, so we fail loud at startup instead.
+//
+// gopherd is a sync + block-production node with no RPC/API layer, so
+// the API/history/market plugins hived ships are intentionally absent.
+// The value documents what the name maps to internally.
+var SupportedPlugins = map[string]string{
+	"chain":          "core block-application engine (always active)",
+	"p2p":            "peer-to-peer block/transaction sync",
+	"witness":        "block production for configured witnesses",
+	"state_snapshot": "snapshot save/load (also driven by --load-snapshot / SIGUSR1)",
+}
+
+// ValidatePlugins checks every plugin named in the config against
+// SupportedPlugins. It returns a non-nil error (naming the offenders
+// and listing the supported set) if any are unsupported, so callers can
+// refuse to launch. An empty plugin list is allowed — gopherd then runs
+// its built-in chain/p2p/witness wiring driven by the other config keys.
+func (c *Config) ValidatePlugins() error {
+	var unsupported []string
+	seen := make(map[string]bool)
+	for _, p := range c.Plugins {
+		if SupportedPlugins[p] == "" && !seen[p] {
+			seen[p] = true
+			unsupported = append(unsupported, p)
+		}
+	}
+	if len(unsupported) == 0 {
+		return nil
+	}
+	supported := make([]string, 0, len(SupportedPlugins))
+	for name := range SupportedPlugins {
+		supported = append(supported, name)
+	}
+	sort.Strings(supported)
+	return fmt.Errorf("unsupported plugin(s): %s — gopherd supports only: %s",
+		strings.Join(unsupported, ", "), strings.Join(supported, ", "))
 }
 
 // Load reads a config.ini path. Use Parse to read from any io.Reader.

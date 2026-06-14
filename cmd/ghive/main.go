@@ -62,6 +62,15 @@ func main() {
 			fmt.Fprintf(os.Stderr, "ghive: config: %v\n", err)
 			os.Exit(1)
 		}
+		// Refuse to launch on any plugin gopherd doesn't implement —
+		// silently ignoring a plugin hived would run risks divergence.
+		// The config FORMAT stays interchangeable with hived (unknown
+		// keys are tolerated); only unsupported `plugin =` entries are
+		// fatal.
+		if err := c.ValidatePlugins(); err != nil {
+			fmt.Fprintf(os.Stderr, "ghive: %v\n", err)
+			os.Exit(1)
+		}
 		cfg = c
 	} else {
 		cfg = &config.Config{}
