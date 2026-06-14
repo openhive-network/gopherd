@@ -91,9 +91,15 @@ func processProposals(s *state.Session, blockTime uint32, blockNum uint32) {
 			if err != nil {
 				return true, nil
 			}
-			if p.EndDate <= blockTime {
+			if p.EndDate < blockTime {
 				return true, nil // expired — excluded from vote calc, NOT removed
 			}
+			// hived find_proposals (util/dhf_processor.cpp:73) treats a
+			// proposal as ACTIVE while head_time <= end_date (INCLUSIVE of the
+			// exact end_date second). Using `EndDate <= blockTime` here dropped
+			// a proposal one maintenance tick early on the boundary, so its
+			// receiver missed a period of pay (peak.proposals short 7900 HBD
+			// at block 36,351,128).
 			if p.StartDate <= blockTime {
 				active = append(active, p)
 			}
