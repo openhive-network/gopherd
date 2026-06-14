@@ -489,6 +489,16 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 	if claimed > maxClaim {
 		claimed = maxClaim
 	}
+	// POST-dust/post-clip claimed — directly comparable to the
+	// instrumented hived's CASHOUT-CALC `claimed` (which is post-dust).
+	// Diff this against hived to localize per-comment over/under-drain
+	// under the HF21 convergent curves (the pre-clip field above logs
+	// the raw curve value, which differs from hived's post-dust value
+	// for dust comments and masks the real divergence).
+	if traceAccount(author) || (envGhivediffAll != "" && ((blockNum >= 2888500 && blockNum <= 2910000) || (blockNum >= 9640246 && blockNum <= 9640246))) || calcTraceWindow(blockNum) {
+		ghiveDiff("GHIVEDIFF CASHOUT-CLAIMED-FINAL block=%d author=%s permlink=%s claimed_final=%d\n",
+			blockNum, author, permlink, claimed)
+	}
 
 	// Pre-HF17 only: subtract this comment's curve from
 	// dgpo.total_reward_shares2 (mirrors
