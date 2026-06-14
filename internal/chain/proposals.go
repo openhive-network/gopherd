@@ -72,9 +72,18 @@ func processProposals(s *state.Session, blockTime uint32, blockNum uint32) {
 		return
 	}
 
-	// Snapshot proposals into in-memory lists.
+	// Snapshot ACTIVE proposals (start<=now<=end) for the vote recalc.
+	// hived does NOT auto-remove expired proposals: dhf_processor::
+	// remove_proposals (util/dhf_processor.cpp:53-68) only deletes
+	// proposals already flagged `removed` by an explicit
+	// remove_proposal_operation — "automatic removing of old proposals is
+	// to be blocked in order to allow looking for expired proposals (by
+	// API call list_proposals with expired flag)". Expired proposals linger
+	// in state forever. Go previously auto-deleted every proposal past its
+	// end_date here, which orphaned later unapprove votes: an
+	// update_proposal_votes(approve=false) on the expired-but-still-alive
+	// proposal 16 hit "proposal not found" at block 36,196,594.
 	var active []objects.Proposal
-	var expired []objects.Proposal
 
 	_ = s.Range(objects.ProposalTable, state.PrimaryIndex, nil,
 		func(_, value []byte) (bool, error) {
@@ -83,19 +92,13 @@ func processProposals(s *state.Session, blockTime uint32, blockNum uint32) {
 				return true, nil
 			}
 			if p.EndDate <= blockTime {
-				expired = append(expired, p)
-				return true, nil
+				return true, nil // expired — excluded from vote calc, NOT removed
 			}
 			if p.StartDate <= blockTime {
 				active = append(active, p)
 			}
 			return true, nil
 		})
-
-	// Drop expired proposals (and their votes).
-	for i := range expired {
-		objects.DeleteProposalFull(s, &expired[i])
-	}
 
 	if len(active) == 0 {
 		return
