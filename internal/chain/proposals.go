@@ -68,9 +68,27 @@ func processProposals(s *state.Session, blockTime uint32, blockNum uint32) {
 	// the C++ order: convert_funds() → make_payments() inside
 	// sps_processor::run().
 	convertProposalFunds(s, blockTime, hf)
-	if blockTime%proposalMaintenancePeriodSec != 0 {
+	// hived gates DHF maintenance on head_time >= next_maintenance_time
+	// (dhf_processor::is_maintenance_period) and reschedules via
+	// set_next_maintenance_time(head_time, HIVE_PROPOSAL_MAINTENANCE_PERIOD)
+	// = head_time + 3600 — a SHIFTING schedule anchored to the last run, NOT
+	// the absolute `blockTime % 3600` grid. The two diverge whenever a grid
+	// block is missed (e.g. the irregular block timing after the HF21 stall
+	// at block 35,922,615): the grid gate skips the missed tick then doubles
+	// the next one against a larger (later) treasury, over-paying proposals
+	// and over-draining the treasury (~152K HBD in 35.93M-36.04M → leaves
+	// peak.proposals short at 36,351,128). next_maintenance_time defaults to
+	// 0, so the first post-HF21 block is due (matches hived's genesis default).
+	mdgpo, derr := objects.GetDGPO(s)
+	if derr != nil {
 		return
 	}
+	if blockTime < mdgpo.NextMaintenanceTime {
+		return
+	}
+	objects.MutateDGPO(s, func(d *objects.DynamicGlobalProperty) {
+		d.NextMaintenanceTime = blockTime + proposalMaintenancePeriodSec
+	})
 
 	// Snapshot ACTIVE proposals (start<=now<=end) for the vote recalc.
 	// hived does NOT auto-remove expired proposals: dhf_processor::
