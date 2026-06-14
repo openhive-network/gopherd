@@ -617,7 +617,7 @@ func (voteEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		// vesting cap). No bump. Note C++ has no "current_mana > 0"
 		// assert here: a zero-mana vote proceeds and lands with
 		// rshares=0 after the dust subtraction.
-		objects.UpdateVotingManabar(voter, ctx.HeadBlockTime, uint16(dvPoolPct), 0)
+		objects.UpdateVotingManabar(voter, ctx.HeadBlockTime, uint16(dvPoolPct), 0, ctx.BlockNum)
 		currentPower = voter.VotingManaCurrent
 		// Base mana for the cost formula (hive_evaluator_social.cpp:
 		// 665-684). Downvotes with an active pool (HF21+) price against

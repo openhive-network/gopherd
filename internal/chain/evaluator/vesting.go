@@ -268,7 +268,7 @@ func (delegateVestingSharesEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	// surfacing as net_rshares ±1 → recent_claims drift → knife-edge claim
 	// failures like vimm.pool @26,423,011). Regen here, unconditionally.
 	if ctx.Hardforks.Has(hardfork.HF20) {
-		objects.UpdateVotingManabar(&delegator, ctx.HeadBlockTime, uint16(dvPoolPct), 0)
+		objects.UpdateVotingManabar(&delegator, ctx.HeadBlockTime, uint16(dvPoolPct), 0, ctx.BlockNum)
 	}
 	if delta > 0 {
 		var available, availableDownvote int64
@@ -348,7 +348,7 @@ func (delegateVestingSharesEvaluator) Apply(ctx *Context, opArg op.Op) error {
 				}
 			}
 			manaBefore, updBefore := delegatee.VotingManaCurrent, delegatee.VotingManaLastUpdate
-			objects.UpdateVotingManabar(&delegatee, ctx.HeadBlockTime, uint16(dvPoolPct), delta)
+			objects.UpdateVotingManabar(&delegatee, ctx.HeadBlockTime, uint16(dvPoolPct), delta, ctx.BlockNum)
 			if vestTraceAccount(string(d.Delegatee)) {
 				ghiveDiff("GHIVEDIFF DELEG-MANA block=%d delegatee=%s now=%d max=%d mana_before=%d upd_before=%d bump=%d mana_after=%d upd_after=%d\n",
 					ctx.BlockNum, d.Delegatee, ctx.HeadBlockTime, delegatee.EffectiveVestingSharesExclWithdraw(),
@@ -368,7 +368,7 @@ func (delegateVestingSharesEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		// HF20/HF21 dock the raw stored values (hive_evaluator_transfer
 		// .cpp:912-934).
 		if ctx.Hardforks.Has(hardfork.HF22) {
-			objects.UpdateVotingManabar(&delegatee, ctx.HeadBlockTime, uint16(dvPoolPct), 0)
+			objects.UpdateVotingManabar(&delegatee, ctx.HeadBlockTime, uint16(dvPoolPct), 0, ctx.BlockNum)
 		}
 		delegatee.ReceivedVestingShares -= returned
 		if delegatee.ReceivedVestingShares < 0 {

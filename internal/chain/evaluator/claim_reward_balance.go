@@ -111,7 +111,7 @@ func (claimRewardBalanceEvaluator) Apply(ctx *Context, opArg op.Op) error {
 			dvPoolPct = dgpoRef.DownvotePoolPercent
 		}
 		manaBefore, updBefore := a.VotingManaCurrent, a.VotingManaLastUpdate
-		objects.UpdateVotingManabar(&a, ctx.HeadBlockTime, dvPoolPct, cr.RewardVests.Amount)
+		objects.UpdateVotingManabar(&a, ctx.HeadBlockTime, dvPoolPct, cr.RewardVests.Amount, ctx.BlockNum)
 		if vestTraceAccount(string(cr.Account)) {
 			ghiveDiff("GHIVEDIFF CLAIM-MANA block=%d acct=%s now=%d max=%d mana_before=%d upd_before=%d bump=%d mana_after=%d upd_after=%d\n",
 				ctx.BlockNum, cr.Account, ctx.HeadBlockTime, a.EffectiveVestingSharesExclWithdraw(),

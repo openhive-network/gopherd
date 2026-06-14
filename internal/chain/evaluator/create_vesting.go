@@ -179,7 +179,7 @@ func createVestingImpl(s *state.Session, accountName string, hiveSatoshi int64, 
 			a.RewardVestingHive += hiveSatoshi
 		} else {
 			if manabarHF20 {
-				objects.UpdateVotingManabar(a, dgpoRef.Time, dvPoolPct, vestsAmount)
+				objects.UpdateVotingManabar(a, dgpoRef.Time, dvPoolPct, vestsAmount, dgpoRef.HeadBlockNumber)
 			}
 			a.VestingShares += vestsAmount
 		}

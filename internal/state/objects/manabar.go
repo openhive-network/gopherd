@@ -170,6 +170,11 @@ func InitRCManabar(a *Account, now uint32) {
 // HIVE_VOTING_MANA_REGENERATION_SECONDS = 5 days. Same as RC regen.
 const VotingManaRegenSec uint32 = 5 * 24 * 60 * 60
 
+// hf21StallBlock = HIVE_HF_21_STALL_BLOCK (0_21.hf). Downvote-manabar
+// max_mana uses an overflow-prone int64 multiply at/before this block,
+// uint128 after (util/manabar.hpp:120-135).
+const hf21StallBlock uint32 = 35922615
+
 // UpdateVotingManabar mirrors hived's util::update_manabar
 // (chain/util/manabar.hpp) — regenerates the account's
 // voting_manabar (and HF21+ downvote_manabar) to the current
@@ -195,14 +200,30 @@ const VotingManaRegenSec uint32 = 5 * 24 * 60 * 60
 // The manabar is in VESTS units post-HF20 — at HF20 activation hived
 // reinterprets the stored pre-HF20 percent value as VESTS without
 // migration.
-func UpdateVotingManabar(a *Account, now uint32, downvotePoolPercent uint16, newMana int64) {
+func UpdateVotingManabar(a *Account, now uint32, downvotePoolPercent uint16, newMana int64, blockNum uint32) {
 	maxMana := a.EffectiveVestingSharesExclWithdraw()
 	regen := ManabarParams{MaxMana: maxMana, RegenTime: VotingManaRegenSec}
 	cur, newUpdate := RegenerateMana(a.VotingManaCurrent, a.VotingManaLastUpdate, regen, now, false)
 	a.VotingManaCurrent = UseMana(cur, -newMana, 0)
 	a.VotingManaLastUpdate = newUpdate
 	if downvotePoolPercent > 0 {
-		dvMax := int64(u128MulDiv10000(maxMana, downvotePoolPercent))
+		// Downvote manabar max_mana. hived (util/manabar.hpp:120-135) gates
+		// the multiply on HIVE_HF_21_STALL_BLOCK (35,922,615), NOT HF22:
+		// blocks AFTER the stall widen to uint128; blocks AT/BEFORE it use a
+		// plain int64 multiply that OVERFLOWS for whale/service downvoters
+		// (effective_vests × pool_pct > 2^63) and wraps to a tiny max — the
+		// "NOTIFYALERT! max mana overflow" path. Replicating the wrap is
+		// required for accounts like ocdb that downvote in the HF21→stall
+		// window: a non-overflowed (uint128) downvote bar there absorbs the
+		// downvote instead of draining the voting bar, leaving residual
+		// voting mana that inflates later downvotes (maysun net_rshares /
+		// honeybee curation short at 36,139,951).
+		var dvMax int64
+		if blockNum > hf21StallBlock {
+			dvMax = int64(u128MulDiv10000(maxMana, downvotePoolPercent))
+		} else {
+			dvMax = (maxMana * int64(downvotePoolPercent)) / 10000
+		}
 		dvRegen := ManabarParams{MaxMana: dvMax, RegenTime: VotingManaRegenSec}
 		newDV, newDVUpdate := RegenerateMana(a.DownvoteManaCurrent, a.DownvoteManaLastUpdate, dvRegen, now, false)
 		a.DownvoteManaCurrent = UseMana(newDV, (-newMana*int64(downvotePoolPercent))/10000, 0)
