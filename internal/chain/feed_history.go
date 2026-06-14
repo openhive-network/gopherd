@@ -252,12 +252,14 @@ func applyHBDHardCap(s *state.Session, fh *objects.FeedHistory, hf hardfork.Set)
 	}
 	hbdSupply := dgpo.CurrentHBDSupply
 	if hf.Has(hardfork.HF25) {
-		// Subtract treasury balance (treasury's HBD is held outside
-		// the open market). Mirrors the HIVE_HARDFORK_1_25_HBD_HARD_CAP
-		// gate at database.cpp:2573. We don't yet model the treasury
-		// account explicitly here, so the subtraction is a no-op
-		// pre-HF25 and we'll wire it when HF25 lands.
-		_ = hbdSupply
+		// HIVE_HARDFORK_1_25_HBD_HARD_CAP (= HF25; database.cpp:2522-2523):
+		// treasury HBD is held outside the open market, so it is EXCLUDED
+		// from the hard-cap's hbd_supply. Treasury is hive.fund post-HF24
+		// (HF25 > HF24), steem.dao otherwise — resolve via the hardfork-
+		// aware helper.
+		if t, terr := objects.GetAccount(s, currentTreasuryName(s, hf)); terr == nil {
+			hbdSupply -= t.HBDBalance
+		}
 	}
 	if hbdSupply <= 0 {
 		return
