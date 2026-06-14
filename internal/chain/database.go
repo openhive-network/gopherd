@@ -953,7 +953,7 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	// GHIVEDIFF_ALL dump matches C++'s placement inside process_funds:
 	// AFTER get_producer_reward (= our processProducerReward) but
 	// BEFORE the content/curate/vesting inflation slice modify.
-	if envGhivediffAll != "" {
+	if envGhivediffAll != "" && (envCalcTo == 0 || calcTraceWindow(blockNum)) {
 		d, _ := objects.GetDGPO(session)
 		fh, _ := objects.GetFeedHistory(session)
 		fmt.Fprintf(os.Stderr, "GHIVEDIFF GLOBAL block=%d fund=%d vfund=%d vshares=%d supply=%d vsupply=%d hbd_supply=%d median=%d/%d prvs=%d prvh=%d\n",

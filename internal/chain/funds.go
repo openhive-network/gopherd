@@ -344,12 +344,19 @@ func processFundsHF16(s *state.Session, dgpo *objects.DynamicGlobalProperty, blo
 		virtualSupply = dgpo.CurrentSupply
 	}
 
-	// HF21+: use virtual_supply_without_treasury for new_hive inflation
-	// (database.cpp:1716-1726). Treasury-held HBD is excluded from the
-	// inflation base so the dhf budget doesn't compound on its own
-	// holdings. Pre-HF21 the full virtual_supply is correct.
+	// HF28+ ONLY: use virtual_supply_without_treasury for new_hive
+	// inflation. hived gates this on HIVE_HARDFORK_1_28_NO_DHF_HBD_IN_INFLATION
+	// (= HIVE_HARDFORK_1_28; database.cpp:1741), NOT HF21. Treasury-held HBD
+	// is excluded from the inflation base so the dhf budget doesn't compound
+	// on its own holdings. Pre-HF28 the FULL virtual_supply is correct —
+	// gating this at HF21 shrank the inflation base by treasury HBD every
+	// block from HF21 on, drifting content_reward 1 sat/block low once the
+	// treasury's accumulated DHF HBD grew enough to tip newHive's floor
+	// (first observable at block 35,932,133; starved the reward fund and
+	// left likwid's claim_reward_balance 1,982,263 reward-VESTS short at
+	// 35,933,333).
 	hfInfl := hardfork.SetForBlock(blockNum)
-	if hfInfl.Has(hardfork.HF21) {
+	if hfInfl.Has(hardfork.HF28) {
 		if treasury, terr := objects.GetAccount(s, currentTreasuryName(s, hfInfl)); terr == nil && treasury.HBDBalance > 0 {
 			if fh, ferr := objects.GetFeedHistory(s); ferr == nil && !priceIsZero(fh.CurrentMedianHistory) {
 				treasuryAsHive := convertHBDToHive(treasury.HBDBalance, fh.CurrentMedianHistory)
