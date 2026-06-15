@@ -26,6 +26,9 @@ Commands:
   validate-blocklog <block_log_path>     parse every block + every transaction
                                          and validate computed merkle roots
                                          match each block header
+  compare-blocklog <ref> <other> [from] [to]
+                                         byte-compare blocks between two block_logs
+                                         (e.g. a live daemon's vs the canonical ref)
   replay <block_log_path>                apply every block through the
                                          evaluator pipeline (state mutation)
   state-dump --data-dir=PATH             dump state objects as JSONL for
@@ -54,6 +57,8 @@ func main() {
 		os.Exit(cmdValidateMainnet(os.Args[2:]))
 	case "validate-blocklog":
 		os.Exit(cmdValidateBlocklog(os.Args[2:]))
+	case "compare-blocklog":
+		os.Exit(cmdCompareBlocklog(os.Args[2:]))
 	case "debug-block":
 		os.Exit(cmdDebugBlock(os.Args[2:]))
 	case "replay":
