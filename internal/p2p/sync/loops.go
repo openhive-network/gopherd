@@ -65,16 +65,28 @@ func (d *Delegate) broadcastInv() {
 		return
 	}
 
-	// During catch-up, advertise just our most-recent block — peers
-	// already have everything we have (we're behind their head). The
-	// 200-block-per-round broadcast was burning 22 % of CPU on per-peer
-	// known-map iteration during a multi-thousand-bps catch-up. The
-	// single-block INV is enough to keep peers aware of our head
-	// without the per-block bookkeeping cost.
-	maxAdvertise := d.cfg.MaxBlocksPerInv
-	if d.isFarBehind() {
-		maxAdvertise = 1
+	// Only advertise LIVE blocks. During initial catch-up every block we
+	// hold is historical (timestamps hours-to-years old); a peer at the
+	// live head rejects a node offering such an ancient block ("you
+	// offered me a block that I have deemed to be invalid") and drops the
+	// connection — churning through the peer set and eventually stalling
+	// the sync once the good peers are exhausted. hived advertises
+	// inventory only when in sync. We gate on the head block's timestamp
+	// recency — the same liveness signal the gossip relay uses
+	// (gossip.liveBroadcastWindowSec) via isCatchingUp() — rather than
+	// the old isFarBehind(): the timestamp test needs no per-peer head
+	// tracking, so it can't be fooled by a freshly-connected peer whose
+	// head we haven't learned yet, and it naturally resumes advertising
+	// the instant we reach the live tip. Catch-up propagation is
+	// unaffected: it runs over the fetch_blockchain_item_ids / fetch_items
+	// path, not this advert path.
+	if d.isCatchingUp() {
+		d.idleMu.Lock()
+		d.idleRounds++
+		d.idleMu.Unlock()
+		return
 	}
+	maxAdvertise := d.cfg.MaxBlocksPerInv
 	if len(nums) > maxAdvertise {
 		nums = nums[len(nums)-maxAdvertise:]
 	}
@@ -149,12 +161,21 @@ func (d *Delegate) broadcastInv() {
 }
 
 // catchupKickerLoop fires a periodic fetch_blockchain_item_ids to every
-// connected peer while we're far behind. Keeps deep pipelining even
+// connected peer while we're catching up. Keeps deep pipelining even
 // when individual peers are slow to walk-forward on their own — the
 // passive walk-forward (in handleBlockchainItemIDsInventory) only fires
-// AFTER the peer answers the prior request, so a slow peer leaves a
-// gap. This loop fills the gap by re-requesting every CatchupKickInterval
-// while isFarBehind() is true.
+// AFTER the peer answers the prior request, so a slow peer (or a broken
+// walk-forward chain) leaves a gap. This loop fills the gap by
+// re-requesting every CatchupKickInterval while isCatchingUp() is true.
+//
+// Gating on isCatchingUp() (head-timestamp recency) rather than the old
+// isFarBehind() is essential: isFarBehind() derived "behind" from the
+// per-peer peerHeadNum, which only advances ~one inventory batch ahead of
+// our head, so it flipped to false mid-catch-up and silenced the kicker —
+// stalling the sync once the self-sustaining walk-forward broke. (Before
+// the INV-advertise suppression landed, peer churn masked this: every
+// "invalid block" disconnect forced a reconnect, and OnPeerConnected
+// re-seeded the walk. With churn gone, the kicker is the only re-seeder.)
 func (d *Delegate) catchupKickerLoop() {
 	defer d.wg.Done()
 	t := time.NewTicker(d.cfg.CatchupKickInterval)
@@ -164,7 +185,7 @@ func (d *Delegate) catchupKickerLoop() {
 		case <-d.stopCh:
 			return
 		case <-t.C:
-			if !d.isFarBehind() {
+			if !d.isCatchingUp() {
 				continue
 			}
 			if d.inhibitFetching.Load() {
@@ -342,6 +363,54 @@ func (d *Delegate) applyLoop() {
 			tryApply()
 		}
 	}
+}
+
+// liveAdvertiseWindowSec bounds how far behind wall-clock our head block
+// may be and still be worth advertising via item_ids_inventory. Blocks
+// are 3s apart, so a node receiving live blocks is at most a few seconds
+// behind; catch-up (initial-sync) blocks are hours-to-years old. Mirrors
+// gossip.liveBroadcastWindowSec (120s ~ 40 blocks) so the advert and
+// relay paths agree on what "live" means.
+const liveAdvertiseWindowSec = 120
+
+// isCatchingUp reports whether we are still doing initial-sync catch-up,
+// i.e. our head block's timestamp is more than liveAdvertiseWindowSec
+// behind wall-clock (or we're at genesis). It is the single liveness
+// signal driving both halves of the catch-up machinery:
+//
+//   - broadcastInv suppresses item_ids_inventory adverts while catching
+//     up, so we never offer a historical block to a live-head peer (which
+//     would disconnect us with "you offered me a block deemed invalid").
+//   - catchupKickerLoop keeps re-issuing fetch_blockchain_item_ids to
+//     every peer while catching up, so the inventory walk stays seeded
+//     even if a walk-forward chain breaks (throttle / item_not_available
+//     / dropped reorder block). Previously this gated on isFarBehind(),
+//     which derived "behind" from per-peer peerHeadNum — but that only
+//     advances ~one inventory batch (≈2000) ahead of our head, so once we
+//     applied through the batch the gate went false and the kicker fell
+//     silent, stalling the sync. The wall-clock timestamp can't be fooled
+//     that way: it stays "catching up" until we genuinely reach the tip.
+//
+// On the rare path where the head bytes aren't cached (or are unparsable)
+// we err toward "catching up" so the kicker keeps us moving rather than
+// going silent.
+func (d *Delegate) isCatchingUp() bool {
+	head := d.headBlockHint.Load()
+	if head == 0 {
+		head, _ = d.chain.HeadBlock()
+	}
+	if head == 0 {
+		return true // at genesis — maximally behind
+	}
+	raw := d.chain.RecentBlockBytes(head)
+	if raw == nil {
+		return true
+	}
+	ts := blockTimestamp(raw)
+	if ts == 0 {
+		return true
+	}
+	return int64(ts) < time.Now().Unix()-liveAdvertiseWindowSec
 }
 
 // blockTimestamp peeks at the timestamp field of a raw block payload

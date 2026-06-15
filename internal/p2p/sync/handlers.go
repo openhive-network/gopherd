@@ -578,6 +578,32 @@ func (d *Delegate) handleBlockBytes(p *node.Peer, signedBlockBytes []byte, bid b
 	}
 }
 
+// releaseOutstanding clears bid from peer p's outstanding-fetch set (if
+// present) and refunds the global in-flight budget. Idempotent: a no-op
+// when bid was never outstanding for p. Used by the duplicate-delivery
+// short-circuits that return BEFORE handleBlockBytes' own cleanup runs —
+// without this, a block we requested from N peers (the walk-forward fans
+// each request out to every peer) leaks N-1 outstanding slots, because
+// only the first delivery reaches handleBlockBytes and the rest are
+// dropped by a dedup ring. The leak silently exhausts MaxOutstandingTotal
+// and pins the catch-up in permanent throttle.
+func (d *Delegate) releaseOutstanding(p *node.Peer, bid block.ID) {
+	st := d.peerStateFor(p)
+	if st == nil {
+		return
+	}
+	st.mu.Lock()
+	_, was := st.outstanding[bid]
+	if was {
+		delete(st.outstanding, bid)
+	}
+	st.known[bid] = struct{}{}
+	st.mu.Unlock()
+	if was {
+		d.outstandingTotal.Add(-1)
+	}
+}
+
 // peerStateFor returns the per-peer state, or nil if the peer was
 // dropped between the message arriving and us being scheduled.
 func (d *Delegate) peerStateFor(p *node.Peer) *peerState {

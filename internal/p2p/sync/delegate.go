@@ -654,33 +654,6 @@ func (d *Delegate) onDequeue() {
 // back-pressured. Exported for tests + observability.
 func (d *Delegate) FetchInhibited() bool { return d.inhibitFetching.Load() }
 
-// isFarBehind reports whether we are >catchupGap blocks behind the
-// highest peer head we've observed. Used by broadcastInv to throttle
-// the per-round inventory size: during catch-up peers already have
-// everything we have, so a single-block INV is sufficient as a
-// keepalive, and the per-peer known-map iteration over ~200 IDs was
-// burning measurable CPU.
-func (d *Delegate) isFarBehind() bool {
-	const catchupGap = 100
-	// Atomic-hint head — isFarBehind is called from the INV loop and
-	// taking applyMu.RLock per tick contends with the apply writer.
-	myHead := d.headBlockHint.Load()
-	if myHead == 0 {
-		myHead, _ = d.chain.HeadBlock()
-	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	for _, st := range d.peers {
-		st.mu.Lock()
-		ph := st.peerHeadNum
-		st.mu.Unlock()
-		if ph > myHead+catchupGap {
-			return true
-		}
-	}
-	return false
-}
-
 // QueueDepth returns the current applyQ depth (atomic, lock-free).
 func (d *Delegate) QueueDepth() int { return int(d.applyQLen.Load()) }
 
@@ -709,9 +682,31 @@ type Stats struct {
 	// CompressedDecodeErrors counts decode failures (bad flags, dict not
 	// embedded, zstd error, header parse). Useful as a sanity gauge.
 	CompressedDecodeErrors uint64
+	// PeerCount is the number of connected peers with per-peer state.
+	PeerCount int
+	// DistinctOutstanding is the number of UNIQUE block IDs currently in
+	// flight (a block requested from N peers via the walk-forward fan-out
+	// counts N times in OutstandingTotal but once here). The ratio
+	// OutstandingTotal/DistinctOutstanding reveals fetch redundancy.
+	DistinctOutstanding int
+}
+
+func (d *Delegate) distinctOutstanding() (distinct, peers int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	seen := make(map[block.ID]struct{}, 1024)
+	for _, st := range d.peers {
+		st.mu.Lock()
+		for bid := range st.outstanding {
+			seen[bid] = struct{}{}
+		}
+		st.mu.Unlock()
+	}
+	return len(seen), len(d.peers)
 }
 
 func (d *Delegate) Stats() Stats {
+	distinct, peers := d.distinctOutstanding()
 	return Stats{
 		QueueDepth:             d.QueueDepth(),
 		QueueCapacity:          d.QueueCapacity(),
@@ -725,5 +720,7 @@ func (d *Delegate) Stats() Stats {
 		CompressedDecompressed: d.compressedDecompressed.Load(),
 		CompressedCacheHits:    d.compressedCacheHits.Load(),
 		CompressedDecodeErrors: d.compressedDecodeErrors.Load(),
+		PeerCount:              peers,
+		DistinctOutstanding:    distinct,
 	}
 }
