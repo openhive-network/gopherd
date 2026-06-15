@@ -1,6 +1,8 @@
 package chain
 
 import (
+	"fmt"
+	"os"
 	"sort"
 
 	"hived-go/internal/protocol/asset"
@@ -151,15 +153,21 @@ func processProposals(s *state.Session, blockTime uint32, blockNum uint32) {
 		return active[i].ID < active[j].ID
 	})
 
-	// Resolve treasury account (HF24+ = "hive.fund", pre-HF24 = "steem.dao").
-	treasuryName := "hive.fund"
+	// Resolve treasury account by the HF24-gated name (pre-HF24 = "steem.dao",
+	// HF24+ = "hive.fund"). MUST NOT probe "hive.fund" first: the account
+	// "hive.fund" was registered by a user on 2020-03-18 (~block 41,759,371,
+	// two days before the HF23 Hive fork) — years before HF24 renamed the
+	// treasury to it. Probing "hive.fund" first made processProposals pay
+	// proposals out of that tiny user account (~22,491 sat HBD) the moment it
+	// was created, collapsing the maintenance budget to ~9 sat so every
+	// proposal below rank 1 (including howo's #70 → 7.488 HBD/tick) went
+	// unpaid — howo's HBD never replenished and its limit_order_create failed
+	// at block 41,759,454. The real treasury (steem.dao, ~276.6M sat) stayed
+	// full the whole time.
+	treasuryName := currentTreasuryName(s, hf)
 	treasury, err := objects.GetAccount(s, treasuryName)
 	if err != nil {
-		treasuryName = "steem.dao"
-		treasury, err = objects.GetAccount(s, treasuryName)
-		if err != nil {
-			return
-		}
+		return
 	}
 
 	// Maintenance budget per hived dhf_processor::calculate_maintenance_budget
@@ -193,6 +201,11 @@ func processProposals(s *state.Session, blockTime uint32, blockNum uint32) {
 	}
 	dailyBudget := treasury.HBDBalance / proposalTotalAmountDivider
 	budget := dailyBudget * passedTime / dailySecondsConst
+	dhfTrace := envGhivediffAll != "" && calcTraceWindow(blockNum)
+	if dhfTrace {
+		fmt.Fprintf(os.Stderr, "GHIVEDIFF DHF-TICK block=%d treasury_hbd=%d dailyBudget=%d budget=%d passed=%d active=%d\n",
+			blockNum, treasury.HBDBalance, dailyBudget, budget, passedTime, len(active))
+	}
 	if budget <= 0 {
 		// Even when budget == 0 we still need to refresh LastBudgetTime
 		// so the next tick computes correctly.
@@ -205,9 +218,15 @@ func processProposals(s *state.Session, blockTime uint32, blockNum uint32) {
 	for _, p := range active {
 		// Proposals with zero votes are not paid.
 		if p.TotalVotes == 0 {
+			if dhfTrace {
+				fmt.Fprintf(os.Stderr, "GHIVEDIFF DHF-SKIP block=%d pid=%d recv=%s votes=0 zero-votes\n", blockNum, p.ID, p.Receiver)
+			}
 			continue
 		}
 		if budget <= 0 {
+			if dhfTrace {
+				fmt.Fprintf(os.Stderr, "GHIVEDIFF DHF-BREAK block=%d pid=%d recv=%s budget-exhausted\n", blockNum, p.ID, p.Receiver)
+			}
 			break
 		}
 		// Reload the treasury fresh for each payment. Holding a single
@@ -264,6 +283,10 @@ func processProposals(s *state.Session, blockTime uint32, blockNum uint32) {
 		objects.AdjustHBDBalance(s, &recv, blockTime, periodPay)
 		objects.PutAccount(s, &recv)
 		budget -= periodPay
+		if dhfTrace {
+			fmt.Fprintf(os.Stderr, "GHIVEDIFF DHF-PAY block=%d pid=%d recv=%s votes=%d dailyPay=%d periodPay=%d budgetLeft=%d\n",
+				blockNum, p.ID, p.Receiver, p.TotalVotes, p.DailyPay, periodPay, budget)
+		}
 	}
 	// Bump LastBudgetTime so the next tick's passed_time is correct.
 	// Mirrors dhf_processor::update_settings (dhf_processor.cpp:214-222).
@@ -304,8 +327,11 @@ func convertProposalFunds(s *state.Session, blockTime uint32, hf hardfork.Set) {
 	// time" pattern in sps_processor::convert_funds).
 	dgpo.NextDailyMaintenanceTime = blockTime + dailyMaintenancePeriodSec
 
-	// Resolve treasury account.
-	treasuryName := "hive.fund"
+	// Resolve treasury account by the HF24-gated name. convertProposalFunds
+	// only runs at HF24+ (gated at the top of this function), where the
+	// treasury is "hive.fund"; use currentTreasuryName for consistency rather
+	// than hard-coding it.
+	treasuryName := currentTreasuryName(s, hf)
 	treasury, terr := objects.GetAccount(s, treasuryName)
 	if terr != nil {
 		objects.PutDGPO(s, &dgpo)

@@ -53,7 +53,7 @@ func updateVirtualSupply(s *state.Session, blockNum uint32) {
 		hbdSupply := dgpo.CurrentHBDSupply
 		virtualSupplyForRatio := dgpo.VirtualSupply
 		if hf.Has(hardfork.HF24) {
-			treasuryName := "hive.fund"
+			treasuryName := currentTreasuryName(s, hf)
 			if treasury, terr := objects.GetAccount(s, treasuryName); terr == nil {
 				hbdSupply -= treasury.HBDBalance
 				if hbdSupply < 0 {

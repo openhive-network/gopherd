@@ -458,25 +458,20 @@ func processFundsHF16(s *state.Session, dgpo *objects.DynamicGlobalProperty, blo
 		if fh, ferr := objects.GetFeedHistory(s); ferr == nil && !priceIsZero(fh.CurrentMedianHistory) {
 			dhfHBD = convertHiveToHBD(dhfNew, fh.CurrentMedianHistory)
 		}
+		// Resolve the treasury by the HF24-gated name. MUST NOT probe
+		// "hive.fund" first: it existed as a user account from 2020-03-18
+		// (pre-HF24), so a hive.fund-first probe would route DHF inflation to
+		// that user account instead of the real pre-HF24 treasury steem.dao.
+		treasuryName := currentTreasuryName(s, hf)
 		if dhfHBD <= 0 {
 			// Fall back to crediting HIVE if the feed isn't available.
-			if treasury, err := objects.GetAccount(s, "hive.fund"); err == nil {
-				treasury.Balance += dhfNew
-				objects.PutAccount(s, &treasury)
-				dgpo.CurrentSupply += dhfNew
-			} else if treasury, err := objects.GetAccount(s, "steem.dao"); err == nil {
+			if treasury, err := objects.GetAccount(s, treasuryName); err == nil {
 				treasury.Balance += dhfNew
 				objects.PutAccount(s, &treasury)
 				dgpo.CurrentSupply += dhfNew
 			}
 		} else {
-			treasuryName := "hive.fund"
-			treasury, err := objects.GetAccount(s, treasuryName)
-			if err != nil {
-				treasuryName = "steem.dao"
-				treasury, err = objects.GetAccount(s, treasuryName)
-			}
-			if err == nil {
+			if treasury, err := objects.GetAccount(s, treasuryName); err == nil {
 				treasury.HBDBalance += dhfHBD
 				objects.PutAccount(s, &treasury)
 			}

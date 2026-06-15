@@ -967,7 +967,7 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	// GHIVEDIFF_ACCOUNTS=acc1,acc2 — per-block balance dump for each
 	// listed account. Mirrors hived's diagnostic block at
 	// database.cpp:1832-1853.
-	if accEnv := envGhivediffAccounts; accEnv != "" {
+	if accEnv := envGhivediffAccounts; accEnv != "" && (envCalcTo == 0 || calcTraceWindow(blockNum)) {
 		for _, name := range strings.Split(accEnv, ",") {
 			if name == "" {
 				continue

@@ -625,6 +625,10 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 				continue
 			}
 			hbdPayout := convertHiveToHBD(share, fh.CurrentMedianHistory)
+			if envGhivediffAll != "" && calcTraceWindow(blockNum) {
+				fmt.Fprintf(os.Stderr, "GHIVEDIFF BENE-TREASURY block=%d author=%s benefactor=%s hbd_before=%d payout=%d share=%d\n",
+					blockNum, c.Author, b.Account, bAcct.HBDBalance, hbdPayout, share)
+			}
 			objects.AdjustHBDBalance(s, &bAcct, blockTime, hbdPayout)
 			objects.PutAccount(s, &bAcct)
 			// adjust_supply pair: HIVE -share burned, HBD +hbdPayout minted
