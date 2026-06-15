@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"runtime/pprof"
 	"syscall"
 	"time"
 
@@ -46,7 +48,7 @@ func main() {
 	flag.BoolVar(&replay, "replay-blockchain", false, "replay the block_log into a fresh state dir before starting")
 	flag.IntVar(&cacheMB, "cache-mb", 1024, "pebble block-cache size in MB (default 1024; was 256 hard-coded)")
 	flag.StringVar(&loadSnapshot, "load-snapshot", "", "load a state snapshot (single-file or directory) on startup before genesis/sync")
-	flag.IntVar(&residentCap, "comment-resident-cap", 4_000_000, "cap RAM-resident comments; frozen comments + their votes spill to an on-disk cold tier (the Go equivalent of hived's mmap'd chainbase paging). 0 disables (unbounded RAM).")
+	flag.IntVar(&residentCap, "comment-resident-cap", 2_000_000, "cap RAM-resident comments; frozen comments + their votes spill to an on-disk cold tier (the Go equivalent of hived's mmap'd chainbase paging). 0 disables (unbounded RAM). Pair with GOMEMLIMIT to also cap RSS — at 13M blocks this took RSS ~9.6G→4.1G.")
 	flag.IntVar(&evictBudget, "evict-budget", 20000, "max comments evicted to the cold tier per block when over the resident cap")
 	flag.Parse()
 
@@ -87,6 +89,33 @@ func main() {
 		fmt.Fprintln(os.Stderr, "ghive: --data-dir or 'data-dir = ...' in config.ini is required")
 		os.Exit(2)
 	}
+
+	// Heap-profile-on-SIGUSR2 (registered EARLY so it works during replay
+	// too): writes a runtime/pprof heap profile to $GHIVE_HEAP_PROFILE
+	// (default /tmp/ghive-heap.pprof). Inspect with
+	// `go tool pprof -inuse_space -top <file>`.
+	heapCh := make(chan os.Signal, 1)
+	signal.Notify(heapCh, syscall.SIGUSR2)
+	go func() {
+		for range heapCh {
+			path := os.Getenv("GHIVE_HEAP_PROFILE")
+			if path == "" {
+				path = "/tmp/ghive-heap.pprof"
+			}
+			f, err := os.Create(path)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "ghive: SIGUSR2: create heap profile: %v\n", err)
+				continue
+			}
+			runtime.GC()
+			if err := pprof.WriteHeapProfile(f); err != nil {
+				fmt.Fprintf(os.Stderr, "ghive: SIGUSR2: write heap profile: %v\n", err)
+			} else {
+				fmt.Printf("ghive: heap profile written to %s\n", path)
+			}
+			_ = f.Close()
+		}
+	}()
 
 	// --replay-blockchain rebuilds state deterministically from the local
 	// block_log. The typed stores (Account/Witness/Comment/...) are
