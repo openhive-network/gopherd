@@ -718,10 +718,11 @@ const recentCompressedCap = 8192
 // single-consumer block applier, and the catch-up kicker.
 // Idempotent.
 func (d *Delegate) Start() {
-	d.wg.Add(3)
+	d.wg.Add(4)
 	go d.invLoop()
 	go d.applyLoop()
 	go d.catchupKickerLoop()
+	go d.pruneLoop()
 }
 
 // Stop signals the background goroutines and waits for them to exit.

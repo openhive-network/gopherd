@@ -160,6 +160,67 @@ func (d *Delegate) broadcastInv() {
 	d.idleMu.Unlock()
 }
 
+// pruneLoop periodically drops per-peer dedup state (known / outstanding)
+// and global in-flight reservations for blocks at or below our head. Those
+// entries are dead weight: a block we've already applied is never
+// re-requested (handleBlockchainItemIDsInventory skips num<=head) and never
+// needs re-dedup. Without this the maps grow unbounded during a long
+// catch-up — at ~9k bps each walking peer adds millions of IDs — which the
+// old churn masked by resetting peer state on every disconnect. Measured
+// holding 4.5 GB at head 6.9M before this loop existed.
+func (d *Delegate) pruneLoop() {
+	defer d.wg.Done()
+	t := time.NewTicker(15 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-d.stopCh:
+			return
+		case <-t.C:
+			head := d.headBlockHint.Load()
+			if head == 0 {
+				h, _ := d.chain.HeadBlock()
+				head = h
+			}
+			if head == 0 {
+				continue
+			}
+			d.mu.Lock()
+			sts := make([]*peerState, 0, len(d.peers))
+			for _, st := range d.peers {
+				sts = append(sts, st)
+			}
+			d.mu.Unlock()
+			freed := 0
+			for _, st := range sts {
+				st.mu.Lock()
+				for bid := range st.known {
+					if n := bid.Num(); n != 0 && n <= head {
+						delete(st.known, bid)
+					}
+				}
+				for bid := range st.outstanding {
+					if n := bid.Num(); n != 0 && n <= head {
+						delete(st.outstanding, bid)
+						freed++
+					}
+				}
+				st.mu.Unlock()
+			}
+			if freed > 0 {
+				d.outstandingTotal.Add(int32(-freed))
+			}
+			d.inflightMu.Lock()
+			for bid := range d.inflight {
+				if n := bid.Num(); n != 0 && n <= head {
+					delete(d.inflight, bid)
+				}
+			}
+			d.inflightMu.Unlock()
+		}
+	}
+}
+
 // catchupKickerLoop fires a periodic fetch_blockchain_item_ids to every
 // connected peer while we're catching up. Keeps deep pipelining even
 // when individual peers are slow to walk-forward on their own — the
