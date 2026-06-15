@@ -40,6 +40,7 @@ func main() {
 		loadSnapshot string
 		residentCap  int
 		evictBudget  int
+		compressLog  bool
 	)
 	flag.BoolVar(&showVersion, "version", false, "print version and exit")
 	flag.BoolVar(&showNetwork, "network", false, "print compiled-in network constants and exit")
@@ -50,6 +51,7 @@ func main() {
 	flag.StringVar(&loadSnapshot, "load-snapshot", "", "load a state snapshot (single-file or directory) on startup before genesis/sync")
 	flag.IntVar(&residentCap, "comment-resident-cap", 2_000_000, "cap RAM-resident comments; frozen comments + their votes spill to an on-disk cold tier (the Go equivalent of hived's mmap'd chainbase paging). 0 disables (unbounded RAM). Pair with GOMEMLIMIT to also cap RSS — at 13M blocks this took RSS ~9.6G→4.1G.")
 	flag.IntVar(&evictBudget, "evict-budget", 20000, "max comments evicted to the cold tier per block when over the resident cap")
+	flag.BoolVar(&compressLog, "compress-block-log", false, "zstd-compress the local block_log (matches hived's on-disk format, ~3-4x smaller). The whole log must be one format; switching requires a fresh log.")
 	flag.Parse()
 
 	if showVersion {
@@ -250,7 +252,7 @@ func main() {
 		os.Exit(1)
 	}
 	blockLogPath := filepath.Join(blockchainDir, "block_log")
-	writer, err := blocklog.OpenForWrite(blockLogPath, false)
+	writer, err := blocklog.OpenForWrite(blockLogPath, compressLog)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ghive: open block_log writer: %v\n", err)
 		os.Exit(1)
