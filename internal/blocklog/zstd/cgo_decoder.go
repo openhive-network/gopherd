@@ -189,14 +189,25 @@ func (p *cgoDecoderPool) release(num uint8, d *cgoDecoder) {
 	dp.pool.Put(d)
 }
 
-// decompress runs ZSTD_decompressDCtx on a magicless payload. dst is
-// the caller-supplied output buffer (a fresh slice or pooled). On
-// dst capacity overflow, retry with a doubled buffer.
+// maxDecompressCap bounds how large the output buffer may grow while
+// retrying a "Destination buffer too small" decode. Hived's magicless
+// block frames carry no embedded content size, so we can't pre-size the
+// buffer; we double from 64 KiB up to this ceiling. It must comfortably
+// exceed the largest possible decompressed block: mainnet's
+// maximum_block_size is witness-tunable up to 2 MiB, and a handful of
+// historical blocks (e.g. 2,780,810) decompress to several hundred KiB —
+// the previous 256 KiB ceiling dropped exactly those, wedging catch-up.
+// 16 MiB is 8× the protocol max, leaving ample headroom.
+const maxDecompressCap = 16 << 20
+
+// decompress runs ZSTD_decompressDCtx on a magicless payload. dst is the
+// caller-supplied output buffer (a fresh slice or pooled). On dst capacity
+// overflow we retry with a doubled buffer, up to maxDecompressCap.
 func (d *cgoDecoder) decompress(payload []byte, dst []byte) ([]byte, error) {
-	if cap(dst) < 8192 {
+	if cap(dst) < 65536 {
 		dst = make([]byte, 0, 65536)
 	}
-	for attempt := 0; attempt < 3; attempt++ {
+	for {
 		dst = dst[:cap(dst)]
 		var srcPtr unsafe.Pointer
 		if len(payload) > 0 {
@@ -207,13 +218,14 @@ func (d *cgoDecoder) decompress(payload []byte, dst []byte) ([]byte, error) {
 			srcPtr, C.size_t(len(payload)))
 		if C.go_zstd_is_err(rc) != 0 {
 			errMsg := C.GoString(C.go_zstd_err_name(rc))
-			// `Destination buffer is too small`: ZSTD_isError returns
-			// non-zero but we'd like to retry with a larger buffer.
-			if attempt < 2 && (errMsg == "Destination buffer is too small" ||
-				errMsg == "Destination buffer too small") {
+			// `Destination buffer is too small`: grow and retry until the
+			// ceiling. Without a high-enough ceiling, large blocks decode-
+			// fail permanently and (over p2p) stall the sync on that block.
+			if (errMsg == "Destination buffer is too small" ||
+				errMsg == "Destination buffer too small") && cap(dst) < maxDecompressCap {
 				newCap := cap(dst) * 2
-				if newCap < 65536 {
-					newCap = 65536
+				if newCap > maxDecompressCap {
+					newCap = maxDecompressCap
 				}
 				dst = make([]byte, 0, newCap)
 				continue
@@ -225,5 +237,4 @@ func (d *cgoDecoder) decompress(payload []byte, dst []byte) ([]byte, error) {
 		runtime.KeepAlive(d.dictKeep)
 		return out, nil
 	}
-	return nil, fmt.Errorf("blocklog/zstd: decompress failed after retries")
 }
