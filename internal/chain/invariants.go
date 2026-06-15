@@ -195,9 +195,14 @@ func CheckInvariants(s *state.Session) (InvariantResult, error) {
 	// the HIVE backing pending-reward vests. ---
 	hive += dgpo.TotalVestingFundHive + dgpo.TotalRewardFundHive + dgpo.PendingRewardedVestingHive
 
-	// --- DGPO-held HBD: DHF interval ledger (HBD minted to the treasury
-	// account, tracked separately from current_hbd_supply). ---
-	hbd += dgpo.DHFIntervalLedger
+	// NOTE: dgpo.DHFIntervalLedger is NOT added here. It is hived's
+	// per-interval reporting accumulator for the dhf_funding virtual op
+	// (dynamic_global_property_object::dhf_interval_ledger), reset hourly by
+	// process_proposals. The HBD it tallies is ALREADY credited to the
+	// treasury account balance (funds.go: treasury.HBDBalance += dhfHBD) AND
+	// to current_hbd_supply — adding the ledger here double-counted it,
+	// failing the HBD identity by the accumulated DHF amount once HF21
+	// (block 35,921,786) began funding the treasury.
 
 	r.HiveComputed = hive
 	r.HiveSupply = dgpo.CurrentSupply

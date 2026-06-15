@@ -88,6 +88,13 @@ func processProposals(s *state.Session, blockTime uint32, blockNum uint32) {
 	}
 	objects.MutateDGPO(s, func(d *objects.DynamicGlobalProperty) {
 		d.NextMaintenanceTime = blockTime + proposalMaintenancePeriodSec
+		// hived's dhf_processor emits a dhf_funding_operation for the HBD
+		// accumulated into the treasury since the last tick and resets
+		// dhf_interval_ledger to 0 (sps_processor::run). The HBD itself
+		// already lives in the treasury account + current_hbd_supply; the
+		// ledger is only the per-interval reporting tally. Reset it here so
+		// it mirrors hived's hourly cadence instead of growing unbounded.
+		d.DHFIntervalLedger = 0
 	})
 
 	// Snapshot ACTIVE proposals (start<=now<=end) for the vote recalc.
