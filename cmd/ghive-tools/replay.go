@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"runtime/pprof"
 	"sort"
+	"strconv"
 	"time"
 
 	"hived-go/internal/blocklog"
@@ -190,6 +191,18 @@ func cmdReplay(args []string) int {
 	}
 	fmt.Printf("replay: applying %d..%d (head=%d)\n", *startBlock, end, bl.Head())
 
+	// Windowed fine-grained invariant checking (see the check site below).
+	var invFineFrom, invFineEvery uint64
+	if v := os.Getenv("GHIVE_INV_FINE_FROM"); v != "" {
+		invFineFrom, _ = strconv.ParseUint(v, 10, 64)
+	}
+	if v := os.Getenv("GHIVE_INV_FINE_EVERY"); v != "" {
+		invFineEvery, _ = strconv.ParseUint(v, 10, 64)
+	}
+	if invFineFrom > 0 {
+		fmt.Printf("replay: fine invariant checks every %d blocks from block %d\n", invFineEvery, invFineFrom)
+	}
+
 	// Cold tier: spill frozen comments + their votes to an on-disk scratch
 	// store so the RAM working set stays bounded on long replays. Attached
 	// AFTER any snapshot load (the store objects persist across sessions, so
@@ -293,7 +306,15 @@ func cmdReplay(args []string) int {
 				prevSnap = cur
 			}
 		}
-		if *checkInvariants != 0 && uint64(n)%uint64(*checkInvariants) == 0 {
+		invEvery := uint64(*checkInvariants)
+		// GHIVE_INV_FINE_FROM / GHIVE_INV_FINE_EVERY: past the FROM block,
+		// check invariants every EVERY blocks instead of the coarse cadence,
+		// so one full replay can pinpoint a conservation-break onset window
+		// without a (memory-heavy) warm-start.
+		if invFineFrom > 0 && uint64(n) >= invFineFrom && invFineEvery > 0 {
+			invEvery = invFineEvery
+		}
+		if invEvery != 0 && uint64(n)%invEvery == 0 {
 			chkSess := state.NewSession(stateDB)
 			r, cerr := chain.CheckInvariants(chkSess)
 			if cerr != nil {

@@ -207,7 +207,24 @@ func processProposals(s *state.Session, blockTime uint32, blockNum uint32) {
 		if p.TotalVotes == 0 {
 			continue
 		}
-		if budget <= 0 || treasury.HBDBalance <= 0 {
+		if budget <= 0 {
+			break
+		}
+		// Reload the treasury fresh for each payment. Holding a single
+		// treasury copy across the whole loop and writing it back LAST
+		// corrupted any payment whose receiver IS the treasury (the Hive
+		// "return proposal", receiver = steem.dao / hive.fund, paid every
+		// maintenance tick when it out-ranks other proposals): the stale
+		// treasury copy clobbered the receiver-side credit on PutAccount,
+		// and the freshly-loaded receiver re-accrued HBD interest a SECOND
+		// time (its hbd_seconds_last_update was still pre-tick because the
+		// treasury debit had not been persisted yet) — leaking that interest
+		// into current_hbd_supply every tick. That was the +67,191 HBD
+		// conservation break growing hourly from HF21 (block 35,921,786) on.
+		// hived mutates a single live db object, so treasury→treasury nets
+		// to zero with interest paid exactly once.
+		treasury, terr := objects.GetAccount(s, treasuryName)
+		if terr != nil || treasury.HBDBalance <= 0 {
 			break
 		}
 		// Per-proposal payment formula differs pre/post HF25
@@ -233,18 +250,21 @@ func processProposals(s *state.Session, blockTime uint32, blockNum uint32) {
 		if periodPay <= 0 {
 			continue
 		}
+		// Debit the treasury and persist it BEFORE loading the receiver, so
+		// that a receiver which == treasury observes the debited balance and
+		// the post-tick hbd_seconds_last_update — the net effect is zero and
+		// interest is paid exactly once (matching hived's single-object
+		// semantics).
+		objects.AdjustHBDBalance(s, &treasury, blockTime, -periodPay)
+		objects.PutAccount(s, &treasury)
 		recv, err := objects.GetAccount(s, p.Receiver)
 		if err != nil {
 			continue
 		}
-		// Treasury → receiver: HBD transfer. Use AdjustHBDBalance so
-		// interest accrual happens correctly on both sides.
-		objects.AdjustHBDBalance(s, &treasury, blockTime, -periodPay)
 		objects.AdjustHBDBalance(s, &recv, blockTime, periodPay)
 		objects.PutAccount(s, &recv)
 		budget -= periodPay
 	}
-	objects.PutAccount(s, &treasury)
 	// Bump LastBudgetTime so the next tick's passed_time is correct.
 	// Mirrors dhf_processor::update_settings (dhf_processor.cpp:214-222).
 	objects.MutateDGPO(s, func(d *objects.DynamicGlobalProperty) {
