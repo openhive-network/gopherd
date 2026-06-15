@@ -99,6 +99,7 @@ func (d *Delegate) dispatchUncompressedFromCompressed(p *node.Peer, raw []byte) 
 		// otherwise the in-flight budget leaks one slot per duplicate and
 		// catch-up stalls once MaxOutstandingTotal is reached.
 		d.releaseOutstanding(p, id)
+		d.removeInflight(id)
 		return
 	}
 	d.handleBlockBytes(p, raw, id)

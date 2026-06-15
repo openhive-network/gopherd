@@ -616,8 +616,8 @@ func (a *app) run() error {
 				return
 			case <-t.C:
 				s := syncDel.Stats()
-				a.logger.printf("STATS peers=%d qdepth=%d/%d inhibit=%v outstanding=%d distinct=%d throttled=%d qfull=%d reorderDrop=%d comp(rx=%d zstd=%d hit=%d err=%d)",
-					s.PeerCount, s.QueueDepth, s.QueueCapacity, s.FetchInhibited, s.OutstandingTotal, s.DistinctOutstanding,
+				a.logger.printf("STATS peers=%d qdepth=%d/%d inhibit=%v outstanding=%d distinct=%d inflight=%d throttled=%d qfull=%d reorderDrop=%d comp(rx=%d zstd=%d hit=%d err=%d)",
+					s.PeerCount, s.QueueDepth, s.QueueCapacity, s.FetchInhibited, s.OutstandingTotal, s.DistinctOutstanding, s.GlobalInflight,
 					s.OutstandingThrottled, s.DroppedQueueFull, s.DroppedReorder,
 					s.CompressedReceived, s.CompressedDecompressed, s.CompressedCacheHits, s.CompressedDecodeErrors)
 			}

@@ -42,6 +42,9 @@ func (d *Delegate) OnPeerDisconnected(p *node.Peer, _ error) {
 			d.outstandingTotal.Add(int32(-n))
 		}
 	}
+	// Free every global reservation this peer held so the blocks it owed
+	// become immediately re-requestable from other peers.
+	d.removeInflightPeer(p)
 }
 
 // OnMessage routes inbound business messages to per-type handlers. We
@@ -121,6 +124,7 @@ func (d *Delegate) handleInv(p *node.Peer, body []byte) {
 	// Bin into "blocks I don't have" vs "txs I don't have".
 	missing := make([]proto.ItemHash, 0, len(msg.ItemHashesAvailable))
 	throttled := false
+	nowNs := time.Now().UnixNano()
 	st.mu.Lock()
 	for _, h := range msg.ItemHashesAvailable {
 		bid := block.ID(h)
@@ -158,6 +162,11 @@ func (d *Delegate) handleInv(p *node.Peer, body []byte) {
 			}
 			if d.outstandingTotal.Load() >= int32(d.cfg.MaxOutstandingTotal) {
 				throttled = true
+				continue
+			}
+			// Global in-flight dedup (see handleBlockchainItemIDsInventory).
+			if !d.tryReserveInflight(bid, p, nowNs) {
+				st.known[bid] = struct{}{}
 				continue
 			}
 			st.outstanding[bid] = struct{}{}
@@ -281,6 +290,7 @@ func (d *Delegate) handleBlockchainItemIDsInventory(p *node.Peer, body []byte) {
 	}
 	missing := make([]proto.ItemHash, 0, len(msg.ItemHashesAvailable))
 	throttled := false
+	nowNs := time.Now().UnixNano()
 	st.mu.Lock()
 	for _, h := range msg.ItemHashesAvailable {
 		bid := block.ID(h)
@@ -309,6 +319,14 @@ func (d *Delegate) handleBlockchainItemIDsInventory(p *node.Peer, body []byte) {
 		if d.outstandingTotal.Load() >= int32(d.cfg.MaxOutstandingTotal) {
 			throttled = true
 			break
+		}
+		// Global in-flight dedup: skip blocks another peer is already
+		// (freshly) fetching. The catch-up kicker re-asks every peer for
+		// the same forward range each second, so without this we'd pull
+		// each block from ~every peer at once. tryReserveInflight still
+		// lets a second peer race a block whose holder has gone stale.
+		if !d.tryReserveInflight(bid, p, nowNs) {
+			continue
 		}
 		st.outstanding[bid] = struct{}{}
 		d.outstandingTotal.Add(1)
@@ -437,8 +455,8 @@ func (d *Delegate) handleItemNotAvailable(p *node.Peer, body []byte) {
 	if err := msg.Unmarshal(body); err != nil {
 		return
 	}
+	bid := block.ID(msg.RequestedItem.ItemHash)
 	if st := d.peerStateFor(p); st != nil {
-		bid := block.ID(msg.RequestedItem.ItemHash)
 		st.mu.Lock()
 		_, was := st.outstanding[bid]
 		delete(st.outstanding, bid)
@@ -447,6 +465,9 @@ func (d *Delegate) handleItemNotAvailable(p *node.Peer, body []byte) {
 			d.outstandingTotal.Add(-1)
 		}
 	}
+	// The holder told us it doesn't have this block; free the global
+	// reservation so another peer can be asked.
+	d.removeInflight(bid)
 }
 
 // handleBlock queues an inbound block onto the apply pipeline.
@@ -490,6 +511,10 @@ func (d *Delegate) handleBlockBytes(p *node.Peer, signedBlockBytes []byte, bid b
 		// contend with broadcastInv's known-map iteration.
 		st.recordBlock()
 	}
+	// Release the global in-flight reservation — the block has arrived
+	// (from this peer or, on a stale re-request, whichever peer we
+	// reassigned it to). Idempotent if already cleared by a racing copy.
+	d.removeInflight(bid)
 
 	// Skip duplicate-arrival recovery + apply work entirely. With the
 	// catch-up kicker firing fetch_blockchain_item_ids to all peers
@@ -659,6 +684,10 @@ func (d *Delegate) sendFetchItems(p *node.Peer, itemType uint32, hashes []proto.
 				}
 				// Also un-mark known so the next INV re-triggers a fetch.
 				delete(st.known, block.ID(h))
+				// Drop the global reservation too — we're abandoning this
+				// fetch under back-pressure, so a later round must be free
+				// to re-request it (from any peer).
+				d.removeInflight(block.ID(h))
 			}
 			st.mu.Unlock()
 			if released > 0 {
