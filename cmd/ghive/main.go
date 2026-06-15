@@ -36,6 +36,8 @@ func main() {
 		replay       bool
 		cacheMB      int
 		loadSnapshot string
+		residentCap  int
+		evictBudget  int
 	)
 	flag.BoolVar(&showVersion, "version", false, "print version and exit")
 	flag.BoolVar(&showNetwork, "network", false, "print compiled-in network constants and exit")
@@ -44,6 +46,8 @@ func main() {
 	flag.BoolVar(&replay, "replay-blockchain", false, "replay the block_log into a fresh state dir before starting")
 	flag.IntVar(&cacheMB, "cache-mb", 1024, "pebble block-cache size in MB (default 1024; was 256 hard-coded)")
 	flag.StringVar(&loadSnapshot, "load-snapshot", "", "load a state snapshot (single-file or directory) on startup before genesis/sync")
+	flag.IntVar(&residentCap, "comment-resident-cap", 4_000_000, "cap RAM-resident comments; frozen comments + their votes spill to an on-disk cold tier (the Go equivalent of hived's mmap'd chainbase paging). 0 disables (unbounded RAM).")
+	flag.IntVar(&evictBudget, "evict-budget", 20000, "max comments evicted to the cold tier per block when over the resident cap")
 	flag.Parse()
 
 	if showVersion {
@@ -175,6 +179,37 @@ func main() {
 	// re-serve fetch_items requests without going to disk.
 	cdb.EnableRecentBlockCache(chain.RecentBlockCacheSize)
 
+	// Cold tier: spill frozen comments + their votes to an on-disk scratch
+	// store so the RAM working set stays bounded. This is the Go port's
+	// equivalent of hived's chainbase, whose state lives in a memory-mapped
+	// file the OS pages in/out — without it the in-heap typed stores grow
+	// without bound (tens of millions of comments+votes by mid-chain). The
+	// cold dir lives under the data-dir, so --replay-blockchain wipes and
+	// rebuilds it along with the rest of derived state.
+	var (
+		commentStore *objects.CommentStore
+		voteStore    *objects.CommentVoteStore
+	)
+	if residentCap > 0 {
+		coldDir := filepath.Join(cfg.DataDir, "comment_cold")
+		cold, cerr := objects.OpenColdKV(coldDir)
+		if cerr != nil {
+			fmt.Fprintf(os.Stderr, "ghive: open cold tier: %v\n", cerr)
+			os.Exit(1)
+		}
+		defer cold.Close()
+		boot := state.NewSession(stateDB)
+		commentStore = objects.EnsureCommentStore(boot)
+		voteStore = objects.EnsureCommentVoteStore(boot)
+		commentStore.SetColdTier(cold)
+		commentStore.SetResidentCap(residentCap)
+		voteStore.SetColdTier(cold)
+		fmt.Printf("ghive: cold tier ON — resident cap %d comments, evict budget %d/block, dir %s\n",
+			residentCap, evictBudget, cold.Dir())
+	} else {
+		fmt.Println("ghive: cold tier OFF (--comment-resident-cap=0) — RAM-resident state is unbounded")
+	}
+
 	// Local block_log writer. Blocks applied from p2p (and locally
 	// produced blocks) are appended here so a later --replay-blockchain can
 	// rebuild state from disk — the same on-disk role as hived's block_log.
@@ -211,6 +246,12 @@ func main() {
 		}
 		if syncDel != nil {
 			syncDel.NotifyHeadAdvanced()
+		}
+		// Post-commit safe point (still under the apply lock): spill frozen
+		// comments + votes to the cold tier when over the resident cap.
+		// No-op when the cold tier is off or we're under the cap.
+		if commentStore != nil {
+			commentStore.EvictFrozen(voteStore, evictBudget)
 		}
 	})
 
