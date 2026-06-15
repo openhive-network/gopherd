@@ -794,6 +794,11 @@ func (voteEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	if v.Weight < 0 {
 		rshares = -rshares
 	}
+	if envGhivediff != "" && envGhivediff == string(v.Voter) {
+		ghiveDiff("GHIVEDIFF VOTERMANA block=%d voter=%s author=%s permlink=%s current_mana=%d max_mana=%d last_update=%d vests=%d recv=%d deleg=%d rshares=%d weight=%d\n",
+			ctx.BlockNum, v.Voter, v.Author, v.Permlink, currentPower, voter.EffectiveVestingSharesExclWithdraw(), voter.VotingManaLastUpdate,
+			voter.VestingShares, voter.ReceivedVestingShares, voter.DelegatedVestingShares, rshares, v.Weight)
+	}
 	// Upvote lockout (HF7+): can't INCREASE rshares within the lockout
 	// window before payout. HF17+ uses 12h, HF7-HF17 uses 1 minute.
 	// C++ hive_evaluator_social.cpp:396-397 uses calculate_discussion_payout_time

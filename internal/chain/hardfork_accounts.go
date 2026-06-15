@@ -2,6 +2,7 @@ package chain
 
 import (
 	"errors"
+	"math/bits"
 
 	"hived-go/internal/protocol/asset"
 	"hived-go/internal/protocol/auth"
@@ -130,11 +131,35 @@ func clearAccount(s *state.Session, name string) error {
 		})
 		return true, nil
 	})
+	dvPoolPct := dgpo.DownvotePoolPercent
+	clearBlockNum := dgpo.HeadBlockNumber
 	for _, dp := range delegations {
 		if da, derr := objects.GetAccount(s, string(dp.delegatee)); derr == nil {
+			// Mirror hived clear_account (database.cpp:1523-1534): regenerate
+			// the delegatee's manabars (with the cap STILL including this
+			// delegation), drop the received vesting, then CONSUME mana equal
+			// to the removed delegation from BOTH bars (use_mana, clamped at
+			// 0 — hived's default min_mana). Go previously only reduced
+			// ReceivedVestingShares, leaving the delegatee's voting mana too
+			// high: a delegatee of a cleared account kept ~delegation-worth of
+			// extra mana, inflating the rshares of EVERY later vote it cast.
+			// That drifted comment net_rshares post-HF23 (advocatus's votes
+			// ran ~0.6% hot → rollie1212/0ppkt12xw1g net_rshares +15,504,515
+			// → viktory88's curation share 1 sat-HIVE low → claim_reward
+			// short 1,958,106 VESTS at 41,905,867).
+			objects.UpdateVotingManabar(&da, blockTime, dvPoolPct, 0, clearBlockNum)
 			da.ReceivedVestingShares -= dp.vests
 			if da.ReceivedVestingShares < 0 {
 				da.ReceivedVestingShares = 0
+			}
+			da.VotingManaCurrent = objects.UseMana(da.VotingManaCurrent, dp.vests, 0)
+			if dvPoolPct > 0 {
+				// downvote cost = delegation × downvote_pool_percent / 100%,
+				// computed in 128-bit like hived (uint128_t × pct) to avoid
+				// int64 overflow for whale delegations.
+				dvHi, dvLo := bits.Mul64(uint64(dp.vests), uint64(dvPoolPct))
+				dvCost, _ := bits.Div64(dvHi, dvLo, 10000)
+				da.DownvoteManaCurrent = objects.UseMana(da.DownvoteManaCurrent, int64(dvCost), 0)
 			}
 			objects.PutAccount(s, &da)
 		}

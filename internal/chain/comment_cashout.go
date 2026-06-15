@@ -1155,12 +1155,8 @@ func distributeCuratorPool(s *state.Session, author, permlink string, pool int64
 	hf := hardfork.SetForBlock(headBlockNum)
 	toReward := hf.Has(hardfork.HF17)
 	for _, p := range *pays {
-		if traceAccount(p.Voter) || traceAccount(author) ||
-			(envCuratorsFrom > 0 && headBlockNum >= envCuratorsFrom) {
-			ghiveDiff("GHIVEDIFF CASHOUT-CURATOR block=%d author=%s permlink=%s voter=%s weight=%d total_weight=%d pool=%d claim=%d\n",
-				headBlockNum, author, permlink, p.Voter, p.Weight, c.TotalVoteWeight, pool, p.Share)
-		}
-		if _, err := CreateVesting_via_chain(s, p.Voter, p.Share, toReward); err != nil {
+		curVests, err := CreateVesting_via_chain(s, p.Voter, p.Share, toReward)
+		if err != nil {
 			// Skip `paid += p.Share` on failure — the curator pool stays
 			// accounted for the actual paid amount so the residual flows
 			// back correctly to the author (matches C++ which would have
@@ -1168,6 +1164,11 @@ func distributeCuratorPool(s *state.Session, author, permlink string, pool int64
 			ghiveDiff("GHIVEDIFF CREATE-VESTING-FAIL site=comment_cashout.curator block=%d author=%s permlink=%s voter=%s amount=%d err=%v\n",
 				headBlockNum, author, permlink, p.Voter, p.Share, err)
 			continue
+		}
+		if traceAccount(p.Voter) || traceAccount(author) ||
+			(envCuratorsFrom > 0 && headBlockNum >= envCuratorsFrom) {
+			ghiveDiff("GHIVEDIFF CASHOUT-CURATOR block=%d author=%s permlink=%s voter=%s weight=%d total_weight=%d pool=%d claim_hive=%d vests=%d\n",
+				headBlockNum, author, permlink, p.Voter, p.Weight, c.TotalVoteWeight, pool, p.Share, curVests)
 		}
 		paid += p.Share
 	}
