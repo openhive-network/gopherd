@@ -331,10 +331,43 @@ func (d *Delegate) applyLoop() {
 		}
 	}
 
+	diag := time.NewTicker(10 * time.Second)
+	defer diag.Stop()
+
 	for {
 		select {
 		case <-d.stopCh:
 			return
+		case <-diag.C:
+			// Stall diagnostics: if we're sitting on a non-empty reorder
+			// buffer but the immediate next block isn't in it, log what
+			// we're waiting for and the buffered range so a catch-up that
+			// gets wedged on one missing block is visible.
+			if len(pending) > 0 {
+				head := d.headBlockHint.Load()
+				if head == 0 {
+					h, _ := d.chain.HeadBlock()
+					head = h
+				}
+				var mn, mx uint32
+				first := true
+				for n := range pending {
+					if first || n < mn {
+						mn = n
+					}
+					if first || n > mx {
+						mx = n
+					}
+					first = false
+				}
+				_, haveNext := pending[head+1]
+				diag := ""
+				if !haveNext {
+					diag = " " + d.diagnoseAwaited(head+1)
+				}
+				d.logf("STALLCHK head=%d awaiting=%d haveNext=%v pending=%d range=[%d..%d]%s",
+					head, head+1, haveNext, len(pending), mn, mx, diag)
+			}
 		case job := <-d.applyQ:
 			d.onDequeue()
 			head := d.headBlockHint.Load()

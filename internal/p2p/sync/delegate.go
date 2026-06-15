@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -375,6 +376,11 @@ type Delegate struct {
 	inflightMu sync.Mutex
 	inflight   map[block.ID]inflightEntry
 
+	// traceLo/traceHi define an optional block-number window for verbose
+	// per-block ingestion tracing (GHIVE_TRACE_LO/HI). Zero = disabled.
+	traceLo uint32
+	traceHi uint32
+
 	// signerCache dedupes RecoverBlockSigner across peer-receive
 	// goroutines. During catch-up the same block frequently arrives
 	// from multiple peers; without the cache, every duplicate triggers
@@ -565,6 +571,51 @@ func (d *Delegate) removeInflight(bid block.ID) {
 	d.inflightMu.Unlock()
 }
 
+// inTrace reports whether n is inside the configured trace window.
+func (d *Delegate) inTrace(n uint32) bool {
+	return d.traceHi != 0 && n >= d.traceLo && n <= d.traceHi
+}
+
+// diagnoseAwaited scans every tracking structure for block numbers in
+// [n, n+3] and reports where (if anywhere) the awaited block is held.
+// Stall diagnostics only — O(peers*outstanding + inflight + compRing).
+func (d *Delegate) diagnoseAwaited(n uint32) string {
+	hi := n + 3
+	// Global inflight.
+	d.inflightMu.Lock()
+	var infl []string
+	nowNs := time.Now().UnixNano()
+	for bid, e := range d.inflight {
+		if bn := bid.Num(); bn >= n && bn <= hi {
+			infl = append(infl, fmt.Sprintf("%d(age=%dms)", bn, (nowNs-e.sinceNs)/1e6))
+		}
+	}
+	d.inflightMu.Unlock()
+	// Compressed dedup ring.
+	d.recentCompMu.Lock()
+	var comp []uint32
+	for bid := range d.recentCompSeen {
+		if bn := bid.Num(); bn >= n && bn <= hi {
+			comp = append(comp, bn)
+		}
+	}
+	d.recentCompMu.Unlock()
+	// Per-peer outstanding.
+	d.mu.Lock()
+	out := 0
+	for _, st := range d.peers {
+		st.mu.Lock()
+		for bid := range st.outstanding {
+			if bn := bid.Num(); bn >= n && bn <= hi {
+				out++
+			}
+		}
+		st.mu.Unlock()
+	}
+	d.mu.Unlock()
+	return fmt.Sprintf("inflight=%v compRing=%v outstandingPeers=%d", infl, comp, out)
+}
+
 // removeInflightPeer drops every reservation held by p (peer disconnected),
 // so the blocks it owed become immediately re-requestable from others.
 func (d *Delegate) removeInflightPeer(p *node.Peer) {
@@ -639,6 +690,16 @@ func newWithChain(cfg Config, c Chain) *Delegate {
 		recentCompFIFO:  make([]block.ID, 0, recentCompressedCap),
 		txSigCache:      newTxSigCache(),
 		inflight:        make(map[block.ID]inflightEntry, 8192),
+	}
+	if lo := os.Getenv("GHIVE_TRACE_LO"); lo != "" {
+		if v, err := strconv.ParseUint(lo, 10, 32); err == nil {
+			d.traceLo = uint32(v)
+		}
+	}
+	if hi := os.Getenv("GHIVE_TRACE_HI"); hi != "" {
+		if v, err := strconv.ParseUint(hi, 10, 32); err == nil {
+			d.traceHi = uint32(v)
+		}
 	}
 	return d
 }
