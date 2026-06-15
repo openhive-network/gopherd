@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"hived-go/internal/blocklog"
 	"hived-go/internal/chain"
 	"hived-go/internal/config"
 	"hived-go/internal/crypto"
@@ -81,6 +82,18 @@ func main() {
 	if cfg.DataDir == "" {
 		fmt.Fprintln(os.Stderr, "ghive: --data-dir or 'data-dir = ...' in config.ini is required")
 		os.Exit(2)
+	}
+
+	// --replay-blockchain rebuilds state deterministically from the local
+	// block_log. The typed stores (Account/Witness/Comment/...) are
+	// in-memory only, so a fresh replay must start from a clean pebble dir;
+	// wipe the K/V files (preserving blockchain/ + peerdb) before reopening.
+	// Mirrors hived, which rebuilds its state index from the block_log.
+	if replay {
+		if err := wipePebbleFiles(cfg.DataDir); err != nil {
+			fmt.Fprintf(os.Stderr, "ghive: wipe state for replay: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	cacheBytes := int64(cacheMB) << 20
@@ -162,6 +175,55 @@ func main() {
 	// re-serve fetch_items requests without going to disk.
 	cdb.EnableRecentBlockCache(chain.RecentBlockCacheSize)
 
+	// Local block_log writer. Blocks applied from p2p (and locally
+	// produced blocks) are appended here so a later --replay-blockchain can
+	// rebuild state from disk — the same on-disk role as hived's block_log.
+	// The append is guarded to the strictly-next block so the replay below
+	// (which reads FROM this log) never double-writes.
+	blockchainDir := filepath.Join(cfg.DataDir, "blockchain")
+	if err := os.MkdirAll(blockchainDir, 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "ghive: mkdir blockchain: %v\n", err)
+		os.Exit(1)
+	}
+	blockLogPath := filepath.Join(blockchainDir, "block_log")
+	writer, err := blocklog.OpenForWrite(blockLogPath, false)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ghive: open block_log writer: %v\n", err)
+		os.Exit(1)
+	}
+	defer writer.Close()
+
+	// syncDel is wired below once p2p starts; this apply hook references it
+	// (nil during the replay phase, which is fine). The hook (1) persists
+	// each freshly-applied block to the local block_log and (2) wakes the
+	// sync INV broadcaster so a locally-produced block propagates promptly.
+	var syncDel *p2psync.Delegate
+	cdb.SetOnBlockApplied(func(blockNum uint32, _ block.ID) {
+		// Persist to the local block_log. Guard to the strictly-next block
+		// so replayed/duplicate applies (at or below the writer head) don't
+		// double-append; only genuinely new blocks extend the log.
+		if blockNum == writer.HeadBlock()+1 {
+			if raw := cdb.RecentBlockBytes(blockNum); raw != nil {
+				if err := writer.Append(raw); err != nil {
+					fmt.Fprintf(os.Stderr, "ghive: block_log append %d: %v\n", blockNum, err)
+				}
+			}
+		}
+		if syncDel != nil {
+			syncDel.NotifyHeadAdvanced()
+		}
+	})
+
+	// --replay-blockchain: rebuild state from the local block_log before
+	// going live. Afterwards the p2p layer picks up from the replayed head
+	// and syncs the remainder from peers (replay → p2p handoff, like hived).
+	if replay {
+		if err := replayBlockLog(cdb, blockLogPath); err != nil {
+			fmt.Fprintf(os.Stderr, "ghive: replay: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
 	// Load witness producers from config. Each (witness, private-key)
 	// pair becomes a Producer entry. Without producers the daemon is
 	// observer-only.
@@ -214,7 +276,6 @@ func main() {
 	var (
 		p2p     *p2pnode.Node
 		gossipS *gossip.Service
-		syncDel *p2psync.Delegate
 	)
 	if cfg.P2PEndpoint != "" || len(cfg.P2PSeedNodes) > 0 {
 		// Build the Node first (gossip + sync both need a Node handle to
@@ -244,13 +305,10 @@ func main() {
 		syncDel = p2psync.New(p2psync.Config{
 			OnBlockApplied: gossipS.BroadcastAppliedBlock,
 		}, cdb)
-		// Pipe local block-apply events into the sync layer so it wakes
-		// its INV broadcaster the moment a witness produces a block —
-		// otherwise the new block waits up to one INVInterval before
-		// peers learn of it.
-		cdb.SetOnBlockApplied(func(_ uint32, _ block.ID) {
-			syncDel.NotifyHeadAdvanced()
-		})
+		// The block-apply hook installed above (block_log append + INV
+		// wake) now sees this non-nil syncDel and wakes its INV broadcaster
+		// the moment a witness produces a block, so the new block doesn't
+		// wait up to one INVInterval before peers learn of it.
 		p2p.SetDelegate(p2pnode.NewMultiDelegate(syncDel, gossipS))
 		if err := p2p.Start(); err != nil {
 			fmt.Fprintf(os.Stderr, "ghive: p2p start: %v\n", err)
@@ -343,6 +401,84 @@ func main() {
 	<-sigCh
 	close(stopHB)
 	fmt.Println("ghive: shutting down...")
+}
+
+// replayBlockLog applies every block in the local block_log from the
+// current state head forward, rebuilding the in-memory typed stores and
+// pebble K/V. Uses batched commits + skipped signatures (the canonical
+// local bytes already passed validation when first written) for speed,
+// then restores per-block durable commit for live operation. After it
+// returns, the p2p layer catches up from the replayed head to the live
+// tip — the replay → p2p handoff.
+func replayBlockLog(cdb *chain.Database, path string) error {
+	r, err := blocklog.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			fmt.Println("ghive: replay: no local block_log; nothing to replay")
+			return nil
+		}
+		return fmt.Errorf("open block_log: %w", err)
+	}
+	defer r.Close()
+	target := r.Head()
+	head, _ := cdb.HeadBlock()
+	if target <= head {
+		fmt.Printf("ghive: replay: nothing to do (block_log head %d <= state head %d)\n", target, head)
+		return nil
+	}
+	cdb.SetCommitBatch(1000, true)
+	fmt.Printf("ghive: replay: applying blocks %d..%d from %s\n", head+1, target, path)
+	start := time.Now()
+	for n := head + 1; n <= target; n++ {
+		raw, err := r.Block(n)
+		if err != nil {
+			return fmt.Errorf("read block %d: %w", n, err)
+		}
+		if _, err := cdb.ApplyBlock(raw, n, chain.ApplyOptions{
+			SkipBlockSignature:        true,
+			SkipTransactionSignatures: true,
+			Sync:                      false,
+		}, nil); err != nil {
+			return fmt.Errorf("apply block %d: %w", n, err)
+		}
+		if n%100000 == 0 {
+			el := time.Since(start).Seconds()
+			fmt.Printf("ghive: replay: head=%d (%.0f bps)\n", n, float64(n-head)/el)
+		}
+	}
+	if err := cdb.FlushBatch(true); err != nil {
+		return fmt.Errorf("flush: %w", err)
+	}
+	// Restore per-block durable commit for live operation.
+	cdb.SetCommitBatch(1, true)
+	el := time.Since(start).Seconds()
+	fmt.Printf("ghive: replay: done, head=%d in %.1fs (%.0f bps)\n", target, el, float64(target-head)/el)
+	return nil
+}
+
+// wipePebbleFiles removes pebble's state files from dir while preserving
+// the blockchain/ subtree (block_log + index) and the peerdb. Used before
+// a --replay-blockchain rebuild: the typed stores are in-memory only, so a
+// deterministic replay must start from clean K/V. Mirrors the same helper
+// in cmd/ghive-sync.
+func wipePebbleFiles(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	for _, e := range entries {
+		switch e.Name() {
+		case "blockchain", "peerdb":
+			continue // preserve
+		}
+		if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // parsePrivateKey decodes a config.ini `private-key` string in WIF format
