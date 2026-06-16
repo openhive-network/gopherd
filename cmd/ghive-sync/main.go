@@ -604,6 +604,26 @@ func (a *app) run() error {
 	defer syncDel.Stop()
 	defer a.p2p.Stop()
 
+	// Diagnostic: periodically dump the sync delegate's load-shedding
+	// counters so we can see queue depth / outstanding budget / throttle
+	// without attaching a debugger. Cheap (one line / 5s).
+	go func() {
+		t := time.NewTicker(5 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-stopCh:
+				return
+			case <-t.C:
+				s := syncDel.Stats()
+				a.logger.printf("STATS peers=%d qdepth=%d/%d inhibit=%v outstanding=%d distinct=%d inflight=%d throttled=%d qfull=%d reorderDrop=%d comp(rx=%d zstd=%d hit=%d err=%d)",
+					s.PeerCount, s.QueueDepth, s.QueueCapacity, s.FetchInhibited, s.OutstandingTotal, s.DistinctOutstanding, s.GlobalInflight,
+					s.OutstandingThrottled, s.DroppedQueueFull, s.DroppedReorder,
+					s.CompressedReceived, s.CompressedDecompressed, s.CompressedCacheHits, s.CompressedDecodeErrors)
+			}
+		}
+	}()
+
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	select {

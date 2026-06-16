@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -362,6 +363,24 @@ type Delegate struct {
 	// item_not_available, or evict it on queue-full.
 	outstandingTotal atomic.Int32
 
+	// inflight is the GLOBAL set of block IDs currently requested from
+	// some peer, keyed by block ID. Without it, the catch-up kicker
+	// (which re-asks every peer "what's after my head?" once a second)
+	// makes us request the same next ~2000 blocks from every peer in
+	// parallel — measured ~4x redundant downloads, all of which must be
+	// decompressed and then discarded. The global set lets us fetch each
+	// block from ONE peer; a stale entry (holder slow for > reRequestStale)
+	// is reassigned so a single slow/silent peer can't head-of-line block
+	// the in-order applyLoop. Guarded by inflightMu, which is always
+	// acquired LAST (after d.mu / st.mu) to keep a strict lock order.
+	inflightMu sync.Mutex
+	inflight   map[block.ID]inflightEntry
+
+	// traceLo/traceHi define an optional block-number window for verbose
+	// per-block ingestion tracing (GHIVE_TRACE_LO/HI). Zero = disabled.
+	traceLo uint32
+	traceHi uint32
+
 	// signerCache dedupes RecoverBlockSigner across peer-receive
 	// goroutines. During catch-up the same block frequently arrives
 	// from multiple peers; without the cache, every duplicate triggers
@@ -507,6 +526,108 @@ func (st *peerState) adaptiveBatchSize(baseline int) int {
 // Exported for observability + tests.
 func (st *peerState) LastRate() uint32 { return st.lastRate.Load() }
 
+// reRequestStale is how long a block may sit requested-but-undelivered
+// from one peer before another peer is allowed to fetch it too. Short
+// enough that a slow/silent peer can't stall the in-order applyLoop for
+// long (the next block must arrive before head can advance); long enough
+// that the common sub-second delivery never triggers a redundant re-ask.
+const reRequestStale = 2 * time.Second
+
+// inflightEntry records which peer we're currently fetching a block from
+// and when the request was (re)issued, for the staleness check.
+type inflightEntry struct {
+	peer    *node.Peer
+	sinceNs int64
+}
+
+// tryReserveInflight attempts to claim bid for peer p. Returns true if p
+// should fetch it — either bid was unclaimed, or the current holder has
+// been slow for longer than reRequestStale (so we let a second peer race
+// it). Returns false when another peer holds a fresh reservation, so the
+// caller skips the redundant fetch. nowNs is passed in so a single round
+// shares one clock read. Acquired under no other lock that would violate
+// the d.mu > st.mu > inflightMu order.
+func (d *Delegate) tryReserveInflight(bid block.ID, p *node.Peer, nowNs int64) bool {
+	d.inflightMu.Lock()
+	defer d.inflightMu.Unlock()
+	e, ok := d.inflight[bid]
+	if !ok {
+		d.inflight[bid] = inflightEntry{peer: p, sinceNs: nowNs}
+		return true
+	}
+	if e.peer != p && nowNs-e.sinceNs >= int64(reRequestStale) {
+		d.inflight[bid] = inflightEntry{peer: p, sinceNs: nowNs}
+		return true
+	}
+	return false
+}
+
+// removeInflight clears bid's global reservation. Idempotent. Called when
+// the block arrives (from anyone), is reported unavailable, is dropped on
+// queue-full, or the fetch is abandoned under back-pressure.
+func (d *Delegate) removeInflight(bid block.ID) {
+	d.inflightMu.Lock()
+	delete(d.inflight, bid)
+	d.inflightMu.Unlock()
+}
+
+// inTrace reports whether n is inside the configured trace window.
+func (d *Delegate) inTrace(n uint32) bool {
+	return d.traceHi != 0 && n >= d.traceLo && n <= d.traceHi
+}
+
+// diagnoseAwaited scans every tracking structure for block numbers in
+// [n, n+3] and reports where (if anywhere) the awaited block is held.
+// Stall diagnostics only — O(peers*outstanding + inflight + compRing).
+func (d *Delegate) diagnoseAwaited(n uint32) string {
+	hi := n + 3
+	// Global inflight.
+	d.inflightMu.Lock()
+	var infl []string
+	nowNs := time.Now().UnixNano()
+	for bid, e := range d.inflight {
+		if bn := bid.Num(); bn >= n && bn <= hi {
+			infl = append(infl, fmt.Sprintf("%d(age=%dms)", bn, (nowNs-e.sinceNs)/1e6))
+		}
+	}
+	d.inflightMu.Unlock()
+	// Compressed dedup ring.
+	d.recentCompMu.Lock()
+	var comp []uint32
+	for bid := range d.recentCompSeen {
+		if bn := bid.Num(); bn >= n && bn <= hi {
+			comp = append(comp, bn)
+		}
+	}
+	d.recentCompMu.Unlock()
+	// Per-peer outstanding.
+	d.mu.Lock()
+	out := 0
+	for _, st := range d.peers {
+		st.mu.Lock()
+		for bid := range st.outstanding {
+			if bn := bid.Num(); bn >= n && bn <= hi {
+				out++
+			}
+		}
+		st.mu.Unlock()
+	}
+	d.mu.Unlock()
+	return fmt.Sprintf("inflight=%v compRing=%v outstandingPeers=%d", infl, comp, out)
+}
+
+// removeInflightPeer drops every reservation held by p (peer disconnected),
+// so the blocks it owed become immediately re-requestable from others.
+func (d *Delegate) removeInflightPeer(p *node.Peer) {
+	d.inflightMu.Lock()
+	for bid, e := range d.inflight {
+		if e.peer == p {
+			delete(d.inflight, bid)
+		}
+	}
+	d.inflightMu.Unlock()
+}
+
 // applyJob is one inbound block waiting for the applier goroutine.
 type applyJob struct {
 	blockNum uint32
@@ -568,6 +689,17 @@ func newWithChain(cfg Config, c Chain) *Delegate {
 		recentCompSeen:  make(map[block.ID]struct{}, recentCompressedCap),
 		recentCompFIFO:  make([]block.ID, 0, recentCompressedCap),
 		txSigCache:      newTxSigCache(),
+		inflight:        make(map[block.ID]inflightEntry, 8192),
+	}
+	if lo := os.Getenv("GHIVE_TRACE_LO"); lo != "" {
+		if v, err := strconv.ParseUint(lo, 10, 32); err == nil {
+			d.traceLo = uint32(v)
+		}
+	}
+	if hi := os.Getenv("GHIVE_TRACE_HI"); hi != "" {
+		if v, err := strconv.ParseUint(hi, 10, 32); err == nil {
+			d.traceHi = uint32(v)
+		}
 	}
 	return d
 }
@@ -586,10 +718,11 @@ const recentCompressedCap = 8192
 // single-consumer block applier, and the catch-up kicker.
 // Idempotent.
 func (d *Delegate) Start() {
-	d.wg.Add(3)
+	d.wg.Add(4)
 	go d.invLoop()
 	go d.applyLoop()
 	go d.catchupKickerLoop()
+	go d.pruneLoop()
 }
 
 // Stop signals the background goroutines and waits for them to exit.
@@ -654,33 +787,6 @@ func (d *Delegate) onDequeue() {
 // back-pressured. Exported for tests + observability.
 func (d *Delegate) FetchInhibited() bool { return d.inhibitFetching.Load() }
 
-// isFarBehind reports whether we are >catchupGap blocks behind the
-// highest peer head we've observed. Used by broadcastInv to throttle
-// the per-round inventory size: during catch-up peers already have
-// everything we have, so a single-block INV is sufficient as a
-// keepalive, and the per-peer known-map iteration over ~200 IDs was
-// burning measurable CPU.
-func (d *Delegate) isFarBehind() bool {
-	const catchupGap = 100
-	// Atomic-hint head — isFarBehind is called from the INV loop and
-	// taking applyMu.RLock per tick contends with the apply writer.
-	myHead := d.headBlockHint.Load()
-	if myHead == 0 {
-		myHead, _ = d.chain.HeadBlock()
-	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	for _, st := range d.peers {
-		st.mu.Lock()
-		ph := st.peerHeadNum
-		st.mu.Unlock()
-		if ph > myHead+catchupGap {
-			return true
-		}
-	}
-	return false
-}
-
 // QueueDepth returns the current applyQ depth (atomic, lock-free).
 func (d *Delegate) QueueDepth() int { return int(d.applyQLen.Load()) }
 
@@ -709,9 +815,37 @@ type Stats struct {
 	// CompressedDecodeErrors counts decode failures (bad flags, dict not
 	// embedded, zstd error, header parse). Useful as a sanity gauge.
 	CompressedDecodeErrors uint64
+	// PeerCount is the number of connected peers with per-peer state.
+	PeerCount int
+	// DistinctOutstanding is the number of UNIQUE block IDs currently in
+	// flight (a block requested from N peers via the walk-forward fan-out
+	// counts N times in OutstandingTotal but once here). The ratio
+	// OutstandingTotal/DistinctOutstanding reveals fetch redundancy.
+	DistinctOutstanding int
+	// GlobalInflight is the size of the global in-flight reservation set.
+	// With dedup working it tracks DistinctOutstanding closely.
+	GlobalInflight int
+}
+
+func (d *Delegate) distinctOutstanding() (distinct, peers int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	seen := make(map[block.ID]struct{}, 1024)
+	for _, st := range d.peers {
+		st.mu.Lock()
+		for bid := range st.outstanding {
+			seen[bid] = struct{}{}
+		}
+		st.mu.Unlock()
+	}
+	return len(seen), len(d.peers)
 }
 
 func (d *Delegate) Stats() Stats {
+	distinct, peers := d.distinctOutstanding()
+	d.inflightMu.Lock()
+	inflight := len(d.inflight)
+	d.inflightMu.Unlock()
 	return Stats{
 		QueueDepth:             d.QueueDepth(),
 		QueueCapacity:          d.QueueCapacity(),
@@ -725,5 +859,8 @@ func (d *Delegate) Stats() Stats {
 		CompressedDecompressed: d.compressedDecompressed.Load(),
 		CompressedCacheHits:    d.compressedCacheHits.Load(),
 		CompressedDecodeErrors: d.compressedDecodeErrors.Load(),
+		PeerCount:              peers,
+		DistinctOutstanding:    distinct,
+		GlobalInflight:         inflight,
 	}
 }

@@ -52,7 +52,7 @@ func TestRoundTripNoDict(t *testing.T) {
 }
 
 func TestBestDictNumberForBlock(t *testing.T) {
-	// Embedded dicts are 0..15; selection is min(blockNum/1M, last_available_dict).
+	// Embedded dicts are 0..104; selection is min(blockNum/1M, last_available_dict).
 	cases := []struct {
 		blockNum uint32
 		want     uint8
@@ -64,7 +64,8 @@ func TestBestDictNumberForBlock(t *testing.T) {
 		{8_999_999, 8},
 		{9_000_000, 9},
 		{15_000_000, 15},
-		{20_000_000, 15}, // capped at last available
+		{20_000_000, 20},
+		{200_000_000, 104}, // capped at last available
 	}
 	for _, c := range cases {
 		got, ok := BestDictNumberForBlock(c.blockNum)

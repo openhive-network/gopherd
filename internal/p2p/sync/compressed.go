@@ -92,6 +92,14 @@ func (d *Delegate) dispatchUncompressedFromCompressed(p *node.Peer, raw []byte) 
 	// free in handleBlockBytes.
 	if d.markCompressedSeen(id) {
 		d.compressedCacheHits.Add(1)
+		// Duplicate compressed delivery (the walk-forward fanned the
+		// fetch out to every peer, so the same block arrives from several
+		// of them). We short-circuit before handleBlockBytes here, so we
+		// must release this peer's outstanding-fetch slot ourselves —
+		// otherwise the in-flight budget leaks one slot per duplicate and
+		// catch-up stalls once MaxOutstandingTotal is reached.
+		d.releaseOutstanding(p, id)
+		d.removeInflight(id)
 		return
 	}
 	d.handleBlockBytes(p, raw, id)

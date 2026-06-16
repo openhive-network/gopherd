@@ -42,6 +42,9 @@ func (d *Delegate) OnPeerDisconnected(p *node.Peer, _ error) {
 			d.outstandingTotal.Add(int32(-n))
 		}
 	}
+	// Free every global reservation this peer held so the blocks it owed
+	// become immediately re-requestable from other peers.
+	d.removeInflightPeer(p)
 }
 
 // OnMessage routes inbound business messages to per-type handlers. We
@@ -121,6 +124,7 @@ func (d *Delegate) handleInv(p *node.Peer, body []byte) {
 	// Bin into "blocks I don't have" vs "txs I don't have".
 	missing := make([]proto.ItemHash, 0, len(msg.ItemHashesAvailable))
 	throttled := false
+	nowNs := time.Now().UnixNano()
 	st.mu.Lock()
 	for _, h := range msg.ItemHashesAvailable {
 		bid := block.ID(h)
@@ -158,6 +162,11 @@ func (d *Delegate) handleInv(p *node.Peer, body []byte) {
 			}
 			if d.outstandingTotal.Load() >= int32(d.cfg.MaxOutstandingTotal) {
 				throttled = true
+				continue
+			}
+			// Global in-flight dedup (see handleBlockchainItemIDsInventory).
+			if !d.tryReserveInflight(bid, p, nowNs) {
+				st.known[bid] = struct{}{}
 				continue
 			}
 			st.outstanding[bid] = struct{}{}
@@ -281,6 +290,7 @@ func (d *Delegate) handleBlockchainItemIDsInventory(p *node.Peer, body []byte) {
 	}
 	missing := make([]proto.ItemHash, 0, len(msg.ItemHashesAvailable))
 	throttled := false
+	nowNs := time.Now().UnixNano()
 	st.mu.Lock()
 	for _, h := range msg.ItemHashesAvailable {
 		bid := block.ID(h)
@@ -309,6 +319,18 @@ func (d *Delegate) handleBlockchainItemIDsInventory(p *node.Peer, body []byte) {
 		if d.outstandingTotal.Load() >= int32(d.cfg.MaxOutstandingTotal) {
 			throttled = true
 			break
+		}
+		// Global in-flight dedup: skip blocks another peer is already
+		// (freshly) fetching. The catch-up kicker re-asks every peer for
+		// the same forward range each second, so without this we'd pull
+		// each block from ~every peer at once. tryReserveInflight still
+		// lets a second peer race a block whose holder has gone stale.
+		reserved := d.tryReserveInflight(bid, p, nowNs)
+		if d.traceHi != 0 && d.inTrace(bid.Num()) {
+			d.logf("TRACE inv-offer num=%d bid=%x reserved=%v from=%s", bid.Num(), bid[:8], reserved, p.Conn().RemoteAddr())
+		}
+		if !reserved {
+			continue
 		}
 		st.outstanding[bid] = struct{}{}
 		d.outstandingTotal.Add(1)
@@ -437,8 +459,11 @@ func (d *Delegate) handleItemNotAvailable(p *node.Peer, body []byte) {
 	if err := msg.Unmarshal(body); err != nil {
 		return
 	}
+	bid := block.ID(msg.RequestedItem.ItemHash)
+	if d.traceHi != 0 && d.inTrace(bid.Num()) {
+		d.logf("TRACE item_not_available num=%d bid=%x from=%s", bid.Num(), bid[:8], p.Conn().RemoteAddr())
+	}
 	if st := d.peerStateFor(p); st != nil {
-		bid := block.ID(msg.RequestedItem.ItemHash)
 		st.mu.Lock()
 		_, was := st.outstanding[bid]
 		delete(st.outstanding, bid)
@@ -447,6 +472,9 @@ func (d *Delegate) handleItemNotAvailable(p *node.Peer, body []byte) {
 			d.outstandingTotal.Add(-1)
 		}
 	}
+	// The holder told us it doesn't have this block; free the global
+	// reservation so another peer can be asked.
+	d.removeInflight(bid)
 }
 
 // handleBlock queues an inbound block onto the apply pipeline.
@@ -457,13 +485,16 @@ func (d *Delegate) handleBlock(p *node.Peer, body []byte) {
 		return
 	}
 	bid := block.ID(msg.BlockID)
-	// If the wire-trailing block_id was zero, derive it from the bytes
-	// — agent-gossip's broadcast path may leave it zero when re-using
-	// the block they just produced.
+	// If the wire-trailing block_id was zero, derive it from the bytes.
+	// This is NOT just a gossip edge case: handleBlockBytes keys the apply
+	// job's block_num off bid.Num(), and the applyLoop drops any job whose
+	// num is <= head — so a zero bid (num 0) is silently discarded, AND the
+	// global in-flight reservation (keyed by the REAL id) is never released,
+	// so the block is re-requested forever and catch-up wedges on it.
 	if bid == (block.ID{}) {
-		// Find the header end by parsing it. The cheaper alternative
-		// is to derive id from bytes; we leave it to the applier so
-		// the queue stays cheap.
+		if derived, ok := blockIDFromRaw(msg.SignedBlockBytes); ok {
+			bid = derived
+		}
 	}
 	d.handleBlockBytes(p, msg.SignedBlockBytes, bid)
 }
@@ -476,6 +507,17 @@ func (d *Delegate) handleBlock(p *node.Peer, body []byte) {
 // handleBlock (BlockMessage path) and handleCompressedBlock
 // (CompressedBlockMessage path).
 func (d *Delegate) handleBlockBytes(p *node.Peer, signedBlockBytes []byte, bid block.ID) {
+	// Trace: derive the authoritative block num from the bytes and compare
+	// to the wire bid we were handed, so a zero/mismatched bid that would
+	// route the block to the wrong apply slot is visible.
+	if d.traceHi != 0 {
+		if tn, ok := blockIDFromRaw(signedBlockBytes); ok {
+			if d.inTrace(tn.Num()) || d.inTrace(bid.Num()) {
+				d.logf("TRACE rx block trueNum=%d bidNum=%d bidZero=%v head=%d",
+					tn.Num(), bid.Num(), bid == (block.ID{}), d.headBlockHint.Load())
+			}
+		}
+	}
 	// Mark known on this peer so we don't ask back for it.
 	if st := d.peerStateFor(p); st != nil {
 		st.mu.Lock()
@@ -490,6 +532,10 @@ func (d *Delegate) handleBlockBytes(p *node.Peer, signedBlockBytes []byte, bid b
 		// contend with broadcastInv's known-map iteration.
 		st.recordBlock()
 	}
+	// Release the global in-flight reservation — the block has arrived
+	// (from this peer or, on a stale re-request, whichever peer we
+	// reassigned it to). Idempotent if already cleared by a racing copy.
+	d.removeInflight(bid)
 
 	// Skip duplicate-arrival recovery + apply work entirely. With the
 	// catch-up kicker firing fetch_blockchain_item_ids to all peers
@@ -578,6 +624,32 @@ func (d *Delegate) handleBlockBytes(p *node.Peer, signedBlockBytes []byte, bid b
 	}
 }
 
+// releaseOutstanding clears bid from peer p's outstanding-fetch set (if
+// present) and refunds the global in-flight budget. Idempotent: a no-op
+// when bid was never outstanding for p. Used by the duplicate-delivery
+// short-circuits that return BEFORE handleBlockBytes' own cleanup runs —
+// without this, a block we requested from N peers (the walk-forward fans
+// each request out to every peer) leaks N-1 outstanding slots, because
+// only the first delivery reaches handleBlockBytes and the rest are
+// dropped by a dedup ring. The leak silently exhausts MaxOutstandingTotal
+// and pins the catch-up in permanent throttle.
+func (d *Delegate) releaseOutstanding(p *node.Peer, bid block.ID) {
+	st := d.peerStateFor(p)
+	if st == nil {
+		return
+	}
+	st.mu.Lock()
+	_, was := st.outstanding[bid]
+	if was {
+		delete(st.outstanding, bid)
+	}
+	st.known[bid] = struct{}{}
+	st.mu.Unlock()
+	if was {
+		d.outstandingTotal.Add(-1)
+	}
+}
+
 // peerStateFor returns the per-peer state, or nil if the peer was
 // dropped between the message arriving and us being scheduled.
 func (d *Delegate) peerStateFor(p *node.Peer) *peerState {
@@ -633,6 +705,10 @@ func (d *Delegate) sendFetchItems(p *node.Peer, itemType uint32, hashes []proto.
 				}
 				// Also un-mark known so the next INV re-triggers a fetch.
 				delete(st.known, block.ID(h))
+				// Drop the global reservation too — we're abandoning this
+				// fetch under back-pressure, so a later round must be free
+				// to re-request it (from any peer).
+				d.removeInflight(block.ID(h))
 			}
 			st.mu.Unlock()
 			if released > 0 {
@@ -640,6 +716,14 @@ func (d *Delegate) sendFetchItems(p *node.Peer, itemType uint32, hashes []proto.
 			}
 		}
 		return
+	}
+	if d.traceHi != 0 {
+		for _, h := range hashes {
+			tb := block.ID(h)
+			if d.inTrace(tb.Num()) {
+				d.logf("TRACE fetch_items send num=%d bid=%x to=%s", tb.Num(), tb[:8], p.Conn().RemoteAddr())
+			}
+		}
 	}
 	msg := proto.FetchItemsMessage{
 		ItemType:     itemType,
