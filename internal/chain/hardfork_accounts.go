@@ -203,6 +203,24 @@ func clearAccount(s *state.Session, name string) error {
 		// the very next schedule rebuild — cascade-divergent producers
 		// thereafter.
 		objects.AdjustProxiedWitnessVotes(s, &account, -account.VestingShares)
+		// Mirror C++ database.cpp:1559 — clear_account calls
+		// util::update_manabar(cprops, a) BEFORE zeroing current_mana.
+		// That regen has one essential side effect: it stamps BOTH
+		// manabars' last_update_time = head_block_time. Go used to set
+		// current_mana = 0 while leaving last_update at its stale
+		// pre-HF23 value, so the cleared account's manabar then
+		// regenerated from that earlier timestamp — over-counting the
+		// pre-HF23→HF23 gap (~1000s) as regen time. For an account that
+		// keeps voting post-HF23 via received delegations (cleared
+		// accounts keep their received_vesting), this inflated voting
+		// mana by ~cap×gap/regen_time (e.g. cnfund: ~48B VESTS), which
+		// flipped its later vote rshares (+965,189,103 on
+		// strawhat/2e6ppq @41,945,011) → reward-fund drift → curator
+		// claim short → claim_reward_balance failures (kimzwarch
+		// @41,984,169 et al.). Regenerate at the still-full cap (vesting
+		// not yet zeroed) so the timestamp lands; the value is discarded
+		// by the current_mana = 0 below.
+		objects.UpdateVotingManabar(&account, blockTime, dvPoolPct, 0, clearBlockNum)
 		hiveValue := vestsToHive(account.VestingShares, &dgpo)
 		dgpo.TotalVestingFundHive -= hiveValue
 		dgpo.TotalVestingShares -= account.VestingShares
