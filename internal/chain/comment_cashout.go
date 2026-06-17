@@ -666,9 +666,13 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 			objects.PutAccount(s, &bAcct)
 		}
 		if vestingSlice > 0 {
-			if _, err := CreateVesting_via_chain(s, b.Account, vestingSlice, toReward); err != nil {
+			benevests, err := CreateVesting_via_chain(s, b.Account, vestingSlice, toReward)
+			if err != nil {
 				ghiveDiff("GHIVEDIFF CREATE-VESTING-FAIL site=comment_cashout.beneficiary block=%d author=%s permlink=%s beneficiary=%s amount=%d err=%v\n",
 					blockNum, c.Author, c.Permlink, b.Account, vestingSlice, err)
+			} else if envGhivediffAll != "" && calcTraceWindow(blockNum) {
+				ghiveDiff("GHIVEDIFF BENE-VEST block=%d author=%s permlink=%s benefactor=%s vesting_slice=%d vests=%d\n",
+					blockNum, c.Author, c.Permlink, b.Account, vestingSlice, benevests)
 			}
 		}
 		if traceAccount(string(b.Account)) {
@@ -699,9 +703,13 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 		}
 	}
 	if vestingHive > 0 {
-		if _, err := CreateVesting_via_chain(s, author, vestingHive, authorToReward); err != nil {
+		avests, err := CreateVesting_via_chain(s, author, vestingHive, authorToReward)
+		if err != nil {
 			ghiveDiff("GHIVEDIFF CREATE-VESTING-FAIL site=comment_cashout.author block=%d author=%s permlink=%s amount=%d err=%v\n",
 				blockNum, author, permlink, vestingHive, err)
+		} else if envGhivediffAll != "" && calcTraceWindow(blockNum) {
+			ghiveDiff("GHIVEDIFF AUTHOR-VEST block=%d author=%s permlink=%s vesting_hive=%d vests=%d\n",
+				blockNum, author, permlink, vestingHive, avests)
 		}
 	}
 	if traceAccount(author) {

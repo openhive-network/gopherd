@@ -976,8 +976,9 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 			if err != nil {
 				continue
 			}
-			fmt.Fprintf(os.Stderr, "GHIVEDIFF ACCT block=%d name=%s hive=%d hbd=%d vests=%d\n",
-				blockNum, name, a.Balance, a.HBDBalance, a.VestingShares)
+			fmt.Fprintf(os.Stderr, "GHIVEDIFF ACCT block=%d name=%s hive=%d hbd=%d vests=%d rvests=%d rvhive=%d deleg=%d recv=%d vmana=%d vmanaupd=%d dvmana=%d effexcl=%d\n",
+				blockNum, name, a.Balance, a.HBDBalance, a.VestingShares, a.RewardVests, a.RewardVestingHive, a.DelegatedVestingShares, a.ReceivedVestingShares,
+				a.VotingManaCurrent, a.VotingManaLastUpdate, a.DownvoteManaCurrent, a.EffectiveVestingSharesExclWithdraw())
 		}
 	}
 	processFunds(session, blockNum, hdr.Witness)

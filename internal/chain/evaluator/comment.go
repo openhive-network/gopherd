@@ -794,8 +794,15 @@ func (voteEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	if v.Weight < 0 {
 		rshares = -rshares
 	}
-	if envGhivediff != "" && envGhivediff == string(v.Voter) {
-		ghiveDiff("GHIVEDIFF VOTERMANA block=%d voter=%s author=%s permlink=%s current_mana=%d max_mana=%d last_update=%d vests=%d recv=%d deleg=%d rshares=%d weight=%d\n",
+	traceVoterMana := envGhivediff != "" && envGhivediff == string(v.Voter)
+	if os.Getenv("GHIVEDIFF_VOTE_AUTHOR") != "" && string(v.Author) == os.Getenv("GHIVEDIFF_VOTE_AUTHOR") {
+		pl := os.Getenv("GHIVEDIFF_VOTE_PERMLINK")
+		if pl == "" || string(v.Permlink) == pl {
+			traceVoterMana = true
+		}
+	}
+	if traceVoterMana {
+		fmt.Fprintf(os.Stderr, "GHIVEDIFF VOTERMANA block=%d voter=%s author=%s permlink=%s current_mana=%d max_mana=%d last_update=%d vests=%d recv=%d deleg=%d rshares=%d weight=%d\n",
 			ctx.BlockNum, v.Voter, v.Author, v.Permlink, currentPower, voter.EffectiveVestingSharesExclWithdraw(), voter.VotingManaLastUpdate,
 			voter.VestingShares, voter.ReceivedVestingShares, voter.DelegatedVestingShares, rshares, v.Weight)
 	}
