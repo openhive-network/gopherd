@@ -183,6 +183,18 @@ func (accountCreateEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		JSONMetadata:         ac.JSONMetadata,
 		VotingManaCurrent:    initialMana,
 		VotingManaLastUpdate: ctx.HeadBlockTime,
+		// Mirror C++ account_object ctor (detail/state/account_object.hpp:
+		// 50-51): BOTH manabars' last_update_time are stamped to the
+		// creation time. Go used to leave DownvoteManaLastUpdate at 0, so a
+		// new account's downvote bar regenerated from epoch 0 on its first
+		// post-HF21 use — dt is clamped to regen_time, refilling it to the
+		// FULL cap instead of the (creation-time-relative) partial value.
+		// That over-strong downvote bar made the account's downvotes too
+		// negative (e.g. nobilpcoinbpc's 2nd downvote of bwar/4w8egy
+		// @35,946,155 used the full bar → comment net_rshares 101,673,000
+		// too low → reward-fund recent_claims drift decaying into the
+		// knife-edge claim_reward failures at 41,984,169+).
+		DownvoteManaLastUpdate: ctx.HeadBlockTime,
 		// Mirror C++ hive_evaluator_account.cpp:134-142: recovery_account
 		// defaults to "steem" pre-HF11, creator account post-HF11, or
 		// empty when creator is HIVE_TEMP_ACCOUNT. The post-HF11 case

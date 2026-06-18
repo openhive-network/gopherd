@@ -149,7 +149,11 @@ func (createClaimedAccountEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		JSONMetadata:         cc.JSONMetadata,
 		VotingManaCurrent:    initialManaCC,
 		VotingManaLastUpdate: ctx.HeadBlockTime,
-		RecoveryAccount:      defaultRecoveryAccount(ctx, cc.Creator),
+		// Stamp the downvote bar's last_update at creation too (C++
+		// account_object.hpp:50-51); see account_create.go for the
+		// over-regen bug this avoids.
+		DownvoteManaLastUpdate: ctx.HeadBlockTime,
+		RecoveryAccount:        defaultRecoveryAccount(ctx, cc.Creator),
 	}
 	if ctx.Hardforks.Has(hardfork.HF20) {
 		objects.InitRCManabar(&newAcct, ctx.HeadBlockTime)
@@ -232,7 +236,13 @@ func (accountCreateWithDelegationEvaluator) Apply(ctx *Context, opArg op.Op) err
 		ReceivedVestingShares: ac.Delegation.Amount,
 		VotingManaCurrent:     10000,
 		VotingManaLastUpdate:  ctx.HeadBlockTime,
-		RecoveryAccount:       defaultRecoveryAccount(ctx, ac.Creator),
+		// Stamp the downvote bar's last_update at creation too (C++
+		// account_object.hpp:50-51). This account_create_with_delegation
+		// path is exactly how nobilpcoinbpc was created; without the stamp
+		// its downvote bar over-regenerated → the kimzwarch claim_reward
+		// cascade. See account_create.go for the full rationale.
+		DownvoteManaLastUpdate: ctx.HeadBlockTime,
+		RecoveryAccount:        defaultRecoveryAccount(ctx, ac.Creator),
 	}
 	if ctx.Hardforks.Has(hardfork.HF20) {
 		objects.InitRCManabar(&newAcct, ctx.HeadBlockTime)
