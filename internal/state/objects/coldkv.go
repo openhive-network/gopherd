@@ -77,6 +77,11 @@ func openColdKV(dir string) (*coldKV, error) {
 		// reads (the apply-loop stall) scan many files. Parallelise on the
 		// idle cores to keep L0 small.
 		MaxConcurrentCompactions: func() int { return 4 },
+		// Scratch tier on a near-idle disk with hundreds of GB free: skip
+		// snappy compression to reclaim the ~13% of replay CPU it burned
+		// (encodeBlock+decode in the cold-tier profile). One entry → pebble
+		// applies NoCompression to every level.
+		Levels: []pebble.LevelOptions{{Compression: pebble.NoCompression}},
 	})
 	if err != nil {
 		return nil, err

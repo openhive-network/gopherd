@@ -328,16 +328,27 @@ func (s *CommentVoteStore) coldDelAllForComment(author auth.AccountName, permlin
 	// vote, giving the voter) so we can delete the matching primary keys.
 	byCommentPrefix := tableKey(coldTableVoteByComment, CommentVoteByCommentPrefix(author, permlink))
 	var voters []auth.AccountName
-	s.cold.rangePrefix(byCommentPrefix, func(_, val []byte) bool {
+	var byCommentKeys [][]byte
+	s.cold.rangePrefix(byCommentPrefix, func(k, val []byte) bool {
 		if cv, err := ReadCommentVote(val); err == nil {
 			voters = append(voters, cv.Voter)
 		}
+		// Collect the index key so we can POINT-delete it below instead of
+		// issuing a DeleteRange. DeleteRange here was the dominant replay
+		// cost in the cold-tier-thrash CPU/alloc profile: its range
+		// tombstones force pebble's keyspan fragmenter to rebuild fragments
+		// on EVERY subsequent cold Get (promote), ~19 GB of garbage + a GC
+		// storm. Point tombstones don't go through the fragmenter. The
+		// rangePrefix callback's key is only valid during the call — copy it.
+		byCommentKeys = append(byCommentKeys, append([]byte(nil), k...))
 		return true
 	})
 	for _, v := range voters {
 		s.cold.del(tableKey(coldTableVotePrimary, commentVoteKey(v, author, permlink)))
 	}
-	s.cold.deletePrefix(byCommentPrefix)
+	for _, k := range byCommentKeys {
+		s.cold.del(k)
+	}
 	delete(s.coldCount, cKey)
 }
 
