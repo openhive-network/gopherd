@@ -12,7 +12,21 @@ type pebbleBackend struct {
 }
 
 func openPebble(path string, cacheSize int64) (*pebbleBackend, error) {
-	opts := &pebble.Options{}
+	// Tuned for a write-once bulk replay on a multi-core box. Pebble's
+	// defaults (4 MiB memtable, MaxConcurrentCompactions=1) leave the
+	// single-threaded apply loop stalling on read-amplification: with one
+	// compaction thread L0 piles up and every Get scans many files. We
+	// have idle cores, so parallelise compaction to keep L0 small (fast
+	// Gets) and enlarge the memtable to cut flush frequency.
+	opts := &pebble.Options{
+		MemTableSize:                128 << 20, // 128 MiB (default 4 MiB)
+		MemTableStopWritesThreshold: 4,
+		L0CompactionThreshold:       2,
+		L0StopWritesThreshold:       1000, // don't stall the writer; let compaction catch up
+		LBaseMaxBytes:               512 << 20,
+		MaxConcurrentCompactions:    func() int { return 6 }, // use idle cores (12-core box)
+		MaxOpenFiles:                16384,
+	}
 	if cacheSize > 0 {
 		opts.Cache = pebble.NewCache(cacheSize)
 		defer opts.Cache.Unref()

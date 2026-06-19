@@ -67,12 +67,16 @@ func openColdKV(dir string) (*coldKV, error) {
 		Cache: pebble.NewCache(1 << 30), // 1 GiB
 		// Big memtable + headroom so the eviction write stream rarely stalls
 		// on flush; this is the dominant cost when eviction engages.
-		MemTableSize:                64 << 20, // 64 MiB
+		MemTableSize:                128 << 20, // 128 MiB
 		MemTableStopWritesThreshold: 8,
-		L0CompactionThreshold:       8,
-		L0StopWritesThreshold:       48,
+		L0CompactionThreshold:       4,
+		L0StopWritesThreshold:       1000, // bulk eviction stream; don't stall on compaction
 		DisableWAL:                  true, // scratch store; snapshots are the source of truth
-		MaxOpenFiles:                4096,
+		MaxOpenFiles:                8192,
+		// Default MaxConcurrentCompactions=1 lets L0 pile up, so promote-back
+		// reads (the apply-loop stall) scan many files. Parallelise on the
+		// idle cores to keep L0 small.
+		MaxConcurrentCompactions: func() int { return 4 },
 	})
 	if err != nil {
 		return nil, err
