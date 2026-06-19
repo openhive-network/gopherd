@@ -29,7 +29,15 @@ var (
 		return out
 	}()
 	envBalanceTraceWithdraw = len(envBalanceTraceList2) > 0
+
+	// WITHDRAW_TRACE_FROM/TO: dump EVERY fill_vesting_withdraw (and each
+	// route processed) for blocks in [from,to], regardless of account.
+	// Diagnostic for localizing pool drift in a narrow block window.
+	wdTraceFrom = func() uint32 { v := os.Getenv("WITHDRAW_TRACE_FROM"); n := uint32(0); fmt.Sscan(v, &n); return n }()
+	wdTraceTo   = func() uint32 { v := os.Getenv("WITHDRAW_TRACE_TO"); n := uint32(0); fmt.Sscan(v, &n); return n }()
 )
+
+func wdTraceOn(blk uint32) bool { return wdTraceTo != 0 && blk >= wdTraceFrom && blk <= wdTraceTo }
 
 func balanceTraceMatchAccount(name string) bool {
 	for _, n := range envBalanceTraceList2 {
@@ -125,6 +133,21 @@ func processOneWithdrawal(s *state.Session, accountName string, scheduledTime ui
 	if a.VestingWithdrawRate == 0 || a.NextVestingWithdrawal == 0 {
 		return
 	}
+	// Stale schedule-store entry guard. hived has NO separate withdrawal
+	// schedule — process_vesting_withdrawals iterates accounts by the
+	// by_next_vesting_withdrawal index, so an account is filled iff its
+	// OWN next_vesting_withdrawal is due. Go keeps a separate
+	// VestingWithdrawalScheduleStore as a fast candidate index; when an
+	// account restarts/cancels a power-down (e.g. justyy @41,914,035) the
+	// old entry can survive in that store while the account field is
+	// rescheduled, causing an early fill that hived never performs (drains
+	// the vesting pool ahead of hived → reward_price drift → create_vesting
+	// floor flips → claim_reward_balance failures downstream, e.g. kimzwarch
+	// @41,984,169). Treat the account field as authoritative: only fill when
+	// the firing entry matches the account's current schedule.
+	if a.NextVestingWithdrawal != scheduledTime {
+		return
+	}
 
 	remaining := a.ToWithdraw - a.Withdrawn
 	if remaining <= 0 {
@@ -195,6 +218,12 @@ func processOneWithdrawal(s *state.Session, accountName string, scheduledTime ui
 		)
 	}
 
+	if wdTraceOn(dgpo.HeadBlockNumber) {
+		fmt.Fprintf(os.Stderr,
+			"GHIVEDIFF WDFILL block=%d name=%s toWithdraw=%d depositedVests=%d toConvert=%d convertedHive=%d acct_vests=%d rate=%d to_withdraw=%d withdrawn=%d\n",
+			dgpo.HeadBlockNumber, accountName, toWithdraw, depositedVests, toConvertToHive, convertedHive,
+			a.VestingShares, a.VestingWithdrawRate, a.ToWithdraw, a.Withdrawn)
+	}
 	a.VestingShares -= toWithdraw
 	a.Balance += convertedHive
 	a.Withdrawn += toWithdraw
@@ -290,6 +319,10 @@ func processWithdrawRoutes(s *state.Session, fromAccount string, toWithdraw int6
 			to, gerr := objects.GetAccount(s, route.To)
 			if gerr != nil {
 				return true, nil
+			}
+			if dgpoT, _ := objects.GetDGPO(s); wdTraceOn(dgpoT.HeadBlockNumber) {
+				fmt.Fprintf(os.Stderr, "GHIVEDIFF WDROUTE block=%d from=%s to=%s pct=%d autoVest=%v toDeposit=%d\n",
+					dgpoT.HeadBlockNumber, fromAccount, route.To, route.Percent, route.AutoVest, toDeposit)
 			}
 			if autoVest {
 				to.VestingShares += toDeposit

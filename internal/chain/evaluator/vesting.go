@@ -61,6 +61,10 @@ func (withdrawVestingEvaluator) Apply(ctx *Context, opArg op.Op) error {
 
 	// Drop any existing schedule entry for this account from the
 	// time-ordered index before we mutate the next-withdrawal field.
+	if os.Getenv("SCHED_TRACE") == w.Account {
+		fmt.Fprintf(os.Stderr, "GHIVEDIFF WVEVAL block=%d acct=%s old_next=%d old_rate=%d amt=%d headtime=%d\n",
+			ctx.BlockNum, w.Account, a.NextVestingWithdrawal, a.VestingWithdrawRate, w.VestingShares.Amount, ctx.HeadBlockTime)
+	}
 	if a.NextVestingWithdrawal != 0 {
 		objects.DeleteVestingWithdrawalSchedule(ctx.DB, a.NextVestingWithdrawal, w.Account)
 	}
