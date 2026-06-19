@@ -370,11 +370,18 @@ func (commentOptionsEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		return nil
 	}
 
-	// "Disabling-or-lowering" requires no votes on the comment yet.
+	// "Disabling-or-lowering" requires the comment to have no rshares
+	// allocated yet. hived gates on comment_cashout->has_votes() ==
+	// was_voted_on (hive_evaluator_social.cpp:155-156), a STICKY flag set by
+	// on_vote when real_vote is true — every vote pre-HF20 and at HF26+, but
+	// only abs_rshares != 0 votes in HF20..HF26 (dust votes excluded). Go
+	// tracks this as c.WasVotedOn. VoteCount over-counts dust votes (wrong
+	// post-HF20: block 43,550,866); AbsRshares skips dust votes (wrong
+	// pre-HF20: block 19,236,724). WasVotedOn is correct across all forks.
 	disablingCuration := !co.AllowCurationRewards
 	disablingVotes := !co.AllowVotes
 	loweringMaxPayout := co.MaxAcceptedPayout.Amount < c.MaxAcceptedPayout
-	if (disablingCuration || disablingVotes || loweringMaxPayout) && c.VoteCount != 0 {
+	if (disablingCuration || disablingVotes || loweringMaxPayout) && c.WasVotedOn {
 		return fmt.Errorf("%w: option tightening requires no votes", ErrCommentClosed)
 	}
 	// Always tightening-only: can't re-enable curation/votes once off.
@@ -1128,6 +1135,13 @@ func (voteEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	// Track AbsRshares for the beneficiary "no votes yet" gate.
 	if absRshares > 0 {
 		c.AbsRshares += absRshares
+	}
+	// was_voted_on (hived on_vote real_vote, hive_evaluator_social.cpp:464/
+	// 752): set on every vote pre-HF20 and at HF26+, else only when
+	// abs_rshares != 0 (HF20..HF26 dust-vote exclusion). Sticky. Drives the
+	// comment_options "option tightening requires no votes" gate.
+	if absRshares != 0 || !ctx.Hardforks.Has(hardfork.HF20) || ctx.Hardforks.Has(hardfork.HF26) {
+		c.WasVotedOn = true
 	}
 	c.LastUpdate = ctx.HeadBlockTime
 

@@ -45,6 +45,15 @@ type Comment struct {
 	// curation weight calc and the "must not have been voted on yet"
 	// gate for setting beneficiaries.
 	AbsRshares int64
+	// WasVotedOn mirrors hived comment_cashout_object::was_voted_on — a
+	// STICKY flag set by on_vote when real_vote is true. real_vote is
+	// HF-dependent: true for every vote pre-HF20 and at HF26+, but only
+	// when abs_rshares != 0 in the HF20..HF26 window (dust votes excluded).
+	// Used by comment_options' "option tightening requires no votes" gate.
+	// Neither VoteCount (counts dust-vote rows -> wrong post-HF20) nor
+	// AbsRshares (skips dust votes -> wrong pre-HF20/HF26+) tracks this
+	// correctly across forks.
+	WasVotedOn bool
 	// WasPaid is set true after the first cashout. Used by HF12-HF17
 	// to gate the second-cashout window: pre-HF17 root posts that
 	// haven't been paid get rescheduled at +30d after first cashout;
@@ -290,6 +299,11 @@ func AppendComment(dst []byte, c *Comment) []byte {
 	dst = appendU64LE(dst, c.ChildrenAbsRshares)
 	dst = appendU32LE(dst, c.MaxCashoutTime)
 	dst = append(dst, byte(c.RewardWeight), byte(c.RewardWeight>>8))
+	if c.WasVotedOn {
+		dst = append(dst, 1)
+	} else {
+		dst = append(dst, 0)
+	}
 	return dst
 }
 
@@ -427,6 +441,13 @@ func ReadComment(src []byte) (Comment, error) {
 	}
 	if c.RewardWeight, err = r.ReadUint16(); err != nil {
 		return c, fmt.Errorf("comment.reward_weight: %w", err)
+	}
+	// WasVotedOn — later schema addition; tolerate EOF.
+	if r.AtEnd() {
+		return c, nil
+	}
+	if c.WasVotedOn, err = r.ReadBool(); err != nil {
+		return c, fmt.Errorf("comment.was_voted_on: %w", err)
 	}
 	if !r.AtEnd() {
 		return c, errors.New("comment: trailing bytes")
