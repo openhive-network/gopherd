@@ -96,7 +96,12 @@ func readCustomJSON(r *fcraw.Reader) (Op, error) {
 	if o.ID, err = r.ReadString(); err != nil {
 		return Op{}, err
 	}
-	if o.JSON, err = r.ReadString(); err != nil {
+	// JSON is validated-then-discarded (the only consumers, custom_json_rc /
+	// rc_differential, json.Unmarshal a fresh []byte copy and are RC-gated).
+	// Alias it into the block buffer like Comment.Body/Title/JSONMetadata —
+	// the op struct never outlives ApplyBlock. ~3.3GB/60s of dense-era
+	// (bidbot/custom_json spam) allocation eliminated → fewer GC cycles.
+	if o.JSON, err = r.ReadStringAlias(); err != nil {
 		return Op{}, err
 	}
 	return OpFromPtr(TagCustomJSON, unsafe.Pointer(&o)), nil
