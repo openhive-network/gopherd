@@ -105,23 +105,29 @@ func openMmapColdKV(dir string) (*mmapColdKV, error) {
 		owned: owned,
 		file:  f,
 		data:  data,
-		idx:   btree.NewBTreeGOptions[mmapColdEntry](mmapColdLess, btree.Options{Degree: 32, NoLocks: true}),
+		idx: btree.NewBTreeGOptions[mmapColdEntry](mmapColdLess, btree.Options{Degree: 32, NoLocks: true}),
 	}, nil
 }
 
 func (c *mmapColdKV) Dir() string { return c.dir }
 
 func (c *mmapColdKV) set(key, val []byte) error {
-	need := c.writeOff + uint64(len(val))
+	need := c.writeOff + uint64(len(key)) + uint64(len(val))
 	if need > uint64(len(c.data)) {
 		return fmt.Errorf("mmapcold: data file full (%d bytes, need %d)", len(c.data), need)
 	}
+	// Write key THEN val inline; the btree entry's key field is a zero-copy
+	// slice into the mapping (no per-evict key alloc — the dominant remaining
+	// GC source). The mapping is persistent so the slice stays valid; btree
+	// rebalancing only copies the slice header. Old key+blob on re-set/del
+	// become dead space (bounded: cold comments are promoted before mutation).
 	off := c.writeOff
-	copy(c.data[off:], val)
+	copy(c.data[off:], key)
+	kEnd := off + uint64(len(key))
+	keySlice := c.data[off:kEnd:kEnd]
+	copy(c.data[kEnd:], val)
 	c.writeOff = need
-	// Set replaces an existing key (old blob becomes dead space). Copy the
-	// key — the btree retains it and callers pass reused scratch buffers.
-	c.idx.Set(mmapColdEntry{key: append([]byte(nil), key...), offset: off, length: uint32(len(val))})
+	c.idx.Set(mmapColdEntry{key: keySlice, offset: kEnd, length: uint32(len(val))})
 	return nil
 }
 
