@@ -149,6 +149,9 @@ type Transfer struct {
 	To     auth.AccountName
 	Amount asset.Asset
 	Memo   string
+	// FromId/ToId: interned account ids populated at parse (not serialized).
+	FromId auth.AccountId
+	ToId   auth.AccountId
 }
 
 func (Transfer) OpTag() Tag { return TagTransfer }
@@ -162,10 +165,10 @@ func (o Transfer) AppendFCBody(dst []byte) []byte {
 func readTransfer(r *fcraw.Reader) (Op, error) {
 	var o Transfer
 	var err error
-	if o.From, err = r.ReadString(); err != nil {
+	if o.From, o.FromId, err = readAccountName(r); err != nil {
 		return Op{}, err
 	}
-	if o.To, err = r.ReadString(); err != nil {
+	if o.To, o.ToId, err = readAccountName(r); err != nil {
 		return Op{}, err
 	}
 	if o.Amount, err = asset.ReadAsset(r); err != nil {

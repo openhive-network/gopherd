@@ -564,7 +564,7 @@ func (voteEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	var voter *objects.Account
 	if ctx.DB.Database().UndoEnabled {
 		var verr error
-		voterLocal, verr = objects.GetAccount(ctx.DB, v.Voter)
+		voterLocal, verr = objects.GetAccountByID(ctx.DB, v.VoterId, v.Voter)
 		if verr != nil {
 			if verr == state.ErrNotFound {
 				return fmt.Errorf("%w: voter=%q", ErrAccountNotFound, v.Voter)
@@ -574,7 +574,7 @@ func (voteEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		voter = &voterLocal
 	} else {
 		var ok bool
-		voter, ok = objects.GetAccountRef(ctx.DB, v.Voter)
+		voter, ok = objects.GetAccountRefByID(ctx.DB, v.VoterId, v.Voter)
 		if !ok {
 			return fmt.Errorf("%w: voter=%q", ErrAccountNotFound, v.Voter)
 		}

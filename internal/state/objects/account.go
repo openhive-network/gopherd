@@ -605,6 +605,37 @@ func GetAccountRef(s *state.Session, name auth.AccountName) (*Account, bool) {
 	return EnsureAccountStore(s).GetRef(name)
 }
 
+// GetAccountRefByID returns a read-only pointer to the account with interned
+// id `id`, skipping the name-string hash on the hot per-op probe. byId mirrors
+// primary and id == InternAccountId(name), so this is bit-identical to
+// GetAccountRef(name). Falls back to the name lookup when id is unset (0, e.g.
+// ops built in code) or — defensively — absent from the id index. Pass the
+// op's parsed *Id field together with the name.
+func GetAccountRefByID(s *state.Session, id auth.AccountId, name auth.AccountName) (*Account, bool) {
+	as := EnsureAccountStore(s)
+	if id != auth.InvalidAccountId {
+		if a, ok := as.GetByID(id); ok {
+			return a, true
+		}
+	}
+	return as.GetRef(name)
+}
+
+// GetAccountByID is the value-copy sibling of GetAccountRefByID.
+func GetAccountByID(s *state.Session, id auth.AccountId, name auth.AccountName) (Account, error) {
+	as := EnsureAccountStore(s)
+	if id != auth.InvalidAccountId {
+		if a, ok := as.GetByID(id); ok {
+			return *a, nil
+		}
+	}
+	a, ok := as.Get(name)
+	if !ok {
+		return Account{}, state.ErrNotFound
+	}
+	return a, nil
+}
+
 // MutateAccount applies an in-place modification to the account slot
 // for `name` via AccountStore.Mutate. Returns false if the row
 // doesn't exist. Saves the Account value-copy on read + write that

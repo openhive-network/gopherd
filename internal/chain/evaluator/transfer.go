@@ -87,7 +87,7 @@ func (transferEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	}
 
 	// Look up sender. The C++ code throws if the account doesn't exist.
-	from, err := objects.GetAccount(ctx.DB, tx.From)
+	from, err := objects.GetAccountByID(ctx.DB, tx.FromId, tx.From)
 	if err != nil {
 		if err == state.ErrNotFound {
 			return fmt.Errorf("%w: from=%q", ErrAccountNotFound, tx.From)
@@ -110,7 +110,7 @@ func (transferEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		from.Balance -= tx.Amount.Amount
 		objects.PutAccount(ctx.DB, &from)
 
-		to, terr := objects.GetAccount(ctx.DB, tx.To)
+		to, terr := objects.GetAccountByID(ctx.DB, tx.ToId, tx.To)
 		if terr != nil {
 			return fmt.Errorf("%w: to=%q (treasury)", ErrAccountNotFound, tx.To)
 		}
@@ -181,7 +181,7 @@ func (transferEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	// value through the overlay, and the subsequent credit puts it back
 	// to its pre-transfer balance — same observable effect as the C++
 	// adjust_balance(from, -amount); adjust_balance(to, amount); pair.
-	to, err := objects.GetAccount(ctx.DB, tx.To)
+	to, err := objects.GetAccountByID(ctx.DB, tx.ToId, tx.To)
 	if err != nil {
 		if err == state.ErrNotFound {
 			return fmt.Errorf("%w: to=%q", ErrAccountNotFound, tx.To)
