@@ -148,8 +148,8 @@ func (s *CommentVoteStore) coldGetVote(voter, author auth.AccountName, permlink 
 	if s.cold == nil {
 		return CommentVote{}, false
 	}
-	k := tableKey(coldTableVotePrimary, commentVoteKey(voter, author, permlink))
-	blob, ok := s.cold.get(k)
+	s.scratchKeyV = appendColdVotePrimaryKey(s.scratchKeyV[:0], voter, author, permlink)
+	blob, ok := s.cold.get(s.scratchKeyV)
 	if !ok {
 		return CommentVote{}, false
 	}
@@ -181,8 +181,10 @@ func (s *CommentVoteStore) coldDelVote(voter, author auth.AccountName, permlink 
 	if s.coldCount[cKey] == 0 {
 		return
 	}
-	s.cold.del(tableKey(coldTableVotePrimary, commentVoteKey(voter, author, permlink)))
-	s.cold.del(tableKey(coldTableVoteByComment, commentVoteByCommentKey(author, permlink, voter)))
+	s.scratchKeyV = appendColdVotePrimaryKey(s.scratchKeyV[:0], voter, author, permlink)
+	s.cold.del(s.scratchKeyV)
+	s.scratchKeyV = appendColdVoteByCommentKey(s.scratchKeyV[:0], author, permlink, voter)
+	s.cold.del(s.scratchKeyV)
 	if n := s.coldCount[cKey] - 1; n <= 0 {
 		delete(s.coldCount, cKey)
 	} else {
