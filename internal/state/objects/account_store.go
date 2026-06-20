@@ -101,6 +101,13 @@ type AccountStore struct {
 	// whether to capture an undo snapshot.
 	db      *state.Database
 	primary map[string]*Account
+	// byId mirrors primary keyed by the account's interned AccountId — the
+	// foundation for id-keyed lookups (P3: GetByID lets the hot evaluators key
+	// accounts by uint32 once ids flow from parse, instead of hashing the name
+	// string on every probe). The id is derived from the (stable, interned)
+	// name, so byId stays a pure mirror of primary with no per-Account id field
+	// to preserve across overwrites. Same *Account pointers as primary.
+	byId    map[auth.AccountId]*Account
 	undoLog []accountUndo
 
 	// freeAccount is a freelist of *Account slots reclaimed at
@@ -149,6 +156,7 @@ func EnsureAccountStore(s *state.Session) *AccountStore {
 func newAccountStore() *AccountStore {
 	return &AccountStore{
 		primary: make(map[string]*Account, 4096),
+		byId:    make(map[auth.AccountId]*Account, 4096),
 		undoLog: make([]accountUndo, 0, 64),
 	}
 }
@@ -177,14 +185,18 @@ func (s *AccountStore) RestoreToPoint(snap int) {
 			if cur, ok := s.primary[e.name]; ok {
 				s.freeAccount = append(s.freeAccount, cur)
 				delete(s.primary, e.name)
+				if id, ok := auth.LookupAccountId(e.name); ok {
+					delete(s.byId, id)
+				}
 			}
 		case 1: // undo overwrite
 			if cur, ok := s.primary[e.name]; ok {
-				*cur = e.snap
+				*cur = e.snap // slot pointer unchanged → byId still valid
 			}
 		case 2: // undo delete
 			*e.slot = e.snap
 			s.primary[e.name] = e.slot
+			s.byId[auth.InternAccountId(e.name)] = e.slot
 		}
 		e.slot = nil
 	}
@@ -239,6 +251,14 @@ func (s *AccountStore) GetRef(name auth.AccountName) (*Account, bool) {
 	return a, ok
 }
 
+// GetByID returns a read-only pointer to the slot for an interned AccountId,
+// or (nil,false) if absent. The id-keyed sibling of GetRef — once ids flow
+// from parse (P2/P3) this skips the name-string hash on the hot probe.
+func (s *AccountStore) GetByID(id auth.AccountId) (*Account, bool) {
+	a, ok := s.byId[id]
+	return a, ok
+}
+
 // Put inserts or replaces the account keyed by a.Name. For an
 // overwrite, mutates the existing slot in place — preserves pointer
 // identity and avoids the per-Put alloc + double struct-copy of the
@@ -282,6 +302,7 @@ func (s *AccountStore) Put(a *Account) {
 	}
 	*cp = *a
 	s.primary[name] = cp
+	s.byId[auth.InternAccountId(name)] = cp
 	if s.db.UndoEnabled {
 		s.undoLog = append(s.undoLog, accountUndo{name: name, op: 0, slot: cp})
 	}
@@ -334,6 +355,9 @@ func (s *AccountStore) Delete(name auth.AccountName) {
 		s.freeAccount = append(s.freeAccount, cur)
 	}
 	delete(s.primary, n)
+	if id, ok := auth.LookupAccountId(n); ok {
+		delete(s.byId, id)
+	}
 }
 
 // RangePrimary calls fn for every account in ascending name order.
@@ -429,6 +453,7 @@ func (s *AccountStore) UnmarshalSnapshot(r io.Reader) error {
 	}
 	count := binary.LittleEndian.Uint32(hdr[4:8])
 	s.primary = make(map[string]*Account, count)
+	s.byId = make(map[auth.AccountId]*Account, count)
 	s.undoLog = s.undoLog[:0]
 	for i := uint32(0); i < count; i++ {
 		nameLen, err := binary.ReadUvarint(br)
@@ -452,7 +477,9 @@ func (s *AccountStore) UnmarshalSnapshot(r io.Reader) error {
 			return fmt.Errorf("account_store: decode rec[%d]: %w", i, err)
 		}
 		cp := acc
-		s.primary[string(nameBuf)] = &cp
+		name := string(nameBuf)
+		s.primary[name] = &cp
+		s.byId[auth.InternAccountId(name)] = &cp
 	}
 	return nil
 }
