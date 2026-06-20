@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"unsafe"
 
 	"github.com/tidwall/btree"
 	"golang.org/x/sys/unix"
@@ -56,12 +57,29 @@ type mmapColdEntry struct {
 
 func mmapColdLess(a, b mmapColdEntry) bool { return bytes.Compare(a.key, b.key) < 0 }
 
+// mmapPrimVal is a primary-table index value: the blob's location in the
+// mapping. The map KEY is an unsafe.String aliasing the key bytes already
+// stored in the mapping — zero-copy (no per-evict key alloc) and GC-cheap (the
+// header points outside the Go heap, so scanObject skips it).
+type mmapPrimVal struct {
+	offset uint64
+	length uint32
+}
+
+// coldKeyIsPrimary routes hot point-op tables (comment/vote primary) to the
+// O(1) hash map; the by-root/by-comment tables (cashout prefix scans only)
+// stay in the ordered btree. Routing by the table prefix byte (key[0]).
+func coldKeyIsPrimary(key []byte) bool {
+	return len(key) > 0 && (key[0] == coldTableCommentPrimary || key[0] == coldTableVotePrimary)
+}
+
 type mmapColdKV struct {
 	dir      string
 	owned    bool
 	file     *os.File
 	data     []byte // the mmap (length == mmapColdFileSize)
 	writeOff uint64
+	prim     map[string]mmapPrimVal // primary tables: O(1) point ops, mmap-aliased keys
 	idx      *btree.BTreeG[mmapColdEntry]
 }
 
@@ -105,7 +123,8 @@ func openMmapColdKV(dir string) (*mmapColdKV, error) {
 		owned: owned,
 		file:  f,
 		data:  data,
-		idx: btree.NewBTreeGOptions[mmapColdEntry](mmapColdLess, btree.Options{Degree: 32, NoLocks: true}),
+		prim:  make(map[string]mmapPrimVal, 1<<21),
+		idx:   btree.NewBTreeGOptions[mmapColdEntry](mmapColdLess, btree.Options{Degree: 32, NoLocks: true}),
 	}, nil
 }
 
@@ -124,9 +143,15 @@ func (c *mmapColdKV) set(key, val []byte) error {
 	off := c.writeOff
 	copy(c.data[off:], key)
 	kEnd := off + uint64(len(key))
-	keySlice := c.data[off:kEnd:kEnd]
 	copy(c.data[kEnd:], val)
 	c.writeOff = need
+	if coldKeyIsPrimary(key) {
+		// Map key aliases the just-written key bytes in the mapping (no copy).
+		keyStr := unsafe.String(&c.data[off], len(key))
+		c.prim[keyStr] = mmapPrimVal{offset: kEnd, length: uint32(len(val))}
+		return nil
+	}
+	keySlice := c.data[off:kEnd:kEnd]
 	c.idx.Set(mmapColdEntry{key: keySlice, offset: kEnd, length: uint32(len(val))})
 	return nil
 }
@@ -134,6 +159,10 @@ func (c *mmapColdKV) set(key, val []byte) error {
 func (c *mmapColdKV) bset(key, val []byte) { _ = c.set(key, val) }
 
 func (c *mmapColdKV) del(key []byte) error {
+	if coldKeyIsPrimary(key) {
+		delete(c.prim, string(key))
+		return nil
+	}
 	c.idx.Delete(mmapColdEntry{key: key})
 	return nil
 }
@@ -144,6 +173,15 @@ func (c *mmapColdKV) bdel(key []byte) { _ = c.del(key) }
 func (c *mmapColdKV) flushBatch() {}
 
 func (c *mmapColdKV) get(key []byte) ([]byte, bool) {
+	if coldKeyIsPrimary(key) {
+		// string(key) in a map index is compiler-optimized — no alloc.
+		e, ok := c.prim[string(key)]
+		if !ok {
+			return nil, false
+		}
+		end := e.offset + uint64(e.length)
+		return c.data[e.offset:end:end], true
+	}
 	e, ok := c.idx.Get(mmapColdEntry{key: key})
 	if !ok {
 		return nil, false
@@ -155,6 +193,10 @@ func (c *mmapColdKV) get(key []byte) ([]byte, bool) {
 }
 
 func (c *mmapColdKV) has(key []byte) bool {
+	if coldKeyIsPrimary(key) {
+		_, ok := c.prim[string(key)]
+		return ok
+	}
 	_, ok := c.idx.Get(mmapColdEntry{key: key})
 	return ok
 }
