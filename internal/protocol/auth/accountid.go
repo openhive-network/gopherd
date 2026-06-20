@@ -24,29 +24,39 @@ var (
 	accountNames    = []string{""} // index 0 reserved; accountNames[id] == name
 )
 
-// InternAccountId returns the dense id for name, assigning the next free id on
-// first sight. The reverse table retains a single backing string per name.
-// Concurrency-safe (verify/touchset run in parallel); the common case (already
-// interned) takes only the read lock.
-func InternAccountId(name string) AccountId {
+// InternAccountName interns name and returns both the canonical (heap-owned)
+// backing string and its dense id in a SINGLE map probe. The parse path uses
+// this on the raw (block-buffer-aliased) name bytes so it REPLACES
+// fcraw.InternString for account fields — one probe yields the owned name to
+// store AND the id to carry, with no double-interning. Concurrency-safe: the
+// hit path takes only the read lock.
+func InternAccountName(name string) (string, AccountId) {
 	accountIdMu.RLock()
 	id, ok := accountIdByName[name]
-	accountIdMu.RUnlock()
 	if ok {
-		return id
+		canon := accountNames[id]
+		accountIdMu.RUnlock()
+		return canon, id
 	}
+	accountIdMu.RUnlock()
 	accountIdMu.Lock()
 	defer accountIdMu.Unlock()
 	// Re-check under the write lock (another goroutine may have assigned it).
 	if id, ok = accountIdByName[name]; ok {
-		return id
+		return accountNames[id], id
 	}
 	// Copy the key so the table doesn't pin a caller's larger backing array
-	// (mirrors fcraw.InternString's ownership discipline).
+	// (the raw name aliases the block buffer; mirrors fcraw.InternString).
 	owned := string([]byte(name))
 	id = AccountId(len(accountNames))
 	accountNames = append(accountNames, owned)
 	accountIdByName[owned] = id
+	return owned, id
+}
+
+// InternAccountId returns just the dense id for name (assigning on first sight).
+func InternAccountId(name string) AccountId {
+	_, id := InternAccountName(name)
 	return id
 }
 

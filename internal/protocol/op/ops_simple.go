@@ -18,6 +18,13 @@ type Vote struct {
 	Author   auth.AccountName
 	Permlink string
 	Weight   int16
+	// VoterId / AuthorId are the interned account ids, populated at parse
+	// (single probe via readAccountName) and carried so the evaluator/stores
+	// key by uint32 instead of re-hashing the name string. NOT serialized —
+	// AppendFCBody writes the names. Zero for ops built in tests/code that
+	// don't set them (evaluator must fall back to name lookup if id==0).
+	VoterId  auth.AccountId
+	AuthorId auth.AccountId
 }
 
 func (Vote) OpTag() Tag { return TagVote }
@@ -101,13 +108,27 @@ func (s *opSlabs) nextComment() *Comment {
 	return &s.comments[s.commentN-1]
 }
 
+// readAccountName reads a length-prefixed account name and interns it in a
+// SINGLE probe, returning the canonical heap-owned name to store AND its id to
+// carry. Replaces ReadString for account-name fields: same one-probe cost,
+// plus the id. The raw bytes alias the block buffer; InternAccountName copies
+// into the owned canonical string, so the result is safe to retain.
+func readAccountName(r *fcraw.Reader) (auth.AccountName, auth.AccountId, error) {
+	raw, err := r.ReadStringAlias()
+	if err != nil {
+		return "", auth.InvalidAccountId, err
+	}
+	name, id := auth.InternAccountName(raw)
+	return name, id, nil
+}
+
 func readVote(r *fcraw.Reader) (Op, error) {
 	o := ensureOpSlabs(r).nextVote()
 	var err error
-	if o.Voter, err = r.ReadString(); err != nil {
+	if o.Voter, o.VoterId, err = readAccountName(r); err != nil {
 		return Op{}, err
 	}
-	if o.Author, err = r.ReadString(); err != nil {
+	if o.Author, o.AuthorId, err = readAccountName(r); err != nil {
 		return Op{}, err
 	}
 	if o.Permlink, err = r.ReadString(); err != nil {

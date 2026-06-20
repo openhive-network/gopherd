@@ -31,8 +31,14 @@ func TestVoteRoundTrip(t *testing.T) {
 		t.Fatalf("tag = %d, want %d", got.OpTag(), TagVote)
 	}
 	v2 := got.(Vote)
-	if v2 != v {
+	// Compare the wire-contract fields (VoterId/AuthorId are parse-derived
+	// interned handles, not serialized — the re-marshal check below is the
+	// bit-identity gate).
+	if v2.Voter != v.Voter || v2.Author != v.Author || v2.Permlink != v.Permlink || v2.Weight != v.Weight {
 		t.Fatalf("round-trip:\n got %+v\nwant %+v", v2, v)
+	}
+	if v2.VoterId == auth.InvalidAccountId || v2.AuthorId == auth.InvalidAccountId || v2.VoterId == v2.AuthorId {
+		t.Fatalf("parse should intern distinct nonzero ids: voter=%d author=%d", v2.VoterId, v2.AuthorId)
 	}
 	wire2 := AppendOperation(nil, v2)
 	if !bytes.Equal(wire, wire2) {
