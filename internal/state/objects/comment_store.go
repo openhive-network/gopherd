@@ -193,7 +193,12 @@ func (s *CommentStore) coldMaybe(author auth.AccountName, permlink string) bool 
 	if s.bloom == nil {
 		return true
 	}
-	return s.bloom.maybePresent(commentKey(author, permlink))
+	// Alloc-free: build the bloom key into reused scratch (maybePresent only
+	// hashes it, never retains). commentKey() here was ~2.2GB/60s at 16M — it
+	// runs on every RAM-miss / Has probe in the dense era. scratchKey2 is the
+	// bloom-key buffer (also used by Evict, which never interleaves with this).
+	s.scratchKey2 = appendCommentKeyRaw(s.scratchKey2[:0], author, permlink)
+	return s.bloom.maybePresent(s.scratchKey2)
 }
 
 // SetResidentCap sets the soft cap on RAM-resident comments. 0 disables
