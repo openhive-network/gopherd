@@ -61,7 +61,7 @@ type CommentVoteStore struct {
 	// evicted from RAM live here, keyed by commentVoteKey (primary) and
 	// commentVoteByCommentKey (secondary). See coldkv.go +
 	// project_disk_backed_stores_2026_05_31.
-	cold *coldKV
+	cold coldStore
 	// coldCount[cKey] = number of this comment's votes currently resident
 	// only in the cold tier. RangeByComment/DeleteAllForComment skip the
 	// cold scan entirely when the count is 0 (the live-comment common case),
@@ -136,7 +136,7 @@ func newCommentVoteStore() *CommentVoteStore {
 
 // SetColdTier attaches (or detaches, with nil) the on-disk cold tier. Must be
 // called before any eviction. Safe to leave unset → pure in-RAM behavior.
-func (s *CommentVoteStore) SetColdTier(c *coldKV) { s.cold = c }
+func (s *CommentVoteStore) SetColdTier(c coldStore) { s.cold = c }
 
 // coldHas reports whether any of this comment's votes are in the cold tier.
 func (s *CommentVoteStore) coldHas(cKey commentPK) bool {

@@ -10,7 +10,7 @@ import (
 
 // commentFixture inserts a deterministic set of comments (two threads with
 // replies) and commits. Attaches cold if non-nil.
-func commentFixture(t *testing.T, cold *coldKV) (*state.Session, *CommentStore) {
+func commentFixture(t *testing.T, cold coldStore) (*state.Session, *CommentStore) {
 	t.Helper()
 	db := openTempDB(t)
 	s := state.NewSession(db)

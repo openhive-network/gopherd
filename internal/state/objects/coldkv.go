@@ -229,7 +229,7 @@ type coldIter struct {
 
 // newPrefixIter returns an iterator positioned before the first key with the
 // given prefix; call Next to advance. Caller must Close.
-func (c *coldKV) newPrefixIter(prefix []byte) (*coldIter, error) {
+func (c *coldKV) newPrefixIter(prefix []byte) (coldIterator, error) {
 	if c.wb != nil {
 		c.flushBatch()
 	}

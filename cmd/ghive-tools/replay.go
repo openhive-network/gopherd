@@ -43,6 +43,7 @@ func cmdReplay(args []string) int {
 	backend := fs.String("backend", "pebble", "state backend: pebble (persistent) or mem (in-memory btree, faster)")
 	residentCap := fs.Int("comment-resident-cap", 0, "if >0, cap RAM-resident comments to this many; frozen comments (and their votes) spill to an on-disk scratch cold tier. Breaks the RAM ceiling for long replays (e.g. 4000000 keeps the cashout window hot).")
 	coldDir := fs.String("cold-dir", "", "directory for the scratch cold tier (default: a tempdir, removed on exit). Only used when --comment-resident-cap>0.")
+	coldMmap := fs.Bool("cold-mmap", false, "use the mmap cold-tier backend (faster, zero-copy) instead of pebble")
 	evictBudget := fs.Int("evict-budget", 20000, "max comments evicted per block when over the resident cap")
 	loadSnapshot := fs.String("load-snapshot", "", "if set, load state from this snapshot path (file = legacy single-file format; directory = block-N dir produced by --snapshot-every; skips genesis + replay before snapshot block)")
 	saveSnapshotAt := fs.Uint("save-snapshot-at", 0, "block number after which to save a single-file snapshot (0 = don't save)")
@@ -210,7 +211,7 @@ func cmdReplay(args []string) int {
 	var commentStoreForEvict *objects.CommentStore
 	var voteStoreForEvict *objects.CommentVoteStore
 	if *residentCap > 0 {
-		cold, cerr := objects.OpenColdKV(*coldDir)
+		cold, cerr := objects.OpenColdTier(*coldDir, *coldMmap)
 		if cerr != nil {
 			fmt.Fprintf(os.Stderr, "replay: open cold tier: %v\n", cerr)
 			return 1

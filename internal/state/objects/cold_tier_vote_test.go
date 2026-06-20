@@ -11,7 +11,7 @@ import (
 
 // voteFixture inserts a deterministic set of votes across several comments
 // and commits, returning the store. If cold != nil it is attached first.
-func voteFixture(t *testing.T, cold *coldKV) (*state.Session, *CommentVoteStore) {
+func voteFixture(t *testing.T, cold coldStore) (*state.Session, *CommentVoteStore) {
 	t.Helper()
 	db := openTempDB(t)
 	s := state.NewSession(db)

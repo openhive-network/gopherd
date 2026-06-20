@@ -58,7 +58,7 @@ type CommentStore struct {
 	// cold is the on-disk tier (nil = disabled, all-RAM behavior). Frozen/
 	// paid comments evicted from RAM live here, keyed by commentKey (primary,
 	// table 0x01) and commentByRootKey (by-root index, table 0x02).
-	cold *coldKV
+	cold coldStore
 	// coldTotal counts all comments resident only in the cold tier; a RAM
 	// miss probes the cold tier only when coldTotal > 0 (so the all-RAM and
 	// eviction-off paths pay zero disk overhead).
@@ -175,7 +175,7 @@ func newCommentStore() *CommentStore {
 
 // SetColdTier attaches (or detaches, with nil) the on-disk cold tier. Must be
 // called before any eviction. Unset → pure in-RAM behavior.
-func (s *CommentStore) SetColdTier(c *coldKV) {
+func (s *CommentStore) SetColdTier(c coldStore) {
 	s.cold = c
 	if c != nil && s.bloom == nil {
 		s.bloom = newColdBloom(100_000_000) // ~120MB, ~1% FP at 100M cold keys
