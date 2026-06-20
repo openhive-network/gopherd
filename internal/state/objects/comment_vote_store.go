@@ -67,6 +67,32 @@ type CommentVoteStore struct {
 	// cold scan entirely when the count is 0 (the live-comment common case),
 	// so hot threads pay zero disk overhead.
 	coldCount map[commentPK]int
+
+	// Reusable scratch for the per-vote cold-write hot path (coldPutVote):
+	// bset copies into the pebble batch, so one grow-once buffer backs every
+	// eviction. Eliminates AppendCommentVote + 2 vote-key allocs per evicted
+	// vote.
+	scratchBlobV []byte
+	scratchKeyV  []byte
+}
+
+// appendColdVotePrimaryKey writes tableKey(coldTableVotePrimary,
+// commentVoteKey(voter,author,permlink)) into dst[:0] alloc-free.
+func appendColdVotePrimaryKey(dst []byte, voter, author auth.AccountName, permlink string) []byte {
+	dst = append(dst, coldTableVotePrimary)
+	dst = state.AppendAccountName(dst, string(voter))
+	dst = state.AppendAccountName(dst, string(author))
+	return append(dst, permlink...)
+}
+
+// appendColdVoteByCommentKey writes tableKey(coldTableVoteByComment,
+// commentVoteByCommentKey(author,permlink,voter)) into dst[:0] alloc-free.
+func appendColdVoteByCommentKey(dst []byte, author auth.AccountName, permlink string, voter auth.AccountName) []byte {
+	dst = append(dst, coldTableVoteByComment)
+	dst = state.AppendAccountName(dst, string(author))
+	dst = append(dst, permlink...)
+	dst = append(dst, 0)
+	return state.AppendAccountName(dst, string(voter))
 }
 
 type commentVoteUndo struct {
@@ -137,9 +163,11 @@ func (s *CommentVoteStore) coldGetVote(voter, author auth.AccountName, permlink 
 // coldPutVote writes a vote into the cold tier (primary + by-comment index)
 // and bumps the per-comment cold counter.
 func (s *CommentVoteStore) coldPutVote(cv *CommentVote) {
-	blob := AppendCommentVote(nil, cv)
-	s.cold.bset(tableKey(coldTableVotePrimary, commentVoteKey(cv.Voter, cv.Author, cv.Permlink)), blob)
-	s.cold.bset(tableKey(coldTableVoteByComment, commentVoteByCommentKey(cv.Author, cv.Permlink, cv.Voter)), blob)
+	s.scratchBlobV = AppendCommentVote(s.scratchBlobV[:0], cv)
+	s.scratchKeyV = appendColdVotePrimaryKey(s.scratchKeyV[:0], cv.Voter, cv.Author, cv.Permlink)
+	s.cold.bset(s.scratchKeyV, s.scratchBlobV)
+	s.scratchKeyV = appendColdVoteByCommentKey(s.scratchKeyV[:0], cv.Author, cv.Permlink, cv.Voter)
+	s.cold.bset(s.scratchKeyV, s.scratchBlobV)
 	s.coldCount[newCommentPK(cv.Author, cv.Permlink)]++
 }
 

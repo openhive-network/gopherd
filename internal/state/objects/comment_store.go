@@ -79,6 +79,46 @@ type CommentStore struct {
 	// false-positive that costs one wasted, correct probe). nil until cold
 	// tier attached.
 	bloom *coldBloom
+
+	// Reusable scratch buffers for the cold-tier eviction/promote hot path.
+	// bset (pebble batch.Set) and bloom.add/coldKV.get all COPY or HASH the
+	// key/val rather than retaining the slice, so a single grow-once buffer
+	// can back every per-evict serialization. Eliminates ~6 allocations per
+	// eviction (AppendComment + 2 cold keys ×(commentKey+tableKey) + bloom
+	// key) — the dominant alloc source at block 16M (cap=1.5M): AppendComment
+	// 9.8GB + commentKey/byRootKey/tableKey ~16GB / 60s.
+	scratchBlob []byte
+	scratchKey  []byte
+	scratchKey2 []byte
+}
+
+// appendColdPrimaryKey writes coldPrimaryKey(author,permlink) into dst[:0]
+// without the intermediate commentKey/tableKey allocations.
+func appendColdPrimaryKey(dst []byte, author auth.AccountName, permlink string) []byte {
+	dst = append(dst, coldTableCommentPrimary)
+	dst = state.AppendAccountName(dst, string(author))
+	return append(dst, permlink...)
+}
+
+// appendColdByRootKey writes coldByRootKeyOf(c) into dst[:0] alloc-free.
+func appendColdByRootKey(dst []byte, c *Comment) []byte {
+	ra, rp := c.RootAuthor, c.RootPermlink
+	if ra == "" {
+		ra, rp = c.Author, c.Permlink
+	}
+	dst = append(dst, coldTableCommentByRoot)
+	dst = state.AppendAccountName(dst, string(ra))
+	dst = append(dst, rp...)
+	dst = append(dst, 0x00)
+	dst = state.AppendAccountName(dst, string(c.Author))
+	return append(dst, c.Permlink...)
+}
+
+// appendCommentKeyRaw writes commentKey(author,permlink) into dst[:0]
+// (used for the bloom key, which is hashed not retained).
+func appendCommentKeyRaw(dst []byte, author auth.AccountName, permlink string) []byte {
+	dst = state.AppendAccountName(dst, string(author))
+	return append(dst, permlink...)
 }
 
 type commentUndo struct {
@@ -237,7 +277,8 @@ func (s *CommentStore) coldGet(author auth.AccountName, permlink string) (Commen
 	if s.cold == nil || !s.coldMaybe(author, permlink) {
 		return Comment{}, false
 	}
-	blob, ok := s.cold.get(coldPrimaryKey(author, permlink))
+	s.scratchKey = appendColdPrimaryKey(s.scratchKey[:0], author, permlink)
+	blob, ok := s.cold.get(s.scratchKey)
 	if !ok {
 		return Comment{}, false
 	}
@@ -273,9 +314,12 @@ func (s *CommentStore) promote(author auth.AccountName, permlink string) (*Comme
 		// Re-accessed cold comment is an eviction candidate again.
 		s.evictQueue = append(s.evictQueue, key)
 	}
-	// Drop cold entries + counters.
-	s.cold.del(coldPrimaryKey(author, permlink))
-	s.cold.del(s.coldByRootKeyOf(cp))
+	// Drop cold entries + counters (scratch reused — coldGet above already
+	// returned, so its buffer use is complete).
+	s.scratchKey = appendColdPrimaryKey(s.scratchKey[:0], author, permlink)
+	s.cold.del(s.scratchKey)
+	s.scratchKey = appendColdByRootKey(s.scratchKey[:0], cp)
+	s.cold.del(s.scratchKey)
 	s.coldTotal--
 	if n := s.coldRoot[rootKey] - 1; n <= 0 {
 		delete(s.coldRoot, rootKey)
@@ -298,11 +342,17 @@ func (s *CommentStore) Evict(author auth.AccountName, permlink string) bool {
 		return false
 	}
 	rootKey := s.rootKeyOf(c)
-	blob := AppendComment(nil, c)
-	s.cold.bset(coldPrimaryKey(author, permlink), blob)
-	s.cold.bset(s.coldByRootKeyOf(c), blob)
+	// Alloc-free: serialize once + build both cold keys into reused scratch
+	// buffers. bset copies into the pebble batch, so the buffers are free to
+	// reuse immediately after each call.
+	s.scratchBlob = AppendComment(s.scratchBlob[:0], c)
+	s.scratchKey = appendColdPrimaryKey(s.scratchKey[:0], author, permlink)
+	s.cold.bset(s.scratchKey, s.scratchBlob)
+	s.scratchKey = appendColdByRootKey(s.scratchKey[:0], c)
+	s.cold.bset(s.scratchKey, s.scratchBlob)
 	if s.bloom != nil {
-		s.bloom.add(commentKey(author, permlink))
+		s.scratchKey2 = appendCommentKeyRaw(s.scratchKey2[:0], author, permlink)
+		s.bloom.add(s.scratchKey2)
 	}
 	s.byRootRemove(rootKey, c)
 	delete(s.primary, key)
