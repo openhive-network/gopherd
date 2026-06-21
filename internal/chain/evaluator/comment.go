@@ -1057,8 +1057,13 @@ func (voteEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	if isNew {
 		objects.PutCommentVote(ctx.DB, &objects.CommentVote{
 			Voter:          v.Voter,
-			Author:         v.Author,
-			Permlink:       v.Permlink,
+			// Share the comment's resident Author/Permlink backing strings
+			// (identical values — c was looked up by v.Author/v.Permlink) so
+			// the stored vote doesn't retain its own permlink copy. Permlinks
+			// (often >16B, not interned) are the #1 resident object source
+			// (~50% of live objects); votes are the biggest duplicator.
+			Author:         c.Author,
+			Permlink:       c.Permlink,
 			Weight:         v.Weight,
 			NumChanges:     0,
 			Rshares:        rshares,
@@ -1117,8 +1122,8 @@ func (voteEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		// path).
 		recast := objects.CommentVote{
 			Voter:          v.Voter,
-			Author:         v.Author,
-			Permlink:       v.Permlink,
+			Author:         c.Author, // share comment's backing (see isNew path)
+			Permlink:       c.Permlink,
 			Weight:         v.Weight,
 			NumChanges:     prev.NumChanges + 1,
 			Rshares:        rshares,
