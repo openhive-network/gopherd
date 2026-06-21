@@ -145,6 +145,31 @@ func cmdReplay(args []string) int {
 		objects.EnsureConvertRequestStore(boot)
 	}
 
+	// Cold tier: spill frozen comments + their votes to an on-disk scratch
+	// store so the RAM working set stays bounded. Attached BEFORE any snapshot
+	// load so CommentStore.UnmarshalSnapshot can spill already-paid comments
+	// straight to disk instead of loading every comment resident (a deep
+	// snapshot has ~175M comments and would OOM a 31 GB box otherwise).
+	// Disabled when --comment-resident-cap=0.
+	var commentStoreForEvict *objects.CommentStore
+	var voteStoreForEvict *objects.CommentVoteStore
+	if *residentCap > 0 {
+		cold, cerr := objects.OpenColdTier(*coldDir, *coldMmap)
+		if cerr != nil {
+			fmt.Fprintf(os.Stderr, "replay: open cold tier: %v\n", cerr)
+			return 1
+		}
+		defer cold.Close()
+		boot := state.NewSession(stateDB)
+		commentStoreForEvict = objects.EnsureCommentStore(boot)
+		voteStoreForEvict = objects.EnsureCommentVoteStore(boot)
+		commentStoreForEvict.SetColdTier(cold)
+		commentStoreForEvict.SetResidentCap(*residentCap)
+		voteStoreForEvict.SetColdTier(cold)
+		fmt.Printf("replay: cold tier ON — resident cap %d comments, evict budget %d/block, dir %s\n",
+			*residentCap, *evictBudget, cold.Dir())
+	}
+
 	if *loadSnapshot != "" {
 		var head uint32
 		st, sterr := os.Stat(*loadSnapshot)
@@ -203,29 +228,6 @@ func cmdReplay(args []string) int {
 	}
 	if invFineFrom > 0 {
 		fmt.Printf("replay: fine invariant checks every %d blocks from block %d\n", invFineEvery, invFineFrom)
-	}
-
-	// Cold tier: spill frozen comments + their votes to an on-disk scratch
-	// store so the RAM working set stays bounded on long replays. Attached
-	// AFTER any snapshot load (the store objects persist across sessions, so
-	// the attachment survives). Disabled when --comment-resident-cap=0.
-	var commentStoreForEvict *objects.CommentStore
-	var voteStoreForEvict *objects.CommentVoteStore
-	if *residentCap > 0 {
-		cold, cerr := objects.OpenColdTier(*coldDir, *coldMmap)
-		if cerr != nil {
-			fmt.Fprintf(os.Stderr, "replay: open cold tier: %v\n", cerr)
-			return 1
-		}
-		defer cold.Close()
-		boot := state.NewSession(stateDB)
-		commentStoreForEvict = objects.EnsureCommentStore(boot)
-		voteStoreForEvict = objects.EnsureCommentVoteStore(boot)
-		commentStoreForEvict.SetColdTier(cold)
-		commentStoreForEvict.SetResidentCap(*residentCap)
-		voteStoreForEvict.SetColdTier(cold)
-		fmt.Printf("replay: cold tier ON — resident cap %d comments, evict budget %d/block, dir %s\n",
-			*residentCap, *evictBudget, cold.Dir())
 	}
 
 	cdb := chain.New(stateDB)

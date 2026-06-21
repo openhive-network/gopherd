@@ -28,6 +28,7 @@ import (
 //     the SAME pointer as primary[its-own-key].
 //   - undoLog captures pre-mutation state so RestoreToPoint reverts
 //     atomically to a savepoint.
+//
 // commentPK is the struct key used by CommentStore's maps. Go hashes
 // the contents of both strings natively, eliminating the per-lookup
 // commentMapKey alloc that previously dominated cashout-heavy blocks
@@ -71,7 +72,7 @@ type CommentStore struct {
 	// promote (so a re-accessed cold comment becomes a candidate again).
 	// Bounded: entries are popped when evicted, so the queue size tracks the
 	// resident-but-not-yet-evicted population, not the full comment count.
-	evictQueue []commentPK
+	evictQueue  []commentPK
 	residentCap int
 	// coldBloom answers "is this comment DEFINITELY not in the cold tier?"
 	// so the hot path (every new comment does Has() → RAM-miss) skips the
@@ -388,6 +389,26 @@ func (s *CommentStore) Evict(author auth.AccountName, permlink string) bool {
 	s.coldTotal++
 	s.coldRoot[rootKey]++
 	return true
+}
+
+// spillToCold writes a comment DIRECTLY to the cold tier without it ever being
+// resident. Used by UnmarshalSnapshot to load a deep snapshot (hundreds of
+// millions of comments) without OOMing — frozen/paid comments go straight to
+// disk instead of the resident map. Mirrors Evict's cold-write half but skips
+// the resident-map removal (the comment was never inserted).
+func (s *CommentStore) spillToCold(c *Comment) {
+	rootKey := s.rootKeyOf(c)
+	s.scratchBlob = AppendComment(s.scratchBlob[:0], c)
+	s.scratchKey = appendColdPrimaryKey(s.scratchKey[:0], c.Author, c.Permlink)
+	s.cold.bset(s.scratchKey, s.scratchBlob)
+	s.scratchKey = appendColdByRootKey(s.scratchKey[:0], c)
+	s.cold.bset(s.scratchKey, s.scratchBlob)
+	if s.bloom != nil {
+		s.scratchKey2 = appendCommentKeyRaw(s.scratchKey2[:0], c.Author, c.Permlink)
+		s.bloom.add(s.scratchKey2)
+	}
+	s.coldTotal++
+	s.coldRoot[rootKey]++
 }
 
 func (s *CommentStore) SnapshotPoint() int { return len(s.undoLog) }
@@ -1040,12 +1061,24 @@ func (s *CommentStore) UnmarshalSnapshot(r io.Reader) error {
 		return fmt.Errorf("comment_store: unsupported version %d", ver)
 	}
 	count := binary.LittleEndian.Uint32(hdr[4:8])
-	s.primary = make(map[commentPK]*Comment, count)
-	s.byRoot = make(map[commentPK][]*Comment, count/8+1)
+	// When a cold tier + resident cap are attached BEFORE load (deep-snapshot
+	// resume), spill already-paid (frozen) comments straight to the cold tier
+	// instead of loading every comment resident. A 35M-block snapshot holds
+	// ~175M comments (~22 GB serialized); loading all resident is ~30 GB+ and
+	// OOMs a 31 GB box. Paid comments are never mutated again by consensus
+	// (cashout is done), so disk is the right home; only the unpaid working set
+	// stays resident. This is what makes warm-start from a deep snapshot viable.
+	spill := s.cold != nil && s.residentCap > 0
+	residentHint := int(count)
+	if spill && residentHint > 4*s.residentCap {
+		residentHint = 4 * s.residentCap // expect ~unpaid set resident
+	}
+	s.primary = make(map[commentPK]*Comment, residentHint)
+	s.byRoot = make(map[commentPK][]*Comment, residentHint/8+1)
 	s.undoLog = s.undoLog[:0]
-	// Everything loads into RAM; cold tier starts empty after a load.
-	s.coldRoot = make(map[commentPK]int)
-	s.coldTotal = 0
+	if s.coldRoot == nil {
+		s.coldRoot = make(map[commentPK]int)
+	}
 	for i := uint32(0); i < count; i++ {
 		recLen, err := binary.ReadUvarint(br)
 		if err != nil {
@@ -1059,13 +1092,24 @@ func (s *CommentStore) UnmarshalSnapshot(r io.Reader) error {
 		if err != nil {
 			return fmt.Errorf("comment_store: decode rec[%d]: %w", i, err)
 		}
+		if spill && c.WasPaid {
+			s.spillToCold(&c)
+			continue
+		}
+		// Resident (unpaid working set, or all-RAM when no cold tier).
+		// Reconstruct WasVotedOn for snapshots written before that field
+		// existed: any accumulated rshares implies the comment was voted on
+		// (the comment_options tightening gate reads WasVotedOn). Harmless on
+		// newer snapshots — the value is already set, the OR keeps it.
+		c.WasVotedOn = c.WasVotedOn || c.AbsRshares != 0 || c.NetRshares != 0 || c.VoteRshares != 0
 		cp := c
 		key := newCommentPK(cp.Author, cp.Permlink)
 		s.primary[key] = &cp
-		// Rebuild byRoot.
 		rootKey := s.rootKeyOf(&cp)
 		s.byRoot[rootKey] = append(s.byRoot[rootKey], &cp)
+		if s.residentCap > 0 {
+			s.evictQueue = append(s.evictQueue, key)
+		}
 	}
 	return nil
 }
-
