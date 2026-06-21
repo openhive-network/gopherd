@@ -232,11 +232,28 @@ func (s *CommentStore) EvictFrozen(cvs *CommentVoteStore, budget int) int {
 		return 0
 	}
 	evicted := 0
-	for len(s.primary) > s.residentCap && evicted < budget && len(s.evictQueue) > 0 {
+	// Bound the scan to one pass over the current queue so deferring unpaid
+	// comments (re-queued at the back) can never spin.
+	scanned := 0
+	limit := len(s.evictQueue)
+	for len(s.primary) > s.residentCap && evicted < budget && len(s.evictQueue) > 0 && scanned < limit {
 		key := s.evictQueue[0]
 		s.evictQueue = s.evictQueue[1:]
-		if _, ok := s.primary[key]; !ok {
+		scanned++
+		c, ok := s.primary[key]
+		if !ok {
 			continue // stale (already evicted/deleted) — drop
+		}
+		// Never evict a comment that has not cashed out yet. It is GUARANTEED to
+		// be read back at its cashout (a random disk read + promote in the cold
+		// tier), so evicting an unpaid comment is pure thrash: it would be paged
+		// out only to be paged straight back in days-of-blocks later. Defer it
+		// (move to the back) so it's reconsidered once paid. Paid comments are
+		// older, so they sit at the FRONT of this age-ordered queue and are hit
+		// first — the common path evicts without ever reaching an unpaid one.
+		if !c.WasPaid {
+			s.evictQueue = append(s.evictQueue, key)
+			continue
 		}
 		author, permlink := auth.AccountName(key.author), key.permlink
 		if s.Evict(author, permlink) {
