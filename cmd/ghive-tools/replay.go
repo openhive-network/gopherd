@@ -13,19 +13,38 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"path/filepath"
 	"runtime"
 	"runtime/pprof"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"hived-go/internal/blocklog"
 	"hived-go/internal/chain"
+	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/state"
 	"hived-go/internal/state/genesis"
 	"hived-go/internal/state/objects"
 	"hived-go/internal/state/snapshot"
 )
+
+// snapBlockNum parses the block height from a snapshot dir path of the form
+// ".../block-<N>" (used to pick the HF era before loading). Returns 0 if the
+// path isn't in that form.
+func snapBlockNum(path string) uint32 {
+	base := filepath.Base(path)
+	const pfx = "block-"
+	if !strings.HasPrefix(base, pfx) {
+		return 0
+	}
+	n, err := strconv.ParseUint(base[len(pfx):], 10, 32)
+	if err != nil {
+		return 0
+	}
+	return uint32(n)
+}
 
 func cmdReplay(args []string) int {
 	fs := flag.NewFlagSet("replay", flag.ContinueOnError)
@@ -166,8 +185,22 @@ func cmdReplay(args []string) int {
 		commentStoreForEvict.SetColdTier(cold)
 		commentStoreForEvict.SetResidentCap(*residentCap)
 		voteStoreForEvict.SetColdTier(cold)
-		fmt.Printf("replay: cold tier ON — resident cap %d comments, evict budget %d/block, dir %s\n",
-			*residentCap, *evictBudget, cold.Dir())
+		// Post-HF17 the by-root cold index is never read (only the pre-HF17
+		// cashout sibling-walk consumes it), so skip writing it — halves cold
+		// writes (eviction + snapshot-load cost). Decide the era from the start
+		// block: the snapshot block when resuming (set BEFORE load so the spill
+		// honors it), else genesis. The per-block loop keeps it correct across
+		// the HF17 boundary for genesis runs.
+		startBlk := uint32(1)
+		if *loadSnapshot != "" {
+			if n := snapBlockNum(*loadSnapshot); n > 0 {
+				startBlk = n
+			}
+		}
+		byRootCold := !hardfork.SetForBlock(startBlk).Has(hardfork.HF17)
+		commentStoreForEvict.SetColdByRootEnabled(byRootCold)
+		fmt.Printf("replay: cold tier ON — resident cap %d comments, evict budget %d/block, by-root cold %v, dir %s\n",
+			*residentCap, *evictBudget, byRootCold, cold.Dir())
 	}
 
 	if *loadSnapshot != "" {
@@ -296,6 +329,9 @@ func cmdReplay(args []string) int {
 		// Post-commit safe point: spill frozen comments + votes to the cold
 		// tier if over the resident cap (no-op when the cold tier is off).
 		if commentStoreForEvict != nil {
+			// Keep the by-root cold gate correct across the HF17 boundary
+			// (monotonic; cheap). Post-HF17 skips the dead by-root cold writes.
+			commentStoreForEvict.SetColdByRootEnabled(!hardfork.SetForBlock(n).Has(hardfork.HF17))
 			commentStoreForEvict.EvictFrozen(voteStoreForEvict, *evictBudget)
 		}
 		if *watchAccount != "" {

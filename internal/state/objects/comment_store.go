@@ -74,6 +74,15 @@ type CommentStore struct {
 	// resident-but-not-yet-evicted population, not the full comment count.
 	evictQueue  []commentPK
 	residentCap int
+	// coldByRootEnabled controls whether evictions/spills write the by-root
+	// cold index (and bump coldRoot). The by-root cold index exists ONLY to
+	// serve RangeByRoot's cold scan, whose only consensus caller is the
+	// PRE-HF17 cashout sibling-walk (comment_cashout.go); the HF17+ cashout
+	// path pays each comment individually and never walks by-root. So once HF17
+	// is active the by-root cold index is write-only dead weight (~half of all
+	// cold writes + the dominant snapshot-load cost). The driver sets this
+	// false for post-HF17 blocks. Default true preserves pre-HF17 correctness.
+	coldByRootEnabled bool
 	// coldBloom answers "is this comment DEFINITELY not in the cold tier?"
 	// so the hot path (every new comment does Has() → RAM-miss) skips the
 	// Pebble probe for genuinely-new keys. Add-only (promotion leaves a
@@ -166,13 +175,19 @@ func EnsureCommentStore(s *state.Session) *CommentStore {
 
 func newCommentStore() *CommentStore {
 	return &CommentStore{
-		primary:     make(map[commentPK]*Comment, 4096),
-		byRoot:      make(map[commentPK][]*Comment, 1024),
-		undoLog:     make([]commentUndo, 0, 64),
-		freeComment: make([]*Comment, 0, 256),
-		coldRoot:    make(map[commentPK]int),
+		primary:           make(map[commentPK]*Comment, 4096),
+		byRoot:            make(map[commentPK][]*Comment, 1024),
+		undoLog:           make([]commentUndo, 0, 64),
+		freeComment:       make([]*Comment, 0, 256),
+		coldRoot:          make(map[commentPK]int),
+		coldByRootEnabled: true,
 	}
 }
+
+// SetColdByRootEnabled controls whether eviction/spill writes the by-root cold
+// index. Set false once HF17 is active (post-HF17 never reads it). See the field
+// doc. Idempotent; cheap to call per block.
+func (s *CommentStore) SetColdByRootEnabled(b bool) { s.coldByRootEnabled = b }
 
 // SetColdTier attaches (or detaches, with nil) the on-disk cold tier. Must be
 // called before any eviction. Unset → pure in-RAM behavior.
@@ -371,8 +386,10 @@ func (s *CommentStore) Evict(author auth.AccountName, permlink string) bool {
 	s.scratchBlob = AppendComment(s.scratchBlob[:0], c)
 	s.scratchKey = appendColdPrimaryKey(s.scratchKey[:0], author, permlink)
 	s.cold.bset(s.scratchKey, s.scratchBlob)
-	s.scratchKey = appendColdByRootKey(s.scratchKey[:0], c)
-	s.cold.bset(s.scratchKey, s.scratchBlob)
+	if s.coldByRootEnabled {
+		s.scratchKey = appendColdByRootKey(s.scratchKey[:0], c)
+		s.cold.bset(s.scratchKey, s.scratchBlob)
+	}
 	if s.bloom != nil {
 		s.scratchKey2 = appendCommentKeyRaw(s.scratchKey2[:0], author, permlink)
 		s.bloom.add(s.scratchKey2)
@@ -387,7 +404,9 @@ func (s *CommentStore) Evict(author auth.AccountName, permlink string) bool {
 	// reference lets GC reclaim the slot + its strings immediately; the cold
 	// blob on disk is the retained copy.
 	s.coldTotal++
-	s.coldRoot[rootKey]++
+	if s.coldByRootEnabled {
+		s.coldRoot[rootKey]++
+	}
 	return true
 }
 
@@ -401,14 +420,18 @@ func (s *CommentStore) spillToCold(c *Comment) {
 	s.scratchBlob = AppendComment(s.scratchBlob[:0], c)
 	s.scratchKey = appendColdPrimaryKey(s.scratchKey[:0], c.Author, c.Permlink)
 	s.cold.bset(s.scratchKey, s.scratchBlob)
-	s.scratchKey = appendColdByRootKey(s.scratchKey[:0], c)
-	s.cold.bset(s.scratchKey, s.scratchBlob)
+	if s.coldByRootEnabled {
+		s.scratchKey = appendColdByRootKey(s.scratchKey[:0], c)
+		s.cold.bset(s.scratchKey, s.scratchBlob)
+	}
 	if s.bloom != nil {
 		s.scratchKey2 = appendCommentKeyRaw(s.scratchKey2[:0], c.Author, c.Permlink)
 		s.bloom.add(s.scratchKey2)
 	}
 	s.coldTotal++
-	s.coldRoot[rootKey]++
+	if s.coldByRootEnabled {
+		s.coldRoot[rootKey]++
+	}
 }
 
 func (s *CommentStore) SnapshotPoint() int { return len(s.undoLog) }
