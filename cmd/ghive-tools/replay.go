@@ -45,6 +45,7 @@ func cmdReplay(args []string) int {
 	coldDir := fs.String("cold-dir", "", "directory for the scratch cold tier (default: a tempdir, removed on exit). Only used when --comment-resident-cap>0.")
 	coldMmap := fs.Bool("cold-mmap", false, "use the mmap cold-tier backend (faster, zero-copy) instead of pebble")
 	evictBudget := fs.Int("evict-budget", 20000, "max comments evicted per block when over the resident cap")
+	parallelApply := fs.Int("parallel-apply", 0, "if >0, apply each block's transactions via the optimistic parallel harness with this many workers (replay mode only; bit-identical to serial). 0 = serial (default).")
 	loadSnapshot := fs.String("load-snapshot", "", "if set, load state from this snapshot path (file = legacy single-file format; directory = block-N dir produced by --snapshot-every; skips genesis + replay before snapshot block)")
 	saveSnapshotAt := fs.Uint("save-snapshot-at", 0, "block number after which to save a single-file snapshot (0 = don't save)")
 	saveSnapshotTo := fs.String("save-snapshot-to", "", "single-file snapshot output path (used with --save-snapshot-at)")
@@ -236,6 +237,7 @@ func cmdReplay(args []string) int {
 	opts := chain.ApplyOptions{
 		Sync:                      false,
 		SkipUnknownOps:            false,
+		ParallelApply:             *parallelApply,
 		TolerateFailingOps:        *tolerateFailing,
 		SkipTransactionSignatures: true, // replay always skips sigs
 		SkipBlockSignature:        true,

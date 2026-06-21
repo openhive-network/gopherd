@@ -288,6 +288,15 @@ func (d *Database) HeadBlockID() (block.ID, error) {
 
 // ApplyOptions tunes ApplyBlock behavior.
 type ApplyOptions struct {
+	// ParallelApply, when > 0 AND the replay-mode skip flags are all set
+	// (SkipTransactionSignatures, SkipTxSavepoints, SkipDedupAndTaPOS), runs a
+	// block's transactions through the optimistic parallel harness with this
+	// many workers (see internal/chain/PARALLEL_DESIGN.md and parallel.go).
+	// 0 = the serial tx loop (default). The result is bit-identical to serial:
+	// transactions whose ops are all speculative-supported and whose read-set
+	// validates are applied from their buffered write-set; everything else is
+	// re-executed serially in transaction order.
+	ParallelApply int
 	// SkipUnknownOps causes ApplyBlock to ignore evaluator.ErrNotImplemented
 	// (treating the op as a no-op). Default false; with the stub registry in
 	// place every op is registered, so this should rarely be needed.
@@ -649,210 +658,223 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	// Truncate the per-block virtual-op buffer (see block_vops.go).
 	d.resetVOps()
 	var skippedThisBlock uint64
-	for i := uint32(0); i < txCount; i++ {
-		var txRes tx.ReadResult
-		var err error
-		if opts.SkipTransactionSignatures {
-			txRes, err = tx.ReadSignedTransactionSkipSigs(r)
-		} else {
-			txRes, err = tx.ReadSignedTransaction(r)
+	// Optimistic parallel tx application (replay mode only). Bit-identical to
+	// the serial loop below; see parallel.go / PARALLEL_DESIGN.md.
+	useParallel := opts.ParallelApply > 0 && opts.SkipTransactionSignatures &&
+		opts.SkipTxSavepoints && opts.SkipDedupAndTaPOS
+	if useParallel {
+		var perr error
+		skippedThisBlock, perr = d.applyTxsParallel(ctx, session, r, txCount,
+			blockNum, hdr.Timestamp, opts, stats, opts.ParallelApply)
+		if perr != nil {
+			return objects.DynamicGlobalProperty{}, perr
 		}
-		if err != nil {
-			return objects.DynamicGlobalProperty{}, fmt.Errorf("apply_block %d tx %d parse: %w", blockNum, i, err)
-		}
-		// hived's apply_block wraps each push_transaction in its own
-		// undo session — if any op in the tx throws, the whole tx is
-		// rolled back atomically. Subsequent txs in the same block
-		// are unaffected. We mirror that by snapshotting the overlay
-		// at tx-start; on failure we Restore. Under SkipTxSavepoints
-		// (trusted-block_log replay) the savepoint is skipped and a
-		// failure halts immediately — no rollback is possible.
-		var txSnap state.Savepoint
-		if !opts.SkipTxSavepoints {
-			txSnap = session.Snapshot()
-		}
-		txFailed := false
-		var failOp string
-		var failErr error
-
-		// Compute the tx_id (first 20 bytes of sha256 over the unsigned
-		// transaction body). Used by both TaPOS and dedup checks below.
-		// Skipped under SkipDedupAndTaPOS (replay against canonical
-		// block_log) — sha256 is ~5s of CPU across an 8M run.
-		var txID [20]byte
-		if !opts.SkipDedupAndTaPOS {
-			ub := rawBlock[hdrLen+txRes.UnsignedStart : hdrLen+txRes.UnsignedEnd]
-			txID = tx.IDFromDigest(tx.DigestFromBytes(ub))
-		}
-
-		// Pre-flight checks: expiration window + dedup + TaPOS slot
-		// existence. Pass `headBlockTime` (= dgpo.Time at start of
-		// apply_block, i.e. PREVIOUS block's timestamp) — this is what
-		// hived's push_transaction sees, NOT the current block's
-		// timestamp. Using hdr.Timestamp here would make the expiration
-		// window 3 seconds tighter than C++ and reject the trailing
-		// edge of legitimate txs.
-		// Signature verification (live-sync only — replay sets
-		// SkipTransactionSignatures since the canonical block_log was
-		// already validated upstream). Pre-HF24 the sig digest is
-		// over OldChainID || unsigned_tx; HF24+ uses ChainID.
-		//
-		// Mirror C++ full_transaction.cpp:479 EXACTLY: the chain-ID
-		// switch is gated on the BLOCK TIMESTAMP vs
-		// HIVE_HARDFORK_1_24_ACTUAL_TIME (1602703884), NOT on the
-		// hf.Has(HF24) block-number predicate. The two cross-over
-		// points sit ~158k blocks apart — a 5.5-day window where a
-		// block-number-gated check recovers the wrong pubkey for every
-		// signed tx. Masked today by SkipTransactionSignatures in
-		// replay; breaks live-sync if not fixed.
-		if !opts.SkipTransactionSignatures {
-			const hf24ActualTime uint32 = 1602703884
-			chainID := network.OldChainID
-			if hdr.Timestamp > hf24ActualTime {
-				chainID = network.ChainID
-			}
-			unsignedBytes := rawBlock[hdrLen+txRes.UnsignedStart : hdrLen+txRes.UnsignedEnd]
-			// Use pre-recovered signer keys when the upstream worker
-			// pool already did the secp256k1 work — that lifts the
-			// dominant CPU cost out of this serial loop. Fall through
-			// to the serial path when the slot is nil (recovery failed
-			// upstream — surface the canonical error here) or when
-			// PreRecoveredTxKeys wasn't supplied (replay tools, tests).
-			var sigErr error
-			if int(i) < len(opts.PreRecoveredTxKeys) && opts.PreRecoveredTxKeys[i] != nil {
-				sigErr = VerifyAuthorityWithKeys(session, &txRes.SignedTx, opts.PreRecoveredTxKeys[i])
+	} else {
+		for i := uint32(0); i < txCount; i++ {
+			var txRes tx.ReadResult
+			var err error
+			if opts.SkipTransactionSignatures {
+				txRes, err = tx.ReadSignedTransactionSkipSigs(r)
 			} else {
-				sigErr = VerifyAuthority(session, &txRes.SignedTx, unsignedBytes, chainID, false)
+				txRes, err = tx.ReadSignedTransaction(r)
 			}
-			if sigErr != nil {
-				txFailed = true
-				failOp = "tx-sigverify"
-				failErr = sigErr
-				if !opts.SkipTxSavepoints {
-					session.Restore(txSnap)
-				}
-				if stats != nil {
-					stats.recordSkip(failOp, failErr)
-				}
-				skippedThisBlock++
-				if opts.TolerateFailingOps {
-					continue
-				}
-				return objects.DynamicGlobalProperty{}, fmt.Errorf("apply_block %d tx %d: %w", blockNum, i, failErr)
+			if err != nil {
+				return objects.DynamicGlobalProperty{}, fmt.Errorf("apply_block %d tx %d parse: %w", blockNum, i, err)
 			}
-		}
-		if !opts.SkipDedupAndTaPOS {
-			if err := validateTxPreFlight(session, &txRes.SignedTx, blockNum, headBlockTime, txID, !opts.SkipBlockSignature); err != nil {
-				txFailed = true
-				failOp = "tx-preflight"
-				failErr = err
-				if !opts.SkipTxSavepoints {
-					session.Restore(txSnap)
-				}
-				if stats != nil {
-					stats.recordSkip(failOp, failErr)
-				}
-				skippedThisBlock++
-				if opts.TolerateFailingOps {
-					continue
-				}
-				return objects.DynamicGlobalProperty{}, fmt.Errorf("apply_block %d tx %d: %w", blockNum, i, failErr)
-			}
-		}
-		// HIVE_CUSTOM_OP_BLOCK_LIMIT (=5) is a mempool-only rule in
-		// hived (custom_op_visitor at database.cpp:578-616 fires from
-		// _push_transaction at :632, NOT from _apply_block). Block
-		// apply trusts the producing witness, so legitimate mainnet
-		// blocks can carry >5 custom_json per account. The cap will be
-		// re-applied when ghive grows a push_transaction entrypoint.
-		if !txFailed {
-			// Phase 5.1 pre-apply tx hook: reset per-tx differential
-			// usage accumulator before any op fires. HF20+ only.
-			resetRCDifferentialForTx(session, blockNum)
-			for j, o := range txRes.SignedTx.Operations {
-				// Phase 5.1 pre-apply op hook: accumulate the (negative)
-				// differential state-bytes for this op into
-				// rc_pending_data BEFORE the op mutates the existing
-				// state. HF20+ only.
-				applyRCDifferentialForOp(session, o, blockNum)
-				if err := evaluator.ApplyOp(ctx, o); err != nil {
-					txFailed = true
-					failOp = o.Tag.Name()
-					failErr = fmt.Errorf("op %d: %w", j, err)
-					break
-				}
-				if stats != nil {
-					stats.OpsApplied++
-				}
-			}
-		}
-		// HF20+: charge RC for the entire transaction.
-		//
-		// Phase 5 implementation:
-		//   1. count_resources(tx) — per-op resource accumulator.
-		//   2. compute total cost via existing ComputeRCCost (sums
-		//      state_bytes + execution_time + per-tx base).
-		//   3. Accumulate (usage, cost) into rc_pending_data — the
-		//      per-block pending totals are flushed to the active
-		//      rc_usage_bucket at finalize.
-		//   4. Charge the payer's manabar (regen, subtract, saturate
-		//      at HIVE_RC_MAX_NEGATIVE_PERCENT).
-		//   5. Enforce insufficient-RC error when EnforceRC is on (live
-		//      sync); replay leaves it false and lets mana go negative.
-		if !txFailed && hardfork.SetForBlock(blockNum).Has(hardfork.HF20) && len(txRes.SignedTx.Operations) > 0 {
-			rcErr := applyRCForTx(session, &txRes.SignedTx, blockNum, hdr.Timestamp,
-				int64(txRes.SignedEnd-txRes.UnsignedStart), opts.EnforceRC)
-			if rcErr != nil {
-				txFailed = true
-				failOp = "tx-insufficient-rc"
-				failErr = rcErr
-			}
-		}
-		if txFailed {
-			// Roll back the partial tx's writes; subsequent txs proceed.
+			// hived's apply_block wraps each push_transaction in its own
+			// undo session — if any op in the tx throws, the whole tx is
+			// rolled back atomically. Subsequent txs in the same block
+			// are unaffected. We mirror that by snapshotting the overlay
+			// at tx-start; on failure we Restore. Under SkipTxSavepoints
+			// (trusted-block_log replay) the savepoint is skipped and a
+			// failure halts immediately — no rollback is possible.
+			var txSnap state.Savepoint
 			if !opts.SkipTxSavepoints {
-				session.Restore(txSnap)
+				txSnap = session.Snapshot()
 			}
-			// Undo the per-op `OpsApplied` increments for the rolled-back ops.
-			if stats != nil {
-				// Number of ops successfully applied within this tx
-				// before the failure point. Subtract since we're
-				// rolling them back.
-				// (we counted them above per-op; the simplest fix
-				// is to leave stats-level counters and just increment
-				// the skip counter). Here we follow the simpler path
-				// and only count the rolled-back as "skipped".
-				stats.recordSkip(failOp, failErr)
+			txFailed := false
+			var failOp string
+			var failErr error
+
+			// Compute the tx_id (first 20 bytes of sha256 over the unsigned
+			// transaction body). Used by both TaPOS and dedup checks below.
+			// Skipped under SkipDedupAndTaPOS (replay against canonical
+			// block_log) — sha256 is ~5s of CPU across an 8M run.
+			var txID [20]byte
+			if !opts.SkipDedupAndTaPOS {
+				ub := rawBlock[hdrLen+txRes.UnsignedStart : hdrLen+txRes.UnsignedEnd]
+				txID = tx.IDFromDigest(tx.DigestFromBytes(ub))
 			}
-			skippedThisBlock++
-			if opts.SkipUnknownOps && isNotImplemented(failErr) {
-				continue
+
+			// Pre-flight checks: expiration window + dedup + TaPOS slot
+			// existence. Pass `headBlockTime` (= dgpo.Time at start of
+			// apply_block, i.e. PREVIOUS block's timestamp) — this is what
+			// hived's push_transaction sees, NOT the current block's
+			// timestamp. Using hdr.Timestamp here would make the expiration
+			// window 3 seconds tighter than C++ and reject the trailing
+			// edge of legitimate txs.
+			// Signature verification (live-sync only — replay sets
+			// SkipTransactionSignatures since the canonical block_log was
+			// already validated upstream). Pre-HF24 the sig digest is
+			// over OldChainID || unsigned_tx; HF24+ uses ChainID.
+			//
+			// Mirror C++ full_transaction.cpp:479 EXACTLY: the chain-ID
+			// switch is gated on the BLOCK TIMESTAMP vs
+			// HIVE_HARDFORK_1_24_ACTUAL_TIME (1602703884), NOT on the
+			// hf.Has(HF24) block-number predicate. The two cross-over
+			// points sit ~158k blocks apart — a 5.5-day window where a
+			// block-number-gated check recovers the wrong pubkey for every
+			// signed tx. Masked today by SkipTransactionSignatures in
+			// replay; breaks live-sync if not fixed.
+			if !opts.SkipTransactionSignatures {
+				const hf24ActualTime uint32 = 1602703884
+				chainID := network.OldChainID
+				if hdr.Timestamp > hf24ActualTime {
+					chainID = network.ChainID
+				}
+				unsignedBytes := rawBlock[hdrLen+txRes.UnsignedStart : hdrLen+txRes.UnsignedEnd]
+				// Use pre-recovered signer keys when the upstream worker
+				// pool already did the secp256k1 work — that lifts the
+				// dominant CPU cost out of this serial loop. Fall through
+				// to the serial path when the slot is nil (recovery failed
+				// upstream — surface the canonical error here) or when
+				// PreRecoveredTxKeys wasn't supplied (replay tools, tests).
+				var sigErr error
+				if int(i) < len(opts.PreRecoveredTxKeys) && opts.PreRecoveredTxKeys[i] != nil {
+					sigErr = VerifyAuthorityWithKeys(session, &txRes.SignedTx, opts.PreRecoveredTxKeys[i])
+				} else {
+					sigErr = VerifyAuthority(session, &txRes.SignedTx, unsignedBytes, chainID, false)
+				}
+				if sigErr != nil {
+					txFailed = true
+					failOp = "tx-sigverify"
+					failErr = sigErr
+					if !opts.SkipTxSavepoints {
+						session.Restore(txSnap)
+					}
+					if stats != nil {
+						stats.recordSkip(failOp, failErr)
+					}
+					skippedThisBlock++
+					if opts.TolerateFailingOps {
+						continue
+					}
+					return objects.DynamicGlobalProperty{}, fmt.Errorf("apply_block %d tx %d: %w", blockNum, i, failErr)
+				}
 			}
-			if opts.TolerateFailingOps {
-				continue
+			if !opts.SkipDedupAndTaPOS {
+				if err := validateTxPreFlight(session, &txRes.SignedTx, blockNum, headBlockTime, txID, !opts.SkipBlockSignature); err != nil {
+					txFailed = true
+					failOp = "tx-preflight"
+					failErr = err
+					if !opts.SkipTxSavepoints {
+						session.Restore(txSnap)
+					}
+					if stats != nil {
+						stats.recordSkip(failOp, failErr)
+					}
+					skippedThisBlock++
+					if opts.TolerateFailingOps {
+						continue
+					}
+					return objects.DynamicGlobalProperty{}, fmt.Errorf("apply_block %d tx %d: %w", blockNum, i, failErr)
+				}
 			}
-			return objects.DynamicGlobalProperty{}, fmt.Errorf("apply_block %d tx %d: %w", blockNum, i, failErr)
+			// HIVE_CUSTOM_OP_BLOCK_LIMIT (=5) is a mempool-only rule in
+			// hived (custom_op_visitor at database.cpp:578-616 fires from
+			// _push_transaction at :632, NOT from _apply_block). Block
+			// apply trusts the producing witness, so legitimate mainnet
+			// blocks can carry >5 custom_json per account. The cap will be
+			// re-applied when ghive grows a push_transaction entrypoint.
+			if !txFailed {
+				// Phase 5.1 pre-apply tx hook: reset per-tx differential
+				// usage accumulator before any op fires. HF20+ only.
+				resetRCDifferentialForTx(session, blockNum)
+				for j, o := range txRes.SignedTx.Operations {
+					// Phase 5.1 pre-apply op hook: accumulate the (negative)
+					// differential state-bytes for this op into
+					// rc_pending_data BEFORE the op mutates the existing
+					// state. HF20+ only.
+					applyRCDifferentialForOp(session, o, blockNum)
+					if err := evaluator.ApplyOp(ctx, o); err != nil {
+						txFailed = true
+						failOp = o.Tag.Name()
+						failErr = fmt.Errorf("op %d: %w", j, err)
+						break
+					}
+					if stats != nil {
+						stats.OpsApplied++
+					}
+				}
+			}
+			// HF20+: charge RC for the entire transaction.
+			//
+			// Phase 5 implementation:
+			//   1. count_resources(tx) — per-op resource accumulator.
+			//   2. compute total cost via existing ComputeRCCost (sums
+			//      state_bytes + execution_time + per-tx base).
+			//   3. Accumulate (usage, cost) into rc_pending_data — the
+			//      per-block pending totals are flushed to the active
+			//      rc_usage_bucket at finalize.
+			//   4. Charge the payer's manabar (regen, subtract, saturate
+			//      at HIVE_RC_MAX_NEGATIVE_PERCENT).
+			//   5. Enforce insufficient-RC error when EnforceRC is on (live
+			//      sync); replay leaves it false and lets mana go negative.
+			if !txFailed && hardfork.SetForBlock(blockNum).Has(hardfork.HF20) && len(txRes.SignedTx.Operations) > 0 {
+				rcErr := applyRCForTx(session, &txRes.SignedTx, blockNum, hdr.Timestamp,
+					int64(txRes.SignedEnd-txRes.UnsignedStart), opts.EnforceRC)
+				if rcErr != nil {
+					txFailed = true
+					failOp = "tx-insufficient-rc"
+					failErr = rcErr
+				}
+			}
+			if txFailed {
+				// Roll back the partial tx's writes; subsequent txs proceed.
+				if !opts.SkipTxSavepoints {
+					session.Restore(txSnap)
+				}
+				// Undo the per-op `OpsApplied` increments for the rolled-back ops.
+				if stats != nil {
+					// Number of ops successfully applied within this tx
+					// before the failure point. Subtract since we're
+					// rolling them back.
+					// (we counted them above per-op; the simplest fix
+					// is to leave stats-level counters and just increment
+					// the skip counter). Here we follow the simpler path
+					// and only count the rolled-back as "skipped".
+					stats.recordSkip(failOp, failErr)
+				}
+				skippedThisBlock++
+				if opts.SkipUnknownOps && isNotImplemented(failErr) {
+					continue
+				}
+				if opts.TolerateFailingOps {
+					continue
+				}
+				return objects.DynamicGlobalProperty{}, fmt.Errorf("apply_block %d tx %d: %w", blockNum, i, failErr)
+			}
+			// Tx applied cleanly: record it in the dedup window so a future
+			// rebroadcast of the same trx_id is rejected. Skipped under
+			// SkipDedupAndTaPOS for canonical-block_log replay.
+			if !opts.SkipDedupAndTaPOS {
+				objects.PutTransactionRecord(session, &objects.TransactionRecord{
+					TrxID:      txID,
+					Expiration: txRes.SignedTx.Expiration,
+				})
+			}
+			// Release the tx savepoint so subsystem stores can stop logging
+			// undo entries we'll never use. Flips db.UndoEnabled to false
+			// when depth reaches 0, which is the common case once the last
+			// tx in this block succeeds — the per-block hooks that follow
+			// (processProducerReward → AdjustWitnessVotesForVoter,
+			// processCommentCashouts, schedule rebuild) then bypass the
+			// 700-byte Witness / 256-byte Account snap copies entirely.
+			if !opts.SkipTxSavepoints {
+				session.DiscardSavepoint(txSnap)
+			}
 		}
-		// Tx applied cleanly: record it in the dedup window so a future
-		// rebroadcast of the same trx_id is rejected. Skipped under
-		// SkipDedupAndTaPOS for canonical-block_log replay.
-		if !opts.SkipDedupAndTaPOS {
-			objects.PutTransactionRecord(session, &objects.TransactionRecord{
-				TrxID:      txID,
-				Expiration: txRes.SignedTx.Expiration,
-			})
-		}
-		// Release the tx savepoint so subsystem stores can stop logging
-		// undo entries we'll never use. Flips db.UndoEnabled to false
-		// when depth reaches 0, which is the common case once the last
-		// tx in this block succeeds — the per-block hooks that follow
-		// (processProducerReward → AdjustWitnessVotesForVoter,
-		// processCommentCashouts, schedule rebuild) then bypass the
-		// 700-byte Witness / 256-byte Account snap copies entirely.
-		if !opts.SkipTxSavepoints {
-			session.DiscardSavepoint(txSnap)
-		}
-	}
+	} // end else (serial tx loop; parallel path handled above)
 	if stats != nil {
 		stats.OpsSkipped += skippedThisBlock
 		if skippedThisBlock == 0 {
