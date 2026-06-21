@@ -176,6 +176,18 @@ func (sp *SpecContext) SpecKVWrites(fn func(fullKey string, value []byte, tombst
 	}
 }
 
+// NumKVWrites returns the number of buffered K/V writes. The commit phase
+// treats any clean tx with buffered K/V writes as not-yet-applicable (re-exec
+// serially), since K/V-write replay by physical key is a later increment.
+func (sp *SpecContext) NumKVWrites() int { return len(sp.kvWrites) }
+
+// CommittedKVByPhysicalKey reads the committed value for an already-encoded
+// physical key (overlay → readCache → backend), bypassing speculative buffers.
+// Used by the commit phase to validate a speculative tx's K/V read-set.
+func (s *Session) CommittedKVByPhysicalKey(fullKey string) ([]byte, bool) {
+	return s.committedGet([]byte(fullKey))
+}
+
 // SpecKVReadsValid reports whether every recorded K/V read still matches the
 // committed state reachable via getter (used at commit to validate a clean tx).
 func (sp *SpecContext) SpecKVReadsValid(getter func(fullKey string) (value []byte, existed bool)) bool {

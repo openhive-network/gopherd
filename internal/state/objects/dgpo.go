@@ -434,18 +434,29 @@ func ReadDGPO(src []byte) (DynamicGlobalProperty, error) {
 	return p, nil
 }
 
-
 // PutDGPO writes the singleton via the typed DGPOStore. No K/V Put —
 // the previous serialize+overlay path was the largest residual
 // Session.Put alloc source (~1.7 GB / 4M blocks for ~5 PutDGPO calls
 // per block). Restore-on-tx-failure is handled by the subsystem's
 // Snapshot/Restore machinery (DGPOStore.RestoreToPoint).
 func PutDGPO(s *state.Session, p *DynamicGlobalProperty) {
+	if s.Spec != nil {
+		// DGPO is a shared singleton with read-modify-write semantics across
+		// many ops; speculative handling (commutative deltas) is a later
+		// increment. For now, taint so the tx re-executes serially and never
+		// touch the shared store from the parallel phase.
+		s.Spec.Taint()
+		return
+	}
 	EnsureDGPOStore(s).Put(p)
 }
 
 // GetDGPO fetches the singleton.
 func GetDGPO(s *state.Session) (DynamicGlobalProperty, error) {
+	if s.Spec != nil {
+		s.Spec.Taint()
+		return DynamicGlobalProperty{}, state.ErrNotFound
+	}
 	p, ok := EnsureDGPOStore(s).Get()
 	if !ok {
 		return DynamicGlobalProperty{}, state.ErrNotFound
@@ -457,12 +468,20 @@ func GetDGPO(s *state.Session) (DynamicGlobalProperty, error) {
 // Read-only: see DGPOStore.GetRef. Saves the ~1 KB value-copy on hot
 // read paths that only need to inspect a few fields.
 func GetDGPORef(s *state.Session) (*DynamicGlobalProperty, bool) {
+	if s.Spec != nil {
+		s.Spec.Taint()
+		return nil, false
+	}
 	return EnsureDGPOStore(s).GetRef()
 }
 
 // MutateDGPO applies an in-place modification to the DGPO singleton
 // via the slot pointer. See DGPOStore.Mutate.
 func MutateDGPO(s *state.Session, fn func(*DynamicGlobalProperty)) bool {
+	if s.Spec != nil {
+		s.Spec.Taint()
+		return false
+	}
 	return EnsureDGPOStore(s).Mutate(fn)
 }
 

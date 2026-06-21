@@ -82,10 +82,10 @@ type Account struct {
 	// hbd_balance × seconds can exceed int64 for large balances over a
 	// year. Mirrors account_object::hbd_seconds in
 	// libraries/chain/include/hive/chain/account_object.hpp.
-	HBDSeconds              [16]byte
-	HBDSecondsLastUpdate    uint32
-	HBDLastInterestPayment  uint32
-	SavingsHBDSeconds       [16]byte
+	HBDSeconds                    [16]byte
+	HBDSecondsLastUpdate          uint32
+	HBDLastInterestPayment        uint32
+	SavingsHBDSeconds             [16]byte
 	SavingsHBDSecondsLastUpdate   uint32
 	SavingsHBDLastInterestPayment uint32
 	// voting_manabar (libraries/chain/util/manabar.hpp +
@@ -582,11 +582,22 @@ func AccountKey(name auth.AccountName) []byte {
 
 // PutAccount stores a in the session's typed AccountStore.
 func PutAccount(s *state.Session, a *Account) {
+	if s.Spec != nil {
+		specPutAccount(s, a)
+		return
+	}
 	EnsureAccountStore(s).Put(a)
 }
 
 // GetAccount fetches the account named name. Returns ErrNotFound if absent.
 func GetAccount(s *state.Session, name auth.AccountName) (Account, error) {
+	if s.Spec != nil {
+		a, ok := specGetAccount(s, name)
+		if !ok {
+			return Account{}, state.ErrNotFound
+		}
+		return a, nil
+	}
 	a, ok := EnsureAccountStore(s).Get(name)
 	if !ok {
 		return Account{}, state.ErrNotFound
@@ -602,6 +613,9 @@ func GetAccount(s *state.Session, name auth.AccountName) (Account, error) {
 // the ~hundred-byte Account value-copy that GetAccount pays. Use on
 // read-only paths only.
 func GetAccountRef(s *state.Session, name auth.AccountName) (*Account, bool) {
+	if s.Spec != nil {
+		return specGetAccountRef(s, name)
+	}
 	return EnsureAccountStore(s).GetRef(name)
 }
 
@@ -610,16 +624,28 @@ func GetAccountRef(s *state.Session, name auth.AccountName) (*Account, bool) {
 // doesn't exist. Saves the Account value-copy on read + write that
 // the Get+modify+Put pattern pays.
 func MutateAccount(s *state.Session, name auth.AccountName, fn func(*Account)) bool {
+	if s.Spec != nil {
+		return specMutateAccount(s, name, fn)
+	}
 	return EnsureAccountStore(s).Mutate(name, fn)
 }
 
 // HasAccount reports whether an account named name exists.
 func HasAccount(s *state.Session, name auth.AccountName) (bool, error) {
+	if s.Spec != nil {
+		return specHasAccount(s, name), nil
+	}
 	return EnsureAccountStore(s).Has(name), nil
 }
 
 // DeleteAccount removes an account row.
 func DeleteAccount(s *state.Session, name auth.AccountName) {
+	if s.Spec != nil {
+		// Account deletion is not buffered yet: taint so the tx re-executes
+		// serially, and do NOT touch the real store from the parallel phase.
+		s.Spec.Taint()
+		return
+	}
 	EnsureAccountStore(s).Delete(name)
 }
 

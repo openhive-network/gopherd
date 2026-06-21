@@ -384,6 +384,10 @@ func cmdReplay(args []string) int {
 	fmt.Printf("blocks applied: %d (full=%d dirty=%d)\n", applied, stats.BlocksFull, stats.BlocksDirty)
 	fmt.Printf("ops applied:    %d\n", stats.OpsApplied)
 	fmt.Printf("ops skipped:    %d\n", stats.OpsSkipped)
+	if *parallelApply > 0 {
+		pa, pr := chain.ParallelStats()
+		fmt.Printf("parallel:       %d txs applied speculatively, %d re-executed serially\n", pa, pr)
+	}
 	fmt.Printf("block errors:   %d\n", errCount)
 	fmt.Printf("elapsed:        %s\n", dur.Round(time.Millisecond))
 	if applied > 0 {

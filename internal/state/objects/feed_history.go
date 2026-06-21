@@ -87,6 +87,10 @@ const feedHistoryAuxKey = "feed_history"
 // preCommit hook is dropped by Session.Restore). Mirrors the lazy-
 // caching strategy used by PutWitnessSchedule.
 func PutFeedHistory(s *state.Session, h *FeedHistory) {
+	if s.Spec != nil {
+		s.Spec.Taint()
+		return
+	}
 	s.SerScratch = AppendFeedHistory(s.SerScratch[:0], h)
 	s.Put(FeedHistoryTable, state.PrimaryIndex, feedHistorySingletonKey, s.SerScratch)
 	hCopy := *h
@@ -102,6 +106,10 @@ func PutFeedHistory(s *state.Session, h *FeedHistory) {
 // (~hourly), so most reads across blocks hit a warm cache without
 // touching the backend or the deserializer.
 func GetFeedHistory(s *state.Session) (FeedHistory, error) {
+	if s.Spec != nil {
+		s.Spec.Taint()
+		return FeedHistory{}, state.ErrNotFound
+	}
 	// If this Session has written to the FH row, the overlay holds the
 	// new value; bypass the cross-block cache and re-read from overlay.
 	if !s.HasOverlayWrite(FeedHistoryTable, state.PrimaryIndex) {
