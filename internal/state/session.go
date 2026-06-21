@@ -18,7 +18,14 @@ import (
 // because replay is monotonically forward; for the rare reorg path we
 // will add a reverse-undo log later (see plan).
 type Session struct {
-	db      *Database
+	// Spec is non-nil only while this Session is executing a transaction
+	// speculatively during optimistic parallel block application (see
+	// internal/chain/PARALLEL_DESIGN.md). nil on the serial path. The hot
+	// methods below branch on it with a single predictable, always-not-taken
+	// (serial) check, so serial behavior is unchanged.
+	Spec *SpecContext
+
+	db *Database
 	// snapshotGen is incremented every Snapshot() and reset to 0 on
 	// Commit/Undo. Overlay entries record the gen at which they were
 	// allocated; Put can safely mutate an entry's value buffer in
@@ -247,6 +254,12 @@ func newOverlayKeyTree() *btree.BTreeG[string] {
 // (the common case for Read* helpers) are safe.
 func (s *Session) Get(table TableID, index IndexID, body []byte) ([]byte, error) {
 	s.scratch = EncodeKeyInto(s.scratch, table, index, body)
+	if s.Spec != nil {
+		if v, existed := s.specKVGet(s.scratch); existed {
+			return v, nil
+		}
+		return nil, ErrNotFound
+	}
 	if e, ok := s.overlay[string(s.scratch)]; ok {
 		if e.tombstone {
 			return nil, ErrNotFound
@@ -270,6 +283,10 @@ func (s *Session) Get(table TableID, index IndexID, body []byte) ([]byte, error)
 // Has reports whether (table, index, body) exists.
 func (s *Session) Has(table TableID, index IndexID, body []byte) (bool, error) {
 	s.scratch = EncodeKeyInto(s.scratch, table, index, body)
+	if s.Spec != nil {
+		_, existed := s.specKVGet(s.scratch)
+		return existed, nil
+	}
 	if e, ok := s.overlay[string(s.scratch)]; ok {
 		return !e.tombstone, nil
 	}
@@ -290,6 +307,10 @@ func (s *Session) Has(table TableID, index IndexID, body []byte) (bool, error) {
 // to a copy into the existing slot.
 func (s *Session) Put(table TableID, index IndexID, body, value []byte) {
 	s.scratch = EncodeKeyInto(s.scratch, table, index, body)
+	if s.Spec != nil {
+		s.specKVPut(s.scratch, value)
+		return
+	}
 	fullKey := string(s.scratch)
 	// Reuse-in-place: if the overlay already holds a (non-tombstoned)
 	// entry for this key with sufficient capacity, copy into the
@@ -339,6 +360,10 @@ func (s *Session) Put(table TableID, index IndexID, body, value []byte) {
 // Get calls return ErrNotFound until the deletion is undone.
 func (s *Session) Delete(table TableID, index IndexID, body []byte) {
 	s.scratch = EncodeKeyInto(s.scratch, table, index, body)
+	if s.Spec != nil {
+		s.specKVDelete(s.scratch)
+		return
+	}
 	fullKey := string(s.scratch)
 	prev, exists := s.overlay[fullKey]
 	if !exists {
