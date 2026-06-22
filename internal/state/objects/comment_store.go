@@ -248,22 +248,24 @@ func (s *CommentStore) EvictFrozen(cvs *CommentVoteStore, budget int) int {
 		return 0
 	}
 	evicted := 0
-	// Bound the TOTAL scan per call to O(budget), independent of queue length.
-	// Deferred-unpaid entries are re-appended to the back; without this bound
-	// the scan grew with the queue every block (O(N²)), grinding the dense era
-	// to a halt at ~19.x M when the unpaid working set first exceeds the cap.
-	scanBudget := budget*8 + 4096
+	// Guarantee forward progress every call with bounded work. We PREFER to
+	// keep un-cashed-out (unpaid) comments resident — evicting one is pure
+	// promote-back thrash (it's read again at cashout) — so when we hit an
+	// unpaid comment at the front we defer it (re-append to the back). But
+	// deferral alone DEADLOCKS when the unpaid working set exceeds the cap (the
+	// dense era): nothing is paid at the front, everything defers, primary never
+	// drops to the cap, and we burn a bounded-but-useless scan every block
+	// forever (~60 blk/s crawl, looks hung). So we cap deferrals per call at
+	// `deferBudget`; once exhausted we FORCE-evict the oldest regardless of
+	// WasPaid. This evicts up to `budget` per call unconditionally → primary
+	// always drains to the cap, RAM is bounded, thrash is the minimum forced by
+	// cap < unpaid-window. maxScan bounds total work (stale drops + defers +
+	// evicts) so one call is always O(budget).
+	maxScan := budget*4 + 8192
+	deferBudget := budget
 	scanned := 0
-	// Hard ceiling: when the UNPAID working set itself exceeds the cap, we can
-	// never get under it by evicting only paid comments. Past this margin we
-	// MUST evict the oldest comments regardless of WasPaid — a bounded amount of
-	// promote-back thrash (the excess only), which is the lesser evil vs. either
-	// unbounded RAM growth or the O(N²) defer-rescan blowup. Recomputed each
-	// call; the margin lets the genuine cashout-window working set stay resident
-	// (no thrash) while capping RAM at hardCap.
-	hardCap := s.residentCap + s.residentCap/3 // ~1.33× cap
-	for len(s.primary) > s.residentCap && evicted < budget && len(s.evictQueue) > 0 && scanned < scanBudget {
-		forceAny := len(s.primary) > hardCap
+	deferred := 0
+	for len(s.primary) > s.residentCap && evicted < budget && len(s.evictQueue) > 0 && scanned < maxScan {
 		key := s.evictQueue[0]
 		s.evictQueue = s.evictQueue[1:]
 		scanned++
@@ -271,16 +273,13 @@ func (s *CommentStore) EvictFrozen(cvs *CommentVoteStore, budget int) int {
 		if !ok {
 			continue // stale (already evicted/deleted) — drop
 		}
-		// Prefer to keep an un-cashed-out comment resident: it is GUARANTEED to
-		// be read back at its cashout, so evicting it is pure promote-back
-		// thrash. Defer it (move to the back) — UNLESS we're past the hard cap,
-		// where bounding RAM wins and we evict it anyway. Paid comments are
-		// older, so they sit at the FRONT of this age-ordered queue and are hit
-		// first; the common path evicts without ever reaching an unpaid one.
-		if !c.WasPaid && !forceAny {
-			s.evictQueue = append(s.evictQueue, key)
+		if !c.WasPaid && deferred < deferBudget {
+			s.evictQueue = append(s.evictQueue, key) // defer (bounded)
+			deferred++
 			continue
 		}
+		// Evict: paid (preferred), or unpaid past the per-call defer budget
+		// (forced — the minimum thrash needed to keep RAM bounded).
 		author, permlink := auth.AccountName(key.author), key.permlink
 		if s.Evict(author, permlink) {
 			if cvs != nil {
