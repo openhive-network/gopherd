@@ -248,11 +248,22 @@ func (s *CommentStore) EvictFrozen(cvs *CommentVoteStore, budget int) int {
 		return 0
 	}
 	evicted := 0
-	// Bound the scan to one pass over the current queue so deferring unpaid
-	// comments (re-queued at the back) can never spin.
+	// Bound the TOTAL scan per call to O(budget), independent of queue length.
+	// Deferred-unpaid entries are re-appended to the back; without this bound
+	// the scan grew with the queue every block (O(N²)), grinding the dense era
+	// to a halt at ~19.x M when the unpaid working set first exceeds the cap.
+	scanBudget := budget*8 + 4096
 	scanned := 0
-	limit := len(s.evictQueue)
-	for len(s.primary) > s.residentCap && evicted < budget && len(s.evictQueue) > 0 && scanned < limit {
+	// Hard ceiling: when the UNPAID working set itself exceeds the cap, we can
+	// never get under it by evicting only paid comments. Past this margin we
+	// MUST evict the oldest comments regardless of WasPaid — a bounded amount of
+	// promote-back thrash (the excess only), which is the lesser evil vs. either
+	// unbounded RAM growth or the O(N²) defer-rescan blowup. Recomputed each
+	// call; the margin lets the genuine cashout-window working set stay resident
+	// (no thrash) while capping RAM at hardCap.
+	hardCap := s.residentCap + s.residentCap/3 // ~1.33× cap
+	for len(s.primary) > s.residentCap && evicted < budget && len(s.evictQueue) > 0 && scanned < scanBudget {
+		forceAny := len(s.primary) > hardCap
 		key := s.evictQueue[0]
 		s.evictQueue = s.evictQueue[1:]
 		scanned++
@@ -260,14 +271,13 @@ func (s *CommentStore) EvictFrozen(cvs *CommentVoteStore, budget int) int {
 		if !ok {
 			continue // stale (already evicted/deleted) — drop
 		}
-		// Never evict a comment that has not cashed out yet. It is GUARANTEED to
-		// be read back at its cashout (a random disk read + promote in the cold
-		// tier), so evicting an unpaid comment is pure thrash: it would be paged
-		// out only to be paged straight back in days-of-blocks later. Defer it
-		// (move to the back) so it's reconsidered once paid. Paid comments are
+		// Prefer to keep an un-cashed-out comment resident: it is GUARANTEED to
+		// be read back at its cashout, so evicting it is pure promote-back
+		// thrash. Defer it (move to the back) — UNLESS we're past the hard cap,
+		// where bounding RAM wins and we evict it anyway. Paid comments are
 		// older, so they sit at the FRONT of this age-ordered queue and are hit
-		// first — the common path evicts without ever reaching an unpaid one.
-		if !c.WasPaid {
+		// first; the common path evicts without ever reaching an unpaid one.
+		if !c.WasPaid && !forceAny {
 			s.evictQueue = append(s.evictQueue, key)
 			continue
 		}

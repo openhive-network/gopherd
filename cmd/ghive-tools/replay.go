@@ -282,6 +282,7 @@ func cmdReplay(args []string) int {
 
 	type acctSnap struct {
 		balance, hbd, vesting, savings, savingsHBD int64
+		rwdVests, rwdHive, rwdHBD                  int64
 		exists                                     bool
 	}
 	prevSnap := acctSnap{}
@@ -297,6 +298,9 @@ func cmdReplay(args []string) int {
 			vesting:    a.VestingShares,
 			savings:    a.SavingsBalance,
 			savingsHBD: a.SavingsHBDBalance,
+			rwdVests:   a.RewardVests,
+			rwdHive:    a.RewardHive,
+			rwdHBD:     a.RewardHBD,
 			exists:     true,
 		}
 	}
@@ -337,13 +341,16 @@ func cmdReplay(args []string) int {
 		if *watchAccount != "" {
 			cur := snapshotAccount(*watchAccount)
 			if cur != prevSnap {
-				fmt.Printf("  WATCH %s @block %d: bal %d→%d hbd %d→%d vests %d→%d savings %d→%d savings_hbd %d→%d\n",
+				fmt.Printf("  WATCH %s @block %d: bal %d→%d hbd %d→%d vests %d→%d savings %d→%d savings_hbd %d→%d rwd_vests %d→%d rwd_hive %d→%d rwd_hbd %d→%d\n",
 					*watchAccount, n,
 					prevSnap.balance, cur.balance,
 					prevSnap.hbd, cur.hbd,
 					prevSnap.vesting, cur.vesting,
 					prevSnap.savings, cur.savings,
-					prevSnap.savingsHBD, cur.savingsHBD)
+					prevSnap.savingsHBD, cur.savingsHBD,
+					prevSnap.rwdVests, cur.rwdVests,
+					prevSnap.rwdHive, cur.rwdHive,
+					prevSnap.rwdHBD, cur.rwdHBD)
 				prevSnap = cur
 			}
 		}

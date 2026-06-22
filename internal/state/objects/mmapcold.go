@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"unsafe"
 
 	"github.com/tidwall/btree"
@@ -243,6 +244,28 @@ type mmapColdIter struct {
 func (c *mmapColdKV) newPrefixIter(prefix []byte) (coldIterator, error) {
 	upper := prefixUpperBound(prefix)
 	mi := &mmapColdIter{data: c.data}
+	// Primary-table keys (comment/vote primary) live in the `prim` hash map,
+	// NOT the btree (the O(1) point-op routing). A prefix scan over a primary
+	// table — the snapshot's full primary merge — must therefore enumerate the
+	// map, sorted, instead of the (by-root-only) btree. Without this the
+	// snapshot silently omitted every cold-tier comment (header counted them,
+	// body didn't write them → truncated-read EOF on load).
+	if coldKeyIsPrimary(prefix) {
+		for k, v := range c.prim {
+			kb := unsafe.Slice(unsafe.StringData(k), len(k))
+			if bytes.Compare(kb, prefix) < 0 {
+				continue
+			}
+			if upper != nil && bytes.Compare(kb, upper) >= 0 {
+				continue
+			}
+			mi.ents = append(mi.ents, mmapColdEntry{key: kb, offset: v.offset, length: v.length})
+		}
+		sort.Slice(mi.ents, func(i, j int) bool {
+			return bytes.Compare(mi.ents[i].key, mi.ents[j].key) < 0
+		})
+		return mi, nil
+	}
 	c.idx.Ascend(mmapColdEntry{key: prefix}, func(e mmapColdEntry) bool {
 		if upper != nil && bytes.Compare(e.key, upper) >= 0 {
 			return false
