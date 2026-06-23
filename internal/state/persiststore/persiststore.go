@@ -245,6 +245,16 @@ func (s *Store) Delete(key string) {
 // Len returns the number of live keys.
 func (s *Store) Len() int { return len(s.idx) }
 
+// SortedKeys returns all live keys in ascending order (for ordered range scans).
+func (s *Store) SortedKeys() []string {
+	out := make([]string, 0, len(s.idx))
+	for k := range s.idx {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // SetUndoEnabled turns undo recording on/off (the wrapper mirrors the chain's
 // db.UndoEnabled). When off, Set/Delete record no undo entries.
 func (s *Store) SetUndoEnabled(b bool) { s.undoEnabled = b }
