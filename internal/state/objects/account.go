@@ -653,3 +653,16 @@ func DeleteAccount(s *state.Session, name auth.AccountName) {
 func RangeAccounts(s *state.Session, fn func(a *Account) (bool, error)) error {
 	return EnsureAccountStore(s).RangePrimary(fn)
 }
+
+// DelayedVoteCandidates returns, in ascending name order, the accounts that may
+// have pending HF24+ delayed-vote buckets (the index processDelayedVoting walks
+// instead of every account).
+func DelayedVoteCandidates(s *state.Session) []string {
+	return EnsureAccountStore(s).DelayedVoteCandidates()
+}
+
+// DropDelayedVoteCandidate removes name from the delayed-vote index once its
+// queue is confirmed empty.
+func DropDelayedVoteCandidate(s *state.Session, name string) {
+	EnsureAccountStore(s).DropDelayedVoteCandidate(name)
+}

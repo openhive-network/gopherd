@@ -109,6 +109,20 @@ type AccountStore struct {
 	// allocating a fresh struct, eliminating the per-Put heap
 	// allocation that ranked third in the alloc profile.
 	freeAccount []*Account
+
+	// delayedVoteSet indexes accounts that (might) have pending HF24+
+	// delayed-vote buckets, so the per-block processDelayedVoting hook
+	// iterates only THOSE accounts instead of sorting+scanning all ~1.4M
+	// every block (which collapsed replay from 8000 to ~2 blk/s once HF24
+	// activated). It is a conservative SUPERSET: every Put/Mutate that
+	// leaves an account with non-empty DelayedVotes adds it (so no account
+	// with pending votes is ever missed — accounts are fully resident, and
+	// UnmarshalSnapshot reseeds from a full scan); entries are removed only
+	// by processDelayedVoting once an account's queue is confirmed empty.
+	// Stale entries (e.g. from a rolled-back tx) are harmless — the hook
+	// rechecks the account's actual DelayedVotes and drops empties. Not
+	// persisted in the snapshot (rebuilt on load); not consensus state.
+	delayedVoteSet map[string]struct{}
 }
 
 type accountUndo struct {
@@ -148,9 +162,38 @@ func EnsureAccountStore(s *state.Session) *AccountStore {
 
 func newAccountStore() *AccountStore {
 	return &AccountStore{
-		primary: make(map[string]*Account, 4096),
-		undoLog: make([]accountUndo, 0, 64),
+		primary:        make(map[string]*Account, 4096),
+		undoLog:        make([]accountUndo, 0, 64),
+		delayedVoteSet: make(map[string]struct{}),
 	}
+}
+
+// noteDelayedVotes adds name to the delayed-vote index if the account has any
+// pending buckets. Add-only (the index is a superset; processDelayedVoting
+// prunes empties). Cheap: a slice-len check on every Put/Mutate, a map insert
+// only for the rare account that actually has delayed votes.
+func (s *AccountStore) noteDelayedVotes(name string, a *Account) {
+	if len(a.DelayedVotes) > 0 {
+		s.delayedVoteSet[name] = struct{}{}
+	}
+}
+
+// DelayedVoteCandidates returns the indexed account names (those that may have
+// pending delayed votes) in ascending order — the small set processDelayedVoting
+// iterates instead of all accounts. Sorted for deterministic processing order.
+func (s *AccountStore) DelayedVoteCandidates() []string {
+	out := make([]string, 0, len(s.delayedVoteSet))
+	for n := range s.delayedVoteSet {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// DropDelayedVoteCandidate removes name from the index (called by
+// processDelayedVoting once the account's queue is confirmed empty).
+func (s *AccountStore) DropDelayedVoteCandidate(name string) {
+	delete(s.delayedVoteSet, name)
 }
 
 // SnapshotPoint returns the current undo-log length.
@@ -246,6 +289,7 @@ func (s *AccountStore) GetRef(name auth.AccountName) (*Account, bool) {
 // from freeAccount or allocates fresh.
 func (s *AccountStore) Put(a *Account) {
 	name := string(a.Name)
+	s.noteDelayedVotes(name, a) // index for processDelayedVoting (superset)
 	if cur, ok := s.primary[name]; ok {
 		if s.db.UndoEnabled {
 			s.undoLog = append(s.undoLog, accountUndo{
@@ -310,9 +354,11 @@ func (s *AccountStore) Mutate(name auth.AccountName, fn func(*Account)) bool {
 		old := *cur
 		fn(cur)
 		emitBalanceTrace(n, &old, cur)
+		s.noteDelayedVotes(n, cur)
 		return true
 	}
 	fn(cur)
+	s.noteDelayedVotes(n, cur)
 	return true
 }
 
@@ -430,6 +476,7 @@ func (s *AccountStore) UnmarshalSnapshot(r io.Reader) error {
 	count := binary.LittleEndian.Uint32(hdr[4:8])
 	s.primary = make(map[string]*Account, count)
 	s.undoLog = s.undoLog[:0]
+	s.delayedVoteSet = make(map[string]struct{}) // reseeded from the scan below
 	for i := uint32(0); i < count; i++ {
 		nameLen, err := binary.ReadUvarint(br)
 		if err != nil {
@@ -452,8 +499,11 @@ func (s *AccountStore) UnmarshalSnapshot(r io.Reader) error {
 			return fmt.Errorf("account_store: decode rec[%d]: %w", i, err)
 		}
 		cp := acc
-		s.primary[string(nameBuf)] = &cp
+		nm := string(nameBuf)
+		s.primary[nm] = &cp
+		if len(cp.DelayedVotes) > 0 {
+			s.delayedVoteSet[nm] = struct{}{} // reseed the delayed-vote index
+		}
 	}
 	return nil
 }
-

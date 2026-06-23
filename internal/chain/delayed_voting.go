@@ -35,17 +35,22 @@ func processDelayedVoting(s *state.Session, blockTime, blockNum uint32) {
 	}
 	var due []matured
 
-	_ = objects.RangeAccounts(s, func(a *objects.Account) (bool, error) {
-		if len(a.DelayedVotes) == 0 {
-			return true, nil
+	// Iterate ONLY accounts with pending delayed votes (the index), in sorted
+	// order — identical accounts + order to the old full RangeAccounts scan, but
+	// without sorting+touching all ~1.4M accounts every block (which collapsed
+	// replay from ~8000 to ~2 blk/s once HF24 activated ~block 47.6M). The index
+	// is a conservative superset; we drop entries here once their queue empties.
+	for _, name := range objects.DelayedVoteCandidates(s) {
+		a, err := objects.GetAccount(s, name)
+		if err != nil {
+			objects.DropDelayedVoteCandidate(s, name)
+			continue
 		}
-		// Take a working copy — we mutate via Put so the typed-store's
-		// undo log captures a clean before-image rather than holding
-		// our scratch slice.
-		acc := *a
-		// Mature every bucket whose time + 30 days <= blockTime.
-		// Buckets are ordered by time so the front is always the
-		// oldest.
+		if len(a.DelayedVotes) == 0 {
+			objects.DropDelayedVoteCandidate(s, name) // stale index entry
+			continue
+		}
+		acc := a // working copy; mutate via Put for a clean undo before-image
 		changed := false
 		for len(acc.DelayedVotes) > 0 {
 			front := acc.DelayedVotes[0]
@@ -61,8 +66,10 @@ func processDelayedVoting(s *state.Session, blockTime, blockNum uint32) {
 		if changed {
 			objects.PutAccount(s, &acc)
 		}
-		return true, nil
-	})
+		if len(acc.DelayedVotes) == 0 {
+			objects.DropDelayedVoteCandidate(s, name) // fully matured
+		}
+	}
 
 	for _, m := range due {
 		// Now that the bucket is mature, propagate the val to the
