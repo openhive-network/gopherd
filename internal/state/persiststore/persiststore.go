@@ -62,6 +62,24 @@ type Store struct {
 	idx       map[string]loc
 	liveBytes uint64 // sum of live record spans (dead = writeOff-headerSize-liveBytes)
 	dirty     bool
+
+	// Undo (phase 2) — mirrors the typed-store SnapshotPoint/RestoreToPoint/
+	// CommitPoint contract so a persiststore-backed table participates in
+	// per-transaction rollback like the in-memory stores. Log-structured undo
+	// is cheap: a mutation's PRIOR record still lives in the log (only the index
+	// moved), so undo just restores the index entry; abandoned records become
+	// dead space (reclaimed by Compact; accounted in liveBytes).
+	undoEnabled bool
+	undoLog     []undoEntry
+}
+
+// undoEntry captures what one Set/Delete changed, so it can be reversed.
+type undoEntry struct {
+	key          string
+	prior        loc    // index loc for key BEFORE this mutation
+	priorExisted bool   // false → key was absent before
+	addedSpan    uint32 // span of the record this mutation appended
+	addedLive    bool   // appended record counted toward liveBytes (Set yes, tombstone no)
 }
 
 // Open opens (creating if absent) a persistent store under dir, reserving a
@@ -153,10 +171,16 @@ func uvarintLen(v uint64) int {
 // Set appends a live record for key→val (superseding any prior record).
 func (s *Store) Set(key string, val []byte) error {
 	s.markDirty()
-	if prev, ok := s.idx[key]; ok {
+	span := recordSpan(len(key), len(val))
+	prev, existed := s.idx[key]
+	if s.undoEnabled {
+		s.undoLog = append(s.undoLog, undoEntry{
+			key: key, prior: prev, priorExisted: existed, addedSpan: span, addedLive: true,
+		})
+	}
+	if existed {
 		s.liveBytes -= uint64(prev.span) // old record is now dead space
 	}
-	span := recordSpan(len(key), len(val))
 	off, err := s.alloc(span)
 	if err != nil {
 		return err
@@ -195,9 +219,14 @@ func (s *Store) Delete(key string) {
 		return
 	}
 	s.markDirty()
+	span := recordSpan(len(key), 0)
+	if s.undoEnabled {
+		s.undoLog = append(s.undoLog, undoEntry{
+			key: key, prior: l, priorExisted: true, addedSpan: span, addedLive: false,
+		})
+	}
 	s.liveBytes -= uint64(l.span)
 	delete(s.idx, key)
-	span := recordSpan(len(key), 0)
 	off, err := s.alloc(span)
 	if err != nil {
 		return // mapping full; the in-RAM delete already took effect
@@ -215,6 +244,42 @@ func (s *Store) Delete(key string) {
 
 // Len returns the number of live keys.
 func (s *Store) Len() int { return len(s.idx) }
+
+// SetUndoEnabled turns undo recording on/off (the wrapper mirrors the chain's
+// db.UndoEnabled). When off, Set/Delete record no undo entries.
+func (s *Store) SetUndoEnabled(b bool) { s.undoEnabled = b }
+
+// SnapshotPoint returns the current undo-log length — the savepoint marker.
+func (s *Store) SnapshotPoint() int { return len(s.undoLog) }
+
+// RestoreToPoint reverts every mutation recorded after `snap`, restoring the
+// index (and liveBytes) to that point. The abandoned appended records remain in
+// the log as dead space (reclaimed by Compact). Mirrors the typed stores.
+func (s *Store) RestoreToPoint(snap int) {
+	if snap < 0 {
+		snap = 0
+	}
+	if snap > len(s.undoLog) {
+		return
+	}
+	for i := len(s.undoLog) - 1; i >= snap; i-- {
+		e := s.undoLog[i]
+		if e.addedLive {
+			s.liveBytes -= uint64(e.addedSpan) // appended record is abandoned
+		}
+		if e.priorExisted {
+			s.idx[e.key] = e.prior
+			s.liveBytes += uint64(e.prior.span)
+		} else {
+			delete(s.idx, e.key)
+		}
+	}
+	s.undoLog = s.undoLog[:snap]
+}
+
+// CommitPoint discards the undo log (the appended records are now permanent;
+// their superseded predecessors are dead space).
+func (s *Store) CommitPoint() { s.undoLog = s.undoLog[:0] }
 
 // rebuildByScan reconstructs the index by walking live + dead records from the
 // data frontier. Used after a crash/dirty open. NOTE: dead (freed/superseded)

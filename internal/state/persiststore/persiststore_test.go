@@ -174,3 +174,58 @@ func TestCompactReclaimsAndSurvives(t *testing.T) {
 	verifyAll(t, s2, want, "reopen after compact")
 	t.Logf("dead ratio before compact: %.2f → after: %.4f; %d live keys", deadBefore, s2.DeadRatio(), s2.Len())
 }
+
+// TestUndoRollback: the SnapshotPoint/RestoreToPoint/CommitPoint contract —
+// mutations after a savepoint are fully reverted (values, presence, and the
+// liveBytes accounting), like a rolled-back transaction.
+func TestUndoRollback(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir, testReserve)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	s.SetUndoEnabled(true)
+
+	// Baseline committed state.
+	base := map[string]string{}
+	for i := 0; i < 500; i++ {
+		k := fmt.Sprintf("k-%03d", i)
+		v := fmt.Sprintf("base-%d", i)
+		s.Set(k, []byte(v))
+		base[k] = v
+	}
+	s.CommitPoint()
+	liveAtBase := s.liveBytes
+
+	// === tx: savepoint, then a mix of overwrites, new keys, and deletes ===
+	sp := s.SnapshotPoint()
+	for i := 0; i < 500; i += 2 {
+		s.Set(fmt.Sprintf("k-%03d", i), []byte(fmt.Sprintf("DIRTY-%d-xxxxxxxx", i)))
+	}
+	for i := 1000; i < 1100; i++ {
+		s.Set(fmt.Sprintf("k-%04d", i), []byte("new"))
+	}
+	for i := 1; i < 100; i += 2 {
+		s.Delete(fmt.Sprintf("k-%03d", i))
+	}
+	// Roll back the whole tx.
+	s.RestoreToPoint(sp)
+
+	// Must be byte-identical to base, same key count, same liveBytes.
+	verifyAll(t, s, base, "after rollback")
+	if s.liveBytes != liveAtBase {
+		t.Fatalf("liveBytes after rollback: got %d want %d", s.liveBytes, liveAtBase)
+	}
+
+	// And the reverted state must still survive a restart.
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s2, err := Open(dir, testReserve)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	verifyAll(t, s2, base, "rollback + restart")
+}
