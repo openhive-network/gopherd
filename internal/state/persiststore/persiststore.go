@@ -29,8 +29,24 @@ import (
 	"path/filepath"
 	"sort"
 
+	"github.com/tidwall/btree"
 	"golang.org/x/sys/unix"
 )
+
+// prefixUpperBound returns the exclusive upper bound for a prefix scan: the
+// smallest key strictly greater than every key starting with prefix, or nil if
+// prefix is all-0xFF (no upper bound).
+func prefixUpperBound(prefix []byte) []byte {
+	out := make([]byte, len(prefix))
+	copy(out, prefix)
+	for i := len(out) - 1; i >= 0; i-- {
+		if out[i] != 0xFF {
+			out[i]++
+			return out[:i+1]
+		}
+	}
+	return nil
+}
 
 const (
 	headerSize = 4096       // page 0: magic | version | writeOff | dirty
@@ -71,6 +87,15 @@ type Store struct {
 	// dead space (reclaimed by Compact; accounted in liveBytes).
 	undoEnabled bool
 	undoLog     []undoEntry
+
+	// Ordered prefix-scan index (phase 4). Only keys whose first byte is a
+	// REGISTERED ordered-table byte are kept in `ordered` (a sorted btree of
+	// keys) — so point-op tables (primary keys, the bulk) stay map-only and
+	// cheap, while secondary-index tables (e.g. votes-by-comment, comments-by-
+	// root) get O(log n) prefix scans without btree'ing every key. Mirrors the
+	// cold tier's map(primary)+btree(secondary) split.
+	orderedTable [256]bool
+	ordered      *btree.BTreeG[string]
 }
 
 // undoEntry captures what one Set/Delete changed, so it can be reversed.
@@ -141,6 +166,48 @@ func (s *Store) markDirty() {
 	}
 }
 
+// RegisterOrderedTable marks keys with first byte `table` as needing the ordered
+// prefix-scan index. Call once per such table right after Open, before any Set.
+// Reseeds the index from existing keys (so it works after a sidecar/scan open).
+func (s *Store) RegisterOrderedTable(table byte) {
+	s.orderedTable[table] = true
+	if s.ordered == nil {
+		s.ordered = btree.NewBTreeGOptions[string](
+			func(a, b string) bool { return a < b },
+			btree.Options{Degree: 32, NoLocks: true},
+		)
+	}
+	for k := range s.idx {
+		if len(k) > 0 && s.orderedTable[k[0]] {
+			s.ordered.Set(k)
+		}
+	}
+}
+
+func (s *Store) isOrdered(key string) bool {
+	return s.ordered != nil && len(key) > 0 && s.orderedTable[key[0]]
+}
+
+// RangePrefix calls fn(key, val) for every live key with the given prefix, in
+// ascending key order. The key's table byte must have been RegisterOrderedTable'd.
+// val is a zero-copy view into the mapping (do not retain across mutations).
+func (s *Store) RangePrefix(prefix []byte, fn func(key string, val []byte) bool) {
+	if s.ordered == nil {
+		return
+	}
+	upper := prefixUpperBound(prefix)
+	s.ordered.Ascend(string(prefix), func(k string) bool {
+		if upper != nil && k >= string(upper) {
+			return false
+		}
+		l, ok := s.idx[k]
+		if !ok {
+			return true
+		}
+		return fn(k, s.data[l.valOff:l.valOff+uint64(l.valLen):l.valOff+uint64(l.valLen)])
+	})
+}
+
 // alloc appends a record slot of size `need` at the frontier (log-structured;
 // no in-place reuse — superseded slots are reclaimed by Compact).
 func (s *Store) alloc(need uint32) (uint64, error) {
@@ -198,6 +265,9 @@ func (s *Store) Set(key string, val []byte) error {
 	copy(s.data[p:], val)
 	s.idx[key] = loc{recOff: off, valOff: valOff, valLen: uint32(len(val)), span: span}
 	s.liveBytes += uint64(span)
+	if s.isOrdered(key) {
+		s.ordered.Set(key) // idempotent on overwrite
+	}
 	return nil
 }
 
@@ -227,6 +297,9 @@ func (s *Store) Delete(key string) {
 	}
 	s.liveBytes -= uint64(l.span)
 	delete(s.idx, key)
+	if s.isOrdered(key) {
+		s.ordered.Delete(key)
+	}
 	off, err := s.alloc(span)
 	if err != nil {
 		return // mapping full; the in-RAM delete already took effect
@@ -280,8 +353,14 @@ func (s *Store) RestoreToPoint(snap int) {
 		if e.priorExisted {
 			s.idx[e.key] = e.prior
 			s.liveBytes += uint64(e.prior.span)
+			if !e.addedLive && s.isOrdered(e.key) {
+				s.ordered.Set(e.key) // undo of a Delete → key reappears
+			}
 		} else {
 			delete(s.idx, e.key)
+			if s.isOrdered(e.key) {
+				s.ordered.Delete(e.key) // undo of a Set that created the key
+			}
 		}
 	}
 	s.undoLog = s.undoLog[:snap]

@@ -229,3 +229,80 @@ func TestUndoRollback(t *testing.T) {
 	defer s2.Close()
 	verifyAll(t, s2, base, "rollback + restart")
 }
+
+// TestOrderedPrefixScan: the secondary-index prefix scan (votes-by-comment
+// style) — ascending order, table-routed (primary keys excluded), surviving
+// restart (reseed after Open) and reflecting undo.
+func TestOrderedPrefixScan(t *testing.T) {
+	const tPrimary, tByComment byte = 0x01, 0x04
+	dir := t.TempDir()
+	s, err := Open(dir, testReserve)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.RegisterOrderedTable(tByComment)
+
+	mk := func(table byte, k string) string { return string(table) + k }
+	// Primary (map-only) keys — must NOT appear in prefix scans.
+	for i := 0; i < 200; i++ {
+		s.Set(mk(tPrimary, fmt.Sprintf("p%04d", i)), []byte("primary"))
+	}
+	// by-comment secondary keys: "comment<NN>|voter<MM>" → val.
+	want := map[string][]string{} // comment -> sorted voter-vals
+	for c := 0; c < 30; c++ {
+		for v := 0; v < 20; v++ {
+			key := mk(tByComment, fmt.Sprintf("comment%02d|voter%02d", c, v))
+			val := fmt.Sprintf("c%02d-v%02d", c, v)
+			s.Set(key, []byte(val))
+			cp := fmt.Sprintf("comment%02d", c)
+			want[cp] = append(want[cp], val)
+		}
+	}
+	scanComment := func(st *Store, c int) []string {
+		var got []string
+		st.RangePrefix([]byte(mk(tByComment, fmt.Sprintf("comment%02d|", c))), func(_ string, val []byte) bool {
+			got = append(got, string(val))
+			return true
+		})
+		return got
+	}
+	checkAll := func(st *Store, ctx string) {
+		for c := 0; c < 30; c++ {
+			got := scanComment(st, c)
+			exp := want[fmt.Sprintf("comment%02d", c)]
+			if len(got) != len(exp) {
+				t.Fatalf("%s: comment%02d got %d want %d", ctx, c, len(got), len(exp))
+			}
+			for i := range got {
+				if got[i] != exp[i] { // exp built in ascending voter order = scan order
+					t.Fatalf("%s: comment%02d[%d] got %q want %q", ctx, c, i, got[i], exp[i])
+				}
+			}
+		}
+	}
+	checkAll(s, "fresh")
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Restart: reopen + re-register (reseeds the ordered index from the loaded
+	// idx) → prefix scans must still work, no replay.
+	s2, err := Open(dir, testReserve)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	s2.RegisterOrderedTable(tByComment)
+	checkAll(s2, "after restart")
+
+	// Undo: delete some, add some, roll back → scans revert.
+	s2.SetUndoEnabled(true)
+	sp := s2.SnapshotPoint()
+	s2.Delete(mk(tByComment, "comment05|voter10"))
+	s2.Set(mk(tByComment, "comment05|voterZZ"), []byte("extra"))
+	if n := len(scanComment(s2, 5)); n != 20 {
+		t.Fatalf("during tx: comment05 got %d want 20 (−1 del +1 add)", n)
+	}
+	s2.RestoreToPoint(sp)
+	checkAll(s2, "after rollback")
+}
