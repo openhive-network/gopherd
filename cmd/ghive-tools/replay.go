@@ -70,6 +70,7 @@ func cmdReplay(args []string) int {
 	coldCompactRatio := fs.Float64("cold-compact-ratio", 0, "if >0 and using --cold-backend=persist, compact the cold tier (reclaim dead space) when its dead-space ratio exceeds this (e.g. 0.4); checked every --cold-compact-every blocks")
 	coldCompactEvery := fs.Uint("cold-compact-every", 1000000, "block cadence for the --cold-compact-ratio dead-space check")
 	shutdownSnapshotDir := fs.String("shutdown-snapshot-dir", "", "if set, on clean exit OR SIGTERM/SIGINT save a dir snapshot here (block-<head>/) and flush the cold tier — so a restart with --load-snapshot + the same --cold-dir resumes at head with ZERO replay tail")
+	persistStateDir := fs.String("persist-state-dir", "", "ZERO-SNAPSHOT NODE: persist ALL non-cold state (accounts, singletons, witnesses, …) into a persiststore container here. With --cold-backend=persist + --cold-dir, the whole node state is two persiststore dirs: on clean exit/SIGTERM it's saved, and a restart with the SAME two dirs resumes at head — no snapshot file. Takes precedence over --load-snapshot/--shutdown-snapshot-dir.")
 	evictBudget := fs.Int("evict-budget", 20000, "max comments evicted per block when over the resident cap")
 	parallelApply := fs.Int("parallel-apply", 0, "if >0, apply each block's transactions via the optimistic parallel harness with this many workers (replay mode only; bit-identical to serial). 0 = serial (default).")
 	loadSnapshot := fs.String("load-snapshot", "", "if set, load state from this snapshot path (file = legacy single-file format; directory = block-N dir produced by --snapshot-every; skips genesis + replay before snapshot block)")
@@ -227,13 +228,37 @@ func cmdReplay(args []string) int {
 				startBlk = n
 			}
 		}
+		if *persistStateDir != "" {
+			if h, ok := snapshot.PersistStateHead(*persistStateDir); ok {
+				startBlk = h
+			}
+		}
 		byRootCold := !hardfork.SetForBlock(startBlk).Has(hardfork.HF17)
 		commentStoreForEvict.SetColdByRootEnabled(byRootCold)
 		fmt.Printf("replay: cold tier ON — resident cap %d comments, evict budget %d/block, by-root cold %v, dir %s\n",
 			*residentCap, *evictBudget, byRootCold, cold.Dir())
 	}
 
-	if *loadSnapshot != "" {
+	persistResumed := false
+	if *persistStateDir != "" {
+		if _, ok := snapshot.PersistStateHead(*persistStateDir); ok {
+			h, err := snapshot.LoadPersist(stateDB, *persistStateDir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "replay: load persist-state: %v\n", err)
+				return 1
+			}
+			// Zero-snapshot node: full state restored from the persiststore
+			// container + the durable cold tier — no snapshot file involved.
+			fmt.Printf("replay: resumed from persist-state %s at block %d (no snapshot file)\n", *persistStateDir, h)
+			if *startBlock == 1 {
+				*startBlock = uint(h) + 1
+			}
+			persistResumed = true
+		}
+	}
+	if persistResumed {
+		// state already restored from the persist-state container
+	} else if *loadSnapshot != "" {
 		var head uint32
 		st, sterr := os.Stat(*loadSnapshot)
 		if sterr != nil {
@@ -461,6 +486,24 @@ func cmdReplay(args []string) int {
 		if stopRequested.Load() {
 			fmt.Printf("replay: clean stop after block %d\n", n)
 			break
+		}
+	}
+
+	// Zero-snapshot node: persist the full non-cold state into the persiststore
+	// container (+ flush the durable cold tier). A restart with the same
+	// --persist-state-dir + --cold-dir resumes at head — no snapshot file.
+	if *persistStateDir != "" && headBlock >= uint32(*startBlock) {
+		if compactCold != nil {
+			if err := compactCold.Flush(); err != nil {
+				fmt.Fprintf(os.Stderr, "replay: cold flush: %v\n", err)
+			}
+		}
+		psStart := time.Now()
+		if err := snapshot.SavePersist(stateDB, *persistStateDir, headBlock); err != nil {
+			fmt.Fprintf(os.Stderr, "replay: save persist-state: %v\n", err)
+		} else {
+			fmt.Printf("replay: saved persist-state %s at block %d in %.1fs (cold flushed) — restart with --persist-state-dir=%s --cold-dir=%s resumes here\n",
+				*persistStateDir, headBlock, time.Since(psStart).Seconds(), *persistStateDir, *coldDir)
 		}
 	}
 
