@@ -306,3 +306,92 @@ func TestOrderedPrefixScan(t *testing.T) {
 	s2.RestoreToPoint(sp)
 	checkAll(s2, "after rollback")
 }
+
+// TestCompactPreservesOrderedScan guards the item-2 cold-compaction dependency:
+// Compact rebuilds the primary index but NOT the ordered btree, so the
+// secondary-index prefix scans (votes-by-comment / comments-by-root) must still
+// be correct after a compaction — including after a subsequent restart.
+func TestCompactPreservesOrderedScan(t *testing.T) {
+	const tPrimary, tByComment byte = 0x01, 0x04
+	dir := t.TempDir()
+	s, err := Open(dir, testReserve)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.RegisterOrderedTable(tByComment)
+	mk := func(table byte, k string) string { return string(table) + k }
+
+	want := map[string]string{}
+	for c := 0; c < 25; c++ {
+		for v := 0; v < 16; v++ {
+			s.Set(mk(tPrimary, fmt.Sprintf("p%02d-%02d", c, v)), []byte("x"))
+			key := mk(tByComment, fmt.Sprintf("comment%02d|voter%02d", c, v))
+			// Overwrite each ordered key several times to build dead space.
+			for r := 0; r < 4; r++ {
+				val := fmt.Sprintf("c%02d-v%02d-r%d", c, v, r)
+				s.Set(key, []byte(val))
+				want[key] = val // last write wins
+			}
+		}
+	}
+	// Delete a few ordered keys so Compact must also honor tombstones.
+	for c := 0; c < 25; c += 5 {
+		dk := mk(tByComment, fmt.Sprintf("comment%02d|voter00", c))
+		s.Delete(dk)
+		delete(want, dk)
+	}
+
+	if dr := s.DeadRatio(); dr < 0.5 {
+		t.Fatalf("expected heavy dead space before compact, got %.2f", dr)
+	}
+	if err := s.Compact(); err != nil {
+		t.Fatal(err)
+	}
+	if dr := s.DeadRatio(); dr > 0.001 {
+		t.Fatalf("compact left dead space: %.3f", dr)
+	}
+
+	scan := func(st *Store, c int) map[string]string {
+		got := map[string]string{}
+		var prev string
+		st.RangePrefix([]byte(mk(tByComment, fmt.Sprintf("comment%02d|", c))), func(k string, val []byte) bool {
+			if prev != "" && k <= prev {
+				t.Fatalf("comment%02d scan not ascending: %q <= %q", c, k, prev)
+			}
+			prev = k
+			got[k] = string(val)
+			return true
+		})
+		return got
+	}
+	check := func(st *Store, ctx string) {
+		// Compare the full ordered set via per-comment scans.
+		for c := 0; c < 25; c++ {
+			for k, v := range scan(st, c) {
+				if want[k] != v {
+					t.Fatalf("%s: %q got %q want %q", ctx, k, v, want[k])
+				}
+			}
+		}
+		// Ensure deleted keys are gone.
+		for c := 0; c < 25; c += 5 {
+			dk := mk(tByComment, fmt.Sprintf("comment%02d|voter00", c))
+			if _, ok := st.Get(dk); ok {
+				t.Fatalf("%s: deleted key %q reappeared", ctx, dk)
+			}
+		}
+	}
+	check(s, "after compact")
+
+	// Restart after compact → scans still correct (reseed from compacted idx).
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s2, err := Open(dir, testReserve)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	s2.RegisterOrderedTable(tByComment)
+	check(s2, "after compact + restart")
+}
