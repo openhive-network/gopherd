@@ -44,7 +44,22 @@ func parseColdByRootRootKey(key []byte) (commentPK, bool) {
 // by-root key count (present only when the by-root cold index was written —
 // pre-HF17; post-HF17 it's empty and unused, which is correct).
 func (s *CommentStore) rebuildColdAccountingFromDurable(d durableColdTier) {
-	s.coldTotal = d.countTable(coldTableCommentPrimary)
+	// One pass over the primary keys rebuilds BOTH coldTotal and the cold bloom.
+	// The bloom gate matters because a RAM miss probes the cold tier only when
+	// the bloom says "maybe present", so without re-adding every cold comment's
+	// raw key the cold half would be invisible after restart. The bloom key is
+	// the cold primary key minus its leading table byte (== appendCommentKeyRaw).
+	s.coldTotal = 0
+	d.rangeTableKeys(coldTableCommentPrimary, func(key []byte) bool {
+		s.coldTotal++
+		if s.bloom != nil && len(key) > 1 {
+			s.bloom.add(key[1:])
+		}
+		return true
+	})
+	// coldRoot (per-root cold count) drives the by-root cold scan; rebuilt from
+	// the by-root index keys (present only when by-root cold was enabled —
+	// pre-HF17; empty + unused post-HF17, which is correct).
 	s.coldRoot = make(map[commentPK]int)
 	d.rangeTableKeys(coldTableCommentByRoot, func(key []byte) bool {
 		if rk, ok := parseColdByRootRootKey(key); ok {
@@ -52,18 +67,6 @@ func (s *CommentStore) rebuildColdAccountingFromDurable(d durableColdTier) {
 		}
 		return true
 	})
-	// Rebuild the cold bloom: a RAM miss probes the cold tier only when the
-	// bloom says "maybe present", so without re-adding every cold comment's raw
-	// key the cold half would be invisible after restart. The bloom key is the
-	// cold primary key minus its leading table byte (== appendCommentKeyRaw).
-	if s.bloom != nil {
-		d.rangeTableKeys(coldTableCommentPrimary, func(key []byte) bool {
-			if len(key) > 1 {
-				s.bloom.add(key[1:])
-			}
-			return true
-		})
-	}
 }
 
 // durableColdAttached reports whether a durable cold tier is attached.

@@ -39,17 +39,40 @@ const (
 // persiststore container under dir. Call on clean shutdown (alongside flushing
 // the durable cold tier).
 func SavePersist(db *state.Database, dir string, blockNum uint32) error {
+	// Write a FRESH container to dir.tmp, then atomically swap it in. This (a)
+	// makes the save atomic — a crash mid-write leaves dir.tmp (ignored) and the
+	// prior dir intact, instead of a half-overwritten container that LoadPersist
+	// would silently resume from; and (b) avoids dead-space accumulation — saving
+	// into the existing append-only store each shutdown would append fresh copies
+	// of all state and never reclaim the old (the persist-state dir would grow
+	// unboundedly across restarts).
+	tmp := dir + ".tmp"
+	if err := os.RemoveAll(tmp); err != nil {
+		return fmt.Errorf("persiststate: clean tmp: %w", err)
+	}
+	if err := savePersistTo(db, tmp, blockNum); err != nil {
+		_ = os.RemoveAll(tmp)
+		return err
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		_ = os.RemoveAll(tmp)
+		return fmt.Errorf("persiststate: clear old: %w", err)
+	}
+	if err := os.Rename(tmp, dir); err != nil {
+		return fmt.Errorf("persiststate: swap: %w", err)
+	}
+	return nil
+}
+
+// savePersistTo writes a complete, fresh persist-state container to dir. The
+// head row is written LAST so that, even setting aside the atomic swap, a
+// partially-written container lacks a head and is treated as absent on load.
+func savePersistTo(db *state.Database, dir string, blockNum uint32) error {
 	ps, err := persiststore.Open(dir, persistStateReserve)
 	if err != nil {
 		return fmt.Errorf("persiststate: open: %w", err)
 	}
 	defer ps.Close()
-
-	var hb [4]byte
-	binary.BigEndian.PutUint32(hb[:], blockNum)
-	if err := ps.Set(psHeadKey, hb[:]); err != nil {
-		return err
-	}
 
 	// K/V mem rows (same framing as snapshot.writeMem, minus the file).
 	var mem bytes.Buffer
@@ -81,6 +104,13 @@ func SavePersist(db *state.Database, dir string, blockNum uint32) error {
 		if err := ps.Set(psSubPfx+name, buf.Bytes()); err != nil {
 			return err
 		}
+	}
+
+	// Head LAST — its presence marks a complete save.
+	var hb [4]byte
+	binary.BigEndian.PutUint32(hb[:], blockNum)
+	if err := ps.Set(psHeadKey, hb[:]); err != nil {
+		return err
 	}
 	return ps.Flush()
 }

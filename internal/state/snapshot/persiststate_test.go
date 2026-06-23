@@ -1,6 +1,7 @@
 package snapshot
 
 import (
+	"os"
 	"testing"
 
 	"hived-go/internal/state"
@@ -77,4 +78,55 @@ func TestSavePersistLoadRoundtrip(t *testing.T) {
 		t.Fatalf("vote mismatch: ok=%v %+v", ok, cv)
 	}
 	t.Logf("zero-snapshot round-trip ok: head=%d, K/V + accounts + witnesses + comments + votes restored from persiststore container", head)
+}
+
+// TestSavePersistTwiceFreshContainer guards the atomic-swap fix: saving twice to
+// the same dir must yield a container reflecting ONLY the second save (no stale
+// rows from the first), proving the swap replaces rather than appends.
+func TestSavePersistTwiceFreshContainer(t *testing.T) {
+	src := state.OpenMem()
+	t.Cleanup(func() { _ = src.Close() })
+	s := state.NewSession(src)
+	objects.EnsureAccountStore(s).Put(&objects.Account{Name: "alice", Balance: 100})
+	if err := s.Commit(false); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir() + "/state"
+	if err := SavePersist(src, dir, 100); err != nil {
+		t.Fatalf("first save: %v", err)
+	}
+
+	// Mutate + save again at a new head.
+	s2 := state.NewSession(src)
+	objects.EnsureAccountStore(s2).Put(&objects.Account{Name: "alice", Balance: 999})
+	objects.EnsureAccountStore(s2).Put(&objects.Account{Name: "carol", Balance: 7})
+	if err := s2.Commit(false); err != nil {
+		t.Fatal(err)
+	}
+	if err := SavePersist(src, dir, 200); err != nil {
+		t.Fatalf("second save: %v", err)
+	}
+	if _, err := os.Stat(dir + ".tmp"); err == nil {
+		t.Fatal("dir.tmp survived the swap")
+	}
+
+	dst := state.OpenMem()
+	t.Cleanup(func() { _ = dst.Close() })
+	objects.EnsureAccountStore(state.NewSession(dst))
+	head, err := LoadPersist(dst, dir)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if head != 200 {
+		t.Fatalf("head: got %d want 200 (stale first save?)", head)
+	}
+	check := state.NewSession(dst)
+	if a, ok := objects.EnsureAccountStore(check).Get("alice"); !ok || a.Balance != 999 {
+		t.Fatalf("alice balance: got %d want 999 (second save not reflected)", a.Balance)
+	}
+	if _, ok := objects.EnsureAccountStore(check).Get("carol"); !ok {
+		t.Fatal("carol missing (second save incomplete)")
+	}
+	t.Log("save-twice ok: fresh container reflects only the latest save, no stale rows, no leftover tmp")
 }
