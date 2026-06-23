@@ -63,6 +63,7 @@ func cmdReplay(args []string) int {
 	residentCap := fs.Int("comment-resident-cap", 0, "if >0, cap RAM-resident comments to this many; frozen comments (and their votes) spill to an on-disk scratch cold tier. Breaks the RAM ceiling for long replays (e.g. 4000000 keeps the cashout window hot).")
 	coldDir := fs.String("cold-dir", "", "directory for the scratch cold tier (default: a tempdir, removed on exit). Only used when --comment-resident-cap>0.")
 	coldMmap := fs.Bool("cold-mmap", false, "use the mmap cold-tier backend (faster, zero-copy) instead of pebble")
+	coldBackend := fs.String("cold-backend", "", "cold-tier backend: \"\"/mmap|pebble|persist. persist = chainbase-in-Go: append-only mmap + restored index, so the cold tier (the bulk of state) SURVIVES restart with no replay (requires a stable --cold-dir). Overrides --cold-mmap when set.")
 	evictBudget := fs.Int("evict-budget", 20000, "max comments evicted per block when over the resident cap")
 	parallelApply := fs.Int("parallel-apply", 0, "if >0, apply each block's transactions via the optimistic parallel harness with this many workers (replay mode only; bit-identical to serial). 0 = serial (default).")
 	loadSnapshot := fs.String("load-snapshot", "", "if set, load state from this snapshot path (file = legacy single-file format; directory = block-N dir produced by --snapshot-every; skips genesis + replay before snapshot block)")
@@ -173,7 +174,15 @@ func cmdReplay(args []string) int {
 	var commentStoreForEvict *objects.CommentStore
 	var voteStoreForEvict *objects.CommentVoteStore
 	if *residentCap > 0 {
-		cold, cerr := objects.OpenColdTier(*coldDir, *coldMmap)
+		backendName := *coldBackend
+		if backendName == "" && *coldMmap {
+			backendName = "mmap" // back-compat: --cold-mmap selects the mmap backend
+		}
+		if backendName == "persist" && *coldDir == "" {
+			fmt.Fprintln(os.Stderr, "replay: --cold-backend=persist requires a stable --cold-dir (a persistent cold tier can't live in a tempdir)")
+			return 2
+		}
+		cold, cerr := objects.OpenColdTierBackend(*coldDir, backendName)
 		if cerr != nil {
 			fmt.Fprintf(os.Stderr, "replay: open cold tier: %v\n", cerr)
 			return 1
