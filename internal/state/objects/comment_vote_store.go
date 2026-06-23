@@ -30,6 +30,7 @@ import (
 //     by ClearWitnessVotesForAccount-style sweeps to find a voter's
 //     full vote set).
 //   - undoLog captures pre-mutation state for snapshot rollback.
+//
 // commentVotePK is the struct primary key for the CommentVote store —
 // Go hashes the three string fields natively, avoiding the per-lookup
 // commentVoteMapKey string-concat allocation.
@@ -708,46 +709,32 @@ func (s *CommentVoteStore) MarshalSnapshot(w io.Writer) error {
 		return nil
 	}
 
-	// Two-way streaming merge of the sorted RAM keys and the cold primary
-	// prefix scan (also ascending by the same encoded key). Disjoint sets;
-	// emit in global ascending order so the byte stream is identical to an
-	// all-RAM snapshot of the same logical contents.
-	it, err := s.cold.newPrefixIter(tableKey(coldTableVotePrimary, nil))
-	if err != nil {
-		return err
-	}
-	defer it.Close()
-	ri := 0
-	ramKeyBytes := func(k commentVotePK) []byte {
-		return commentVoteKey(auth.AccountName(k.voter), auth.AccountName(k.author), k.permlink)
-	}
-	for ri < len(keys) || it.valid() {
-		emitRAM := false
-		if ri < len(keys) && it.valid() {
-			rk := ramKeyBytes(keys[ri])
-			ck := it.key()[1:] // strip table prefix
-			emitRAM = bytesLess(rk, ck)
-		} else {
-			emitRAM = ri < len(keys)
-		}
-		if emitRAM {
-			recBuf = AppendCommentVote(recBuf[:0], s.primary[keys[ri]])
-			if err := writeRec(recBuf); err != nil {
-				return err
-			}
-			ri++
-		} else {
-			v, err := it.val()
-			if err != nil {
-				return err
-			}
-			if err := writeRec(v); err != nil {
-				return err
-			}
-			it.next()
+	// Two tiers written back-to-back (NOT merge-sorted): resident set first
+	// (sorted, ≤ residentCap), then every cold vote STREAMED straight from the
+	// tier. Tiers are disjoint and snapshot LOAD is order-independent, so global
+	// ordering is unnecessary. This avoids the old 2-way merge's
+	// materialize-and-sort of ALL cold votes (via newPrefixIter), which at 25M+
+	// blocks (tens of millions of cold VOTES — even more than comments)
+	// allocated multiple GB near GOMEMLIMIT and hung the save in a GC spiral.
+	// Streaming is O(coldN) time, O(1) extra memory.
+	for _, k := range keys {
+		recBuf = AppendCommentVote(recBuf[:0], s.primary[k])
+		if err := writeRec(recBuf); err != nil {
+			return err
 		}
 	}
-	return nil
+	var streamErr error
+	rerr := s.cold.rangePrefix(tableKey(coldTableVotePrimary, nil), func(_, v []byte) bool {
+		if err := writeRec(v); err != nil {
+			streamErr = err
+			return false
+		}
+		return true
+	})
+	if streamErr != nil {
+		return streamErr
+	}
+	return rerr
 }
 
 // UnmarshalSnapshot rebuilds the primary map AND the byComment secondary
@@ -797,4 +784,3 @@ func (s *CommentVoteStore) UnmarshalSnapshot(r io.Reader) error {
 	}
 	return nil
 }
-

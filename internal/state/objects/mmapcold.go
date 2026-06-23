@@ -48,7 +48,11 @@ type coldIterator interface {
 // into the mapping stay valid for the process lifetime. Sized for the dense
 // era; a full 60M replay (~150GB cold + dead space) needs reclaim or a larger
 // reservation (TODO).
-const mmapColdFileSize = 220 << 30 // 220 GiB sparse
+// 400 GiB sparse reservation. Only touched pages consume disk; a full 60M
+// replay's cold data is ~150-200 GB plus promote/re-evict dead space (no
+// reclaim), so 220 GiB risked a mid-run "data file full". 400 GiB removes that
+// (disk has ~700 GB free); the bset panic is the backstop if it's ever hit.
+const mmapColdFileSize = 400 << 30
 
 type mmapColdEntry struct {
 	key    []byte
@@ -157,7 +161,18 @@ func (c *mmapColdKV) set(key, val []byte) error {
 	return nil
 }
 
-func (c *mmapColdKV) bset(key, val []byte) { _ = c.set(key, val) }
+func (c *mmapColdKV) bset(key, val []byte) {
+	// A cold-tier write MUST NOT silently fail: Evict removes the row from RAM
+	// regardless, so a swallowed "data file full" error loses the record
+	// entirely → silent consensus divergence + a snapshot count-header that
+	// over-counts (truncated-read EOF on later load). Panic loudly instead: the
+	// process exits non-zero, the watchdog resumes from the last snapshot, and
+	// the cause is visible. The reservation (mmapColdFileSize) is sized so this
+	// never fires on a 60M replay; the panic is a correctness backstop only.
+	if err := c.set(key, val); err != nil {
+		panic(fmt.Sprintf("mmapcold: %v — raise mmapColdFileSize or add cold-tier compaction", err))
+	}
+}
 
 func (c *mmapColdKV) del(key []byte) error {
 	if coldKeyIsPrimary(key) {
