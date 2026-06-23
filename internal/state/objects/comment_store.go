@@ -995,9 +995,18 @@ func (s *CommentStore) MarshalSnapshot(w io.Writer) error {
 	if _, err := w.Write(commentStoreSnapshotMagic[:]); err != nil {
 		return err
 	}
+	// Durable cold tier (PersistCold): the cold rows persist across restart, so
+	// don't serialize them — write only the resident set and flag it. This is
+	// what turns the snapshot save from a ~150-200GB cold re-serialize (the
+	// slow-save bottleneck) into a fast resident-only dump.
+	_, durableCold := s.durableColdAttached()
 	var hdr [8]byte
 	binary.LittleEndian.PutUint32(hdr[0:4], commentStoreSnapshotVersion)
-	binary.LittleEndian.PutUint32(hdr[4:8], uint32(len(s.primary)+s.coldTotal))
+	countField := uint32(len(s.primary) + s.coldTotal)
+	if durableCold {
+		countField = uint32(len(s.primary)) | snapColdDurableFlag
+	}
+	binary.LittleEndian.PutUint32(hdr[4:8], countField)
 	if _, err := w.Write(hdr[:]); err != nil {
 		return err
 	}
@@ -1024,7 +1033,9 @@ func (s *CommentStore) MarshalSnapshot(w io.Writer) error {
 		return err
 	}
 
-	if s.cold == nil || s.coldTotal == 0 {
+	if s.cold == nil || s.coldTotal == 0 || durableCold {
+		// Resident-only: no cold tier, nothing cold, or the cold tier is durable
+		// (its rows persist across restart and are rebuilt from its own index).
 		for _, k := range keys {
 			recBuf = AppendComment(recBuf[:0], s.primary[k])
 			if err := writeRec(recBuf); err != nil {
@@ -1083,7 +1094,20 @@ func (s *CommentStore) UnmarshalSnapshot(r io.Reader) error {
 	if ver != commentStoreSnapshotVersion {
 		return fmt.Errorf("comment_store: unsupported version %d", ver)
 	}
-	count := binary.LittleEndian.Uint32(hdr[4:8])
+	countField := binary.LittleEndian.Uint32(hdr[4:8])
+	durableSnap := countField&snapColdDurableFlag != 0
+	count := countField &^ snapColdDurableFlag
+	var durableD durableColdTier
+	if durableSnap {
+		// The snapshot omitted the cold rows; they must still be present in a
+		// durable cold tier attached before load. Refuse otherwise — loading
+		// only the resident half would silently drop most of state.
+		d, ok := s.durableColdAttached()
+		if !ok {
+			return fmt.Errorf("comment_store: snapshot was saved with a durable cold tier but none is attached (cold rows would be lost)")
+		}
+		durableD = d // rebuild accounting after the resident records load
+	}
 	// When a cold tier + resident cap are attached BEFORE load (deep-snapshot
 	// resume), spill already-paid (frozen) comments straight to the cold tier
 	// instead of loading every comment resident. A 35M-block snapshot holds
@@ -1091,7 +1115,9 @@ func (s *CommentStore) UnmarshalSnapshot(r io.Reader) error {
 	// OOMs a 31 GB box. Paid comments are never mutated again by consensus
 	// (cashout is done), so disk is the right home; only the unpaid working set
 	// stays resident. This is what makes warm-start from a deep snapshot viable.
-	spill := s.cold != nil && s.residentCap > 0
+	// Durable load: the snapshot holds ONLY the resident (unpaid) set; cold rows
+	// already live in the durable cold tier, so never re-spill (would double them).
+	spill := s.cold != nil && s.residentCap > 0 && !durableSnap
 	residentHint := int(count)
 	if spill && residentHint > 4*s.residentCap {
 		residentHint = 4 * s.residentCap // expect ~unpaid set resident
@@ -1133,6 +1159,12 @@ func (s *CommentStore) UnmarshalSnapshot(r io.Reader) error {
 		if s.residentCap > 0 {
 			s.evictQueue = append(s.evictQueue, key)
 		}
+	}
+	if durableD != nil {
+		// Rebuild coldTotal + coldRoot from the durable cold tier's restored
+		// index (no cold data faulted) — the bookkeeping the omitted cold-record
+		// stream would otherwise have produced.
+		s.rebuildColdAccountingFromDurable(durableD)
 	}
 	return nil
 }

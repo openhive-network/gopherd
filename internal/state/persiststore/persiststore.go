@@ -357,6 +357,32 @@ func (s *Store) DeletePrefix(prefix []byte) {
 	}
 }
 
+// CountTable returns the number of live keys whose first byte is `table`.
+// Index-only (no data-page faults) — cheap even with a huge cold tier, which is
+// what makes a durable-cold restart fast (the cold accounting is rebuilt from
+// the restored index, not by touching every cold record).
+func (s *Store) CountTable(table byte) int {
+	n := 0
+	for k := range s.idx {
+		if len(k) > 0 && k[0] == table {
+			n++
+		}
+	}
+	return n
+}
+
+// RangeTableKeys calls fn for every live KEY whose first byte is `table` (index
+// only, no value access, unspecified order). fn returns false to stop.
+func (s *Store) RangeTableKeys(table byte, fn func(key string) bool) {
+	for k := range s.idx {
+		if len(k) > 0 && k[0] == table {
+			if !fn(k) {
+				return
+			}
+		}
+	}
+}
+
 // RangePrimaryByOffset streams the VALUE of every live key under prefix in
 // ASCENDING FILE-OFFSET order, so the underlying mmap reads are sequential (no
 // random page-fault amplification). Mirrors the cold tier's same-named method

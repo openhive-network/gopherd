@@ -78,6 +78,27 @@ func (c *PersistCold) Close() error   { return c.ps.Close() }
 func (c *PersistCold) Flush() error   { return c.ps.Flush() }
 func (c *PersistCold) Compact() error { return c.ps.Compact() }
 
+// --- durableColdTier: the cold tier's contents survive restart, so the
+// comment/vote stores can SKIP serializing cold rows into the snapshot (save)
+// and REBUILD their cold accounting from the restored index (load) instead of
+// re-spilling every cold record. ---
+
+func (c *PersistCold) durable() bool             { return true }
+func (c *PersistCold) countTable(table byte) int { return c.ps.CountTable(table) }
+func (c *PersistCold) rangeTableKeys(table byte, fn func(key []byte) bool) {
+	c.ps.RangeTableKeys(table, func(k string) bool { return fn([]byte(k)) })
+}
+
+// durableColdTier is implemented by cold backends whose data persists across
+// restart (PersistCold). Stores type-assert their coldStore to it to choose the
+// fast durable-cold snapshot path. mmapColdKV/coldKV do NOT implement it, so
+// they keep the original (re-serialize/re-spill) behavior.
+type durableColdTier interface {
+	durable() bool
+	countTable(table byte) int
+	rangeTableKeys(table byte, fn func(key []byte) bool)
+}
+
 // persistColdIter is a pull-style ascending iterator over a key prefix, backed
 // by a sorted key snapshot (values fetched on demand from the live mapping).
 type persistColdIter struct {
