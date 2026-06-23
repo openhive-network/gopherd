@@ -220,6 +220,28 @@ func (c *mmapColdKV) deletePrefix(prefix []byte) error {
 
 func (c *mmapColdKV) rangePrefix(prefix []byte, fn func(key, val []byte) bool) error {
 	upper := prefixUpperBound(prefix)
+	// Primary-table keys live in the `prim` hash map, not the btree. STREAM them
+	// directly (no sort, no materialized slice) — the snapshot save iterates
+	// tens of millions of cold comments here; collecting+sorting them all in
+	// memory (the old newPrefixIter path) blew the heap near GOMEMLIMIT and
+	// hung the save in a GC spiral. Map order is unspecified, which is fine:
+	// snapshot load is order-independent.
+	if coldKeyIsPrimary(prefix) {
+		for k, v := range c.prim {
+			kb := unsafe.Slice(unsafe.StringData(k), len(k))
+			if bytes.Compare(kb, prefix) < 0 {
+				continue
+			}
+			if upper != nil && bytes.Compare(kb, upper) >= 0 {
+				continue
+			}
+			end := v.offset + uint64(v.length)
+			if !fn(kb, c.data[v.offset:end:end]) {
+				return nil
+			}
+		}
+		return nil
+	}
 	c.idx.Ascend(mmapColdEntry{key: prefix}, func(e mmapColdEntry) bool {
 		if upper != nil && bytes.Compare(e.key, upper) >= 0 {
 			return false
