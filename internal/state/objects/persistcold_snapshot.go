@@ -74,3 +74,46 @@ func (s *CommentStore) durableColdAttached() (durableColdTier, bool) {
 	d, ok := s.cold.(durableColdTier)
 	return d, ok && d.durable()
 }
+
+// --- CommentVoteStore durable-cold support (mirrors the comment store) ---
+
+// parseColdVotePrimaryCommentKey extracts the COMMENT (commentPK) a cold vote
+// belongs to, from its primary key:
+//
+//	[coldTableVotePrimary] [voter: 16B] [author: 16B zero-padded] [permlink]
+//
+// Index-only (no value decode). Primary keys are always written on spill (the
+// by-comment index may be skipped), so this is the robust source for coldCount.
+func parseColdVotePrimaryCommentKey(key []byte) (commentPK, bool) {
+	const off = 1 + state.AccountNameKeyLen // skip table byte + voter
+	if len(key) < off+state.AccountNameKeyLen || key[0] != coldTableVotePrimary {
+		return commentPK{}, false
+	}
+	raw := key[off : off+state.AccountNameKeyLen]
+	if z := bytes.IndexByte(raw, 0); z >= 0 {
+		raw = raw[:z]
+	}
+	author := string(raw)
+	permlink := string(key[off+state.AccountNameKeyLen:])
+	return newCommentPK(auth.AccountName(author), permlink), true
+}
+
+func (s *CommentVoteStore) durableColdAttached() (durableColdTier, bool) {
+	if s.cold == nil {
+		return nil, false
+	}
+	d, ok := s.cold.(durableColdTier)
+	return d, ok && d.durable()
+}
+
+// rebuildColdAccountingFromDurable reconstructs coldCount (per-comment cold vote
+// count) from the durable cold tier's restored index — no cold value faulted.
+func (s *CommentVoteStore) rebuildColdAccountingFromDurable(d durableColdTier) {
+	s.coldCount = make(map[commentPK]int)
+	d.rangeTableKeys(coldTableVotePrimary, func(key []byte) bool {
+		if ck, ok := parseColdVotePrimaryCommentKey(key); ok {
+			s.coldCount[ck]++
+		}
+		return true
+	})
+}

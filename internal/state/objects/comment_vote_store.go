@@ -657,13 +657,22 @@ func (s *CommentVoteStore) MarshalSnapshot(w io.Writer) error {
 	if _, err := w.Write(commentVoteStoreSnapshotMagic[:]); err != nil {
 		return err
 	}
+	_, durableCold := s.durableColdAttached()
 	total := len(s.primary)
 	for _, n := range s.coldCount {
 		total += n
 	}
 	var hdr [8]byte
 	binary.LittleEndian.PutUint32(hdr[0:4], commentVoteStoreSnapshotVersion)
-	binary.LittleEndian.PutUint32(hdr[4:8], uint32(total))
+	countField := uint32(total)
+	if durableCold {
+		// Durable cold tier: cold votes persist across restart, so write only the
+		// resident set and flag it (coldCount is rebuilt from the cold index on
+		// load). Turns the cold-vote re-serialize (the biggest slow-save cost —
+		// even more votes than comments) into a fast resident-only dump.
+		countField = uint32(len(s.primary)) | snapColdDurableFlag
+	}
+	binary.LittleEndian.PutUint32(hdr[4:8], countField)
 	if _, err := w.Write(hdr[:]); err != nil {
 		return err
 	}
@@ -698,8 +707,9 @@ func (s *CommentVoteStore) MarshalSnapshot(w io.Writer) error {
 		return err
 	}
 
-	// Fast path: no cold tier → emit RAM in sorted order (unchanged format).
-	if s.cold == nil {
+	// Fast path: no cold tier, or a DURABLE cold tier (its votes persist across
+	// restart and are rebuilt from its own index) → emit RAM only.
+	if s.cold == nil || durableCold {
 		for _, k := range keys {
 			recBuf = AppendCommentVote(recBuf[:0], s.primary[k])
 			if err := writeRec(recBuf); err != nil {
@@ -756,11 +766,22 @@ func (s *CommentVoteStore) UnmarshalSnapshot(r io.Reader) error {
 	if ver != commentVoteStoreSnapshotVersion {
 		return fmt.Errorf("comment_vote_store: unsupported version %d", ver)
 	}
-	count := binary.LittleEndian.Uint32(hdr[4:8])
+	countField := binary.LittleEndian.Uint32(hdr[4:8])
+	durableSnap := countField&snapColdDurableFlag != 0
+	count := countField &^ snapColdDurableFlag
+	var durableD durableColdTier
+	if durableSnap {
+		d, ok := s.durableColdAttached()
+		if !ok {
+			return fmt.Errorf("comment_vote_store: snapshot was saved with a durable cold tier but none is attached (cold votes would be lost)")
+		}
+		durableD = d
+	}
 	s.primary = make(map[commentVotePK]*CommentVote, count)
 	s.byComment = make(map[commentPK][]*CommentVote, count/8+1)
 	s.undoLog = s.undoLog[:0]
-	// Everything loads into RAM; the cold tier starts empty after a load.
+	// Resident votes load into RAM; cold votes (durable) stay in the cold tier
+	// and their per-comment counts are rebuilt from its index below.
 	s.coldCount = make(map[commentPK]int)
 	for i := uint32(0); i < count; i++ {
 		recLen, err := binary.ReadUvarint(br)
@@ -781,6 +802,9 @@ func (s *CommentVoteStore) UnmarshalSnapshot(r io.Reader) error {
 		// Rebuild byComment.
 		cKey := newCommentPK(cv.Author, cv.Permlink)
 		s.byComment[cKey] = append(s.byComment[cKey], &cp)
+	}
+	if durableD != nil {
+		s.rebuildColdAccountingFromDurable(durableD)
 	}
 	return nil
 }

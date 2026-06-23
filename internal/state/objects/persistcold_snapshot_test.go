@@ -110,3 +110,75 @@ func TestDurableColdSnapshotRestart(t *testing.T) {
 	}
 	t.Logf("RESTART AT HEAD ok: %d comments (resident + durable cold) intact after snapshot reload — NO REPLAY", wantCount)
 }
+
+// TestDurableColdVoteSnapshotRestart is the same cutover proof for the
+// CommentVoteStore (votes are the largest cold tier of all).
+func TestDurableColdVoteSnapshotRestart(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "voteCold")
+	cold1, err := OpenPersistCold(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sA, cvsA := voteFixture(t, cold1)
+	if n := cvsA.EvictComment("auth1", "post-a"); n != 3 {
+		t.Fatalf("evicted %d from post-a, want 3", n)
+	}
+	if n := cvsA.EvictComment("auth2", "post-c"); n != 2 {
+		t.Fatalf("evicted %d from post-c, want 2", n)
+	}
+
+	all := []struct{ v, a, p string }{
+		{"alice", "auth1", "post-a"}, {"bob", "auth1", "post-a"}, {"carol", "auth1", "post-a"},
+		{"alice", "auth1", "post-b"}, {"dave", "auth1", "post-b"},
+		{"bob", "auth2", "post-c"}, {"zeb", "auth2", "post-c"},
+	}
+	want := map[string]CommentVote{}
+	for _, c := range all {
+		got, err := GetCommentVote(sA, auth.AccountName(c.v), auth.AccountName(c.a), c.p)
+		if err != nil {
+			t.Fatalf("pre-save get %v: %v", c, err)
+		}
+		want[c.v+"|"+c.a+"|"+c.p] = got
+	}
+	wantA := cvsA.CountForComment("auth1", "post-a")
+	wantC := cvsA.CountForComment("auth2", "post-c")
+
+	var buf bytes.Buffer
+	if err := cvsA.MarshalSnapshot(&buf); err != nil {
+		t.Fatalf("MarshalSnapshot: %v", err)
+	}
+	if err := cold1.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// === RESTART ===
+	cold2, err := OpenPersistCold(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cold2.Close()
+	db := openTempDB(t)
+	sB := state.NewSession(db)
+	cvsB := EnsureCommentVoteStore(sB)
+	cvsB.SetColdTier(cold2)
+	if err := cvsB.UnmarshalSnapshot(&buf); err != nil {
+		t.Fatalf("UnmarshalSnapshot: %v", err)
+	}
+
+	if got := cvsB.CountForComment("auth1", "post-a"); got != wantA {
+		t.Fatalf("restart count post-a %d want %d (cold votes lost?)", got, wantA)
+	}
+	if got := cvsB.CountForComment("auth2", "post-c"); got != wantC {
+		t.Fatalf("restart count post-c %d want %d", got, wantC)
+	}
+	for _, c := range all {
+		got, err := GetCommentVote(sB, auth.AccountName(c.v), auth.AccountName(c.a), c.p)
+		if err != nil {
+			t.Fatalf("restart get %v: %v (cold vote lost?)", c, err)
+		}
+		if got != want[c.v+"|"+c.a+"|"+c.p] {
+			t.Fatalf("restart vote mismatch %v: got=%+v want=%+v", c, got, want[c.v+"|"+c.a+"|"+c.p])
+		}
+	}
+	t.Logf("RESTART AT HEAD ok: votes (resident + durable cold) intact via Get + per-comment count — NO REPLAY")
+}
