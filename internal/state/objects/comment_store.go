@@ -1051,7 +1051,7 @@ func (s *CommentStore) MarshalSnapshot(w io.Writer) error {
 		}
 	}
 	var streamErr error
-	rerr := s.cold.rangePrefix(tableKey(coldTableCommentPrimary, nil), func(_, v []byte) bool {
+	rerr := s.cold.rangePrimaryByOffset(tableKey(coldTableCommentPrimary, nil), func(v []byte) bool {
 		if err := writeRec(v); err != nil {
 			streamErr = err
 			return false

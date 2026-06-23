@@ -37,10 +37,10 @@ type coldKV struct {
 // Cold-tier table prefixes. One shared Pebble instance, namespaced by a
 // leading byte so prefix scans stay within a logical table.
 const (
-	coldTableCommentPrimary    byte = 0x01
-	coldTableCommentByRoot     byte = 0x02
-	coldTableVotePrimary       byte = 0x03
-	coldTableVoteByComment     byte = 0x04
+	coldTableCommentPrimary byte = 0x01
+	coldTableCommentByRoot  byte = 0x02
+	coldTableVotePrimary    byte = 0x03
+	coldTableVoteByComment  byte = 0x04
 )
 
 // openColdKV opens (creating if needed) a scratch Pebble store at dir. If dir
@@ -218,6 +218,14 @@ func (c *coldKV) rangePrefix(prefix []byte, fn func(key, val []byte) bool) error
 		}
 	}
 	return it.Error()
+}
+
+// rangePrimaryByOffset: for the pebble backend, the LSM already yields values
+// in key order with sequential SST reads, so just delegate to rangePrefix. (The
+// offset-ordering optimization matters only for the mmap backend's random
+// page-fault thrash; pebble isn't used by the long replay.)
+func (c *coldKV) rangePrimaryByOffset(prefix []byte, fn func(val []byte) bool) error {
+	return c.rangePrefix(prefix, func(_, v []byte) bool { return fn(v) })
 }
 
 // coldIter is a pull-style ascending iterator over a key prefix, used by the

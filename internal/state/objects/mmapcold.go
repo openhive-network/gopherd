@@ -26,6 +26,12 @@ type coldStore interface {
 	del(key []byte) error
 	deletePrefix(prefix []byte) error
 	rangePrefix(prefix []byte, fn func(key, val []byte) bool) error
+	// rangePrimaryByOffset streams the VALUES of every primary-table key under
+	// prefix, in ASCENDING FILE-OFFSET order, so the underlying blob reads are
+	// SEQUENTIAL (no random mmap page-fault amplification). The snapshot save
+	// uses this: map-order reads thrashed at ~6 MB/s (57 MB/s read-amplified)
+	// reserializing tens of GB of cold rows; offset order is disk-sequential.
+	rangePrimaryByOffset(prefix []byte, fn func(val []byte) bool) error
 	newPrefixIter(prefix []byte) (coldIterator, error)
 	Dir() string
 	Close() error
@@ -264,6 +270,43 @@ func (c *mmapColdKV) rangePrefix(prefix []byte, fn func(key, val []byte) bool) e
 		end := e.offset + uint64(e.length)
 		return fn(e.key, c.data[e.offset:end:end])
 	})
+	return nil
+}
+
+// rangePrimaryByOffset streams primary values in ascending file-offset order.
+// Collects a PACKED (offset<<24 | length) uint64 per matching entry — 8 bytes
+// each, half the old materialize — sorts (offset is the high bits, so a plain
+// uint64 sort orders by offset), then reads each blob sequentially from the
+// mmap. Sequential reads share pages with adjacent records → no fault
+// amplification → disk-bandwidth speed instead of the ~6 MB/s random thrash.
+func (c *mmapColdKV) rangePrimaryByOffset(prefix []byte, fn func(val []byte) bool) error {
+	if !coldKeyIsPrimary(prefix) {
+		// by-root/by-comment (btree) prefixes are already key-ordered and small
+		// per-scan; just delegate.
+		return c.rangePrefix(prefix, func(_, v []byte) bool { return fn(v) })
+	}
+	upper := prefixUpperBound(prefix)
+	packed := make([]uint64, 0, len(c.prim))
+	for k, v := range c.prim {
+		kb := unsafe.Slice(unsafe.StringData(k), len(k))
+		if bytes.Compare(kb, prefix) < 0 {
+			continue
+		}
+		if upper != nil && bytes.Compare(kb, upper) >= 0 {
+			continue
+		}
+		// offset < 2^40 (file ≤ 400 GiB), length < 2^24 (16 MB ≫ any blob).
+		packed = append(packed, v.offset<<24|uint64(v.length))
+	}
+	sort.Slice(packed, func(i, j int) bool { return packed[i] < packed[j] })
+	for _, p := range packed {
+		off := p >> 24
+		ln := uint64(p & 0xFFFFFF)
+		end := off + ln
+		if !fn(c.data[off:end:end]) {
+			return nil
+		}
+	}
 	return nil
 }
 

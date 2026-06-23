@@ -724,7 +724,7 @@ func (s *CommentVoteStore) MarshalSnapshot(w io.Writer) error {
 		}
 	}
 	var streamErr error
-	rerr := s.cold.rangePrefix(tableKey(coldTableVotePrimary, nil), func(_, v []byte) bool {
+	rerr := s.cold.rangePrimaryByOffset(tableKey(coldTableVotePrimary, nil), func(v []byte) bool {
 		if err := writeRec(v); err != nil {
 			streamErr = err
 			return false
