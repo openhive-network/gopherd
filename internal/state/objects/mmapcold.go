@@ -103,6 +103,11 @@ func OpenColdTier(dir string, useMmap bool) (coldStore, error) {
 	return openColdKV(dir)
 }
 
+// ColdStore is the exported alias of the cold-tier interface, so cmd/ packages
+// can hold a cold tier (returned by OpenColdTierBackend) across scopes and pass
+// it to SetColdTier.
+type ColdStore = coldStore
+
 // OpenColdTierBackend selects the cold-tier backend by name:
 //
 //	"mmap"    — mmapColdKV (volatile: O_TRUNC on open → lost on restart)
@@ -111,7 +116,7 @@ func OpenColdTier(dir string, useMmap bool) (coldStore, error) {
 //
 // "persist" is the cutover backend: same mmap speed as "mmap" but append-only +
 // index-restored, so the cold tier (the bulk of state) comes back at head.
-func OpenColdTierBackend(dir, backend string) (coldStore, error) {
+func OpenColdTierBackend(dir, backend string) (ColdStore, error) {
 	switch backend {
 	case "", "mmap":
 		return openMmapColdKV(dir)

@@ -73,10 +73,20 @@ func (c *PersistCold) newPrefixIter(prefix []byte) (coldIterator, error) {
 	return &persistColdIter{ps: c.ps, keys: c.ps.PrefixKeysSorted(prefix)}, nil
 }
 
-func (c *PersistCold) Dir() string    { return c.ps.Dir() }
-func (c *PersistCold) Close() error   { return c.ps.Close() }
-func (c *PersistCold) Flush() error   { return c.ps.Flush() }
-func (c *PersistCold) Compact() error { return c.ps.Compact() }
+func (c *PersistCold) Dir() string        { return c.ps.Dir() }
+func (c *PersistCold) Close() error       { return c.ps.Close() }
+func (c *PersistCold) Flush() error       { return c.ps.Flush() }
+func (c *PersistCold) Compact() error     { return c.ps.Compact() }
+func (c *PersistCold) DeadRatio() float64 { return c.ps.DeadRatio() }
+
+// CompactableCold is implemented by cold backends that can reclaim dead space
+// (superseded records left by re-Put/promote). The replay loop type-asserts to
+// it to schedule compaction on long runs. Exported so cmd/ packages can use it.
+type CompactableCold interface {
+	DeadRatio() float64
+	Compact() error
+	Flush() error
+}
 
 // --- durableColdTier: the cold tier's contents survive restart, so the
 // comment/vote stores can SKIP serializing cold rows into the snapshot (save)

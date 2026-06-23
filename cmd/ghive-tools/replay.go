@@ -13,12 +13,15 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"runtime/pprof"
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"hived-go/internal/blocklog"
@@ -64,6 +67,9 @@ func cmdReplay(args []string) int {
 	coldDir := fs.String("cold-dir", "", "directory for the scratch cold tier (default: a tempdir, removed on exit). Only used when --comment-resident-cap>0.")
 	coldMmap := fs.Bool("cold-mmap", false, "use the mmap cold-tier backend (faster, zero-copy) instead of pebble")
 	coldBackend := fs.String("cold-backend", "", "cold-tier backend: \"\"/mmap|pebble|persist. persist = chainbase-in-Go: append-only mmap + restored index, so the cold tier (the bulk of state) SURVIVES restart with no replay (requires a stable --cold-dir). Overrides --cold-mmap when set.")
+	coldCompactRatio := fs.Float64("cold-compact-ratio", 0, "if >0 and using --cold-backend=persist, compact the cold tier (reclaim dead space) when its dead-space ratio exceeds this (e.g. 0.4); checked every --cold-compact-every blocks")
+	coldCompactEvery := fs.Uint("cold-compact-every", 1000000, "block cadence for the --cold-compact-ratio dead-space check")
+	shutdownSnapshotDir := fs.String("shutdown-snapshot-dir", "", "if set, on clean exit OR SIGTERM/SIGINT save a dir snapshot here (block-<head>/) and flush the cold tier — so a restart with --load-snapshot + the same --cold-dir resumes at head with ZERO replay tail")
 	evictBudget := fs.Int("evict-budget", 20000, "max comments evicted per block when over the resident cap")
 	parallelApply := fs.Int("parallel-apply", 0, "if >0, apply each block's transactions via the optimistic parallel harness with this many workers (replay mode only; bit-identical to serial). 0 = serial (default).")
 	loadSnapshot := fs.String("load-snapshot", "", "if set, load state from this snapshot path (file = legacy single-file format; directory = block-N dir produced by --snapshot-every; skips genesis + replay before snapshot block)")
@@ -106,6 +112,19 @@ func cmdReplay(args []string) int {
 		return 2
 	}
 	logPath := rest[0]
+
+	// Graceful shutdown: SIGTERM/SIGINT requests a clean stop at the next block
+	// boundary. With --shutdown-snapshot-dir + a durable cold tier, the node then
+	// saves a fast resident-only head snapshot + flushes the cold tier, so a
+	// restart resumes at head with ZERO replay tail.
+	var stopRequested atomic.Bool
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		s := <-sigCh
+		fmt.Fprintf(os.Stderr, "\nreplay: %v received — finishing current block then shutting down cleanly...\n", s)
+		stopRequested.Store(true)
+	}()
 
 	var stateDB *state.Database
 	switch *backend {
@@ -173,6 +192,7 @@ func cmdReplay(args []string) int {
 	// Disabled when --comment-resident-cap=0.
 	var commentStoreForEvict *objects.CommentStore
 	var voteStoreForEvict *objects.CommentVoteStore
+	var cold objects.ColdStore
 	if *residentCap > 0 {
 		backendName := *coldBackend
 		if backendName == "" && *coldMmap {
@@ -182,11 +202,12 @@ func cmdReplay(args []string) int {
 			fmt.Fprintln(os.Stderr, "replay: --cold-backend=persist requires a stable --cold-dir (a persistent cold tier can't live in a tempdir)")
 			return 2
 		}
-		cold, cerr := objects.OpenColdTierBackend(*coldDir, backendName)
+		c, cerr := objects.OpenColdTierBackend(*coldDir, backendName)
 		if cerr != nil {
 			fmt.Fprintf(os.Stderr, "replay: open cold tier: %v\n", cerr)
 			return 1
 		}
+		cold = c
 		defer cold.Close()
 		boot := state.NewSession(stateDB)
 		commentStoreForEvict = objects.EnsureCommentStore(boot)
@@ -277,7 +298,13 @@ func cmdReplay(args []string) int {
 	var (
 		applied, errCount uint64
 		stats             chain.Stats
+		headBlock         uint32 = uint32(*startBlock) - 1 // last fully-applied block
 	)
+	// Cold-tier compaction handle (only the persist backend supports reclaim).
+	var compactCold objects.CompactableCold
+	if cold != nil {
+		compactCold, _ = cold.(objects.CompactableCold)
+	}
 	opts := chain.ApplyOptions{
 		Sync:                      false,
 		SkipUnknownOps:            false,
@@ -413,6 +440,47 @@ func cmdReplay(args []string) int {
 				return 1
 			}
 			fmt.Printf("replay: saved snapshot %s (%.1fs)\n", path, time.Since(snapStart).Seconds())
+		}
+		headBlock = n
+		// Cold-tier compaction: reclaim dead space (superseded records from
+		// re-Put/promote) on long persist-backed runs. At a between-blocks safe
+		// point (no held cold value slices) the remap is safe.
+		if compactCold != nil && *coldCompactRatio > 0 && uint64(n)%uint64(*coldCompactEvery) == 0 {
+			if dr := compactCold.DeadRatio(); dr > *coldCompactRatio {
+				fmt.Printf("replay: cold dead-ratio %.2f > %.2f at block %d — compacting...\n", dr, *coldCompactRatio, n)
+				cstart := time.Now()
+				if err := compactCold.Compact(); err != nil {
+					fmt.Fprintf(os.Stderr, "replay: cold compact: %v\n", err)
+				} else {
+					fmt.Printf("replay: cold compacted in %.1fs (dead-ratio now %.2f)\n", time.Since(cstart).Seconds(), compactCold.DeadRatio())
+				}
+			}
+		}
+		// Graceful stop requested by SIGTERM/SIGINT: the current block is fully
+		// applied (headBlock == n), so break to the clean-shutdown path.
+		if stopRequested.Load() {
+			fmt.Printf("replay: clean stop after block %d\n", n)
+			break
+		}
+	}
+
+	// Clean-shutdown head snapshot (on completion OR SIGTERM). With a durable
+	// cold tier this is a fast resident-only dump; combined with flushing the
+	// cold tier, a restart (--load-snapshot=<this> + same --cold-dir) resumes at
+	// headBlock with ZERO replay tail.
+	if *shutdownSnapshotDir != "" && headBlock >= uint32(*startBlock) {
+		if compactCold != nil {
+			if err := compactCold.Flush(); err != nil {
+				fmt.Fprintf(os.Stderr, "replay: cold flush: %v\n", err)
+			}
+		}
+		snapStart := time.Now()
+		path, err := snapshot.Save(stateDB, *shutdownSnapshotDir, headBlock, "")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "replay: shutdown snapshot: %v\n", err)
+		} else {
+			fmt.Printf("replay: shutdown snapshot %s at block %d in %.1fs (cold flushed) — restart with --load-snapshot=%s --cold-dir=%s resumes here\n",
+				path, headBlock, time.Since(snapStart).Seconds(), path, *coldDir)
 		}
 	}
 
