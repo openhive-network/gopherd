@@ -318,6 +318,70 @@ func (s *Store) Delete(key string) {
 // Len returns the number of live keys.
 func (s *Store) Len() int { return len(s.idx) }
 
+// Dir returns the store's directory.
+func (s *Store) Dir() string { return s.dir }
+
+// Has reports whether key has a live value.
+func (s *Store) Has(key string) bool { _, ok := s.idx[key]; return ok }
+
+// PrefixKeysSorted returns every live key with the given prefix, ascending. Uses
+// the ordered btree when the table is registered (cheap), else filters the full
+// key set (rare paths only).
+func (s *Store) PrefixKeysSorted(prefix []byte) []string {
+	var out []string
+	if s.ordered != nil && len(prefix) > 0 && s.orderedTable[prefix[0]] {
+		upper := prefixUpperBound(prefix)
+		s.ordered.Ascend(string(prefix), func(k string) bool {
+			if upper != nil && k >= string(upper) {
+				return false
+			}
+			out = append(out, k)
+			return true
+		})
+		return out
+	}
+	p := string(prefix)
+	for k := range s.idx {
+		if len(k) >= len(p) && k[:len(p)] == p {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// DeletePrefix deletes every live key with the given prefix.
+func (s *Store) DeletePrefix(prefix []byte) {
+	for _, k := range s.PrefixKeysSorted(prefix) {
+		s.Delete(k)
+	}
+}
+
+// RangePrimaryByOffset streams the VALUE of every live key under prefix in
+// ASCENDING FILE-OFFSET order, so the underlying mmap reads are sequential (no
+// random page-fault amplification). Mirrors the cold tier's same-named method
+// used by the snapshot save. fn returns false to stop.
+func (s *Store) RangePrimaryByOffset(prefix []byte, fn func(val []byte) bool) {
+	type ent struct {
+		off    uint64
+		valOff uint64
+		valLen uint32
+	}
+	p := string(prefix)
+	ents := make([]ent, 0, 1024)
+	for k, l := range s.idx {
+		if len(k) >= len(p) && k[:len(p)] == p {
+			ents = append(ents, ent{l.recOff, l.valOff, l.valLen})
+		}
+	}
+	sort.Slice(ents, func(i, j int) bool { return ents[i].off < ents[j].off })
+	for _, e := range ents {
+		if !fn(s.data[e.valOff : e.valOff+uint64(e.valLen) : e.valOff+uint64(e.valLen)]) {
+			return
+		}
+	}
+}
+
 // SortedKeys returns all live keys in ascending order (for ordered range scans).
 func (s *Store) SortedKeys() []string {
 	out := make([]string, 0, len(s.idx))

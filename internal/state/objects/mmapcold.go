@@ -103,6 +103,27 @@ func OpenColdTier(dir string, useMmap bool) (coldStore, error) {
 	return openColdKV(dir)
 }
 
+// OpenColdTierBackend selects the cold-tier backend by name:
+//
+//	"mmap"    — mmapColdKV (volatile: O_TRUNC on open → lost on restart)
+//	"pebble"  — coldKV LSM (volatile across our use)
+//	"persist" — PersistCold (chainbase-in-Go: SURVIVES restart, no replay)
+//
+// "persist" is the cutover backend: same mmap speed as "mmap" but append-only +
+// index-restored, so the cold tier (the bulk of state) comes back at head.
+func OpenColdTierBackend(dir, backend string) (coldStore, error) {
+	switch backend {
+	case "", "mmap":
+		return openMmapColdKV(dir)
+	case "pebble":
+		return openColdKV(dir)
+	case "persist":
+		return OpenPersistCold(dir)
+	default:
+		return nil, fmt.Errorf("unknown cold-tier backend %q (want mmap|pebble|persist)", backend)
+	}
+}
+
 func openMmapColdKV(dir string) (*mmapColdKV, error) {
 	owned := dir == ""
 	if owned {
