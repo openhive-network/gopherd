@@ -299,6 +299,18 @@ func (c *mmapColdKV) rangePrimaryByOffset(prefix []byte, fn func(val []byte) boo
 		packed = append(packed, v.offset<<24|uint64(v.length))
 	}
 	sort.Slice(packed, func(i, j int) bool { return packed[i] < packed[j] })
+	// We now read blobs in ascending offset order. mmap page faults do NOT
+	// trigger readahead by default, so even offset-ordered reads were random
+	// 4KB faults (~52 MB/s) — the snapshot-save bottleneck. MADV_SEQUENTIAL
+	// tells the kernel to prefetch aggressively for this scan → disk-sequential
+	// bandwidth. Restore MADV_NORMAL after: the cold tier's steady-state access
+	// (point gets on promote) is random, where sequential readahead would waste
+	// I/O. The scan runs only at a snapshot save (replay paused), so toggling
+	// the advice here is safe.
+	if len(c.data) > 0 {
+		_ = unix.Madvise(c.data, unix.MADV_SEQUENTIAL)
+		defer func() { _ = unix.Madvise(c.data, unix.MADV_NORMAL) }()
+	}
 	for _, p := range packed {
 		off := p >> 24
 		ln := uint64(p & 0xFFFFFF)
