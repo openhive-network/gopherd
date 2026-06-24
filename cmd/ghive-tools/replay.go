@@ -114,18 +114,13 @@ func cmdReplay(args []string) int {
 	}
 	logPath := rest[0]
 
-	// Graceful shutdown: SIGTERM/SIGINT requests a clean stop at the next block
-	// boundary. With --shutdown-snapshot-dir + a durable cold tier, the node then
-	// saves a fast resident-only head snapshot + flushes the cold tier, so a
-	// restart resumes at head with ZERO replay tail.
+	// Graceful-shutdown flag. The signal handler is installed LATER, right before
+	// the apply loop — NOT here — so that a SIGTERM/SIGINT during the (long,
+	// uninterruptible) snapshot-load/genesis phase keeps the DEFAULT behavior
+	// (terminate immediately), rather than being swallowed by a handler the load
+	// loop never polls. There is nothing to flush mid-load, so immediate exit is
+	// correct there.
 	var stopRequested atomic.Bool
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
-	go func() {
-		s := <-sigCh
-		fmt.Fprintf(os.Stderr, "\nreplay: %v received — finishing current block then shutting down cleanly...\n", s)
-		stopRequested.Store(true)
-	}()
 
 	var stateDB *state.Database
 	switch *backend {
@@ -365,6 +360,21 @@ func cmdReplay(args []string) int {
 			exists:     true,
 		}
 	}
+
+	// Install the graceful-shutdown handler now that the load phase is done and
+	// the apply loop (which polls stopRequested each block) is about to start.
+	// First signal → clean stop at the next block boundary; a SECOND signal →
+	// force exit (so a stuck shutdown is still killable without SIGKILL).
+	sigCh := make(chan os.Signal, 2)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		s := <-sigCh
+		fmt.Fprintf(os.Stderr, "\nreplay: %v received — finishing current block then shutting down cleanly (signal again to force)...\n", s)
+		stopRequested.Store(true)
+		<-sigCh
+		fmt.Fprintln(os.Stderr, "replay: second signal — forcing exit")
+		os.Exit(130)
+	}()
 
 	var rawScratch, outScratch []byte
 	for n := uint32(*startBlock); n <= end; n++ {
