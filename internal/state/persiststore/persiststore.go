@@ -75,7 +75,7 @@ type Store struct {
 	data      []byte // mmap (MAP_SHARED); writes flushed via msync
 	size      uint64 // mapping length (sparse reservation)
 	writeOff  uint64 // append frontier
-	idx       map[string]loc
+	idx       *keyIndex
 	liveBytes uint64 // sum of live record spans (dead = writeOff-headerSize-liveBytes)
 	dirty     bool
 
@@ -135,9 +135,9 @@ func Open(dir string, reserveBytes uint64) (*Store, error) {
 		f:        f,
 		data:     data,
 		size:     reserveBytes,
-		idx:      make(map[string]loc, 1<<16),
 		writeOff: headerSize,
 	}
+	s.idx = newKeyIndex(1<<16, s.recordKey)
 	mg := binary.LittleEndian.Uint32(s.data[0:4])
 	if mg == magic {
 		s.writeOff = binary.LittleEndian.Uint64(s.data[8:16])
@@ -166,6 +166,24 @@ func (s *Store) markDirty() {
 	}
 }
 
+// recordKey returns a zero-copy view of the key stored in the record at recOff
+// ([recType 1B][keyLen uvarint][key bytes]...). Used by the index to verify a
+// hash probe against the real key.
+func (s *Store) recordKey(recOff uint64) []byte {
+	p := recOff + 1 // skip recType
+	klen, n := binary.Uvarint(s.data[p:])
+	p += uint64(n)
+	return s.data[p : p+klen]
+}
+
+// tblByte is a key's table byte (first byte), or 0 for the empty key.
+func tblByte(key string) byte {
+	if len(key) == 0 {
+		return 0
+	}
+	return key[0]
+}
+
 // RegisterOrderedTable marks keys with first byte `table` as needing the ordered
 // prefix-scan index. Call once per such table right after Open, before any Set.
 // Reseeds the index from existing keys (so it works after a sidecar/scan open).
@@ -177,11 +195,12 @@ func (s *Store) RegisterOrderedTable(table byte) {
 			btree.Options{Degree: 32, NoLocks: true},
 		)
 	}
-	for k := range s.idx {
+	s.idx.eachKey(func(k []byte, _ loc) bool {
 		if len(k) > 0 && s.orderedTable[k[0]] {
-			s.ordered.Set(k)
+			s.ordered.Set(string(k))
 		}
-	}
+		return true
+	})
 }
 
 func (s *Store) isOrdered(key string) bool {
@@ -200,7 +219,7 @@ func (s *Store) RangePrefix(prefix []byte, fn func(key string, val []byte) bool)
 		if upper != nil && k >= string(upper) {
 			return false
 		}
-		l, ok := s.idx[k]
+		l, ok := s.idx.get(k)
 		if !ok {
 			return true
 		}
@@ -239,7 +258,7 @@ func uvarintLen(v uint64) int {
 func (s *Store) Set(key string, val []byte) error {
 	s.markDirty()
 	span := recordSpan(len(key), len(val))
-	prev, existed := s.idx[key]
+	prev, existed := s.idx.get(key)
 	if s.undoEnabled {
 		s.undoLog = append(s.undoLog, undoEntry{
 			key: key, prior: prev, priorExisted: existed, addedSpan: span, addedLive: true,
@@ -263,7 +282,7 @@ func (s *Store) Set(key string, val []byte) error {
 	p += uint64(n)
 	valOff := p
 	copy(s.data[p:], val)
-	s.idx[key] = loc{recOff: off, valOff: valOff, valLen: uint32(len(val)), span: span}
+	s.idx.set(key, loc{recOff: off, valOff: valOff, valLen: uint32(len(val)), span: span}, tblByte(key))
 	s.liveBytes += uint64(span)
 	if s.isOrdered(key) {
 		s.ordered.Set(key) // idempotent on overwrite
@@ -274,7 +293,7 @@ func (s *Store) Set(key string, val []byte) error {
 // Get returns a zero-copy view of key's value (valid until the next Set/flush
 // that may reuse the slot). ok=false on miss.
 func (s *Store) Get(key string) ([]byte, bool) {
-	l, ok := s.idx[key]
+	l, ok := s.idx.get(key)
 	if !ok {
 		return nil, false
 	}
@@ -284,7 +303,7 @@ func (s *Store) Get(key string) ([]byte, bool) {
 // Delete appends a tombstone for key (so a crash-time scan-rebuild knows the
 // key is gone). The prior live record becomes dead space.
 func (s *Store) Delete(key string) {
-	l, ok := s.idx[key]
+	l, ok := s.idx.get(key)
 	if !ok {
 		return
 	}
@@ -296,7 +315,7 @@ func (s *Store) Delete(key string) {
 		})
 	}
 	s.liveBytes -= uint64(l.span)
-	delete(s.idx, key)
+	s.idx.del(key)
 	if s.isOrdered(key) {
 		s.ordered.Delete(key)
 	}
@@ -316,13 +335,13 @@ func (s *Store) Delete(key string) {
 }
 
 // Len returns the number of live keys.
-func (s *Store) Len() int { return len(s.idx) }
+func (s *Store) Len() int { return s.idx.len() }
 
 // Dir returns the store's directory.
 func (s *Store) Dir() string { return s.dir }
 
 // Has reports whether key has a live value.
-func (s *Store) Has(key string) bool { _, ok := s.idx[key]; return ok }
+func (s *Store) Has(key string) bool { return s.idx.has(key) }
 
 // PrefixKeysSorted returns every live key with the given prefix, ascending. Uses
 // the ordered btree when the table is registered (cheap), else filters the full
@@ -341,11 +360,13 @@ func (s *Store) PrefixKeysSorted(prefix []byte) []string {
 		return out
 	}
 	p := string(prefix)
-	for k := range s.idx {
+	s.idx.eachKey(func(kb []byte, _ loc) bool {
+		k := string(kb)
 		if len(k) >= len(p) && k[:len(p)] == p {
 			out = append(out, k)
 		}
-	}
+		return true
+	})
 	sort.Strings(out)
 	return out
 }
@@ -363,24 +384,24 @@ func (s *Store) DeletePrefix(prefix []byte) {
 // the restored index, not by touching every cold record).
 func (s *Store) CountTable(table byte) int {
 	n := 0
-	for k := range s.idx {
-		if len(k) > 0 && k[0] == table {
+	s.idx.eachTable(func(tbl byte, _ loc) bool {
+		if tbl == table {
 			n++
 		}
-	}
+		return true
+	})
 	return n
 }
 
 // RangeTableKeys calls fn for every live KEY whose first byte is `table` (index
 // only, no value access, unspecified order). fn returns false to stop.
 func (s *Store) RangeTableKeys(table byte, fn func(key string) bool) {
-	for k := range s.idx {
-		if len(k) > 0 && k[0] == table {
-			if !fn(k) {
-				return
-			}
+	s.idx.eachKey(func(kb []byte, _ loc) bool {
+		if len(kb) > 0 && kb[0] == table {
+			return fn(string(kb))
 		}
-	}
+		return true
+	})
 }
 
 // RangePrimaryByOffset streams the VALUE of every live key under prefix in
@@ -395,11 +416,12 @@ func (s *Store) RangePrimaryByOffset(prefix []byte, fn func(val []byte) bool) {
 	}
 	p := string(prefix)
 	ents := make([]ent, 0, 1024)
-	for k, l := range s.idx {
-		if len(k) >= len(p) && k[:len(p)] == p {
+	s.idx.eachKey(func(kb []byte, l loc) bool {
+		if len(kb) >= len(p) && string(kb[:len(p)]) == p {
 			ents = append(ents, ent{l.recOff, l.valOff, l.valLen})
 		}
-	}
+		return true
+	})
 	sort.Slice(ents, func(i, j int) bool { return ents[i].off < ents[j].off })
 	for _, e := range ents {
 		if !fn(s.data[e.valOff : e.valOff+uint64(e.valLen) : e.valOff+uint64(e.valLen)]) {
@@ -410,10 +432,11 @@ func (s *Store) RangePrimaryByOffset(prefix []byte, fn func(val []byte) bool) {
 
 // SortedKeys returns all live keys in ascending order (for ordered range scans).
 func (s *Store) SortedKeys() []string {
-	out := make([]string, 0, len(s.idx))
-	for k := range s.idx {
-		out = append(out, k)
-	}
+	out := make([]string, 0, s.idx.len())
+	s.idx.eachKey(func(kb []byte, _ loc) bool {
+		out = append(out, string(kb))
+		return true
+	})
 	sort.Strings(out)
 	return out
 }
@@ -441,13 +464,13 @@ func (s *Store) RestoreToPoint(snap int) {
 			s.liveBytes -= uint64(e.addedSpan) // appended record is abandoned
 		}
 		if e.priorExisted {
-			s.idx[e.key] = e.prior
+			s.idx.set(e.key, e.prior, tblByte(e.key))
 			s.liveBytes += uint64(e.prior.span)
 			if !e.addedLive && s.isOrdered(e.key) {
 				s.ordered.Set(e.key) // undo of a Delete → key reappears
 			}
 		} else {
-			delete(s.idx, e.key)
+			s.idx.del(e.key)
 			if s.isOrdered(e.key) {
 				s.ordered.Delete(e.key) // undo of a Set that created the key
 			}
@@ -468,7 +491,7 @@ func (s *Store) CommitPoint() { s.undoLog = s.undoLog[:0] }
 // for a reused offset cannot exist.) For phase 1 we conservatively keep the
 // highest-offset record per key.
 func (s *Store) rebuildByScan() error {
-	s.idx = make(map[string]loc, 1<<16)
+	s.idx.reset(1 << 16)
 	s.liveBytes = 0
 	p := uint64(headerSize)
 	for p < s.writeOff {
@@ -497,15 +520,15 @@ func (s *Store) rebuildByScan() error {
 		}
 		// Records are in ascending offset order, so the LAST record for a key
 		// wins: a later live record supersedes; a later tombstone deletes.
-		if prev, ok := s.idx[key]; ok {
+		if prev, ok := s.idx.get(key); ok {
 			s.liveBytes -= uint64(prev.span)
 		}
 		if typ == recTomb {
-			delete(s.idx, key)
+			s.idx.del(key)
 			continue
 		}
 		span := uint32(p - recOff)
-		s.idx[key] = loc{recOff: recOff, valOff: valOff, valLen: uint32(vlen), span: span}
+		s.idx.set(key, loc{recOff: recOff, valOff: valOff, valLen: uint32(vlen), span: span}, tblByte(key))
 		s.liveBytes += uint64(span)
 	}
 	return nil
@@ -520,10 +543,8 @@ func (s *Store) Flush() error {
 	if err := unix.Msync(s.data, unix.MS_SYNC); err != nil {
 		return fmt.Errorf("persiststore: msync: %w", err)
 	}
-	keys := make([]string, 0, len(s.idx))
-	for k := range s.idx {
-		keys = append(keys, k)
-	}
+	keys := make([]string, 0, s.idx.len())
+	s.idx.eachKey(func(kb []byte, _ loc) bool { keys = append(keys, string(kb)); return true })
 	sort.Strings(keys)
 	tmp := s.sidecarPath() + ".tmp"
 	f, err := os.Create(tmp)
@@ -538,7 +559,7 @@ func (s *Store) Flush() error {
 	w.Write(hdr[:])
 	var vb [binary.MaxVarintLen64]byte
 	for _, k := range keys {
-		l := s.idx[k]
+		l, _ := s.idx.get(k)
 		n := binary.PutUvarint(vb[:], uint64(len(k)))
 		w.Write(vb[:n])
 		w.WriteString(k)
@@ -580,7 +601,7 @@ func (s *Store) loadSidecar() error {
 	}
 	count := binary.LittleEndian.Uint64(b[8:16])
 	p := 16
-	s.idx = make(map[string]loc, count)
+	s.idx.reset(int(count))
 	s.liveBytes = 0
 	for i := uint64(0); i < count; i++ {
 		klen, n := binary.Uvarint(b[p:])
@@ -598,7 +619,7 @@ func (s *Store) loadSidecar() error {
 		p += n
 		span, n := binary.Uvarint(b[p:])
 		p += n
-		s.idx[key] = loc{recOff: recOff, valOff: valOff, valLen: uint32(valLen), span: uint32(span)}
+		s.idx.set(key, loc{recOff: recOff, valOff: valOff, valLen: uint32(valLen), span: uint32(span)}, tblByte(key))
 		s.liveBytes += span
 	}
 	return nil
@@ -618,10 +639,8 @@ func (s *Store) DeadRatio() float64 {
 // reclaiming every dead byte, then atomically swaps it in and re-mmaps. Safe to
 // call only at a quiescent point (no held value slices; replay paused).
 func (s *Store) Compact() error {
-	keys := make([]string, 0, len(s.idx))
-	for k := range s.idx {
-		keys = append(keys, k)
-	}
+	keys := make([]string, 0, s.idx.len())
+	s.idx.eachKey(func(kb []byte, _ loc) bool { keys = append(keys, string(kb)); return true })
 	sort.Strings(keys)
 
 	tmpPath := s.dataPath + ".compact"
@@ -641,11 +660,11 @@ func (s *Store) Compact() error {
 	binary.LittleEndian.PutUint32(nd[0:4], magic)
 	binary.LittleEndian.PutUint32(nd[4:8], version)
 	nd[16] = 0
-	newIdx := make(map[string]loc, len(keys))
+	newIdx := newKeyIndex(len(keys), s.recordKey)
 	w := uint64(headerSize)
 	var live uint64
 	for _, k := range keys {
-		l := s.idx[k]
+		l, _ := s.idx.get(k)
 		val := s.data[l.valOff : l.valOff+uint64(l.valLen)]
 		span := recordSpan(len(k), len(val))
 		p := w
@@ -659,7 +678,7 @@ func (s *Store) Compact() error {
 		p += uint64(n)
 		valOff := p
 		copy(nd[p:], val)
-		newIdx[k] = loc{recOff: w, valOff: valOff, valLen: l.valLen, span: span}
+		newIdx.setUnique(k, loc{recOff: w, valOff: valOff, valLen: l.valLen, span: span}, tblByte(k))
 		w += uint64(span)
 		live += uint64(span)
 	}
