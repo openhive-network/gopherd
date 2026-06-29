@@ -617,7 +617,17 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 		if berr != nil {
 			continue
 		}
-		if hfBene.Has(hardfork.HF21) && b.Account == treasuryName {
+		// hived database::is_treasury (database.cpp:374) matches BOTH the
+		// current AND obsolete treasury names: NEW_HIVE_TREASURY_ACCOUNT
+		// ("hive.fund") || OBSOLETE_TREASURY_ACCOUNT ("steem.dao"). A comment
+		// may name the obsolete "steem.dao" as a DHF beneficiary even at HF24+;
+		// hived still routes the WHOLE share to the CURRENT treasury as HBD.
+		// We previously only matched the *current* name (treasuryName), so such
+		// comments fell through to the 50/50 split below — under-burning
+		// current_supply by share/2 and over-vesting. ROOT of the khaiyoui
+		// 48,032,488 cs+11/hbd-2 divergence (cascades via virtual_supply →
+		// new_hive floor → vesting_reward → F/S short).
+		if hfBene.Has(hardfork.HF21) && (b.Account == "hive.fund" || b.Account == "steem.dao") {
 			// Treasury branch: convert HIVE→HBD at current median.
 			fh, ferr := objects.GetFeedHistory(s)
 			if ferr != nil || priceIsZero(fh.CurrentMedianHistory) {
@@ -625,12 +635,18 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 				continue
 			}
 			hbdPayout := convertHiveToHBD(share, fh.CurrentMedianHistory)
-			if envGhivediffAll != "" && calcTraceWindow(blockNum) {
-				fmt.Fprintf(os.Stderr, "GHIVEDIFF BENE-TREASURY block=%d author=%s benefactor=%s hbd_before=%d payout=%d share=%d\n",
-					blockNum, c.Author, b.Account, bAcct.HBDBalance, hbdPayout, share)
+			// Credit the CURRENT treasury (mirrors hived adjust_balance(
+			// get_treasury())), NOT b.Account — the beneficiary may name the
+			// obsolete "steem.dao" but the HBD goes to the live treasury.
+			tAcct, terr := objects.GetAccount(s, auth.AccountName(treasuryName))
+			if terr == nil {
+				if envGhivediffAll != "" && calcTraceWindow(blockNum) {
+					fmt.Fprintf(os.Stderr, "GHIVEDIFF BENE-TREASURY block=%d author=%s benefactor=%s treasury=%s hbd_before=%d payout=%d share=%d\n",
+						blockNum, c.Author, b.Account, treasuryName, tAcct.HBDBalance, hbdPayout, share)
+				}
+				objects.AdjustHBDBalance(s, &tAcct, blockTime, hbdPayout)
+				objects.PutAccount(s, &tAcct)
 			}
-			objects.AdjustHBDBalance(s, &bAcct, blockTime, hbdPayout)
-			objects.PutAccount(s, &bAcct)
 			// adjust_supply pair: HIVE -share burned, HBD +hbdPayout minted
 			// (with VS recompute on the HBD branch). Mirrors C++
 			// database_comment.cpp:283-285.
