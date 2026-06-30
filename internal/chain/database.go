@@ -965,6 +965,24 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	updateMedianFeed(session, blockNum, hdr.Timestamp)
 	updateVirtualSupply(session, blockNum)
 	clearNullAccountBalance(session, blockNum)
+	// Treasury sweep (post-HF24): "steem.dao" is the obsolete treasury; any
+	// funds that land on it — notably the DHF return-proposal payment whose
+	// receiver is still "steem.dao" — must be migrated to the current
+	// treasury (hive.fund) EVERY block, not just once at HF24. Mirrors
+	// hived's per-block consolidate_treasury_balance() at the "treasury"
+	// phase (database.cpp:2358), guarded by collect_account_total_balance so
+	// it only runs when steem.dao actually holds a balance. Without this Go
+	// leaked the return-proposal HBD into steem.dao (~13K sat/tick),
+	// shrinking the DHF budget until spaminator's proposal dropped below the
+	// funding cutoff (convert failure @48,177,223).
+	if hasHF24(session) {
+		if sd, serr := objects.GetAccount(session, "steem.dao"); serr == nil &&
+			(sd.Balance > 0 || sd.HBDBalance > 0 || sd.SavingsBalance > 0 ||
+				sd.SavingsHBDBalance > 0 || sd.RewardHive > 0 || sd.RewardHBD > 0 ||
+				sd.VestingShares > 0) {
+			consolidateTreasuryBalance(session, hdr.Timestamp)
+		}
+	}
 	processProducerReward(session, hdr.Witness, blockNum)
 	if envGhivediff != "" {
 		// Per-block dump in the HF7-cascade-divergence window. Trace
