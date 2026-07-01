@@ -543,9 +543,17 @@ func (s *Store) Flush() error {
 	if err := unix.Msync(s.data, unix.MS_SYNC); err != nil {
 		return fmt.Errorf("persiststore: msync: %w", err)
 	}
-	keys := make([]string, 0, s.idx.len())
-	s.idx.eachKey(func(kb []byte, _ loc) bool { keys = append(keys, string(kb)); return true })
-	sort.Strings(keys)
+	// Collect every live loc from the index WITHOUT faulting data pages
+	// (eachTable is index-only), then sort by recOff so we read the keys back in
+	// FILE-OFFSET order — sequential reads instead of random per-key faults.
+	// The old form (eachKey in hash order + a per-key idx.get) faulted the whole
+	// cold file in random order TWICE; at ~49M cold keys that thrashed page cache
+	// and hung Flush for 60+ min. Offset order turns it into a ~sequential scan.
+	// Sidecar load (loadSidecar) is order-independent, so recOff order is fine
+	// (and still deterministic — recOff is unique per live key).
+	locs := make([]loc, 0, s.idx.len())
+	s.idx.eachTable(func(_ byte, l loc) bool { locs = append(locs, l); return true })
+	sort.Slice(locs, func(i, j int) bool { return locs[i].recOff < locs[j].recOff })
 	tmp := s.sidecarPath() + ".tmp"
 	f, err := os.Create(tmp)
 	if err != nil {
@@ -555,14 +563,14 @@ func (s *Store) Flush() error {
 	var hdr [16]byte
 	binary.LittleEndian.PutUint32(hdr[0:4], magic)
 	binary.LittleEndian.PutUint32(hdr[4:8], version)
-	binary.LittleEndian.PutUint64(hdr[8:16], uint64(len(keys)))
+	binary.LittleEndian.PutUint64(hdr[8:16], uint64(len(locs)))
 	w.Write(hdr[:])
 	var vb [binary.MaxVarintLen64]byte
-	for _, k := range keys {
-		l, _ := s.idx.get(k)
+	for _, l := range locs {
+		k := s.recordKey(l.recOff) // sequential fault (locs sorted by recOff)
 		n := binary.PutUvarint(vb[:], uint64(len(k)))
 		w.Write(vb[:n])
-		w.WriteString(k)
+		w.Write(k)
 		n = binary.PutUvarint(vb[:], l.recOff)
 		w.Write(vb[:n])
 		n = binary.PutUvarint(vb[:], l.valOff)
