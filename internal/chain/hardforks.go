@@ -133,8 +133,16 @@ func applyHardfork(s *state.Session, id hardfork.ID) {
 			objects.PutDGPO(s, &dgpo)
 		}
 	case hardfork.HF16:
-		// Truncate the price-history window from 168 → 84 entries.
-		truncateFeedHistoryWindow(s, 84)
+		// NOTE: HF16 lowers the feed-history window CONSTANT 168 → 84
+		// (HIVE_FEED_HISTORY_WINDOW), but hived does NOT truncate the
+		// existing price_history deque at the hardfork — apply_hardfork has
+		// no price_history mutation. Because update_median_feed pops at most
+		// ONE entry per call (database.cpp:2482, see trimPriceHistory), the
+		// already-full 168-entry deque never shrinks to 84; it stays pegged
+		// at 168 for the rest of chain history. Explicitly truncating here
+		// (as we used to) diverged the median feed from HF16 on and caused
+		// the block 49,596,514 claim_reward wall.
+		//
 		// Switch to the smooth inflation curve. Seed reward-split
 		// percentages: 75 % content, 15 % vesting, 0 % proposal,
 		// witness gets the remainder (10 %).
@@ -1167,16 +1175,3 @@ func retallyWitnessVoteCounts(s *state.Session) {
 	})
 }
 
-// truncateFeedHistoryWindow shrinks fho.price_history to at most n
-// entries, preserving the most-recent values. HF16 cuts the window from
-// 168 (24×7 hourly) to 84 (12×7).
-func truncateFeedHistoryWindow(s *state.Session, n int) {
-	fh, err := objects.GetFeedHistory(s)
-	if err != nil {
-		return
-	}
-	if len(fh.PriceHistory) > n {
-		fh.PriceHistory = fh.PriceHistory[len(fh.PriceHistory)-n:]
-		objects.PutFeedHistory(s, &fh)
-	}
-}
