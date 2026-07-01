@@ -326,6 +326,11 @@ func newColdBloom(expectedKeys int) *coldBloom {
 }
 
 // fnv1a64 of b, used as the base hash; the k probes are derived by mixing.
+// Only ONE pass over the bytes: h2 is derived from h1 via a splitmix64-style
+// finalizer (Kirsch–Mitzenmacher double hashing). This halves the per-key
+// hashing cost on the cold-tier hot path (add on every evict, maybePresent on
+// every RAM miss). The bloom is a non-consensus heuristic — changing the hash
+// only shifts the false-positive distribution slightly, never correctness.
 func bloomHash(b []byte) (uint64, uint64) {
 	const off = 1469598103934665603
 	const prime = 1099511628211
@@ -334,12 +339,14 @@ func bloomHash(b []byte) (uint64, uint64) {
 		h ^= uint64(c)
 		h *= prime
 	}
-	// second independent hash (different seed) for double hashing.
-	h2 := uint64(1099511628211)
-	for _, c := range b {
-		h2 = (h2 ^ uint64(c)) * 0x100000001b3
-		h2 += 0x9e3779b97f4a7c15
-	}
+	// Derive an independent-enough second hash from h1 without re-scanning b.
+	h2 := h ^ (h >> 33)
+	h2 *= 0xff51afd7ed558ccd
+	h2 ^= h2 >> 33
+	h2 *= 0xc4ceb9fe1a85ec53
+	h2 ^= h2 >> 33
+	// h2 must be odd so (h1 + i*h2) visits distinct slots over the k probes.
+	h2 |= 1
 	return h, h2
 }
 
