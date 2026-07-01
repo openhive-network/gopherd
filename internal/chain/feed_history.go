@@ -35,6 +35,26 @@ const (
 	feedHistoryWindow        = 12 * 7
 )
 
+// trimPriceHistory mirrors hived's feed_history trim (database.cpp:2482):
+//
+//	if( fho.price_history.size() > window ) fho.price_history.pop_front();
+//
+// It removes AT MOST ONE entry per call — NOT a truncate-to-window. This
+// distinction is consensus-critical across the HF16 window reduction
+// (168 -> 84): when HF16 fires the deque is already pegged at 168, and
+// because only one element is ever removed per hourly update while one is
+// added, the window can never shrink to 84 — it stays stuck at 168 for the
+// rest of chain history. Computing current_median_history over 168 samples
+// (index 84) vs 84 samples (index 42) selects a different stored feed, which
+// diverges the median (and every downstream HBD author payout) from HF16 on.
+// The previous `hist[len-window:]` truncation matched hived only until HF16.
+func trimPriceHistory(hist []asset.Price, window int) []asset.Price {
+	if len(hist) > window {
+		return hist[1:]
+	}
+	return hist
+}
+
 // updateMedianFeed mirrors libraries/chain/database.cpp:2399. Once per
 // HIVE_FEED_INTERVAL_BLOCKS, scan every witness with a fresh feed,
 // compute the median exchange rate, push it into the rolling window,
@@ -202,9 +222,7 @@ func updateMedianFeed(s *state.Session, blockNum, blockTime uint32) {
 		return
 	}
 	fh.PriceHistory = append(fh.PriceHistory, medianFeed)
-	if len(fh.PriceHistory) > window {
-		fh.PriceHistory = fh.PriceHistory[len(fh.PriceHistory)-window:]
-	}
+	fh.PriceHistory = trimPriceHistory(fh.PriceHistory, window)
 	if len(fh.PriceHistory) > 0 {
 		copyHist := make([]asset.Price, len(fh.PriceHistory))
 		copy(copyHist, fh.PriceHistory)
