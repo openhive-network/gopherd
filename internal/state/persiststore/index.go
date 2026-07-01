@@ -1,5 +1,7 @@
 package persiststore
 
+import "sort"
+
 // keyIndex is the in-RAM key→loc index for a Store. It replaces a
 // map[string]loc to BOUND and shrink the resident footprint of a huge cold
 // tier: instead of storing every (long) key string in the heap, it stores only
@@ -213,11 +215,25 @@ func (ix *keyIndex) eachTable(fn func(tbl byte, l loc) bool) {
 // data mapping (faults cold pages — for the rarer key-iterating paths: Flush,
 // Compact, SortedKeys, prefix listing, by-offset snapshot scan).
 func (ix *keyIndex) eachKey(fn func(key []byte, l loc) bool) {
+	// Read records in FILE-OFFSET order (sequential), not hash-slot order
+	// (random). On a cold tier bigger than page cache, hash-order key reads
+	// fault the file randomly — that thrashed page cache and made Flush hang
+	// 60min+ and persist resume-load crawl. Sorting a compact []uint32 of live
+	// slot indices by recOff is RAM-only (no data faults); the keyAt reads then
+	// march up the file. Every eachKey caller is a cold path (load / flush /
+	// snapshot-save / compaction), never the per-block apply loop.
+	order := make([]uint32, 0, ix.count)
 	for i := range ix.slots {
 		if ix.slots[i].used {
-			if !fn(ix.keyAt(ix.slots[i].loc.recOff), ix.slots[i].loc) {
-				return
-			}
+			order = append(order, uint32(i))
+		}
+	}
+	sort.Slice(order, func(a, b int) bool {
+		return ix.slots[order[a]].loc.recOff < ix.slots[order[b]].loc.recOff
+	})
+	for _, si := range order {
+		if !fn(ix.keyAt(ix.slots[si].loc.recOff), ix.slots[si].loc) {
+			return
 		}
 	}
 }

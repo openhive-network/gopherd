@@ -195,12 +195,23 @@ func (s *Store) RegisterOrderedTable(table byte) {
 			btree.Options{Degree: 32, NoLocks: true},
 		)
 	}
-	s.idx.eachKey(func(k []byte, _ loc) bool {
-		if len(k) > 0 && s.orderedTable[k[0]] {
-			s.ordered.Set(string(k))
+	// Reseed the ordered btree for THIS table WITHOUT faulting every record:
+	// eachTable is index-only, so collect just this table's locs, sort by recOff,
+	// and read the keys back in FILE-OFFSET order (sequential). The old eachKey
+	// form faulted EVERY cold record in hash order on each call — at ~300M cold
+	// keys that thrashed page cache and made a persist resume-LOAD take many
+	// minutes, defeating the whole point of a fast-resume checkpoint.
+	var locs []loc
+	s.idx.eachTable(func(tbl byte, l loc) bool {
+		if tbl == table {
+			locs = append(locs, l)
 		}
 		return true
 	})
+	sort.Slice(locs, func(i, j int) bool { return locs[i].recOff < locs[j].recOff })
+	for _, l := range locs {
+		s.ordered.Set(string(s.recordKey(l.recOff)))
+	}
 }
 
 func (s *Store) isOrdered(key string) bool {
@@ -540,6 +551,13 @@ func (s *Store) sidecarPath() string { return filepath.Join(s.dir, "index.bin") 
 // Flush persists everything for a clean restart: msync the data mapping, write
 // the index sidecar (sorted keys, deterministic), and clear the dirty flag.
 func (s *Store) Flush() error {
+	// Skip when nothing changed since the last flush. Close() calls Flush()
+	// unconditionally, so a shutdown that already flushed explicitly (the
+	// --shutdown-snapshot path) would otherwise re-scan + rewrite the entire
+	// multi-GB sidecar a second time — pure waste (and confusingly slow).
+	if !s.dirty {
+		return nil
+	}
 	if err := unix.Msync(s.data, unix.MS_SYNC); err != nil {
 		return fmt.Errorf("persiststore: msync: %w", err)
 	}
