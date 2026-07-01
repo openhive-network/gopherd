@@ -95,8 +95,12 @@ func updateMedianFeed(s *state.Session, blockNum, blockTime uint32) {
 				continue
 			}
 			if hf.Has(hardfork.HF19) {
+				// hived (database.cpp:2413): include iff now < last+AGE, i.e.
+				// EXCLUDE when now >= last+AGE. Go used `>` which includes a
+				// feed exactly at the 7-day boundary that hived excludes.
+				// Match hived with `>=`.
 				if w.LastHBDExchangeUpdate == 0 ||
-					blockTime > w.LastHBDExchangeUpdate+maxFeedAgeSec {
+					blockTime >= w.LastHBDExchangeUpdate+maxFeedAgeSec {
 					continue
 				}
 			}
@@ -104,7 +108,7 @@ func updateMedianFeed(s *state.Session, blockNum, blockTime uint32) {
 		}
 	}
 
-	if envGhivediffFeed != "" {
+	if envGhivediffFeed != "" && vsDumpFrom != 0 && uint64(blockNum) >= vsDumpFrom && uint64(blockNum) <= vsDumpTo {
 		var sched []string
 		if ws, err := objects.GetWitnessSchedule(s); err == nil {
 			for _, n := range ws.CurrentShuffledWitnesses {
@@ -183,7 +187,7 @@ func updateMedianFeed(s *state.Session, blockNum, blockTime uint32) {
 
 	sort.Slice(feeds, func(i, j int) bool { return priceLess(feeds[i], feeds[j]) })
 	medianFeed := feeds[len(feeds)/2]
-	if envGhivediffFeed != "" {
+	if envGhivediffFeed != "" && vsDumpFrom != 0 && uint64(blockNum) >= vsDumpFrom && uint64(blockNum) <= vsDumpTo {
 		fmt.Fprintf(os.Stderr, "GHIVEDIFF FEED-MEDIAN block=%d median_base=%d median_quote=%d\n",
 			blockNum, medianFeed.Base.Amount, medianFeed.Quote.Amount)
 	}
@@ -205,7 +209,7 @@ func updateMedianFeed(s *state.Session, blockNum, blockTime uint32) {
 		copyHist := make([]asset.Price, len(fh.PriceHistory))
 		copy(copyHist, fh.PriceHistory)
 		sort.Slice(copyHist, func(i, j int) bool { return priceLess(copyHist[i], copyHist[j]) })
-		if envGhivediffFeed != "" {
+		if envGhivediffFeed != "" && vsDumpFrom != 0 && uint64(blockNum) >= vsDumpFrom && uint64(blockNum) <= vsDumpTo {
 			fmt.Fprintf(os.Stderr, "GHIVEDIFF FEED-HIST block=%d hist_len=%d cmh_base=%d cmh_quote=%d\n",
 				blockNum, len(fh.PriceHistory),
 				copyHist[len(copyHist)/2].Base.Amount,
