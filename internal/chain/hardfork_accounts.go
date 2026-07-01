@@ -2,7 +2,9 @@ package chain
 
 import (
 	"errors"
+	"fmt"
 	"math/bits"
+	"os"
 
 	"hived-go/internal/protocol/asset"
 	"hived-go/internal/protocol/auth"
@@ -417,6 +419,9 @@ func clearAccount(s *state.Session, name string) error {
 	// hive_transferred = total_transferred_hive, hbd_transferred =
 	// total_transferred_hbd, and gather_balance pushes that pair into
 	// hardfork_property_object.h23_balances (database.cpp:2533-2538).
+	if os.Getenv("CLEARTRACE") != "" {
+		fmt.Fprintf(os.Stderr, "CLEARTRACE name=%s hive=%d hbd=%d\n", account.Name, totalTransferredHive, totalTransferredHBD)
+	}
 	gatherBalance(s, account.Name, totalTransferredHive, totalTransferredHBD)
 
 	objects.PutAccount(s, &account)

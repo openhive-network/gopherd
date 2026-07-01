@@ -4,12 +4,22 @@ import (
 	"fmt"
 	"math/bits"
 	"os"
+	"strconv"
 
 	"hived-go/internal/math128"
 	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
 )
+
+// VS-DUMP diagnostic window (env VSDUMP_FROM/VSDUMP_TO): dumps the HBD
+// print-rate inputs each block in [from,to] to localize a print_rate /
+// treasury-HBD divergence (the reward_hbd-short wall at 49,596,514).
+var vsDumpFrom, vsDumpTo = func() (uint64, uint64) {
+	f, _ := strconv.ParseUint(os.Getenv("VSDUMP_FROM"), 10, 64)
+	t, _ := strconv.ParseUint(os.Getenv("VSDUMP_TO"), 10, 64)
+	return f, t
+}()
 
 // updateVirtualSupply mirrors database::update_virtual_supply
 // (libraries/chain/database.cpp:2868). Recomputes
@@ -110,9 +120,13 @@ func updateVirtualSupply(s *state.Session, blockNum uint32) {
 			}
 			dgpo.HBDPrintRate = uint16(rate)
 		}
-		if blockNum == 5216528 {
-			fmt.Fprintf(os.Stderr, "GHIVEDIFF VS-DUMP block=%d hbd_supply=%d virtual_supply=%d hbd_as_hive=%d percent_hbd=%d print_rate=%d median_base=%d median_quote=%d\n",
-				blockNum, hbdSupply, virtualSupplyForRatio, convertHBDToHive(hbdSupply, fh.CurrentMedianHistory), percentHBD, dgpo.HBDPrintRate,
+		if vsDumpFrom != 0 && uint64(blockNum) >= vsDumpFrom && uint64(blockNum) <= vsDumpTo {
+			var treasHBD int64
+			if treasury, terr := objects.GetAccount(s, currentTreasuryName(s, hf)); terr == nil {
+				treasHBD = treasury.HBDBalance
+			}
+			fmt.Fprintf(os.Stderr, "GHIVEDIFF VS-DUMP block=%d total_hbd=%d treasury_hbd=%d hbd_supply=%d virtual_supply=%d current_supply=%d hbd_as_hive=%d percent_hbd=%d print_rate=%d median_base=%d median_quote=%d\n",
+				blockNum, dgpo.CurrentHBDSupply, treasHBD, hbdSupply, virtualSupplyForRatio, dgpo.CurrentSupply, convertHBDToHive(hbdSupply, fh.CurrentMedianHistory), percentHBD, dgpo.HBDPrintRate,
 				fh.CurrentMedianHistory.Base.Amount, fh.CurrentMedianHistory.Quote.Amount)
 		}
 	}

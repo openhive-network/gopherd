@@ -1021,6 +1021,20 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 				a.VotingManaCurrent, a.VotingManaLastUpdate, a.DownvoteManaCurrent, a.EffectiveVestingSharesExclWithdraw())
 		}
 	}
+	// TREASURYTRACE diagnostic: dump steem.dao + hive.fund balances at the
+	// START of the block (= end of prev block, pre this block's DHF/sweep).
+	// Sparse stride to bisect the 296,435-sat HF23->HF24 hive.fund residual
+	// against hived account_history ground truth. Uncommitted diagnostic.
+	if os.Getenv("TREASURYTRACE") != "" {
+		if blockNum%200000 == 0 || (blockNum >= 47797670 && blockNum <= 47797690) {
+			for _, name := range []string{"steem.dao", "hive.fund"} {
+				if a, e := objects.GetAccount(session, name); e == nil {
+					fmt.Fprintf(os.Stderr, "TREASURYTRACE block=%d name=%s hive=%d hbd=%d savings_hbd=%d reward_hbd=%d vests=%d\n",
+						blockNum, name, a.Balance, a.HBDBalance, a.SavingsHBDBalance, a.RewardHBD, a.VestingShares)
+				}
+			}
+		}
+	}
 	processFunds(session, blockNum, hdr.Witness)
 	if envGhivediff != "" {
 		switch blockNum {
