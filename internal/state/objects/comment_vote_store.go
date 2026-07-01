@@ -658,6 +658,9 @@ func (s *CommentVoteStore) MarshalSnapshot(w io.Writer) error {
 		return err
 	}
 	_, durableCold := s.durableColdAttached()
+	if SnapshotForceSelfContained {
+		durableCold = false // stream cold rows into the file → portable snapshot
+	}
 	total := len(s.primary)
 	for _, n := range s.coldCount {
 		total += n

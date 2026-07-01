@@ -1000,6 +1000,9 @@ func (s *CommentStore) MarshalSnapshot(w io.Writer) error {
 	// what turns the snapshot save from a ~150-200GB cold re-serialize (the
 	// slow-save bottleneck) into a fast resident-only dump.
 	_, durableCold := s.durableColdAttached()
+	if SnapshotForceSelfContained {
+		durableCold = false // stream cold rows into the file → portable snapshot
+	}
 	var hdr [8]byte
 	binary.LittleEndian.PutUint32(hdr[0:4], commentStoreSnapshotVersion)
 	countField := uint32(len(s.primary) + s.coldTotal)

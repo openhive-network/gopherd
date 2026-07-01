@@ -14,6 +14,16 @@ import (
 // attached, else it would silently drop the cold half of state.
 const snapColdDurableFlag = uint32(1) << 31
 
+// SnapshotForceSelfContained, when true, makes CommentStore / CommentVoteStore
+// MarshalSnapshot STREAM the full cold tier into the snapshot even when the
+// attached cold backend is durable (persist). The result is a portable,
+// self-contained snapshot (no snapColdDurableFlag) that loads into ANY cold
+// backend — the key primitive for cheap wall iteration: replay fast on persist,
+// then freeze ONE self-contained checkpoint near the frontier that each fix-test
+// run loads into a fresh volatile tier. Only affects marshaling, never the load
+// path (which keys off the file's own flag), so it's safe to leave set globally.
+var SnapshotForceSelfContained bool
+
 // parseColdByRootRootKey extracts the ROOT (commentPK) from a cold by-root key:
 //
 //	[coldTableCommentByRoot] [rootAuthor: 16B zero-padded] [rootPermlink] [0x00] [child…]
