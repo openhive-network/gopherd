@@ -1,10 +1,19 @@
 package chain
 
 import (
+	"fmt"
+	"os"
+
 	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
 )
+
+// envDelegretTrace (GHIVEDIFF_DELEGRET=1) traces every delegation-return
+// sweep: hint skips, ready counts, primary-row misses, per-return credits.
+// Diagnostic for the 40M-checkpoint resume post-mortem (returns present in
+// state but observably not processed).
+var envDelegretTrace = os.Getenv("GHIVEDIFF_DELEGRET")
 
 // clearExpiredDelegations mirrors database::clear_expired_delegations
 // (libraries/chain/database.cpp:2326). For each
@@ -13,6 +22,9 @@ import (
 // decrementing their `delegated_vesting_shares`.
 func clearExpiredDelegations(s *state.Session, blockTime uint32) {
 	if hint, ok := s.GetExpHint(objects.VestingDelegationExpirationTable, objects.VestingDelegationExpirationByDateIndex); ok && hint > blockTime {
+		if envDelegretTrace != "" {
+			fmt.Fprintf(os.Stderr, "DELEGRET skip blockTime=%d hint=%d\n", blockTime, hint)
+		}
 		return
 	}
 
@@ -61,15 +73,24 @@ func clearExpiredDelegations(s *state.Session, blockTime uint32) {
 			dvPoolPct = dgpoNow.DownvotePoolPercent
 		}
 	}
+	if envDelegretTrace != "" && len(ready) > 0 {
+		fmt.Fprintf(os.Stderr, "DELEGRET sweep blockTime=%d ready=%d nextExp=%d\n", blockTime, len(ready), nextExp)
+	}
 	for _, p := range ready {
 		v, err := s.Get(objects.VestingDelegationExpirationTable, state.PrimaryIndex,
 			append(state.AppendAccountName(nil, p.delegator), state.AppendUint32BE(nil, p.id)...))
 		if err != nil {
+			if envDelegretTrace != "" {
+				fmt.Fprintf(os.Stderr, "DELEGRET MISS-PRIMARY delegator=%s id=%d exp=%d\n", p.delegator, p.id, p.expiration)
+			}
 			continue
 		}
 		exp, err := objects.ReadVestingDelegationExpiration(v)
 		if err != nil {
 			continue
+		}
+		if envDelegretTrace != "" {
+			fmt.Fprintf(os.Stderr, "DELEGRET return delegator=%s vests=%d exp=%d\n", exp.Delegator, exp.VestingShares, exp.Expiration)
 		}
 		a, gerr := objects.GetAccount(s, exp.Delegator)
 		if gerr != nil {

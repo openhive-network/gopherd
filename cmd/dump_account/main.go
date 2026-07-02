@@ -36,6 +36,15 @@ func main() {
 		objects.EnsureAccountStore(boot)
 		objects.EnsureCommentStore(boot)
 		objects.EnsureCommentVoteStore(boot)
+		objects.EnsureBlockSummaryStore(boot)
+		objects.EnsureCommentCashoutScheduleStore(boot)
+		objects.EnsureConvertRequestStore(boot)
+		objects.EnsureDGPOStore(boot)
+		objects.EnsureFutureWitnessScheduleStore(boot)
+		objects.EnsureLimitOrderStore(boot)
+		objects.EnsureTransactionStore(boot)
+		objects.EnsureVestingWithdrawalScheduleStore(boot)
+		objects.EnsureWitnessScheduleStore(boot)
 		if info, err := os.Stat(*snapshotPath); err == nil && info.IsDir() {
 			if _, err := snap.Load(stateDB, *snapshotPath); err != nil {
 				panic(fmt.Errorf("load dir snapshot: %w", err))
