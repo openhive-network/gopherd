@@ -122,61 +122,28 @@ func updateMedianFeed(s *state.Session, blockNum, blockTime uint32) {
 		fmt.Fprintf(os.Stderr, "GHIVEDIFF FEED-SCHED block=%d feeds=%d schedule=[%s]\n",
 			blockNum, len(feeds), strings.Join(sched, ","))
 		// Also dump top-25 witnesses by votes to compare voted-set composition.
+		// Uses the typed WitnessStore — the legacy K/V WitnessTable ranges went
+		// permanently empty after the typed-store overhaul, which silently
+		// emptied these dumps (feedp.log 2026-07-01 had top25=[]).
+		wstore := objects.EnsureWitnessStore(s)
 		var entries []string
-		_ = s.Range(objects.WitnessTable, objects.WitnessByVoteIndex, nil,
-			func(key, _ []byte) (bool, error) {
-				if len(entries) >= 25 || len(key) < 8+state.AccountNameKeyLen {
-					return len(entries) < 25, nil
-				}
-				ownerBytes := key[8 : 8+state.AccountNameKeyLen]
-				n := state.AccountNameKeyLen
-				for n > 0 && ownerBytes[n-1] == 0 {
-					n--
-				}
-				name := string(ownerBytes[:n])
-				w, _ := objects.GetWitness(s, auth.AccountName(name))
-				entries = append(entries, fmt.Sprintf("%s=%d", name, w.TotalVotesVests))
-				return true, nil
-			})
+		_ = wstore.RangeByVote(func(w *objects.Witness) (bool, error) {
+			entries = append(entries, fmt.Sprintf("%s=%d", w.Owner, w.TotalVotesVests))
+			return len(entries) < 25, nil
+		})
 		fmt.Fprintf(os.Stderr, "GHIVEDIFF SCHED-VOTES block=%d top25=[%s]\n",
 			blockNum, strings.Join(entries, ","))
-		// Top-30 by smallest VST (timeshare candidates).
-		var vstEntries []string
-		_ = s.Range(objects.WitnessTable, objects.WitnessByScheduleTimeIndex, nil,
-			func(key, _ []byte) (bool, error) {
-				if len(vstEntries) >= 30 || len(key) < 16+state.AccountNameKeyLen {
-					return len(vstEntries) < 30, nil
-				}
-				vstHex := fmt.Sprintf("%x", key[:16])
-				ownerBytes := key[16 : 16+state.AccountNameKeyLen]
-				n := state.AccountNameKeyLen
-				for n > 0 && ownerBytes[n-1] == 0 {
-					n--
-				}
-				name := string(ownerBytes[:n])
-				vstEntries = append(vstEntries, fmt.Sprintf("%s=%s", name, vstHex))
-				return true, nil
-			})
+		// Top-30 by smallest VST (timeshare candidates), with position +
+		// last_update + votes for cross-side diff.
+		var vstEntries, posEntries []string
+		_ = wstore.RangeByScheduleTime(func(w *objects.Witness) (bool, error) {
+			vstEntries = append(vstEntries, fmt.Sprintf("%s=%x", w.Owner, w.VirtualScheduledTime))
+			posEntries = append(posEntries, fmt.Sprintf("%s:pos=%x,lu=%x,votes=%d",
+				w.Owner, w.VirtualPosition, w.VirtualLastUpdate, w.TotalVotesVests))
+			return len(vstEntries) < 30, nil
+		})
 		fmt.Fprintf(os.Stderr, "GHIVEDIFF SCHED-VSTS block=%d top30=[%s]\n",
 			blockNum, strings.Join(vstEntries, ","))
-		// Per-witness position + last_update + votes for cross-side diff.
-		var posEntries []string
-		_ = s.Range(objects.WitnessTable, objects.WitnessByScheduleTimeIndex, nil,
-			func(key, _ []byte) (bool, error) {
-				if len(posEntries) >= 30 || len(key) < 16+state.AccountNameKeyLen {
-					return len(posEntries) < 30, nil
-				}
-				ownerBytes := key[16 : 16+state.AccountNameKeyLen]
-				n := state.AccountNameKeyLen
-				for n > 0 && ownerBytes[n-1] == 0 {
-					n--
-				}
-				name := string(ownerBytes[:n])
-				w, _ := objects.GetWitness(s, auth.AccountName(name))
-				posEntries = append(posEntries, fmt.Sprintf("%s:pos=%x,lu=%x,votes=%d",
-					name, w.VirtualPosition, w.VirtualLastUpdate, w.TotalVotesVests))
-				return true, nil
-			})
 		fmt.Fprintf(os.Stderr, "GHIVEDIFF SCHED-POS block=%d top30=[%s]\n",
 			blockNum, strings.Join(posEntries, ","))
 	}
