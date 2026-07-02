@@ -137,7 +137,7 @@ func Open(dir string, reserveBytes uint64) (*Store, error) {
 		size:     reserveBytes,
 		writeOff: headerSize,
 	}
-	s.idx = newKeyIndex(1<<16, s.recordKey)
+	s.idx = newKeyIndex(filepath.Join(dir, "index.dat"), 1<<16, s.recordKey)
 	mg := binary.LittleEndian.Uint32(s.data[0:4])
 	if mg == magic {
 		s.writeOff = binary.LittleEndian.Uint64(s.data[8:16])
@@ -686,7 +686,7 @@ func (s *Store) Compact() error {
 	binary.LittleEndian.PutUint32(nd[0:4], magic)
 	binary.LittleEndian.PutUint32(nd[4:8], version)
 	nd[16] = 0
-	newIdx := newKeyIndex(len(keys), s.recordKey)
+	newIdx := newKeyIndex(filepath.Join(s.dir, "index.dat.compact"), len(keys), s.recordKey)
 	w := uint64(headerSize)
 	var live uint64
 	for _, k := range keys {
@@ -724,10 +724,23 @@ func (s *Store) Compact() error {
 	}
 	s.f = nf
 	s.data = nd
+	// Retire the old index mapping/file, then move the compacted index into the
+	// canonical index.dat path (rename keeps newIdx's mmap valid — inode-based).
+	s.idx.Close()
+	canonical := filepath.Join(s.dir, "index.dat")
+	if err := os.Rename(newIdx.path, canonical); err == nil {
+		newIdx.path = canonical
+	}
 	s.idx = newIdx
 	s.writeOff = w
 	s.liveBytes = live
-	s.dirty = false
+	// Compaction rewrote every record offset, so the on-disk index sidecar is now
+	// STALE — mark dirty so the next Flush rewrites it (and a crash before that
+	// reopens via rebuildByScan, not the stale sidecar). Without this, the !dirty
+	// fast-path in Flush would skip the rewrite and a reopen would load stale
+	// offsets (TestIndexProperty round-17 regression).
+	s.dirty = true
+	s.data[16] = 1
 	return nil
 }
 
@@ -742,6 +755,9 @@ func (s *Store) Close() error {
 	if s.f != nil {
 		_ = s.f.Close()
 		s.f = nil
+	}
+	if s.idx != nil {
+		s.idx.Close() // unmap + remove the mmap'd index.dat
 	}
 	return ferr
 }
