@@ -84,6 +84,58 @@ func newKeyIndex(path string, capHint int, keyAt func(recOff uint64) []byte) *ke
 	return ix
 }
 
+// openExistingIndex mmaps an existing index.dat AS-IS (no truncation), aliasing
+// slots over its current contents. Only valid when a stamp has vouched that the
+// file reflects the store's exact on-disk state (see Store stamp handling) —
+// this is what lets a reopen skip the multi-minute full rebuild from the
+// sidecar. Returns an error (never panics) so a failed reuse falls back to the
+// sidecar/scan rebuild.
+func openExistingIndex(path string, count int, keyAt func(recOff uint64) []byte) (*keyIndex, error) {
+	f, err := os.OpenFile(path, os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	st, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	nbytes := st.Size()
+	n := int(nbytes / int64(idxSlotSize))
+	if n < 16 || int64(n)*int64(idxSlotSize) != nbytes || n&(n-1) != 0 {
+		f.Close()
+		return nil, fmt.Errorf("persiststore: index %s size %d is not a power-of-two slot array", path, nbytes)
+	}
+	if count < 0 || count*10 >= n*7 {
+		f.Close()
+		return nil, fmt.Errorf("persiststore: index %s count %d over grow threshold for %d slots", path, count, n)
+	}
+	data, err := unix.Mmap(int(f.Fd()), 0, int(nbytes), unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	ix := &keyIndex{path: path, keyAt: keyAt, f: f, data: data, count: count}
+	ix.slots = unsafe.Slice((*idxSlot)(unsafe.Pointer(&data[0])), n)
+	ix.mask = uint64(n - 1)
+	return ix, nil
+}
+
+// closeKeep unmaps the index but KEEPS index.dat on disk. Used by a clean
+// shutdown after the stamp is written, so the next Open can reuse the table
+// instead of rebuilding it from the sidecar.
+func (ix *keyIndex) closeKeep() {
+	if ix.data != nil {
+		_ = unix.Munmap(ix.data)
+		ix.data = nil
+	}
+	if ix.f != nil {
+		_ = ix.f.Close()
+		ix.f = nil
+	}
+	ix.slots = nil
+}
+
 // mapSlots (re)creates ix.path as a ZEROED file of n slots and mmaps it,
 // aliasing ix.slots over the mapping. n must be a power of two. Truncate-to-0
 // then truncate-up guarantees the slots start all-zero (used==false) even when

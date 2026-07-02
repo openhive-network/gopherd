@@ -395,3 +395,85 @@ func TestCompactPreservesOrderedScan(t *testing.T) {
 	s2.RegisterOrderedTable(tByComment)
 	check(s2, "after compact + restart")
 }
+
+// TestStampIndexReuse: a clean Close leaves index.dat + a stamp; the next Open
+// must adopt the existing table (reusedIndex) instead of rebuilding from the
+// sidecar, and everything must still read back byte-identical — including
+// through a second cycle with more mutations, and a fallback (no reuse) after
+// a simulated crash.
+func TestStampIndexReuse(t *testing.T) {
+	dir := t.TempDir()
+	want := map[string]string{}
+	s, err := Open(dir, testReserve)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 4000; i++ {
+		k := fmt.Sprintf("s-%05d", i)
+		v := fmt.Sprintf("val-%d-%0*d", i, i%25, i)
+		if err := s.Set(k, []byte(v)); err != nil {
+			t.Fatal(err)
+		}
+		want[k] = v
+	}
+	for i := 0; i < 4000; i += 5 {
+		k := fmt.Sprintf("s-%05d", i)
+		s.Delete(k)
+		delete(want, k)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reopen 1: must reuse the stamped index, not rebuild.
+	s2, err := Open(dir, testReserve)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s2.reusedIndex {
+		t.Fatal("expected stamp-validated index reuse on clean reopen")
+	}
+	verifyAll(t, s2, want, "stamp reuse")
+
+	// Mutate more, close again, reopen — reuse must hold across cycles.
+	for i := 0; i < 1000; i++ {
+		k := fmt.Sprintf("s2-%05d", i)
+		v := fmt.Sprintf("second-%d", i*3)
+		if err := s2.Set(k, []byte(v)); err != nil {
+			t.Fatal(err)
+		}
+		want[k] = v
+	}
+	if err := s2.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s3, err := Open(dir, testReserve)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s3.reusedIndex {
+		t.Fatal("expected index reuse on second clean reopen")
+	}
+	verifyAll(t, s3, want, "stamp reuse cycle 2")
+
+	// Simulate a crash: mutate, msync data, drop without Flush. The stale stamp
+	// (from the last clean close, already consumed) must NOT resurrect; the
+	// reopen must fall back to a scan rebuild and still see the crash-era write.
+	if err := s3.Set("crash-key", []byte("crash-val")); err != nil {
+		t.Fatal(err)
+	}
+	want["crash-key"] = "crash-val"
+	if err := msyncData(s3); err != nil {
+		t.Fatal(err)
+	}
+	dropWithoutFlush(s3)
+	s4, err := Open(dir, testReserve)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s4.Close()
+	if s4.reusedIndex {
+		t.Fatal("must NOT reuse index after a crash (dirty shutdown)")
+	}
+	verifyAll(t, s4, want, "crash fallback after stamp era")
+}

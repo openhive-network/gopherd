@@ -96,6 +96,10 @@ type Store struct {
 	// cold tier's map(primary)+btree(secondary) split.
 	orderedTable [256]bool
 	ordered      *btree.BTreeG[string]
+
+	// reusedIndex records that Open skipped the sidecar rebuild by reusing a
+	// stamp-validated index.dat (observability + tests).
+	reusedIndex bool
 }
 
 // undoEntry captures what one Set/Delete changed, so it can be reversed.
@@ -137,20 +141,42 @@ func Open(dir string, reserveBytes uint64) (*Store, error) {
 		size:     reserveBytes,
 		writeOff: headerSize,
 	}
-	s.idx = newKeyIndex(filepath.Join(dir, "index.dat"), 1<<16, s.recordKey)
 	mg := binary.LittleEndian.Uint32(s.data[0:4])
 	if mg == magic {
 		s.writeOff = binary.LittleEndian.Uint64(s.data[8:16])
 		dirtyByte := s.data[16]
-		if loadErr := s.loadSidecar(); loadErr != nil || dirtyByte != 0 {
-			// No clean sidecar, or a dirty (crash) shutdown → rebuild by scan.
-			if err := s.rebuildByScan(); err != nil {
-				s.Close()
-				return nil, err
+		// Stamp-validated index reuse: if the last shutdown was clean AND wrote a
+		// stamp vouching that index.dat matches this exact data state, mmap the
+		// existing table instead of re-inserting every key from the sidecar (which
+		// takes tens of minutes at hundreds of millions of cold rows). The stamp is
+		// consumed (removed) NO MATTER WHAT before index.dat is touched any other
+		// way — it must never survive into a state it no longer describes (e.g. a
+		// crash mid-rebuild after mapSlots truncated the file it vouches for).
+		if dirtyByte == 0 {
+			if st, err := s.readStamp(); err == nil {
+				_ = os.Remove(s.stampPath())
+				if ix, err := openExistingIndex(filepath.Join(dir, "index.dat"), int(st.count), s.recordKey); err == nil {
+					s.idx = ix
+					s.liveBytes = st.liveBytes
+					s.reusedIndex = true
+				}
+			}
+		}
+		_ = os.Remove(s.stampPath())
+		if s.idx == nil {
+			s.idx = newKeyIndex(filepath.Join(dir, "index.dat"), 1<<16, s.recordKey)
+			if loadErr := s.loadSidecar(); loadErr != nil || dirtyByte != 0 {
+				// No clean sidecar, or a dirty (crash) shutdown → rebuild by scan.
+				if err := s.rebuildByScan(); err != nil {
+					s.Close()
+					return nil, err
+				}
 			}
 		}
 	} else {
 		// Fresh file: write the header.
+		_ = os.Remove(s.stampPath())
+		s.idx = newKeyIndex(filepath.Join(dir, "index.dat"), 1<<16, s.recordKey)
 		binary.LittleEndian.PutUint32(s.data[0:4], magic)
 		binary.LittleEndian.PutUint32(s.data[4:8], version)
 		binary.LittleEndian.PutUint64(s.data[8:16], s.writeOff)
@@ -548,6 +574,86 @@ func (s *Store) rebuildByScan() error {
 // sidecarPath is the persisted index (clean-shutdown fast restart).
 func (s *Store) sidecarPath() string { return filepath.Join(s.dir, "index.bin") }
 
+// stampPath is the index-reuse stamp: its presence vouches that index.dat is
+// byte-consistent with the data segment at the recorded writeOff, so Open can
+// mmap it directly instead of rebuilding from the sidecar. It exists ONLY
+// between a clean Flush and the next Open (Open always consumes it).
+func (s *Store) stampPath() string { return filepath.Join(s.dir, "index.stamp") }
+
+// indexStamp is the decoded stamp payload.
+type indexStamp struct {
+	count     uint64
+	slots     uint64
+	writeOff  uint64
+	liveBytes uint64
+}
+
+const stampLen = 4 + 4 + 4 + 4 + 8 + 8 + 8 + 8 // magic|version|slotSize|pad|count|slots|writeOff|liveBytes
+
+// writeStamp msyncs the index mapping (its dirty pages must be on disk for the
+// file to be reusable) and atomically writes the stamp describing it.
+func (s *Store) writeStamp() error {
+	if err := unix.Msync(s.idx.data, unix.MS_SYNC); err != nil {
+		return fmt.Errorf("persiststore: msync index: %w", err)
+	}
+	var b [stampLen]byte
+	binary.LittleEndian.PutUint32(b[0:4], magic)
+	binary.LittleEndian.PutUint32(b[4:8], version)
+	binary.LittleEndian.PutUint32(b[8:12], uint32(idxSlotSize))
+	binary.LittleEndian.PutUint64(b[16:24], uint64(s.idx.count))
+	binary.LittleEndian.PutUint64(b[24:32], uint64(len(s.idx.slots)))
+	binary.LittleEndian.PutUint64(b[32:40], s.writeOff)
+	binary.LittleEndian.PutUint64(b[40:48], s.liveBytes)
+	tmp := s.stampPath() + ".tmp"
+	f, err := os.Create(tmp)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(b[:]); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	f.Close()
+	return os.Rename(tmp, s.stampPath())
+}
+
+// readStamp loads and validates the stamp against the CURRENT header state.
+// Any mismatch (different binary's slot layout, different writeOff, wrong
+// index.dat size) means index.dat cannot be trusted → error → full rebuild.
+func (s *Store) readStamp() (indexStamp, error) {
+	b, err := os.ReadFile(s.stampPath())
+	if err != nil {
+		return indexStamp{}, err
+	}
+	if len(b) != stampLen ||
+		binary.LittleEndian.Uint32(b[0:4]) != magic ||
+		binary.LittleEndian.Uint32(b[4:8]) != version ||
+		binary.LittleEndian.Uint32(b[8:12]) != uint32(idxSlotSize) {
+		return indexStamp{}, fmt.Errorf("persiststore: bad index stamp")
+	}
+	st := indexStamp{
+		count:     binary.LittleEndian.Uint64(b[16:24]),
+		slots:     binary.LittleEndian.Uint64(b[24:32]),
+		writeOff:  binary.LittleEndian.Uint64(b[32:40]),
+		liveBytes: binary.LittleEndian.Uint64(b[40:48]),
+	}
+	if st.writeOff != s.writeOff {
+		return indexStamp{}, fmt.Errorf("persiststore: index stamp writeOff %d != header %d", st.writeOff, s.writeOff)
+	}
+	fi, err := os.Stat(filepath.Join(s.dir, "index.dat"))
+	if err != nil {
+		return indexStamp{}, err
+	}
+	if uint64(fi.Size()) != st.slots*uint64(idxSlotSize) {
+		return indexStamp{}, fmt.Errorf("persiststore: index.dat size %d != stamped %d slots", fi.Size(), st.slots)
+	}
+	return st, nil
+}
+
 // Flush persists everything for a clean restart: msync the data mapping, write
 // the index sidecar (sorted keys, deterministic), and clear the dirty flag.
 func (s *Store) Flush() error {
@@ -556,6 +662,11 @@ func (s *Store) Flush() error {
 	// --shutdown-snapshot path) would otherwise re-scan + rewrite the entire
 	// multi-GB sidecar a second time — pure waste (and confusingly slow).
 	if !s.dirty {
+		// Still make sure a stamp exists (a stamp-reusing Open consumed it; if
+		// nothing was mutated since, the index is trivially still valid).
+		if _, err := os.Stat(s.stampPath()); err != nil {
+			return s.writeStamp()
+		}
 		return nil
 	}
 	if err := unix.Msync(s.data, unix.MS_SYNC); err != nil {
@@ -612,7 +723,12 @@ func (s *Store) Flush() error {
 	}
 	s.dirty = false
 	s.data[16] = 0
-	return unix.Msync(s.data[:headerSize], unix.MS_SYNC)
+	if err := unix.Msync(s.data[:headerSize], unix.MS_SYNC); err != nil {
+		return err
+	}
+	// Persist the index table itself + its stamp, so the next Open skips the
+	// full sidecar rebuild (tens of minutes at 40M+ blocks of cold rows).
+	return s.writeStamp()
 }
 
 // loadSidecar restores the index from a clean-shutdown sidecar. Returns an error
@@ -741,14 +857,20 @@ func (s *Store) Compact() error {
 	// offsets (TestIndexProperty round-17 regression).
 	s.dirty = true
 	s.data[16] = 1
+	// The stamp (if any) described the pre-compaction index — never reusable.
+	_ = os.Remove(s.stampPath())
 	return nil
 }
 
-// Close flushes (clean shutdown) and unmaps.
+// Close flushes (clean shutdown) and unmaps. After a clean flush the index
+// file is KEPT (with its stamp) so the next Open can reuse it; on a failed
+// flush it is removed — the sidecar/scan rebuild is the source of truth then.
 func (s *Store) Close() error {
 	var ferr error
+	flushed := false
 	if s.data != nil {
 		ferr = s.Flush()
+		flushed = ferr == nil && !s.dirty
 		_ = unix.Munmap(s.data)
 		s.data = nil
 	}
@@ -757,7 +879,12 @@ func (s *Store) Close() error {
 		s.f = nil
 	}
 	if s.idx != nil {
-		s.idx.Close() // unmap + remove the mmap'd index.dat
+		if flushed {
+			s.idx.closeKeep()
+		} else {
+			_ = os.Remove(s.stampPath())
+			s.idx.Close() // unmap + remove the mmap'd index.dat
+		}
 	}
 	return ferr
 }
