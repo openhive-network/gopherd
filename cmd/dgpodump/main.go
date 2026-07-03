@@ -29,8 +29,10 @@ func main() {
 			fmt.Printf("%s: decode: %v\n", path, err)
 			continue
 		}
-		fmt.Printf("%s\n  head=%d time=%d aslot=%d\n  F(fund_hive)=%d  S(vesting_shares)=%d  current_supply=%d  hbd_supply=%d  virtual_supply=%d\n",
+		fmt.Printf("%s\n  head=%d time=%d aslot=%d\n  F(fund_hive)=%d  S(vesting_shares)=%d  current_supply=%d  hbd_supply=%d  virtual_supply=%d\n  HBDInterestRate=%d HBDPrintRate=%d LastBudgetTime=%d NextMaintenanceTime=%d\n",
 			path, d.HeadBlockNumber, d.Time, d.CurrentAslot,
-			d.TotalVestingFundHive, d.TotalVestingShares, d.CurrentSupply, d.CurrentHBDSupply, d.VirtualSupply)
+			d.TotalVestingFundHive, d.TotalVestingShares, d.CurrentSupply, d.CurrentHBDSupply, d.VirtualSupply,
+			d.HBDInterestRate, d.HBDPrintRate, d.LastBudgetTime, d.NextDailyMaintenanceTime)
+		fmt.Printf("  ProposalFundPercent=%d ContentRewardPercent=%d VestingRewardPercent=%d\n", d.ProposalFundPercent, d.ContentRewardPercent, d.VestingRewardPercent)
 	}
 }

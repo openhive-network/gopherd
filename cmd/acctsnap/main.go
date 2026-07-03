@@ -23,6 +23,26 @@ func main() {
 	if err := st.UnmarshalSnapshot(f); err != nil {
 		panic(err)
 	}
+	if len(os.Args) >= 3 && os.Args[2] == "--sumhbd" {
+		var liquid, savings, reward, total int64
+		var n int
+		var topName string
+		var topHBD int64
+		_ = st.RangePrimary(func(a *objects.Account) (bool, error) {
+			liquid += a.HBDBalance
+			savings += a.SavingsHBDBalance
+			reward += a.RewardHBD
+			total += a.HBDBalance + a.SavingsHBDBalance + a.RewardHBD
+			n++
+			if a.HBDBalance > topHBD {
+				topHBD = a.HBDBalance
+				topName = string(a.Name)
+			}
+			return true, nil
+		})
+		fmt.Printf("accounts=%d\n liquid_hbd=%d\n savings_hbd=%d\n reward_hbd=%d\n TOTAL(liquid+savings+reward)=%d\n top_liquid=%s(%d)\n", n, liquid, savings, reward, total, topName, topHBD)
+		return
+	}
 	for _, name := range os.Args[2:] {
 		a, ok := st.Get(auth.AccountName(name))
 		if !ok {
