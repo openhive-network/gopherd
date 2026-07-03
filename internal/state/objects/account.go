@@ -666,3 +666,14 @@ func DelayedVoteCandidates(s *state.Session) []string {
 func DropDelayedVoteCandidate(s *state.Session, name string) {
 	EnsureAccountStore(s).DropDelayedVoteCandidate(name)
 }
+
+// DelayedVoteNoneDue reports whether processDelayedVoting can skip its scan
+// this block (no candidate's front bucket has matured by blockTime).
+func DelayedVoteNoneDue(s *state.Session, blockTime, intervalSec uint32) bool {
+	return EnsureAccountStore(s).DelayedVoteNoneDue(blockTime, intervalSec)
+}
+
+// RecomputeDelayedVoteMin refreshes the min-front-time lower bound after a scan.
+func RecomputeDelayedVoteMin(s *state.Session) {
+	EnsureAccountStore(s).RecomputeDelayedVoteMin()
+}

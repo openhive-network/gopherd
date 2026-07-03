@@ -29,6 +29,14 @@ func processDelayedVoting(s *state.Session, blockTime, blockNum uint32) {
 		return
 	}
 
+	// Fast path: skip the O(candidates) scan entirely on blocks where no
+	// account's oldest delayed-vote bucket has matured yet (the common case —
+	// maturations are spread across the 30-day window). Exact: never skips a
+	// due account (see AccountStore.minFrontTime).
+	if objects.DelayedVoteNoneDue(s, blockTime, objects.DelayedVotingTotalIntervalSec) {
+		return
+	}
+
 	type matured struct {
 		name string
 		val  uint64
@@ -82,4 +90,8 @@ func processDelayedVoting(s *state.Session, blockTime, blockNum uint32) {
 			objects.AdjustProxiedWitnessVotes(s, &a, int64(m.val))
 		}
 	}
+
+	// Refresh the min-front-time lower bound so subsequent blocks can O(1)-skip
+	// until the next-oldest bucket matures.
+	objects.RecomputeDelayedVoteMin(s)
 }

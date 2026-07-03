@@ -123,6 +123,18 @@ type AccountStore struct {
 	// rechecks the account's actual DelayedVotes and drops empties. Not
 	// persisted in the snapshot (rebuilt on load); not consensus state.
 	delayedVoteSet map[string]struct{}
+
+	// minFrontTime is a conservative LOWER BOUND on the oldest (front)
+	// delayed-vote bucket time across all candidates. 0 = unknown (force a
+	// scan). Since a bucket matures at front.Time + INTERVAL, if
+	// minFrontTime + INTERVAL > blockTime then NOTHING is due and
+	// processDelayedVoting can skip the O(candidates) scan entirely — the
+	// common case, since maturations are spread over the 30-day window.
+	// Kept a lower bound: adding a candidate lowers it toward the true min;
+	// removals leave it loose (still ≤ true min = safe, just triggers an
+	// occasional extra scan). RecomputeDelayedVoteMin refreshes it to the
+	// exact min after each scan. Not consensus state; rebuilt on load.
+	minFrontTime uint32
 }
 
 type accountUndo struct {
@@ -175,7 +187,47 @@ func newAccountStore() *AccountStore {
 func (s *AccountStore) noteDelayedVotes(name string, a *Account) {
 	if len(a.DelayedVotes) > 0 {
 		s.delayedVoteSet[name] = struct{}{}
+		// Keep minFrontTime a lower bound on all candidates' front-bucket
+		// times so processDelayedVoting can O(1)-skip when nothing is due.
+		if front := a.DelayedVotes[0].Time; s.minFrontTime == 0 || front < s.minFrontTime {
+			s.minFrontTime = front
+		}
 	}
+}
+
+// DelayedVoteNoneDue reports whether NO candidate's front bucket can have
+// matured by blockTime (based on the minFrontTime lower bound), letting
+// processDelayedVoting skip its scan. intervalSec = maturation interval.
+// Conservative: a false negative (returns false when nothing is actually
+// due) only causes an extra scan; it never skips a due account.
+func (s *AccountStore) DelayedVoteNoneDue(blockTime, intervalSec uint32) bool {
+	if len(s.delayedVoteSet) == 0 {
+		return true
+	}
+	if s.minFrontTime == 0 {
+		return false // unknown bound — must scan
+	}
+	// due iff front + interval <= blockTime  ⟺  front <= blockTime - interval.
+	// Nothing due iff minFrontTime (lower bound) > blockTime - interval.
+	return blockTime >= intervalSec && s.minFrontTime > blockTime-intervalSec
+}
+
+// RecomputeDelayedVoteMin refreshes minFrontTime to the exact minimum
+// front-bucket time across candidates (dropping any whose queue emptied).
+// Called after processDelayedVoting scans, so the next blocks can skip.
+func (s *AccountStore) RecomputeDelayedVoteMin() {
+	var min uint32
+	for n := range s.delayedVoteSet {
+		a := s.primary[n]
+		if a == nil || len(a.DelayedVotes) == 0 {
+			delete(s.delayedVoteSet, n)
+			continue
+		}
+		if front := a.DelayedVotes[0].Time; min == 0 || front < min {
+			min = front
+		}
+	}
+	s.minFrontTime = min
 }
 
 // DelayedVoteCandidates returns the indexed account names (those that may have
@@ -477,6 +529,7 @@ func (s *AccountStore) UnmarshalSnapshot(r io.Reader) error {
 	s.primary = make(map[string]*Account, count)
 	s.undoLog = s.undoLog[:0]
 	s.delayedVoteSet = make(map[string]struct{}) // reseeded from the scan below
+	s.minFrontTime = 0                           // unknown until first scan recomputes
 	for i := uint32(0); i < count; i++ {
 		nameLen, err := binary.ReadUvarint(br)
 		if err != nil {
