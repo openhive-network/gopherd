@@ -5,6 +5,7 @@ import (
 	"math/big"
 	"math/bits"
 	"os"
+	"sort"
 	"strings"
 
 	"hived-go/internal/protocol/auth"
@@ -115,7 +116,7 @@ func processVestingWithdrawals(s *state.Session, blockTime uint32, hooks *blockH
 	})
 
 	for _, p := range *ready {
-		processOneWithdrawal(s, p.account, p.nextWithdrawal)
+		processOneWithdrawal(s, p.account, p.nextWithdrawal, blockTime)
 	}
 }
 
@@ -123,7 +124,7 @@ func processVestingWithdrawals(s *state.Session, blockTime uint32, hooks *blockH
 // vesting withdrawal — convert min(rate, remaining) VESTS to HIVE, credit
 // from_account.balance (and any routed accounts), update DGPO totals,
 // advance or clear the schedule.
-func processOneWithdrawal(s *state.Session, accountName string, scheduledTime uint32) {
+func processOneWithdrawal(s *state.Session, accountName string, scheduledTime, blockTime uint32) {
 	objects.DeleteVestingWithdrawalSchedule(s, scheduledTime, accountName)
 
 	a, err := objects.GetAccount(s, accountName)
@@ -192,9 +193,19 @@ func processOneWithdrawal(s *state.Session, accountName string, scheduledTime ui
 	// auto_vest=true entries (VESTS stay in the vesting pool), then as
 	// HIVE for auto_vest=false entries (priced via the dynamic ratio).
 	// The remainder is paid to the account itself in HIVE.
+	// HF24+ auto_vest route deposits count toward the recipient's witness
+	// votes only after delayed-vote maturation (database_vesting.cpp:213,
+	// dv->add_votes → add_delayed_value). Accumulate per-recipient here;
+	// flushed after the withdrawal removal so a self-route nets against the
+	// withdrawal exactly like hived's votes_update_data set (whose entries
+	// are keyed by account).
+	var routeDelayedVotes map[string]int64
+	if hfWithdraw.Has(hardfork.HF24) {
+		routeDelayedVotes = map[string]int64{}
+	}
 	var depositedVests int64
-	depositedVests += processWithdrawRoutes(s, accountName, toWithdraw, true, scheduledTime)
-	depositedVests += processWithdrawRoutes(s, accountName, toWithdraw, false, scheduledTime)
+	depositedVests += processWithdrawRoutes(s, accountName, toWithdraw, true, scheduledTime, routeDelayedVotes)
+	depositedVests += processWithdrawRoutes(s, accountName, toWithdraw, false, scheduledTime, routeDelayedVotes)
 
 	// Re-read account in case routing modified it (specifically, if a
 	// route loops back to the source account or shares the dgpo).
@@ -238,21 +249,32 @@ func processOneWithdrawal(s *state.Session, accountName string, scheduledTime ui
 		dgpoNow, _ := objects.GetDGPO(s)
 		hfNow := hardfork.SetForBlock(dgpoNow.HeadBlockNumber)
 		if hfNow.Has(hardfork.HF24) {
-			// Try to erase the toWithdraw amount from the back of
-			// DelayedVotes. The back is the most-recent (newest)
-			// bucket, which is conceptually the vests that just left
-			// the account.
-			withdrawAmt := uint64(toWithdraw)
-			eraseAmt := withdrawAmt
-			if eraseAmt > a.SumDelayedVotes {
-				eraseAmt = a.SumDelayedVotes
+			// hived batches the from-account's -to_withdraw with any
+			// self-route auto_vest deposit into ONE votes_update_data
+			// entry (net <= 0 since routed_vests <= to_withdraw), then
+			// update_votes erases it from the back of DelayedVotes (the
+			// vests that just left / re-entered); only the leftover beyond
+			// sum_delayed_votes hits witness totals immediately.
+			netWithdraw := toWithdraw
+			if routeDelayedVotes != nil {
+				if selfDep, ok := routeDelayedVotes[accountName]; ok {
+					netWithdraw -= selfDep
+					delete(routeDelayedVotes, accountName)
+				}
 			}
-			if eraseAmt > 0 {
-				_ = objects.DelayedVotingEraseOnAccount(&a, eraseAmt)
-			}
-			leftover := withdrawAmt - eraseAmt
-			if leftover > 0 {
-				objects.AdjustProxiedWitnessVotes(s, &a, -int64(leftover))
+			if netWithdraw > 0 {
+				withdrawAmt := uint64(netWithdraw)
+				eraseAmt := withdrawAmt
+				if eraseAmt > a.SumDelayedVotes {
+					eraseAmt = a.SumDelayedVotes
+				}
+				if eraseAmt > 0 {
+					_ = objects.DelayedVotingEraseOnAccount(&a, eraseAmt)
+				}
+				leftover := withdrawAmt - eraseAmt
+				if leftover > 0 {
+					objects.AdjustProxiedWitnessVotes(s, &a, -int64(leftover))
+				}
 			}
 		} else {
 			objects.AdjustProxiedWitnessVotes(s, &a, -toWithdraw)
@@ -280,6 +302,33 @@ func processOneWithdrawal(s *state.Session, accountName string, scheduledTime ui
 	}
 	objects.PutAccount(s, &a)
 
+	// Flush HF24 auto_vest route deposits to NON-self recipients as
+	// delayed-vote buckets (hived update_votes → add_delayed_value): the
+	// vest only reaches the recipient's witness totals after the 30-day
+	// maturation. The self-route entry (if any) was netted into the
+	// withdrawal above and removed from the map. Operations on distinct
+	// recipients are independent, but iterate in sorted order for a
+	// deterministic, replayable sequence.
+	if len(routeDelayedVotes) > 0 {
+		targets := make([]string, 0, len(routeDelayedVotes))
+		for t := range routeDelayedVotes {
+			targets = append(targets, t)
+		}
+		sort.Strings(targets)
+		for _, t := range targets {
+			val := routeDelayedVotes[t]
+			if val <= 0 {
+				continue
+			}
+			ta, gerr := objects.GetAccount(s, t)
+			if gerr != nil {
+				continue
+			}
+			_ = objects.DelayedVotingAddOnAccount(&ta, blockTime, uint64(val))
+			objects.PutAccount(s, &ta)
+		}
+	}
+
 	dgpo.TotalVestingFundHive -= convertedHive
 	dgpo.TotalVestingShares -= toConvertToHive
 	objects.PutDGPO(s, &dgpo)
@@ -289,7 +338,7 @@ func processOneWithdrawal(s *state.Session, accountName string, scheduledTime ui
 // for one account's withdrawal chunk. autoVest controls which pass we're
 // running — VESTS routes first (preserve precision), HIVE routes second.
 // Returns the total VESTS-satoshi diverted in this pass.
-func processWithdrawRoutes(s *state.Session, fromAccount string, toWithdraw int64, autoVest bool, now uint32) int64 {
+func processWithdrawRoutes(s *state.Session, fromAccount string, toWithdraw int64, autoVest bool, now uint32, delayedVotes map[string]int64) int64 {
 	var deposited int64
 	prefix := state.AppendAccountName(nil, fromAccount)
 	_ = s.Range(objects.WithdrawRouteTable, state.PrimaryIndex, prefix,
@@ -327,15 +376,22 @@ func processWithdrawRoutes(s *state.Session, fromAccount string, toWithdraw int6
 			if autoVest {
 				to.VestingShares += toDeposit
 				objects.PutAccount(s, &to)
-				// C++ database_vesting.cpp:215 — auto_vest deposit
-				// propagates the new vest into witness vote totals
-				// (HF24+ uses delayed_voting instead, which we'll
-				// wire up separately when needed).
+				// C++ database_vesting.cpp:208-217 — auto_vest deposit
+				// propagates the new vest into the recipient's witness
+				// vote totals. Pre-HF24: immediately. HF24+: via delayed
+				// voting (dv->add_votes → add_delayed_value at end-of-
+				// withdrawal), so it only counts after the 30-day
+				// maturation. Accumulate per-recipient; the caller flushes
+				// the buckets (netting any self-route). Skipping this
+				// entirely (the old behavior) permanently under-counted
+				// every auto_vest-route recipient's witnesses post-HF24.
 				dgpoNow, _ := objects.GetDGPO(s)
-				if !hardfork.SetForBlock(dgpoNow.HeadBlockNumber).Has(hardfork.HF24) {
-					if fresh, ferr := objects.GetAccount(s, route.To); ferr == nil {
-						objects.AdjustProxiedWitnessVotes(s, &fresh, toDeposit)
+				if hardfork.SetForBlock(dgpoNow.HeadBlockNumber).Has(hardfork.HF24) {
+					if delayedVotes != nil {
+						delayedVotes[route.To] += toDeposit
 					}
+				} else if fresh, ferr := objects.GetAccount(s, route.To); ferr == nil {
+					objects.AdjustProxiedWitnessVotes(s, &fresh, toDeposit)
 				}
 				// HF20+: route recipient's effective_vests increased →
 				// refresh their RC cap. C++ post_apply on
