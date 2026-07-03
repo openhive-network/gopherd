@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"unsafe"
 
 	"github.com/tidwall/btree"
@@ -92,6 +93,7 @@ type mmapColdKV struct {
 	writeOff uint64
 	prim     map[string]mmapPrimVal // primary tables: O(1) point ops, mmap-aliased keys
 	idx      *btree.BTreeG[mmapColdEntry]
+	heapKeys bool // COLD_HEAP_KEYS: heap-copy index keys so rehash never re-reads the mmap
 }
 
 // OpenColdTier opens the configured cold-tier backend (pebble by default,
@@ -155,13 +157,27 @@ func openMmapColdKV(dir string) (*mmapColdKV, error) {
 	}
 	// Random access on promote reads; the kernel needn't read-ahead.
 	_ = unix.Madvise(data, unix.MADV_RANDOM)
+	// Pre-size the primary index so a bulk snapshot-load spill (tens of
+	// millions of comments) does NOT rehash. prim keys are ZERO-COPY slices
+	// aliasing the mmap; Go map growth re-hashes every existing key, and its
+	// hasher READS the key bytes — which, once the mmap append region is
+	// evicted under memory pressure, become scattered disk re-reads that
+	// collapse a warm-start load from ~10min to hours. Opt-in via env so the
+	// default (small maps, incremental replay) is unchanged.
+	primCap := 1 << 21
+	if v := os.Getenv("COLD_PRIM_PRESIZE"); v != "" {
+		if n, perr := strconv.Atoi(v); perr == nil && n > primCap {
+			primCap = n
+		}
+	}
 	return &mmapColdKV{
-		dir:   dir,
-		owned: owned,
-		file:  f,
-		data:  data,
-		prim:  make(map[string]mmapPrimVal, 1<<21),
-		idx:   btree.NewBTreeGOptions[mmapColdEntry](mmapColdLess, btree.Options{Degree: 32, NoLocks: true}),
+		dir:      dir,
+		owned:    owned,
+		file:     f,
+		data:     data,
+		prim:     make(map[string]mmapPrimVal, primCap),
+		idx:      btree.NewBTreeGOptions[mmapColdEntry](mmapColdLess, btree.Options{Degree: 32, NoLocks: true}),
+		heapKeys: os.Getenv("COLD_HEAP_KEYS") != "",
 	}, nil
 }
 
@@ -183,12 +199,27 @@ func (c *mmapColdKV) set(key, val []byte) error {
 	copy(c.data[kEnd:], val)
 	c.writeOff = need
 	if coldKeyIsPrimary(key) {
-		// Map key aliases the just-written key bytes in the mapping (no copy).
-		keyStr := unsafe.String(&c.data[off], len(key))
+		// Map key: by default a zero-copy slice aliasing the just-written mmap
+		// bytes (no per-evict alloc). BUT Go map growth re-hashes every existing
+		// key, and the hasher READS the key bytes — once the cold tier (tens of
+		// GB) exceeds page cache (40M+ blocks), those reads become scattered
+		// random disk faults. That collapses BOTH the snapshot-load and the LIVE
+		// apply (comments freeze → prim map grows → rehash → thrash) from ~3k to
+		// ~300 bps. With heapKeys the key is heap-copied so rehash stays CPU-only
+		// (~+16 bytes/key; cheaper than the disk thrash). See COLD_HEAP_KEYS.
+		var keyStr string
+		if c.heapKeys {
+			keyStr = string(key) // heap copy
+		} else {
+			keyStr = unsafe.String(&c.data[off], len(key))
+		}
 		c.prim[keyStr] = mmapPrimVal{offset: kEnd, length: uint32(len(val))}
 		return nil
 	}
 	keySlice := c.data[off:kEnd:kEnd]
+	if c.heapKeys {
+		keySlice = append([]byte(nil), key...) // heap copy so btree rebalance/compare never re-reads the mmap
+	}
 	c.idx.Set(mmapColdEntry{key: keySlice, offset: kEnd, length: uint32(len(val))})
 	return nil
 }
