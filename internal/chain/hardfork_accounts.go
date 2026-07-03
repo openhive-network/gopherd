@@ -372,7 +372,14 @@ func clearAccount(s *state.Session, name string) error {
 	}
 	if account.SavingsHBDBalance > 0 {
 		totalTransferredHBD += account.SavingsHBDBalance
-		objects.AdjustSavingsHBDBalance(s, &treasury, blockTime, account.SavingsHBDBalance)
+		// hived clear_account (database.cpp:141-142) moves cleared savings
+		// HBD into the treasury's LIQUID balance via adjust_balance — NOT
+		// into treasury savings. (The savings HIVE above likewise goes to
+		// treasury.Balance, the liquid HIVE field.) Routing it to treasury
+		// savings instead stranded 296,435 sats out of the DHF budget base
+		// (budget = treasury.HBDBalance/100/24 reads only LIQUID), capping
+		// proposal #160 low and shorting fullalt.dhf at block 51,950,208.
+		objects.AdjustHBDBalance(s, &treasury, blockTime, account.SavingsHBDBalance)
 		account.SavingsHBDBalance = 0
 	}
 
