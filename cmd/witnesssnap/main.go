@@ -24,6 +24,29 @@ func main() {
 	if err := st.UnmarshalSnapshot(f); err != nil {
 		panic(err)
 	}
+	if len(os.Args) >= 3 && os.Args[2] == "--rates" {
+		// Dump top witnesses by vote with their HBDInterestRate — for
+		// checking the median input set.
+		type wr struct {
+			name string
+			votes int64
+			rate uint16
+		}
+		var all []wr
+		_ = st.RangePrimary(func(w *objects.Witness) (bool, error) {
+			all = append(all, wr{string(w.Owner), w.TotalVotesVests, w.HBDInterestRate})
+			return true, nil
+		})
+		// simple partial sort: print all with votes>0, caller eyeballs top-21
+		for i := 1; i < len(all); i++ {
+			x := all[i]; j := i
+			for ; j > 0 && all[j-1].votes < x.votes; j-- { all[j] = all[j-1] }
+			all[j] = x
+		}
+		lim := 30; if lim > len(all) { lim = len(all) }
+		for i := 0; i < lim; i++ { fmt.Printf("%2d %-18s votes=%d hbd_interest_rate=%d\n", i, all[i].name, all[i].votes, all[i].rate) }
+		return
+	}
 	for _, name := range os.Args[2:] {
 		w, ok := st.Get(auth.AccountName(name))
 		if !ok {
