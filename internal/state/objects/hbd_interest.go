@@ -134,16 +134,36 @@ const hf25LiquidHbdDisabledBlock uint32 = 55_235_767
 // Pre-HF25: liquid HBD earns interest. HF25+: the seconds tracking
 // is bypassed for liquid HBD (only savings_hbd accrues).
 func AdjustHBDBalance(s *state.Session, a *Account, blockTime uint32, delta int64) {
+	dgpo, dgpoErr := GetDGPO(s)
+	if dgpoErr != nil {
+		a.HBDBalance += delta
+		return
+	}
+	if AdjustHBDBalanceInto(s, a, blockTime, delta, &dgpo) {
+		PutDGPO(s, &dgpo)
+	}
+}
+
+// AdjustHBDBalanceInto is AdjustHBDBalance operating on the CALLER's dgpo
+// pointer instead of doing its own GetDGPO/PutDGPO. Callers that already
+// hold a working dgpo copy in the same block (e.g. process_funds routing
+// the per-block DHF inflation into the treasury) MUST use this so the
+// hbd_seconds accrual + interest payout share that copy — a direct
+// `treasury.HBDBalance += x` skips the accrual and over-counts the
+// treasury's hbd_seconds (end-of-interval balance charged for the whole
+// interval), over-paying HBD interest (first visible as hbd_supply +1151
+// at the hive.fund interest payout, block 52,107,629). Returns true if
+// dgpo was modified (interest paid), so the caller can persist it.
+func AdjustHBDBalanceInto(s *state.Session, a *Account, blockTime uint32, delta int64, dgpo *DynamicGlobalProperty) (dgpoChanged bool) {
 	if a.HBDSecondsLastUpdate != blockTime {
-		dgpo, dgpoErr := GetDGPO(s)
 		// C++ has_hardfork(HF25) is FALSE during the activation block's
 		// ops — process_hardforks runs LAST in _apply_block. Go bumps
 		// dgpo.HeadBlockNumber at the START of the block, so a `>=`
 		// gate flips true one block too early. Use `>` to match the
 		// off-by-one semantics that hardfork.SetForBlock(N).Has(HF25)
 		// also obeys (per hardfork_test.go).
-		hf25Active := dgpoErr == nil && dgpo.HeadBlockNumber > hf25LiquidHbdDisabledBlock
-		if !hf25Active && dgpoErr == nil {
+		hf25Active := dgpo.HeadBlockNumber > hf25LiquidHbdDisabledBlock
+		if !hf25Active {
 			elapsed := blockTime - a.HBDSecondsLastUpdate
 			a.HBDSeconds = uint128AddProduct(a.HBDSeconds, a.HBDBalance, elapsed)
 			a.HBDSecondsLastUpdate = blockTime
@@ -154,7 +174,7 @@ func AdjustHBDBalance(s *state.Session, a *Account, blockTime uint32, delta int6
 			// real mainnet block).
 			doPayout := blockTime-a.HBDLastInterestPayment > hbdInterestCompoundIntervalSec
 			if doPayout && !uint128IsZero(a.HBDSeconds) {
-				interest := hbdInterestPayout(a.HBDSeconds, rateForDGPO(&dgpo))
+				interest := hbdInterestPayout(a.HBDSeconds, rateForDGPO(dgpo))
 				if interest > 0 {
 					a.HBDBalance += interest
 					// Mirror C++ adjust_balance HBD branch (database.cpp:3350-3354):
@@ -168,7 +188,7 @@ func AdjustHBDBalance(s *state.Session, a *Account, blockTime uint32, delta int6
 					if fh, ferr := GetFeedHistory(s); ferr == nil && !feedPriceIsZero(fh.CurrentMedianHistory) {
 						dgpo.VirtualSupply += hbdInterestVirtualHive(interest, fh.CurrentMedianHistory)
 					}
-					PutDGPO(s, &dgpo)
+					dgpoChanged = true
 				}
 				a.HBDSeconds = [16]byte{}
 				a.HBDLastInterestPayment = blockTime
@@ -176,6 +196,7 @@ func AdjustHBDBalance(s *state.Session, a *Account, blockTime uint32, delta int6
 		}
 	}
 	a.HBDBalance += delta
+	return dgpoChanged
 }
 
 // AdjustSavingsHBDBalance mirrors database::adjust_savings_balance(account,

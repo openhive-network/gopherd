@@ -472,7 +472,18 @@ func processFundsHF16(s *state.Session, dgpo *objects.DynamicGlobalProperty, blo
 			}
 		} else {
 			if treasury, err := objects.GetAccount(s, treasuryName); err == nil {
-				treasury.HBDBalance += dhfHBD
+				// Mirror hived process_funds (database_comment.cpp:
+				// adjust_balance( get_treasury_name(), hbd_issued )): route the
+				// per-block DHF HBD add through the hbd_seconds/interest accrual
+				// against THIS block's dgpo copy. A direct `treasury.HBDBalance
+				// += dhfHBD` skipped the accrual, so the treasury's hbd_seconds
+				// was over-counted at the hourly proposal-payout AdjustHBDBalance
+				// calls (end-of-hour balance charged for the whole hour) and its
+				// HBD interest over-paid — hbd_supply drifted +1151 at the
+				// hive.fund interest payout (block 52,107,629), cascading through
+				// virtual_supply → new_hive → reward_balance → curation pool →
+				// pending vesting → leo.voter claim_reward_balance fail @52,378,769.
+				objects.AdjustHBDBalanceInto(s, &treasury, dgpo.Time, dhfHBD, dgpo)
 				objects.PutAccount(s, &treasury)
 			}
 			dgpo.CurrentHBDSupply += dhfHBD

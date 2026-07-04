@@ -34,5 +34,8 @@ func main() {
 			d.TotalVestingFundHive, d.TotalVestingShares, d.CurrentSupply, d.CurrentHBDSupply, d.VirtualSupply,
 			d.HBDInterestRate, d.HBDPrintRate, d.LastBudgetTime, d.NextDailyMaintenanceTime)
 		fmt.Printf("  ProposalFundPercent=%d ContentRewardPercent=%d VestingRewardPercent=%d\n", d.ProposalFundPercent, d.ContentRewardPercent, d.VestingRewardPercent)
+		fmt.Printf("  PRVS(pending_shares)=%d  PRVH(pending_hive)=%d  (TS+PS)=%d (TF+PH)=%d\n",
+			d.PendingRewardedVestingShares, d.PendingRewardedVestingHive,
+			d.TotalVestingShares+d.PendingRewardedVestingShares, d.TotalVestingFundHive+d.PendingRewardedVestingHive)
 	}
 }
