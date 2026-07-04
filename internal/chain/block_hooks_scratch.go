@@ -35,6 +35,11 @@ type CuratorPay struct {
 	Voter  string
 	Weight uint64
 	Share  int64
+	// Created is the voter account's creation time, used as the tie-break
+	// on equal Weight — hived's pay_curators cmp orders equal-weight votes
+	// by voter account_id (creation order), NOT by voter name. See
+	// distributeCuratorPool.
+	Created uint32
 }
 
 // cashoutSibling is a per-cashout sibling record used in the pre-HF17

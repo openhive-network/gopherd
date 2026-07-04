@@ -1137,7 +1137,14 @@ func distributeCuratorPool(s *state.Session, author, permlink string, pool int64
 			if s64 <= 0 {
 				return true, nil
 			}
-			*pays = append(*pays, CuratorPay{Voter: string(cv.Voter), Weight: cv.CurationWeight, Share: s64})
+			// Capture the voter's account creation time for the equal-weight
+			// tie-break below (hived orders equal-weight curators by voter
+			// account_id, i.e. creation order — not by voter name).
+			var created uint32
+			if av, ok := objects.GetAccountRef(s, cv.Voter); ok {
+				created = av.Created
+			}
+			*pays = append(*pays, CuratorPay{Voter: string(cv.Voter), Weight: cv.CurationWeight, Share: s64, Created: created})
 			return true, nil
 		})
 
@@ -1151,6 +1158,21 @@ func distributeCuratorPool(s *state.Session, author, permlink string, pool int64
 	slices.SortFunc(*pays, func(a, b CuratorPay) int {
 		if a.Weight != b.Weight {
 			if a.Weight > b.Weight {
+				return -1
+			}
+			return 1
+		}
+		// Equal weight: hived's pay_curators cmp tie-breaks by
+		// obj->get_voter() — the voter's account_id, i.e. account CREATION
+		// order — NOT the voter name. Ordering by name instead pays
+		// equal-weight curators in a different order; since each CreateVesting
+		// mutates the reward-vesting pool price, the per-curator vests drift by
+		// a satoshi, surfacing as e.g. leo.voter's reward_vests coming up 1 sat
+		// short at claim_reward_balance block 52,378,769. Approximate account_id
+		// order by (Created ASC, Name ASC), same tie-break as pay_liquidity_reward
+		// (7838fd8).
+		if a.Created != b.Created {
+			if a.Created < b.Created {
 				return -1
 			}
 			return 1
