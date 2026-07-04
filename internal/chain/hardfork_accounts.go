@@ -370,17 +370,26 @@ func clearAccount(s *state.Session, name string) error {
 		treasury.Balance += account.SavingsBalance
 		account.SavingsBalance = 0
 	}
-	if account.SavingsHBDBalance > 0 {
-		totalTransferredHBD += account.SavingsHBDBalance
-		// hived clear_account (database.cpp:141-142) moves cleared savings
-		// HBD into the treasury's LIQUID balance via adjust_balance — NOT
-		// into treasury savings. (The savings HIVE above likewise goes to
-		// treasury.Balance, the liquid HIVE field.) Routing it to treasury
-		// savings instead stranded 296,435 sats out of the DHF budget base
-		// (budget = treasury.HBDBalance/100/24 reads only LIQUID), capping
-		// proposal #160 low and shorting fullalt.dhf at block 51,950,208.
-		objects.AdjustHBDBalance(s, &treasury, blockTime, account.SavingsHBDBalance)
-		account.SavingsHBDBalance = 0
+	// hived clear_account (database.cpp:1614-1615) runs these adjust calls
+	// UNCONDITIONALLY — even when the balance is 0 — because the account-side
+	// AdjustSavingsHBDBalance carries the savings-HBD interest payout/reset that
+	// keeps hbd_seconds + savings_hbd_last_interest_payment aligned with hived
+	// (reset to the clear block). Gating on `> 0` left 0-savings cleared accounts
+	// (e.g. coininstant) with STALE interest state from years earlier (seconds
+	// ~4e10, last_payment=2019), phase-shifting their later payout schedule vs
+	// hived. Dormant while hbd_interest_rate=0, but once witnesses raised it to
+	// 300 (~block 52M, ahead of HF25) that cost coininstant the 51.9M savings-
+	// interest payment hived made → 987 sat short at transfer_from_savings block
+	// 52,117,581. (hived reset coininstant to seconds=0 / last_int=HF23 time @42M;
+	// Go left it stale — confirmed via hived parity-42M API.)
+	// The treasury credit is the bug1 fix: cleared savings HBD → treasury LIQUID
+	// (not savings), else 296,435 sat is stranded out of the DHF budget base
+	// (budget = treasury.HBDBalance/100/24, LIQUID only) → fullalt.dhf short @51,950,208.
+	{
+		savHBDSnap := account.SavingsHBDBalance
+		totalTransferredHBD += savHBDSnap
+		objects.AdjustSavingsHBDBalance(s, &account, blockTime, -savHBDSnap)
+		objects.AdjustHBDBalance(s, &treasury, blockTime, savHBDSnap)
 	}
 
 	// --- LIQUID BALANCES → treasury.
@@ -389,11 +398,14 @@ func clearAccount(s *state.Session, name string) error {
 		treasury.Balance += account.Balance
 		account.Balance = 0
 	}
-	if account.HBDBalance > 0 {
+	// Unconditional like hived (database.cpp:1155), same reasoning as savings
+	// above: the account-side AdjustHBDBalance resets liquid hbd_seconds/
+	// last_interest_payment even at 0 balance, keeping the schedule aligned.
+	{
 		hbdSnap := account.HBDBalance
 		totalTransferredHBD += hbdSnap
+		objects.AdjustHBDBalance(s, &account, blockTime, -hbdSnap)
 		objects.AdjustHBDBalance(s, &treasury, blockTime, hbdSnap)
-		account.HBDBalance = 0
 	}
 
 	// --- REWARD BALANCES → treasury.
