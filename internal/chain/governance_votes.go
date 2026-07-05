@@ -1,6 +1,9 @@
 package chain
 
 import (
+	"math"
+	"sort"
+
 	"hived-go/internal/protocol/auth"
 	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/state"
@@ -31,27 +34,42 @@ func removeExpiredGovernanceVotes(s *state.Session, blockTime, blockNum uint32, 
 	if !hf.Has(hardfork.HF25) {
 		return
 	}
-	// C++ database.cpp:3628 — runs every block once HF25 is active. The
-	// by_governance_vote_expiration_ts index lets hived short-circuit
-	// when the earliest row is still in the future; we don't yet have
-	// that secondary index, so we scan all accounts. The total cost is
-	// bounded by Account.RangePrimary which is O(n_accounts) per block.
-	// TODO(perf): build a by-expiration index if this dominates.
-
+	// C++ database.cpp:3628 — runs every block once HF25 is active. hived's
+	// by_governance_vote_expiration_ts index short-circuits when the earliest
+	// row is still in the future; we mirror that with the AccountStore's
+	// govExpLB lower bound: O(1)-skip when nothing can be due (it DID
+	// dominate: sorting+scanning ~1.6M accounts every block was ~5s/block at
+	// 55M — the post-HF25 frontier crawl). When something IS due, one
+	// UNORDERED scan collects the due names (sorted below — processing order
+	// unchanged) and the exact next-due bound for the following blocks; the
+	// noteDelayedVotes chokepoint keeps the bound valid between scans.
+	accts := objects.EnsureAccountStore(s)
+	if accts.GovExpNoneDue(blockTime) {
+		return
+	}
 	type expired struct {
 		name string
 	}
 	var due []expired
-	_ = objects.RangeAccounts(s, func(a *objects.Account) (bool, error) {
-		if a.GovernanceVoteExpiration == 0 {
+	nextDue := uint32(math.MaxUint32)
+	_ = accts.RangePrimaryUnordered(func(a *objects.Account) (bool, error) {
+		e := a.GovernanceVoteExpiration
+		if e == 0 {
 			return true, nil
 		}
-		if a.GovernanceVoteExpiration > blockTime {
+		if e > blockTime {
+			if e < nextDue {
+				nextDue = e
+			}
 			return true, nil
 		}
 		due = append(due, expired{name: a.Name})
 		return true, nil
 	})
+	// Install BEFORE processing: expirations written while clearing (all 0 or
+	// future renewals) flow through the noteDelayedVotes min() automatically.
+	accts.SetGovExpBound(nextDue)
+	sort.Slice(due, func(i, j int) bool { return due[i].name < due[j].name })
 
 	for _, e := range due {
 		a, err := objects.GetAccount(s, e.name)

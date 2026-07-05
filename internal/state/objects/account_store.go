@@ -135,6 +135,13 @@ type AccountStore struct {
 	// occasional extra scan). RecomputeDelayedVoteMin refreshes it to the
 	// exact min after each scan. Not consensus state; rebuilt on load.
 	minFrontTime uint32
+
+	// govExpLB is a conservative LOWER BOUND on the earliest non-zero
+	// GovernanceVoteExpiration across all accounts — the O(1)-skip gate for
+	// removeExpiredGovernanceVotes (see noteDelayedVotes). 0 = unknown
+	// (forces a scan: fresh store, snapshot load, post-rollback);
+	// math.MaxUint32 = nothing pending. Not consensus state, not persisted.
+	govExpLB uint32
 }
 
 type accountUndo struct {
@@ -193,6 +200,44 @@ func (s *AccountStore) noteDelayedVotes(name string, a *Account) {
 			s.minFrontTime = front
 		}
 	}
+	// Same trick for governance-vote expiration: keep govExpLB a lower bound
+	// on the earliest non-zero expiration so removeExpiredGovernanceVotes can
+	// O(1)-skip blocks where nothing is due (post-HF25 it otherwise sorted +
+	// scanned ALL ~1.6M accounts EVERY block — ~5s/block at 55M, the gen60
+	// frontier crawl). Within a block the bound only ever DECREASES here, and
+	// tx-rollback restores pre-tx values that the block-start bound already
+	// covered, so undo keeps the invariant (bound ≤ every non-zero exp).
+	if e := a.GovernanceVoteExpiration; e != 0 && s.govExpLB != 0 && e < s.govExpLB {
+		s.govExpLB = e
+	}
+}
+
+// GovExpNoneDue reports whether NO account's governance-vote expiration can
+// have passed by blockTime, based on the govExpLB lower bound. Conservative:
+// false only forces a scan, never skips a due account. 0 = unknown → scan.
+func (s *AccountStore) GovExpNoneDue(blockTime uint32) bool {
+	return s.govExpLB != 0 && s.govExpLB > blockTime
+}
+
+// SetGovExpBound installs the exact next-due expiration computed by the
+// hook's full scan (math.MaxUint32 when no account has one pending).
+func (s *AccountStore) SetGovExpBound(v uint32) { s.govExpLB = v }
+
+// RangePrimaryUnordered visits every account WITHOUT the name sort — for
+// scans whose processing order is established by the caller (the governance
+// expiry hook collects due names and sorts just those). The name sort of the
+// full map is ~5s at 1.6M accounts; unordered iteration is ~100ms.
+func (s *AccountStore) RangePrimaryUnordered(fn func(a *Account) (bool, error)) error {
+	for _, a := range s.primary {
+		ok, err := fn(a)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return nil
+		}
+	}
+	return nil
 }
 
 // DelayedVoteNoneDue reports whether NO candidate's front bucket can have
@@ -264,6 +309,13 @@ func (s *AccountStore) RestoreToPoint(snap int) {
 	}
 	if snap > len(s.undoLog) {
 		return
+	}
+	if snap < len(s.undoLog) {
+		// Rolled-back writes may have fed govExpLB values that no longer
+		// exist; and a rollback ACROSS a hook's SetGovExpBound could leave
+		// the bound above a still-live expiration. Reset to unknown — one
+		// extra scan, never a missed expiration.
+		s.govExpLB = 0
 	}
 	for i := len(s.undoLog) - 1; i >= snap; i-- {
 		e := &s.undoLog[i]
