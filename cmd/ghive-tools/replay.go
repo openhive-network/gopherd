@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"runtime/pprof"
 	"sort"
 	"strconv"
@@ -83,8 +84,14 @@ func cmdReplay(args []string) int {
 	checkInvariants := fs.Uint("check-invariants", 0, "verify HIVE/HBD/VESTS conservation laws every N blocks (0 = off); aborts at the first block where the books don't balance — catches silent drift WITHOUT a reference hived")
 	checkInvariantsStop := fs.Bool("check-invariants-stop", true, "stop replay at the first invariant violation (set false to log and continue)")
 	selfContainedSnap := fs.Bool("snapshot-self-contained", false, "when saving a snapshot on a persist cold backend, STREAM the full cold tier into the snapshot (portable, loads into any cold backend) instead of the default resident-only durable dump. Use for a frozen near-frontier checkpoint that each fix-test run reloads into a fresh volatile tier.")
+	prefetch := fs.Int("prefetch", 8, "read+decompress this many blocks ahead of apply on a background goroutine (0 = serial read like before)")
+	memLimitGiB := fs.Int("mem-limit-gib", 0, "if >0, set the Go runtime soft memory limit (debug.SetMemoryLimit) to this many GiB — same effect as GOMEMLIMIT but wired in-process so GC pacing always cooperates with the cgroup cap")
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+	if *memLimitGiB > 0 {
+		debug.SetMemoryLimit(int64(*memLimitGiB) << 30)
+		fmt.Fprintf(os.Stderr, "replay: Go memory limit set to %d GiB\n", *memLimitGiB)
 	}
 	if *selfContainedSnap {
 		objects.SnapshotForceSelfContained = true
@@ -380,15 +387,60 @@ func cmdReplay(args []string) int {
 		os.Exit(130)
 	}()
 
-	var rawScratch, outScratch []byte
-	for n := uint32(*startBlock); n <= end; n++ {
-		raw, newRaw, err := bl.BlockReuse(n, rawScratch, outScratch)
-		rawScratch = newRaw
-		// raw aliases outScratch (or a fresh alloc when block was bigger).
-		// Capture it as the next-iteration outScratch reuse buffer; the
-		// current iteration must not retain `raw` past the next loop step.
-		outScratch = raw
+	// Block read+decompress pipeline: a single reader goroutine runs
+	// bl.BlockReuse up to --prefetch blocks ahead of apply, recycling a fixed
+	// ring of buffer pairs through channels. Overlaps the pread + zstd
+	// decompress (which otherwise stall the apply goroutine every block) with
+	// the CPU-bound apply. Bounded ring → a few MB, no RSS growth. With
+	// --prefetch=0 the reader still runs but hands over one block at a time
+	// (ring of 1 behaves like the old serial loop, minus the overlap).
+	type fetchedBlock struct {
+		n   uint32
+		blk []byte // decompressed block (owned by this ring slot)
+		raw []byte // compressed-bytes scratch (owned by this ring slot)
+		err error
+	}
+	depth := *prefetch
+	if depth < 1 {
+		depth = 1
+	}
+	freeCh := make(chan fetchedBlock, depth)
+	readyCh := make(chan fetchedBlock, depth)
+	for i := 0; i < depth; i++ {
+		freeCh <- fetchedBlock{}
+	}
+	fetchDone := make(chan struct{})
+	defer close(fetchDone) // unblock the reader if apply bails out early
+	go func() {
+		defer close(readyCh)
+		for n := uint32(*startBlock); n <= end; n++ {
+			var slot fetchedBlock
+			select {
+			case slot = <-freeCh:
+			case <-fetchDone:
+				return
+			}
+			blk, newRaw, err := bl.BlockReuse(n, slot.raw, slot.blk)
+			slot.raw = newRaw
+			if blk != nil {
+				// blk aliases slot.blk or is a fresh (bigger) alloc; either way
+				// it becomes this slot's decompress buffer from now on.
+				slot.blk = blk
+			}
+			select {
+			case readyCh <- fetchedBlock{n: n, blk: blk, raw: slot.raw, err: err}:
+			case <-fetchDone:
+				return
+			}
+		}
+	}()
+	for fb := range readyCh {
+		n := fb.n
+		raw := fb.blk
+		err := fb.err
+		recycle := fetchedBlock{blk: fb.blk, raw: fb.raw}
 		if err != nil {
+			freeCh <- recycle
 			fmt.Fprintf(os.Stderr, "block %d read: %v\n", n, err)
 			errCount++
 			if errCount >= uint64(*maxErrors) {
@@ -397,6 +449,7 @@ func cmdReplay(args []string) int {
 			continue
 		}
 		if _, err := cdb.ApplyBlock(raw, n, opts, &stats); err != nil {
+			freeCh <- recycle
 			fmt.Fprintf(os.Stderr, "block %d apply: %v\n", n, err)
 			errCount++
 			if errCount >= uint64(*maxErrors) {
@@ -495,6 +548,10 @@ func cmdReplay(args []string) int {
 				}
 			}
 		}
+		// The block's bytes are dead from here (state never retains aliases
+		// past the apply+evict of its own block — same lifetime the old serial
+		// loop gave the scratch buffers). Hand the slot back to the reader.
+		freeCh <- recycle
 		// Graceful stop requested by SIGTERM/SIGINT: the current block is fully
 		// applied (headBlock == n), so break to the clean-shutdown path.
 		if stopRequested.Load() {

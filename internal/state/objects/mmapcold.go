@@ -177,7 +177,13 @@ func openMmapColdKV(dir string) (*mmapColdKV, error) {
 		data:     data,
 		prim:     make(map[string]mmapPrimVal, primCap),
 		idx:      btree.NewBTreeGOptions[mmapColdEntry](mmapColdLess, btree.Options{Degree: 32, NoLocks: true}),
-		heapKeys: os.Getenv("COLD_HEAP_KEYS") != "",
+		// Default ON: with zero-copy index keys aliasing the data mmap, every
+		// map rehash / btree rebalance re-reads key bytes — once the cold tier
+		// outgrows page cache (40M+ blocks) those become scattered disk faults
+		// and BOTH live apply and snapshot save collapse ~4000→300 bps (see
+		// the comment in set). +16 B/key of heap is far cheaper than the
+		// thrash. COLD_HEAP_KEYS=0 restores the old zero-copy behavior.
+		heapKeys: os.Getenv("COLD_HEAP_KEYS") != "0",
 	}, nil
 }
 
