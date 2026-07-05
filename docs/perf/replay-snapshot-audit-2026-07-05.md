@@ -45,6 +45,14 @@ Numbers at 6M scale (volatile mmap cold, cap 200K): save 3.5s → 1.6s,
 load 16.6s → 9.3s; remaining load cost is the pre-HF17 by-root btree,
 which does not exist for post-HF17 (late-chain) snapshots.
 
+At 20M scale (11GB snapshot → persist cold, 12G cgroup) MEASURED WHILE the
+stalled gen60 held 23GB RSS: old 475s ≈ new 479s → new+fadvise 411s. In that
+regime the load is cgroup-reclaim/writeback-bound (~25MB/s), not CPU-bound —
+the dirty-page flood from spilling ~10GB into the cold tier's MAP_SHARED
+mmap dominates and masks the CPU-side wins. Re-measure on an idle box;
+backlog: bulk cold-spill via pwrite/appender instead of mmap memcpy to give
+the kernel writeback a sequential stream.
+
 ## Found while profiling: the 17–18M eviction-thrash stall
 
 gen60 (cap=1M) stalled >25min between 18M and 19M at 98% CPU. Heap profile:
@@ -55,7 +63,11 @@ block runs the full forced-eviction scan (20K defers + forced evicts +
 promote-backs). NOT a memory problem — a cap-too-small problem.
 
 **Fix: run genesis replays with `--comment-resident-cap=4000000`** (the
-validated bank-run setting). Restart command for gen60:
+validated bank-run setting) — that clears the 15–25M spam era. Note the
+separate known issue past 40M: the unpaid working set exceeds RAM regardless
+of cap (fat heap votes; the real fix is compact/co-located votes — see
+project_perf_root_working_set_2026_07_01), so expect the late-chain slowdown
+either way. Restart command for gen60:
 
 ```
 systemd-run --user --unit=gen60 -p MemoryMax=30G -p MemorySwapMax=0 \
