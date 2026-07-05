@@ -81,31 +81,6 @@ func (recurrentTransferEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	}
 	pairID := extractRecurrentTransferPairID(rt.Extensions)
 
-	if rt.Amount.Amount == 0 && rt.Executions == 0 {
-		// Delete the schedule.
-		if has, err := objects.HasRecurrentTransfer(ctx.DB, rt.From, rt.To, pairID); err != nil {
-			return err
-		} else if has {
-			objects.DeleteRecurrentTransfer(ctx.DB, rt.From, rt.To, pairID)
-			// Mirror C++ hive_evaluator_transfer.cpp:952 — decrement
-			// from_account.open_recurrent_transfers; asserts > 0
-			// before decrement. We use saturated-floor here defensively.
-			if fromAcct, ferr := objects.GetAccount(ctx.DB, rt.From); ferr == nil {
-				if fromAcct.OpenRecurrentTransfers > 0 {
-					fromAcct.OpenRecurrentTransfers--
-					objects.PutAccount(ctx.DB, &fromAcct)
-				}
-			}
-		}
-		return nil
-	}
-
-	// hive_evaluator_transfer.cpp:968 — create path requires non-zero
-	// amount.
-	if rt.Amount.Amount == 0 {
-		return fmt.Errorf("recurrent_transfer: amount must be non-zero")
-	}
-
 	from, err := objects.GetAccount(ctx.DB, rt.From)
 	if err != nil {
 		return fmt.Errorf("%w: from=%q", ErrAccountNotFound, rt.From)
@@ -130,17 +105,55 @@ func (recurrentTransferEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		}
 	}
 
-	// Look up any existing schedule for (from, to, pair_id) to preserve
-	// its trigger_date semantics on update (mirrors C++
-	// recurrent_transfer_object::set_recurrence_trigger_date: trigger_date
-	// only resets when recurrence changes; otherwise it stays put across
-	// edits). On a fresh create, hived's constructor sets trigger_date =
-	// head_block_time, so the very first firing happens in the block
-	// containing the operation (see
-	// hive_evaluator_transfer.cpp:969 + recurrent_transfer_object.hpp:18).
-	var newTrigger uint32
+	// Branch layout mirrors C++ recurrent_transfer_evaluator::do_apply
+	// (hive_evaluator_transfer.cpp:952+): the (from,to,pair_id) lookup
+	// decides create vs delete vs modify. amount == 0 on an EXISTING
+	// schedule is the documented CANCEL path (validate() already enforces
+	// executions >= 1, so a mainnet cancel carries executions >= 2 — the
+	// old `amount==0 && executions==0` delete gate here matched nothing
+	// and cancels bounced with "amount must be non-zero", first at block
+	// 55,240,835, HF25+5,068).
 	existing, existingErr := objects.GetRecurrentTransfer(ctx.DB, rt.From, rt.To, pairID)
 	hasExisting := existingErr == nil
+
+	if hasExisting && rt.Amount.Amount == 0 {
+		// Delete. Pre-HF29 nodes reject executions < 2 on this path too
+		// (HF29 = HIVE_HARDFORK_1_29_ALLOW_MODIFY_LAST_RECURRENT_TRANSFER;
+		// not in our hardfork table yet — unconditional until the replay
+		// window approaches HF29).
+		if rt.Executions < 2 {
+			return fmt.Errorf("recurrent_transfer: executions must be at least 2 when deleting (pre-HF29)")
+		}
+		objects.DeleteRecurrentTransfer(ctx.DB, rt.From, rt.To, pairID)
+		// C++ asserts open_recurrent_transfers > 0 before decrement;
+		// saturated-floor defensively.
+		if from.OpenRecurrentTransfers > 0 {
+			from.OpenRecurrentTransfers--
+			objects.PutAccount(ctx.DB, &from)
+		}
+		return nil
+	}
+	if !hasExisting {
+		// Create-path asserts, in C++ order.
+		if from.OpenRecurrentTransfers >= 255 {
+			return fmt.Errorf("recurrent_transfer: %q already has 255 open recurrent transfers (HIVE_MAX_OPEN_RECURRENT_TRANSFERS)", rt.From)
+		}
+		if rt.Amount.Amount == 0 {
+			return fmt.Errorf("recurrent_transfer: cannot create a recurrent transfer with 0 amount (no existing schedule to delete)")
+		}
+		if rt.Executions < 2 {
+			return fmt.Errorf("recurrent_transfer: executions must be at least 2 on create")
+		}
+	} else if rt.Executions < 2 {
+		// Modify path: pre-HF29 requires at least 2 executions.
+		return fmt.Errorf("recurrent_transfer: executions must be at least 2 when modifying (pre-HF29)")
+	}
+
+	// Trigger-date semantics (C++ set_recurrence_trigger_date): resets only
+	// when recurrence changes; a fresh create triggers at head_block_time so
+	// the first firing happens in the containing block
+	// (hive_evaluator_transfer.cpp:969 + recurrent_transfer_object.hpp:18).
+	var newTrigger uint32
 	switch {
 	case !hasExisting:
 		newTrigger = ctx.HeadBlockTime
@@ -166,13 +179,8 @@ func (recurrentTransferEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	if hasExisting {
 		consecFailures = existing.ConsecutiveFailures
 	} else {
-		// Mirror C++ hive_evaluator_transfer.cpp:935-944 — on CREATE
-		// (no existing schedule), assert open_recurrent_transfers <
-		// HIVE_MAX_OPEN_RECURRENT_TRANSFERS (255) and increment.
-		// Updates of an existing schedule don't touch the counter.
-		if from.OpenRecurrentTransfers >= 255 {
-			return fmt.Errorf("recurrent_transfer: %q already has 255 open recurrent transfers (HIVE_MAX_OPEN_RECURRENT_TRANSFERS)", rt.From)
-		}
+		// CREATE: increment open_recurrent_transfers (the <255 assert ran
+		// above, in C++ order). Updates don't touch the counter.
 		from.OpenRecurrentTransfers++
 		objects.PutAccount(ctx.DB, &from)
 	}
