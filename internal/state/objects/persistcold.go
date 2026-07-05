@@ -73,6 +73,10 @@ func (c *PersistCold) newPrefixIter(prefix []byte) (coldIterator, error) {
 	return &persistColdIter{ps: c.ps, keys: c.ps.PrefixKeysSorted(prefix)}, nil
 }
 
+// ensureCapacity pre-grows the key index for a bulk insert of `extra` rows
+// (matched by the coldBulkPresizer assertion in the snapshot loaders).
+func (c *PersistCold) ensureCapacity(extra int) { c.ps.EnsureIndexCapacity(extra) }
+
 func (c *PersistCold) Dir() string        { return c.ps.Dir() }
 func (c *PersistCold) Close() error       { return c.ps.Close() }
 func (c *PersistCold) Flush() error       { return c.ps.Flush() }

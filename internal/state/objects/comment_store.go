@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 
 	"hived-go/internal/protocol/auth"
 	"hived-go/internal/state"
@@ -122,6 +123,18 @@ func appendColdByRootKey(dst []byte, c *Comment) []byte {
 	dst = append(dst, 0x00)
 	dst = state.AppendAccountName(dst, string(c.Author))
 	return append(dst, c.Permlink...)
+}
+
+// appendColdByRootKeyParts is appendColdByRootKey for callers that have the
+// (already-fallback-resolved) root parts as loose strings instead of a
+// *Comment (the snapshot-load raw-spill path).
+func appendColdByRootKeyParts(dst []byte, rootAuthor, rootPermlink, author, permlink string) []byte {
+	dst = append(dst, coldTableCommentByRoot)
+	dst = state.AppendAccountName(dst, rootAuthor)
+	dst = append(dst, rootPermlink...)
+	dst = append(dst, 0x00)
+	dst = state.AppendAccountName(dst, author)
+	return append(dst, permlink...)
 }
 
 // appendCommentKeyRaw writes commentKey(author,permlink) into dst[:0]
@@ -440,6 +453,35 @@ func (s *CommentStore) spillToCold(c *Comment) {
 	s.coldTotal++
 	if s.coldByRootEnabled {
 		s.coldRoot[rootKey]++
+	}
+}
+
+// spillToColdRaw is spillToCold for a record that is ALREADY in serialized
+// form (a snapshot-load record routed cold by peekCommentSpillRouting): the
+// blob goes to the tier verbatim, skipping the ReadComment→AppendComment
+// round-trip that dominated self-contained snapshot loads (tens of millions
+// of cold rows, several allocs each). author/permlink/root* may alias a
+// scratch buffer — everything retained (cold keys, blob, coldRoot map key) is
+// copied by the tier / here.
+func (s *CommentStore) spillToColdRaw(blob []byte, author, permlink, rootAuthor, rootPermlink string) {
+	if rootAuthor == "" {
+		rootAuthor, rootPermlink = author, permlink
+	}
+	s.scratchKey = appendColdPrimaryKey(s.scratchKey[:0], auth.AccountName(author), permlink)
+	s.cold.bset(s.scratchKey, blob)
+	if s.coldByRootEnabled {
+		s.scratchKey = appendColdByRootKeyParts(s.scratchKey[:0], rootAuthor, rootPermlink, author, permlink)
+		s.cold.bset(s.scratchKey, blob)
+	}
+	if s.bloom != nil {
+		s.scratchKey2 = appendCommentKeyRaw(s.scratchKey2[:0], auth.AccountName(author), permlink)
+		s.bloom.add(s.scratchKey2)
+	}
+	s.coldTotal++
+	if s.coldByRootEnabled {
+		// The map key must own its bytes — root* may alias the caller's
+		// scratch buffer (commentPK stores string headers, not copies).
+		s.coldRoot[newCommentPK(auth.AccountName(strings.Clone(rootAuthor)), strings.Clone(rootPermlink))]++
 	}
 }
 
@@ -1131,14 +1173,40 @@ func (s *CommentStore) UnmarshalSnapshot(r io.Reader) error {
 	if s.coldRoot == nil {
 		s.coldRoot = make(map[commentPK]int)
 	}
+	if spill {
+		// The bulk of a self-contained snapshot spills straight back to the
+		// cold tier; presize its key index once instead of paying log2(N)
+		// incremental rehash-doublings across tens of millions of bsets.
+		if ec, ok := s.cold.(interface{ ensureCapacity(int) }); ok {
+			extra := int(count)
+			if s.coldByRootEnabled {
+				extra *= 2 // primary + by-root row per spilled comment
+			}
+			ec.ensureCapacity(extra)
+		}
+	}
+	var recScratch []byte
 	for i := uint32(0); i < count; i++ {
 		recLen, err := binary.ReadUvarint(br)
 		if err != nil {
 			return fmt.Errorf("comment_store: read rec len[%d]: %w", i, err)
 		}
-		rec := make([]byte, recLen)
+		if uint64(cap(recScratch)) < recLen {
+			recScratch = make([]byte, recLen+recLen/2)
+		}
+		rec := recScratch[:recLen]
 		if _, err := io.ReadFull(br, rec); err != nil {
 			return fmt.Errorf("comment_store: read rec[%d]: %w", i, err)
+		}
+		if spill {
+			// Cold-bound records go to the tier VERBATIM (the snapshot record
+			// IS the cold blob format) — no decode, no re-encode, no allocs.
+			// The peek's strings alias rec; spillToColdRaw copies what it keeps.
+			author, permlink, ra, rp, wasPaid, ok := peekCommentSpillRouting(rec)
+			if ok && wasPaid {
+				s.spillToColdRaw(rec, author, permlink, ra, rp)
+				continue
+			}
 		}
 		c, err := ReadComment(rec)
 		if err != nil {

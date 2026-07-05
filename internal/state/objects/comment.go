@@ -455,6 +455,88 @@ func ReadComment(src []byte) (Comment, error) {
 	return c, nil
 }
 
+// peekCommentSpillRouting skip-parses ONLY the fields a snapshot load needs
+// to route a record to the cold tier WITHOUT decoding the whole comment:
+// author/permlink (the cold key), root author/permlink (the by-root key;
+// empty = fall back to self, mirroring ReadComment's legacy-row default) and
+// WasPaid. All strings ALIAS src — callers must copy anything they retain.
+// ok=false means "don't route from the peek, run the full decoder" (the
+// record is malformed and ReadComment will produce the proper error).
+//
+// Kept next to AppendComment/ReadComment: any schema change there must be
+// mirrored here (the layout offsets below are AppendComment's, verbatim).
+func peekCommentSpillRouting(src []byte) (author, permlink, rootAuthor, rootPermlink string, wasPaid, ok bool) {
+	r := fcraw.NewReader(src)
+	var err error
+	if author, err = r.ReadStringAlias(); err != nil {
+		return "", "", "", "", false, false
+	}
+	if permlink, err = r.ReadStringAlias(); err != nil {
+		return "", "", "", "", false, false
+	}
+	// ParentAuthor + ParentPermlink.
+	for i := 0; i < 2; i++ {
+		var n uint32
+		if n, err = r.ReadVarUint(); err != nil || r.Skip(int(n)) != nil {
+			return "", "", "", "", false, false
+		}
+	}
+	// Created..AllowCurationRewards: 4+4+4+8+4+8+2+1+1 fixed bytes.
+	if r.Skip(36) != nil {
+		return "", "", "", "", false, false
+	}
+	// Beneficiaries + everything after are later schema additions; a record
+	// ending here decodes with WasPaid=false → resident, not spilled.
+	if r.AtEnd() {
+		return author, permlink, "", "", false, true
+	}
+	benef, err := r.ReadVarUint()
+	if err != nil || benef > 8 {
+		return "", "", "", "", false, false
+	}
+	for i := uint32(0); i < benef; i++ {
+		var n uint32
+		if n, err = r.ReadVarUint(); err != nil || r.Skip(int(n)+2) != nil {
+			return "", "", "", "", false, false
+		}
+	}
+	if r.Skip(8) != nil { // AbsRshares
+		return "", "", "", "", false, false
+	}
+	if r.AtEnd() { // WasPaid absent → false → resident
+		return author, permlink, "", "", false, true
+	}
+	if wasPaid, err = r.ReadBool(); err != nil {
+		return "", "", "", "", false, false
+	}
+	// Root fields live behind VoteRshares+TotalVoteWeight (16) + LastPayout
+	// (4). A clean EOF at a layer boundary is a legacy row (root falls back
+	// to self, like ReadComment); a truncation MID-field is malformed — hand
+	// it to the full decoder for the proper error.
+	if r.AtEnd() {
+		return author, permlink, "", "", wasPaid, true
+	}
+	if r.Skip(16) != nil {
+		return "", "", "", "", false, false
+	}
+	if r.AtEnd() {
+		return author, permlink, "", "", wasPaid, true
+	}
+	if r.Skip(4) != nil {
+		return "", "", "", "", false, false
+	}
+	if r.AtEnd() {
+		return author, permlink, "", "", wasPaid, true
+	}
+	if rootAuthor, err = r.ReadStringAlias(); err != nil {
+		return "", "", "", "", false, false
+	}
+	if rootPermlink, err = r.ReadStringAlias(); err != nil {
+		return "", "", "", "", false, false
+	}
+	return author, permlink, rootAuthor, rootPermlink, wasPaid, true
+}
+
 // PutComment stores c via the typed CommentStore.
 func PutComment(s *state.Session, c *Comment) {
 	EnsureCommentStore(s).Put(c)

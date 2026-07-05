@@ -263,11 +263,22 @@ func (ix *keyIndex) setUnique(key string, l loc, tbl byte) {
 // then atomically renames it over index.dat. Old + new are both mapped only for
 // the duration of the rehash; both are file-backed (pageable), so the transient
 // is disk, not RSS.
-func (ix *keyIndex) grow() {
+func (ix *keyIndex) grow() { ix.growTo(len(ix.slots) << 1) }
+
+// ensureCapacity pre-grows the table to hold `total` entries under the grow
+// threshold with a SINGLE rehash. A bulk insert of N known-count records
+// (snapshot load spilling tens of millions of cold rows) otherwise pays
+// log2(N/current) full rehashes of an ever-larger table.
+func (ix *keyIndex) ensureCapacity(total int) {
+	if want := powTwoFor(total); want > len(ix.slots) {
+		ix.growTo(want)
+	}
+}
+
+func (ix *keyIndex) growTo(n int) {
 	oldSlots := ix.slots
 	oldData := ix.data
 	oldF := ix.f
-	n := len(oldSlots) << 1
 	newMask := uint64(n - 1)
 
 	growPath := ix.path + ".grow"

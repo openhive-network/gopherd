@@ -786,12 +786,16 @@ func (s *CommentVoteStore) UnmarshalSnapshot(r io.Reader) error {
 	// Resident votes load into RAM; cold votes (durable) stay in the cold tier
 	// and their per-comment counts are rebuilt from its index below.
 	s.coldCount = make(map[commentPK]int)
+	var recScratch []byte
 	for i := uint32(0); i < count; i++ {
 		recLen, err := binary.ReadUvarint(br)
 		if err != nil {
 			return fmt.Errorf("comment_vote_store: read rec len[%d]: %w", i, err)
 		}
-		rec := make([]byte, recLen)
+		if uint64(cap(recScratch)) < recLen {
+			recScratch = make([]byte, recLen+recLen/2)
+		}
+		rec := recScratch[:recLen]
 		if _, err := io.ReadFull(br, rec); err != nil {
 			return fmt.Errorf("comment_vote_store: read rec[%d]: %w", i, err)
 		}

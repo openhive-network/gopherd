@@ -419,6 +419,13 @@ func (s *Store) DeletePrefix(prefix []byte) {
 // Index-only (no data-page faults) — cheap even with a huge cold tier, which is
 // what makes a durable-cold restart fast (the cold accounting is rebuilt from
 // the restored index, not by touching every cold record).
+// EnsureIndexCapacity pre-grows the key index to hold `extra` MORE entries on
+// top of the current count with at most one rehash. Call before a bulk insert
+// of known size (snapshot-load cold spill) to skip the incremental doublings.
+func (s *Store) EnsureIndexCapacity(extra int) {
+	s.idx.ensureCapacity(s.idx.len() + extra)
+}
+
 func (s *Store) CountTable(table byte) int {
 	n := 0
 	s.idx.eachTable(func(tbl byte, _ loc) bool {

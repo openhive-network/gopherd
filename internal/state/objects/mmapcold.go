@@ -189,6 +189,21 @@ func openMmapColdKV(dir string) (*mmapColdKV, error) {
 
 func (c *mmapColdKV) Dir() string { return c.dir }
 
+// ensureCapacity pre-grows the primary index for a bulk insert of `extra`
+// rows (the snapshot-load spill), replacing log2(N) incremental map-growth
+// rehashes with one up-front allocation. Existing entries (rare — loads run
+// on a fresh tier) are carried over.
+func (c *mmapColdKV) ensureCapacity(extra int) {
+	if extra <= 1<<20 {
+		return
+	}
+	np := make(map[string]mmapPrimVal, len(c.prim)+extra)
+	for k, v := range c.prim {
+		np[k] = v
+	}
+	c.prim = np
+}
+
 func (c *mmapColdKV) set(key, val []byte) error {
 	need := c.writeOff + uint64(len(key)) + uint64(len(val))
 	if need > uint64(len(c.data)) {

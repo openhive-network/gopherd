@@ -33,10 +33,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash"
+	"hash/crc32"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
+	"time"
 
 	"hived-go/internal/state"
 )
@@ -45,12 +48,30 @@ import (
 // snapshots with a different format; we don't migrate.
 const Format = 1
 
+// HashAlgoCRC32C is the default checksum for newly written snapshots:
+// hardware-accelerated Castagnoli CRC32 (~an order of magnitude faster than
+// sha256 on multi-GB stores; these sums only guard against corruption, not
+// adversaries). Legacy snapshots (empty hash_algo) keep verifying as sha256.
+const HashAlgoCRC32C = "crc32c"
+
+var castagnoli = crc32.MakeTable(crc32.Castagnoli)
+
+func newSnapshotHash(algo string) hash.Hash {
+	if algo == HashAlgoCRC32C {
+		return crc32.New(castagnoli)
+	}
+	return sha256.New()
+}
+
 // Manifest is the JSON sidecar describing a snapshot directory.
 type Manifest struct {
 	Format       int               `json:"format"`
 	BlockNum     uint32            `json:"block_num"`
 	HeadBlockID  string            `json:"head_block_id,omitempty"` // hex; empty if unknown
 	WrittenAtNs  int64             `json:"written_at_ns"`
+	// HashAlgo names the checksum in the *sha256 fields: "" = sha256
+	// (legacy), "crc32c" = Castagnoli CRC32 (the write default).
+	HashAlgo     string            `json:"hash_algo,omitempty"`
 	MemFile      string            `json:"mem_file"`
 	MemSHA256    string            `json:"mem_sha256"`
 	Subsystems   []SubsystemEntry  `json:"subsystems"`
@@ -83,14 +104,34 @@ func Save(db *state.Database, dir string, blockNum uint32, headBlockID string) (
 		return "", fmt.Errorf("snapshot: mkdir tmp: %w", err)
 	}
 
-	// Write the K/V backend dump.
-	memPath := filepath.Join(tmpDir, "mem.bin")
-	memSHA, err := writeMem(db, memPath)
-	if err != nil {
-		return "", fmt.Errorf("snapshot: write mem: %w", err)
+	// Write the K/V dump and every subsystem file CONCURRENTLY — the files
+	// are independent, and the store marshalers only READ their (paused)
+	// stores, so the small stores + mem.bin overlap with the giant
+	// comment/vote streams instead of queueing behind them.
+	var (
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		firstErr error
+	)
+	fail := func(err error) {
+		mu.Lock()
+		if firstErr == nil {
+			firstErr = err
+		}
+		mu.Unlock()
 	}
-
-	// Write each subsystem that supports MarshalSnapshot.
+	memPath := filepath.Join(tmpDir, "mem.bin")
+	var memSHA string
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		sum, err := writeMem(db, memPath)
+		if err != nil {
+			fail(fmt.Errorf("snapshot: write mem: %w", err))
+			return
+		}
+		memSHA = sum
+	}()
 	subEntries := make([]SubsystemEntry, 0, 8)
 	for _, name := range db.SubsystemNames() {
 		sys := db.GetSubsystem(name)
@@ -98,17 +139,29 @@ func Save(db *state.Database, dir string, blockNum uint32, headBlockID string) (
 		if !ok {
 			continue
 		}
+		name := name
 		fname := name + ".bin"
 		fpath := filepath.Join(tmpDir, "subsystems", fname)
-		sum, err := writeSubsystem(marshaler, fpath)
-		if err != nil {
-			return "", fmt.Errorf("snapshot: write subsystem %s: %w", name, err)
-		}
-		subEntries = append(subEntries, SubsystemEntry{
-			Name:   name,
-			File:   filepath.Join("subsystems", fname),
-			SHA256: sum,
-		})
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sum, err := writeSubsystem(marshaler, fpath, name)
+			if err != nil {
+				fail(fmt.Errorf("snapshot: write subsystem %s: %w", name, err))
+				return
+			}
+			mu.Lock()
+			subEntries = append(subEntries, SubsystemEntry{
+				Name:   name,
+				File:   filepath.Join("subsystems", fname),
+				SHA256: sum,
+			})
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+	if firstErr != nil {
+		return "", firstErr
 	}
 	sort.Slice(subEntries, func(i, j int) bool { return subEntries[i].Name < subEntries[j].Name })
 
@@ -117,6 +170,7 @@ func Save(db *state.Database, dir string, blockNum uint32, headBlockID string) (
 		Format:      Format,
 		BlockNum:    blockNum,
 		HeadBlockID: headBlockID,
+		HashAlgo:    HashAlgoCRC32C,
 		MemFile:     "mem.bin",
 		MemSHA256:   memSHA,
 		Subsystems:  subEntries,
@@ -152,13 +206,13 @@ func Load(db *state.Database, snapDir string) (*Manifest, error) {
 		return nil, fmt.Errorf("snapshot: format %d not supported (want %d)", man.Format, Format)
 	}
 
-	// K/V dump.
-	memPath := filepath.Join(snapDir, man.MemFile)
-	if err := loadMem(db, memPath, man.MemSHA256); err != nil {
-		return nil, fmt.Errorf("snapshot: load mem: %w", err)
+	// Resolve every subsystem up front so registration errors surface before
+	// any goroutine starts mutating stores.
+	type subLoad struct {
+		sub SubsystemEntry
+		m   state.SnapshotMarshaler
 	}
-
-	// Per-subsystem files.
+	loads := make([]subLoad, 0, len(man.Subsystems))
 	for _, sub := range man.Subsystems {
 		sys := db.GetSubsystem(sub.Name)
 		if sys == nil {
@@ -168,27 +222,106 @@ func Load(db *state.Database, snapDir string) (*Manifest, error) {
 		if !ok {
 			return nil, fmt.Errorf("snapshot: subsystem %q does not implement SnapshotMarshaler", sub.Name)
 		}
-		fpath := filepath.Join(snapDir, sub.File)
-		if err := loadSubsystem(marshaler, fpath, sub.SHA256); err != nil {
-			return nil, fmt.Errorf("snapshot: load subsystem %s: %w", sub.Name, err)
+		loads = append(loads, subLoad{sub: sub, m: marshaler})
+	}
+
+	// Load the K/V dump and the subsystem files CONCURRENTLY: each file
+	// fills its own independent store. The one shared resource is the cold
+	// tier — comment_store and comment_vote_store both spill into it during
+	// load and the persist backend is not safe for concurrent writers — so
+	// those two run sequentially on ONE goroutine; everything else fans out.
+	var (
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		firstErr error
+	)
+	fail := func(err error) {
+		mu.Lock()
+		if firstErr == nil {
+			firstErr = err
 		}
+		mu.Unlock()
+	}
+	runLoad := func(l subLoad) {
+		fpath := filepath.Join(snapDir, l.sub.File)
+		if err := loadSubsystem(l.m, fpath, l.sub.SHA256, man.HashAlgo, l.sub.Name); err != nil {
+			fail(fmt.Errorf("snapshot: load subsystem %s: %w", l.sub.Name, err))
+		}
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		memPath := filepath.Join(snapDir, man.MemFile)
+		if err := loadMem(db, memPath, man.MemSHA256, man.HashAlgo); err != nil {
+			fail(fmt.Errorf("snapshot: load mem: %w", err))
+		}
+	}()
+	coldWriters := make([]subLoad, 0, 2)
+	for _, l := range loads {
+		if l.sub.Name == "comment_store" || l.sub.Name == "comment_vote_store" {
+			coldWriters = append(coldWriters, l)
+			continue
+		}
+		l := l
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			runLoad(l)
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for _, l := range coldWriters {
+			runLoad(l)
+		}
+	}()
+	wg.Wait()
+	if firstErr != nil {
+		return nil, firstErr
 	}
 
 	return man, nil
 }
 
+// countingWriter counts bytes so the per-file log line can report MB/s.
+type countingWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (cw *countingWriter) Write(p []byte) (int, error) {
+	n, err := cw.w.Write(p)
+	cw.n += int64(n)
+	return n, err
+}
+
+// logPhase prints one timing line per snapshot file that is big or slow
+// enough to matter (the per-store breakdown is what tells us WHERE a slow
+// save/load went — total-only timing hid a 2-orders-of-magnitude spread).
+func logPhase(verb, name string, bytes int64, dur time.Duration) {
+	if dur < 500*time.Millisecond && bytes < 64<<20 {
+		return
+	}
+	mbps := float64(bytes) / (1 << 20) / dur.Seconds()
+	fmt.Fprintf(os.Stderr, "snapshot: %s %s — %.1f MB in %.1fs (%.0f MB/s)\n",
+		verb, name, float64(bytes)/(1<<20), dur.Seconds(), mbps)
+}
+
 // writeMem dumps every (key, value) in the K/V backend to path. Same
 // stream format as state.Database.SaveSnapshot but without the
 // embedded block-num header (the manifest carries it). Returns the
-// hex sha256 of the file.
+// hex checksum of the file.
 func writeMem(db *state.Database, path string) (string, error) {
+	start := time.Now()
 	f, err := os.Create(path)
 	if err != nil {
 		return "", err
 	}
 	defer f.Close()
-	h := sha256.New()
-	w := bufio.NewWriterSize(io.MultiWriter(f, h), 1<<20)
+	h := newSnapshotHash(HashAlgoCRC32C)
+	cw := &countingWriter{w: io.MultiWriter(f, h)}
+	w := bufio.NewWriterSize(cw, 1<<20)
 
 	// Header: magic + format version. No block number here — manifest
 	// owns that.
@@ -210,19 +343,22 @@ func writeMem(db *state.Database, path string) (string, error) {
 	if err := f.Sync(); err != nil {
 		return "", err
 	}
+	logPhase("wrote", "mem.bin", cw.n, time.Since(start))
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // loadMem reads a writeMem dump and re-inserts every (key, value) into
-// the K/V backend. Verifies sha256 against expected.
-func loadMem(db *state.Database, path, expectedSHA string) error {
+// the K/V backend. Verifies the checksum against expected.
+func loadMem(db *state.Database, path, expectedSHA, hashAlgo string) error {
+	start := time.Now()
 	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	h := sha256.New()
-	r := bufio.NewReaderSize(io.TeeReader(f, h), 1<<20)
+	h := newSnapshotHash(hashAlgo)
+	cr := &countingWriter{w: h}
+	r := bufio.NewReaderSize(io.TeeReader(f, cr), 1<<20)
 
 	var magic [8]byte
 	if _, err := io.ReadFull(r, magic[:]); err != nil {
@@ -246,19 +382,22 @@ func loadMem(db *state.Database, path, expectedSHA string) error {
 	if expectedSHA != "" && got != expectedSHA {
 		return fmt.Errorf("checksum mismatch: got %s, want %s", got, expectedSHA)
 	}
+	logPhase("loaded", "mem.bin", cr.n, time.Since(start))
 	return nil
 }
 
 // writeSubsystem invokes m.MarshalSnapshot and writes the result to
-// path, returning the hex sha256.
-func writeSubsystem(m state.SnapshotMarshaler, path string) (string, error) {
+// path, returning the hex checksum.
+func writeSubsystem(m state.SnapshotMarshaler, path, name string) (string, error) {
+	start := time.Now()
 	f, err := os.Create(path)
 	if err != nil {
 		return "", err
 	}
 	defer f.Close()
-	h := sha256.New()
-	bw := bufio.NewWriterSize(io.MultiWriter(f, h), 1<<20)
+	h := newSnapshotHash(HashAlgoCRC32C)
+	cw := &countingWriter{w: io.MultiWriter(f, h)}
+	bw := bufio.NewWriterSize(cw, 1<<20)
 	if err := m.MarshalSnapshot(bw); err != nil {
 		return "", err
 	}
@@ -268,23 +407,30 @@ func writeSubsystem(m state.SnapshotMarshaler, path string) (string, error) {
 	if err := f.Sync(); err != nil {
 		return "", err
 	}
+	logPhase("wrote", name, cw.n, time.Since(start))
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // loadSubsystem opens path and feeds it into m.UnmarshalSnapshot.
-// Verifies sha256 if expectedSHA is non-empty.
-func loadSubsystem(m state.SnapshotMarshaler, path, expectedSHA string) error {
+// Verifies the checksum if expectedSHA is non-empty.
+func loadSubsystem(m state.SnapshotMarshaler, path, expectedSHA, hashAlgo, name string) error {
+	start := time.Now()
 	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 	var h hash.Hash
+	var cr *countingWriter
 	var src io.Reader = f
 	if expectedSHA != "" {
-		h = sha256.New()
-		src = io.TeeReader(f, h)
+		h = newSnapshotHash(hashAlgo)
+		cr = &countingWriter{w: h}
+		src = io.TeeReader(f, cr)
 	}
+	// The unmarshalers read record-at-a-time; without buffering every tiny
+	// read goes through the TeeReader straight to a file read syscall.
+	src = bufio.NewReaderSize(src, 1<<20)
 	if err := m.UnmarshalSnapshot(src); err != nil {
 		return err
 	}
@@ -299,6 +445,7 @@ func loadSubsystem(m state.SnapshotMarshaler, path, expectedSHA string) error {
 		if got != expectedSHA {
 			return fmt.Errorf("checksum mismatch: got %s, want %s", got, expectedSHA)
 		}
+		logPhase("loaded", name, cr.n, time.Since(start))
 	}
 	return nil
 }
