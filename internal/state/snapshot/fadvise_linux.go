@@ -20,3 +20,13 @@ func dropCacheUpTo(f *os.File, upTo int64) {
 	}
 	_ = unix.Fadvise(int(f.Fd()), 0, upTo, unix.FADV_DONTNEED)
 }
+
+// diskFree returns the free bytes available to this process on the
+// filesystem holding path, and whether the probe worked.
+func diskFree(path string) (uint64, bool) {
+	var st unix.Statfs_t
+	if err := unix.Statfs(path, &st); err != nil {
+		return 0, false
+	}
+	return st.Bavail * uint64(st.Bsize), true
+}

@@ -31,6 +31,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash"
 	"hash/crc32"
@@ -39,6 +40,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"syscall"
 	"time"
 
 	"hived-go/internal/state"
@@ -88,13 +90,108 @@ type SubsystemEntry struct {
 // <dir>/block-<blockNum>/. The directory must not already exist (we'll
 // fail loudly rather than silently overwrite). headBlockID may be empty.
 //
+// Disk-full handling: a replay carries hours of un-recreatable state, so
+// running out of disk mid-save must NOT abort the run. Save pre-flights the
+// filesystem against an estimate (the newest sibling snapshot's size — the
+// best predictor of this one's), and if the write still hits ENOSPC it
+// removes the partial .tmp, logs loudly, and PAUSES (poll every 15s) until
+// enough space is freed, then retries from scratch.
+//
 // Returns the final snapshot directory path.
 func Save(db *state.Database, dir string, blockNum uint32, headBlockID string) (string, error) {
+	for {
+		path, err := saveOnce(db, dir, blockNum, headBlockID)
+		if err == nil || !errors.Is(err, syscall.ENOSPC) {
+			return path, err
+		}
+		// Drop the partial .tmp first — the operator shouldn't have to free
+		// space for the failed attempt AND the retry.
+		_ = os.RemoveAll(filepath.Join(dir, fmt.Sprintf("block-%d.tmp", blockNum)))
+		need := snapshotSizeEstimate(dir)
+		waitForDiskSpace(dir, need, err)
+	}
+}
+
+// snapshotSizeEstimate returns the byte size of the newest block-* sibling
+// under dir (0 if none) — the best available predictor of the next
+// snapshot's size.
+func snapshotSizeEstimate(dir string) uint64 {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	newest, best := uint64(0), ""
+	for _, e := range entries {
+		if !e.IsDir() || filepath.Ext(e.Name()) == ".tmp" {
+			continue
+		}
+		var n uint64
+		// Sscanf ignores trailing garbage, so require the exact round-trip
+		// (otherwise a leftover "block-N.tmp" would be measured — and a
+		// partial one under-estimates to near zero).
+		if _, err := fmt.Sscanf(e.Name(), "block-%d", &n); err != nil || n == 0 || e.Name() != fmt.Sprintf("block-%d", n) {
+			continue
+		}
+		if n > newest {
+			newest, best = n, e.Name()
+		}
+	}
+	if best == "" {
+		return 0
+	}
+	var total uint64
+	_ = filepath.WalkDir(filepath.Join(dir, best), func(_ string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if fi, err := d.Info(); err == nil {
+			total += uint64(fi.Size())
+		}
+		return nil
+	})
+	return total
+}
+
+// waitForDiskSpace blocks until the filesystem under dir has at least
+// need*1.1 bytes free (or, when no estimate exists, until free space grew by
+// 10GiB over the failure point), logging a loud actionable line each minute.
+func waitForDiskSpace(dir string, need uint64, cause error) {
+	free0, ok := diskFree(dir)
+	if !ok {
+		return // can't probe; let the retry fail again rather than spin blind
+	}
+	target := need + need/10
+	if target == 0 {
+		target = free0 + 10<<30
+	}
+	lastLog := time.Time{}
+	for {
+		free, ok := diskFree(dir)
+		if !ok || free >= target {
+			return
+		}
+		if time.Since(lastLog) >= time.Minute {
+			fmt.Fprintf(os.Stderr,
+				"snapshot: PAUSED on disk space at %s — %v; need ~%.1f GiB free, have %.1f GiB. Free space to resume (replay state is intact, retrying every 15s)\n",
+				dir, cause, float64(target)/(1<<30), float64(free)/(1<<30))
+			lastLog = time.Now()
+		}
+		time.Sleep(15 * time.Second)
+	}
+}
+
+func saveOnce(db *state.Database, dir string, blockNum uint32, headBlockID string) (string, error) {
 	if db == nil {
 		return "", fmt.Errorf("snapshot: nil database")
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("snapshot: mkdir parent: %w", err)
+	}
+	// Pre-flight: don't start a multi-GB write that predictably won't fit.
+	if need := snapshotSizeEstimate(dir); need > 0 {
+		if free, ok := diskFree(dir); ok && free < need+need/10 {
+			waitForDiskSpace(dir, need, fmt.Errorf("pre-flight: snapshot needs ~%.1f GiB (newest sibling), only %.1f GiB free", float64(need)/(1<<30), float64(free)/(1<<30)))
+		}
 	}
 	finalDir := filepath.Join(dir, fmt.Sprintf("block-%d", blockNum))
 	tmpDir := finalDir + ".tmp"
