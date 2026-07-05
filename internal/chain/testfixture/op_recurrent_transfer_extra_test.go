@@ -569,14 +569,14 @@ func TestRecurrentTransferPairIDCRUDFull(t *testing.T) {
 			rt2.Memo, rt2.Amount, rt2.Recurrence)
 	}
 
-	// Delete pair_id=100 (amount=0, executions=0 — see evaluator
-	// CRUD-delete branch)
+	// Delete pair_id=100 (amount=0 on an existing schedule = cancel;
+	// executions must be >= 2 pre-HF29, mirroring hived)
 	f.MustApplyOp(op.RecurrentTransfer{
 		From:       "alice",
 		To:         "bob",
 		Amount:     asset.Asset{Amount: 0, Symbol: asset.Symbol{Num: asset.HbdSymbol}},
 		Recurrence: 60,
-		Executions: 0,
+		Executions: 2,
 		Extensions: recurrentTransferPairIDExt(100),
 	})
 

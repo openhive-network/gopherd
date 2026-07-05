@@ -425,13 +425,13 @@ func TestRecurrentTransferApply(t *testing.T) {
 		t.Fatal("recurrent transfer should exist")
 	}
 
-	t.Log("--- Delete schedule with amount=0 + executions=0")
+	t.Log("--- Delete schedule with amount=0 (executions >= 2 pre-HF29)")
 	if err := f.ApplyOp(op.RecurrentTransfer{
 		From:       "alice",
 		To:         "bob",
 		Amount:     HIVE(0),
 		Recurrence: 0,
-		Executions: 0,
+		Executions: 2,
 	}); err != nil {
 		t.Fatalf("delete: %v", err)
 	}

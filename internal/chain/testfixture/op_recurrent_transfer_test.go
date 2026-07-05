@@ -126,8 +126,8 @@ func TestRecurrentTransferPairIDCRUDUpdate(t *testing.T) {
 }
 
 // TestRecurrentTransferPairIDCRUDDelete ports the delete branch of
-// recurrent_transfer_pair_id_crud. Issuing an op with amount=0 and
-// executions=0 deletes the schedule.
+// recurrent_transfer_pair_id_crud. Issuing an op with amount=0 on an
+// existing schedule deletes it (executions >= 2 pre-HF29).
 func TestRecurrentTransferPairIDCRUDDelete(t *testing.T) {
 	f := New(t)
 	f.Actors("alice", "bob")
@@ -150,13 +150,13 @@ func TestRecurrentTransferPairIDCRUDDelete(t *testing.T) {
 		t.Fatal("expected schedule with pair_id=7 to exist")
 	}
 
-	// Delete via amount=0/executions=0.
+	// Delete via amount=0 (executions >= 2 pre-HF29).
 	f.MustApplyOp(op.RecurrentTransfer{
 		From:       "alice",
 		To:         "bob",
 		Amount:     asset.Asset{Amount: 0, Symbol: asset.Symbol{Num: asset.HbdSymbol}},
 		Recurrence: 72,
-		Executions: 0,
+		Executions: 2,
 		Extensions: recurrentTransferPairIDExt(7),
 	})
 
