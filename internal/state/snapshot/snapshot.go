@@ -285,14 +285,25 @@ func Load(db *state.Database, snapDir string) (*Manifest, error) {
 }
 
 // countingWriter counts bytes so the per-file log line can report MB/s.
+// When f is set it also drops the OS page cache for consumed ranges every
+// dropCacheStride bytes — snapshot streams are strictly forward, and on a
+// tight cgroup a multi-GB file otherwise evicts the heap + cold-tier pages.
 type countingWriter struct {
-	w io.Writer
-	n int64
+	w       io.Writer
+	f       *os.File
+	n       int64
+	advised int64
 }
+
+const dropCacheStride = 256 << 20
 
 func (cw *countingWriter) Write(p []byte) (int, error) {
 	n, err := cw.w.Write(p)
 	cw.n += int64(n)
+	if cw.f != nil && cw.n-cw.advised >= dropCacheStride {
+		dropCacheUpTo(cw.f, cw.n)
+		cw.advised = cw.n
+	}
 	return n, err
 }
 
@@ -320,7 +331,7 @@ func writeMem(db *state.Database, path string) (string, error) {
 	}
 	defer f.Close()
 	h := newSnapshotHash(HashAlgoCRC32C)
-	cw := &countingWriter{w: io.MultiWriter(f, h)}
+	cw := &countingWriter{w: io.MultiWriter(f, h), f: f}
 	w := bufio.NewWriterSize(cw, 1<<20)
 
 	// Header: magic + format version. No block number here — manifest
@@ -357,7 +368,7 @@ func loadMem(db *state.Database, path, expectedSHA, hashAlgo string) error {
 	}
 	defer f.Close()
 	h := newSnapshotHash(hashAlgo)
-	cr := &countingWriter{w: h}
+	cr := &countingWriter{w: h, f: f}
 	r := bufio.NewReaderSize(io.TeeReader(f, cr), 1<<20)
 
 	var magic [8]byte
@@ -396,7 +407,7 @@ func writeSubsystem(m state.SnapshotMarshaler, path, name string) (string, error
 	}
 	defer f.Close()
 	h := newSnapshotHash(HashAlgoCRC32C)
-	cw := &countingWriter{w: io.MultiWriter(f, h)}
+	cw := &countingWriter{w: io.MultiWriter(f, h), f: f}
 	bw := bufio.NewWriterSize(cw, 1<<20)
 	if err := m.MarshalSnapshot(bw); err != nil {
 		return "", err
@@ -425,7 +436,7 @@ func loadSubsystem(m state.SnapshotMarshaler, path, expectedSHA, hashAlgo, name 
 	var src io.Reader = f
 	if expectedSHA != "" {
 		h = newSnapshotHash(hashAlgo)
-		cr = &countingWriter{w: h}
+		cr = &countingWriter{w: h, f: f}
 		src = io.TeeReader(f, cr)
 	}
 	// The unmarshalers read record-at-a-time; without buffering every tiny
