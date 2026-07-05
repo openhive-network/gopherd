@@ -3,6 +3,7 @@ package evaluator
 import (
 	"errors"
 	"fmt"
+	"math/bits"
 
 	"hived-go/internal/math128"
 	"hived-go/internal/protocol/asset"
@@ -159,8 +160,17 @@ func (collateralizedConvertEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	dgpo.VirtualSupply += hbdAsHIVE
 
 	// percent_hbd <= hbd_stop_percent (basis points). Use the freshly-
-	// updated supplies — mirrors calculate_HBD_percent.
-	percentHBD := calcHBDPercent(dgpo.CurrentHBDSupply, fh.CurrentMedianHistory, dgpo.VirtualSupply)
+	// updated supplies — mirrors database::calculate_HBD_percent
+	// (database.cpp:2878-2901) EXACTLY, like updateVirtualSupply's copy in
+	// internal/chain/virtual_supply.go (validated 47.8M→55.2M):
+	//   HF24+ excludes treasury HBD from the debt ratio (hbd_supply -=
+	//   treasury.hbd_balance, floor 0; virtual_supply recomputed as
+	//   hbd×median + current_supply) and HF21+ rounds half-up
+	//   (num += virtual_supply/2). The old local calcHBDPercent had
+	//   neither — with the treasury holding millions of HBD by 57M it
+	//   overstated the ratio (1001 vs ≤1000) and bounced a legal
+	//   collateralized_convert at block 57,065,738.
+	percentHBD := calcHBDPercent(ctx, &dgpo, fh.CurrentMedianHistory)
 	if percentHBD > int64(dgpo.HBDStopPercent) {
 		return fmt.Errorf("collateralized_convert: percent_hbd %d > hbd_stop_percent %d", percentHBD, dgpo.HBDStopPercent)
 	}
@@ -266,12 +276,34 @@ func convertHBDToHiveLocal(hbdAmount int64, p asset.Price) int64 {
 //
 // (i.e. convert HBD → HIVE-equivalent then divide by virtual_supply,
 // in basis points). Returns 0 when virtual_supply is non-positive.
-func calcHBDPercent(hbdSupply int64, median asset.Price, virtualSupply int64) int64 {
+func calcHBDPercent(ctx *Context, dgpo *objects.DynamicGlobalProperty, median asset.Price) int64 {
+	hbdSupply := dgpo.CurrentHBDSupply
+	virtualSupply := dgpo.VirtualSupply
+	if ctx.Hardforks.Has(hardfork.HF24) {
+		// Treasury HBD sits outside the open market — excluded from the
+		// debt ratio, and virtual_supply recomputed from the reduced debt
+		// (database.cpp:2887-2894). hive.fund is the treasury post-HF24.
+		if t, terr := objects.GetAccount(ctx.DB, "hive.fund"); terr == nil {
+			hbdSupply -= t.HBDBalance
+			if hbdSupply < 0 {
+				hbdSupply = 0
+			}
+			if hbdSupply != dgpo.CurrentHBDSupply {
+				virtualSupply = convertHBDToHiveLocal(hbdSupply, median) + dgpo.CurrentSupply
+			}
+		}
+	}
 	if virtualSupply <= 0 {
 		return 0
 	}
 	hbdInHIVE := convertHBDToHiveLocal(hbdSupply, median)
 	num := math128.Mul64Wide(uint64(hbdInHIVE), uint64(hive100Percent))
+	if ctx.Hardforks.Has(hardfork.HF21) {
+		// Round half-up (database.cpp:2898-2899).
+		half := uint64(virtualSupply / 2)
+		lo, carry := bits.Add64(num.Lo, half, 0)
+		num = math128.U128{Hi: num.Hi + carry, Lo: lo}
+	}
 	q := num.DivU64(uint64(virtualSupply))
 	if q.Hi != 0 {
 		return 1 << 31
