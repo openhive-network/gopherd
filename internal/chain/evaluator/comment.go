@@ -985,7 +985,14 @@ func (voteEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		reverseAuction := uint32(0)
 		if dgpoRef != nil && dgpoRef.ReverseAuctionSeconds > 0 {
 			reverseAuction = dgpoRef.ReverseAuctionSeconds
-		} else if ctx.HeadBlockTime > hf6ReverseAuctionTime {
+		} else if !ctx.Hardforks.Has(hardfork.HF25) && ctx.HeadBlockTime > hf6ReverseAuctionTime {
+			// Pre-HF6-block fallback ONLY: once HF25 explicitly sets
+			// dgpo.reverse_auction_seconds = 0, zero means ZERO (hived's
+			// `_seconds < get_reverse_auction_seconds()` is never true) —
+			// resurrecting the 30-min ramp here penalized every early
+			// curator post-HF25 (anadolu reward_vests 6.5% short at
+			// 55,236,769 = HF25+1002). Same bug class as HBDPrintRate
+			// 0-means-unset.
 			reverseAuction = 30 * 60 // HIVE_REVERSE_AUCTION_WINDOW_SECONDS_HF6
 		}
 		if reverseAuction > 0 && voteCurationWeight > 0 && ctx.HeadBlockTime > hf6ReverseAuctionTime {
@@ -1027,10 +1034,19 @@ func (voteEvaluator) Apply(ctx *Context, opArg op.Op) error {
 			// Hived gates on `_seconds >= early_voting_seconds`. The
 			// elapsed >= mid path subsumes elapsed >= early so the
 			// branching maps to the same set partition.
+			//
+			// C++ sets max_vote_weight = vote_weight AFTER the phase
+			// division (hive_evaluator_social.cpp:812-825) — unlike the
+			// reverse-auction branch, the DISCOUNTED weight is what
+			// accumulates into total_vote_weight. Leaving maxVoteWeight
+			// undiscounted inflated TotalVoteWeight and diluted every
+			// curator's weight/total share on posts with 24h+ votes.
 			if elapsed >= earlyVotingSeconds+midVotingSeconds {
 				voteCurationWeight /= 8
+				maxVoteWeight = voteCurationWeight
 			} else if elapsed >= earlyVotingSeconds {
 				voteCurationWeight /= 2
+				maxVoteWeight = voteCurationWeight
 			}
 		}
 		c.VoteRshares = newVoteRshares
