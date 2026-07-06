@@ -327,6 +327,12 @@ func Load(db *state.Database, snapDir string) (*Manifest, error) {
 	// tier — comment_store and comment_vote_store both spill into it during
 	// load and the persist backend is not safe for concurrent writers — so
 	// those two run sequentially on ONE goroutine; everything else fans out.
+	//
+	// GHIVE_SNAPSHOT_LOAD_SERIAL=1 forces a fully sequential load: lower
+	// peak memory/reclaim pressure (a 25GB parallel load on a 31GB box
+	// repeatedly tripped systemd-oomd's ">50% pressure for >20s" kill) at
+	// the cost of wall-clock.
+	serialLoad := os.Getenv("GHIVE_SNAPSHOT_LOAD_SERIAL") == "1"
 	var (
 		wg       sync.WaitGroup
 		mu       sync.Mutex
@@ -344,6 +350,18 @@ func Load(db *state.Database, snapDir string) (*Manifest, error) {
 		if err := loadSubsystem(l.m, fpath, l.sub.SHA256, man.HashAlgo, l.sub.Name); err != nil {
 			fail(fmt.Errorf("snapshot: load subsystem %s: %w", l.sub.Name, err))
 		}
+	}
+	if serialLoad {
+		memPath := filepath.Join(snapDir, man.MemFile)
+		if err := loadMem(db, memPath, man.MemSHA256, man.HashAlgo); err != nil {
+			return nil, fmt.Errorf("snapshot: load mem: %w", err)
+		}
+		for _, l := range loads {
+			if runLoad(l); firstErr != nil {
+				return nil, firstErr
+			}
+		}
+		return man, nil
 	}
 	wg.Add(1)
 	go func() {
