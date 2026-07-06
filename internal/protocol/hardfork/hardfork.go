@@ -87,11 +87,14 @@ var MainnetActivationBlock = [NumHardforks + 1]uint32{
 	HF25: 55235767,
 	HF26: 68676505,
 	HF27: 69050084,
-	// HF28 activated Nov 19, 2025; the exact mainnet activation block is
-	// pending lookup. Replay window is 8.22M blocks so this placeholder
-	// has no effect yet — fill from chain history before extending replay
-	// past 100M blocks.
-	HF28: 100000000,
+	// HF28 activated Nov 19, 2025 (time 1763557200); the exact mainnet
+	// activation block is pending lookup — by timestamp it lands near
+	// ~104M. The placeholder MUST stay above any replay target until the
+	// real block is filled in (the old 100,000,000 placeholder would have
+	// fired HF28 rules spuriously at exactly block 100M). Binary-search
+	// the block_log for the first block with ts >= 1763557200 before
+	// extending replay past ~103M.
+	HF28: 200000000,
 }
 
 // Set is a bitmap of activated hardforks. The zero value has only HF0 active
