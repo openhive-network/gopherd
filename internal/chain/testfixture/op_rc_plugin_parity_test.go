@@ -173,7 +173,7 @@ func bumpPendingClaimedAccounts(t *testing.T, f *Fixture, name string, n uint32)
 	if err != nil {
 		t.Fatalf("bumpPendingClaimedAccounts: get %q: %v", name, err)
 	}
-	a.PendingClaimedAccounts += uint16(n)
+	a.PendingClaimedAccounts += int64(n)
 	objects.PutAccount(s, &a)
 	if err := s.Commit(false); err != nil {
 		t.Fatalf("bumpPendingClaimedAccounts: commit: %v", err)

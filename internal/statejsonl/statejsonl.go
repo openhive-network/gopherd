@@ -82,7 +82,7 @@ type AccountRow struct {
 	Withdrawn                     int64  `json:"withdrawn"`
 	Proxy                         string `json:"proxy"`
 	WitnessesVotedFor             uint16 `json:"witnesses_voted_for"`
-	PendingClaimedAccounts        uint16 `json:"pending_claimed_accounts"`
+	PendingClaimedAccounts        int64  `json:"pending_claimed_accounts"`
 	VotingManaCurrent             int64  `json:"voting_mana_current"`
 	VotingManaLastUpdate          uint32 `json:"voting_mana_last_update"`
 	HBDLastInterestPayment        uint32 `json:"hbd_last_interest_payment"`

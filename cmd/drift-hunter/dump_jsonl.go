@@ -147,7 +147,7 @@ func dumpHivedJSONL(rpc *rpcClient, outPath string) error {
 			Withdrawn:              looseInt(a.Withdrawn.String()),
 			Proxy:                  a.Proxy,
 			WitnessesVotedFor:      a.WitnessesVotedFor,
-			PendingClaimedAccounts: a.PendingClaimedAccounts,
+			PendingClaimedAccounts: int64(a.PendingClaimedAccounts),
 			VotingManaCurrent:      looseInt(a.VotingManabar.CurrentMana.String()),
 			VotingManaLastUpdate:   a.VotingManabar.LastUpdateTime,
 			LastOwnerUpdate:        parseISO8601Sec(a.LastOwnerUpdate),

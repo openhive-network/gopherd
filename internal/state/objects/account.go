@@ -51,7 +51,10 @@ type Account struct {
 	// PendingClaimedAccounts is the count of paid-for-but-not-yet-used
 	// account claims (HF20+). claim_account increments;
 	// create_claimed_account decrements.
-	PendingClaimedAccounts uint16
+	// int64 like hived's share_type — ocdb WRAPPED a uint16 (65,535) during
+	// the 58M-59M claim-bot era and create_claimed_account saw 0 pending
+	// at block 59,062,878.
+	PendingClaimedAccounts int64
 	// SavingsBalance / SavingsHBDBalance hold funds in the time-locked
 	// savings account.
 	SavingsBalance    int64
@@ -249,6 +252,9 @@ func AppendAccount(dst []byte, a *Account) []byte {
 	dst = fcraw.AppendVarUint(dst, uint32(len(a.Proxy)))
 	dst = append(dst, a.Proxy...)
 	dst = append(dst, byte(a.WitnessesVotedFor), byte(a.WitnessesVotedFor>>8))
+	// Legacy 2-byte slot (kept for record-layout stability; truncated when
+	// the count exceeds 65,535 — the authoritative WIDE value is appended
+	// at the record tail, schema-tolerant like the other late additions).
 	dst = append(dst, byte(a.PendingClaimedAccounts), byte(a.PendingClaimedAccounts>>8))
 	dst = appendI64LE(dst, a.SavingsBalance)
 	dst = appendI64LE(dst, a.SavingsHBDBalance)
@@ -308,6 +314,7 @@ func AppendAccount(dst []byte, a *Account) []byte {
 	dst = append(dst, a.RecoveryAccount...)
 	dst = appendI64LE(dst, a.RCAdjustment)
 	dst = appendU32LE(dst, a.LastAccountRecoveryTime)
+	dst = appendI64LE(dst, a.PendingClaimedAccounts) // wide (see legacy 2-byte slot)
 	return dst
 }
 
@@ -353,8 +360,11 @@ func ReadAccount(src []byte) (Account, error) {
 	if a.WitnessesVotedFor, err = r.ReadUint16(); err != nil {
 		return a, fmt.Errorf("account.witnesses_voted_for: %w", err)
 	}
-	if a.PendingClaimedAccounts, err = r.ReadUint16(); err != nil {
-		return a, fmt.Errorf("account.pending_claimed_accounts: %w", err)
+	if pcaNarrow, perr := r.ReadUint16(); perr != nil {
+		return a, fmt.Errorf("account.pending_claimed_accounts: %w", perr)
+	} else {
+		// Legacy 2-byte slot; superseded by the wide tail field when present.
+		a.PendingClaimedAccounts = int64(pcaNarrow)
 	}
 	if a.SavingsBalance, err = r.ReadInt64(); err != nil {
 		return a, fmt.Errorf("account.savings_balance: %w", err)
@@ -566,6 +576,15 @@ func ReadAccount(src []byte) (Account, error) {
 	}
 	if a.LastAccountRecoveryTime, err = r.ReadUint32(); err != nil {
 		return a, fmt.Errorf("account.last_account_recovery_time: %w", err)
+	}
+	// Wide PendingClaimedAccounts — later schema addition; tolerate EOF
+	// (legacy rows keep the 2-byte value read above, which was exact for
+	// counts <= 65,535 — all banked snapshots predate any wrap).
+	if r.AtEnd() {
+		return a, nil
+	}
+	if a.PendingClaimedAccounts, err = r.ReadInt64(); err != nil {
+		return a, fmt.Errorf("account.pending_claimed_accounts_wide: %w", err)
 	}
 	if !r.AtEnd() {
 		return a, errors.New("account: trailing bytes after decode (schema mismatch?)")
