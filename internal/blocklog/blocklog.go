@@ -141,6 +141,23 @@ func Open(path string) (*Reader, error) {
 		p.main = main
 		p.mainSize = stat.Size()
 
+		// Optional "<main>.end" sidecar: LOGICAL end-of-log override for a
+		// file whose physical tail is garbage (e.g. an interrupted copy cut
+		// mid-block). Content: the decimal byte offset of the end of the
+		// last complete block (its trailer's last byte + 1). Everything —
+		// the last block's endOffset fallback and the backward index
+		// build — keys off p.mainSize, so clamping here is sufficient.
+		if endBytes, err := os.ReadFile(p.mainPath + ".end"); err == nil {
+			var logical int64
+			if _, serr := fmt.Sscanf(strings.TrimSpace(string(endBytes)), "%d", &logical); serr == nil && logical > 0 && logical <= p.mainSize {
+				p.mainSize = logical
+			} else {
+				main.Close()
+				r.Close()
+				return nil, fmt.Errorf("blocklog: bad .end sidecar for %s: %q (file size %d)", p.mainPath, endBytes, stat.Size())
+			}
+		}
+
 		idxPath := p.mainPath + indexExtension
 		if idxFile, err := os.Open(idxPath); err == nil {
 			idxStat, statErr := idxFile.Stat()
