@@ -310,8 +310,18 @@ func Load(db *state.Database, snapDir string) (*Manifest, error) {
 		sub SubsystemEntry
 		m   state.SnapshotMarshaler
 	}
+	// GHIVE_SNAPSHOT_SKIP_COMMENTS=1: leave comment_store/comment_vote_store
+	// EMPTY (skip their multi-GB files). For feed/schedule-only diagnostics
+	// with --tolerate-failing-ops: comment-touching ops fail and are skipped,
+	// while witness state, feeds, and the schedule replay faithfully. NEVER
+	// valid for consensus replay.
+	skipComments := os.Getenv("GHIVE_SNAPSHOT_SKIP_COMMENTS") == "1"
 	loads := make([]subLoad, 0, len(man.Subsystems))
 	for _, sub := range man.Subsystems {
+		if skipComments && (sub.Name == "comment_store" || sub.Name == "comment_vote_store" || sub.Name == "comment_cashout_schedule_store") {
+			fmt.Fprintf(os.Stderr, "snapshot: SKIPPING %s (GHIVE_SNAPSHOT_SKIP_COMMENTS)\n", sub.Name)
+			continue
+		}
 		sys := db.GetSubsystem(sub.Name)
 		if sys == nil {
 			return nil, fmt.Errorf("snapshot: subsystem %q present in snapshot but not registered (call EnsureXxx before Load)", sub.Name)
