@@ -39,6 +39,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -408,9 +409,22 @@ type countingWriter struct {
 	f       *os.File
 	n       int64
 	advised int64
+	// paceStart, when set, enables the GHIVE_SNAPSHOT_LOAD_PACE_MB rate
+	// limit for this stream (loads only — saves must not be paced).
+	paceStart time.Time
 }
 
 const dropCacheStride = 256 << 20
+
+// loadPaceMBs, when >0 (GHIVE_SNAPSHOT_LOAD_PACE_MB), caps the aggregate
+// snapshot-load streaming rate. systemd-oomd kills any scope on a user box
+// whose reclaim pressure stays >50% for 20s; an unthrottled 25GB load (read
+// + cold-tier spill) reliably trips that on a 31GB machine. Pacing the read
+// side paces the whole pipeline and keeps pressure under the trigger.
+var loadPaceMBs = func() int64 {
+	n, _ := strconv.ParseInt(os.Getenv("GHIVE_SNAPSHOT_LOAD_PACE_MB"), 10, 64)
+	return n
+}()
 
 func (cw *countingWriter) Write(p []byte) (int, error) {
 	n, err := cw.w.Write(p)
@@ -418,6 +432,13 @@ func (cw *countingWriter) Write(p []byte) (int, error) {
 	if cw.f != nil && cw.n-cw.advised >= dropCacheStride {
 		dropCacheUpTo(cw.f, cw.n)
 		cw.advised = cw.n
+	}
+	if loadPaceMBs > 0 && cw.paceStart != (time.Time{}) {
+		budget := time.Duration(cw.n/(loadPaceMBs<<20))*time.Second +
+			time.Duration((cw.n%(loadPaceMBs<<20))*int64(time.Second)/(loadPaceMBs<<20))
+		if ahead := budget - time.Since(cw.paceStart); ahead > 10*time.Millisecond {
+			time.Sleep(ahead)
+		}
 	}
 	return n, err
 }
@@ -483,7 +504,7 @@ func loadMem(db *state.Database, path, expectedSHA, hashAlgo string) error {
 	}
 	defer f.Close()
 	h := newSnapshotHash(hashAlgo)
-	cr := &countingWriter{w: h, f: f}
+	cr := &countingWriter{w: h, f: f, paceStart: time.Now()}
 	r := bufio.NewReaderSize(io.TeeReader(f, cr), 1<<20)
 
 	var magic [8]byte
@@ -551,7 +572,7 @@ func loadSubsystem(m state.SnapshotMarshaler, path, expectedSHA, hashAlgo, name 
 	var src io.Reader = f
 	if expectedSHA != "" {
 		h = newSnapshotHash(hashAlgo)
-		cr = &countingWriter{w: h, f: f}
+		cr = &countingWriter{w: h, f: f, paceStart: time.Now()}
 		src = io.TeeReader(f, cr)
 	}
 	// The unmarshalers read record-at-a-time; without buffering every tiny
