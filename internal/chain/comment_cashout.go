@@ -27,6 +27,7 @@ var (
 	envGhivediffDumpFile = os.Getenv("GHIVEDIFF_DUMP_FILE")
 	envGhivediffVsts     = os.Getenv("GHIVEDIFF_VSTS")
 	envGhivediffPowbump  = os.Getenv("GHIVEDIFF_POWBUMP")
+	envGhivediffTimeshare = os.Getenv("GHIVEDIFF_TIMESHARE")
 	envGhivediffReset    = os.Getenv("GHIVEDIFF_RESET")
 	// GHIVEDIFF_CALC_FROM/TO: emit CASHOUT-CALC for all cashouts in the
 	// [from,to] block range (drift localization without recompiling).

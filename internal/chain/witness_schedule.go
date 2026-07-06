@@ -6,6 +6,7 @@ import (
 	"math/big"
 	"os"
 	"sort"
+	"strings"
 
 	"hived-go/internal/math128"
 	"hived-go/internal/protocol/auth"
@@ -47,13 +48,13 @@ func initMinerName(_ uint32) string { return "initminer" }
 // updateWitnessSchedule4's per-round work. ApplyBlock holds applyMu,
 // so reuse across rounds is single-threaded and safe.
 type witnessScheduleScratch struct {
-	active          []schedPicked
-	voteCands       []auth.AccountName
-	powCandidates   []schedPowEntry
-	visited         []schedProcessed
-	selectedVoted   map[string]bool
-	selectedMiners  map[string]bool
-	miners          []schedPicked // helper used during sort/version-tally
+	active         []schedPicked
+	voteCands      []auth.AccountName
+	powCandidates  []schedPowEntry
+	visited        []schedProcessed
+	selectedVoted  map[string]bool
+	selectedMiners map[string]bool
+	miners         []schedPicked // helper used during sort/version-tally
 }
 
 type schedPicked struct {
@@ -403,6 +404,17 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 		}
 		return true, nil
 	})
+
+	// GHIVEDIFF_TIMESHARE: one line per rebuild with the timeshare pick(s)
+	// — diffed against the block_log's actual non-core producers to find
+	// the first phase-drifted pick (the 59,076,000 feed-median wall class).
+	if envGhivediffTimeshare != "" {
+		var names []string
+		for _, p := range visited {
+			names = append(names, string(p.owner))
+		}
+		ghiveDiff("GHIVEDIFF TIMESHARE block=%d visited=[%s]\n", blockNum, strings.Join(names, ","))
+	}
 
 	// First pass: walk visited in ASC order, advancing new_virtual_time
 	// to each visited witness's OLD VST. After the loop, new_virtual_time
@@ -771,9 +783,9 @@ func updateWitnessSchedulePreHF4(s *state.Session, ws *objects.WitnessSchedule, 
 				objects.PutWitness(s, &w)
 				if dgpo.NumPowWitnesses > 0 {
 					dgpo.NumPowWitnesses--
-				if envGhivediffPowbump != "" {
-					fmt.Fprintf(os.Stderr, "POWDRAIN block=%d num=%d witness=%s\n", blockNum, dgpo.NumPowWitnesses, w.Owner)
-				}
+					if envGhivediffPowbump != "" {
+						fmt.Fprintf(os.Stderr, "POWDRAIN block=%d num=%d witness=%s\n", blockNum, dgpo.NumPowWitnesses, w.Owner)
+					}
 				}
 			}
 		}
