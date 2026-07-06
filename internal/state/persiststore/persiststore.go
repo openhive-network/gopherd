@@ -276,17 +276,22 @@ func (s *Store) alloc(need uint32) (uint64, error) {
 	}
 	s.writeOff = off + uint64(need)
 	binary.LittleEndian.PutUint64(s.data[8:16], s.writeOff)
-	// Kick ASYNC writeback for every appendSyncStride of new data so a bulk
-	// load (snapshot spill: ~24GB of appends) doesn't pile up gigabytes of
-	// dirty mmap pages. Unbounded dirty accumulation drives system-wide
-	// reclaim pressure — systemd-oomd killed two 58M-snapshot loads at
-	// ">50% memory pressure for >20s" before this. MS_ASYNC only schedules
-	// the flush (no wait); steady-state per-block appends hit this every
-	// ~256MB, i.e. rarely.
+	// Every appendSyncStride of new data: SYNC-writeback the stride, then
+	// DROP its pages from the mapping. A bulk load (snapshot spill: ~24GB
+	// of appends) otherwise accumulates a resident+dirty footprint that
+	// saturates the cgroup and spins reclaim — systemd-oomd killed FIVE
+	// snapshot loads at ">50% memory pressure for >20s" (MS_ASYNC alone
+	// only schedules writeback; the pages stay resident until reclaim
+	// fights for them). MS_SYNC + MADV_DONTNEED turns the append stream
+	// into bounded memory: ~1-2s of writeback per 256MB (every ~10K blocks
+	// during steady-state replay — negligible), refaults on later reads
+	// come clean from the file.
 	if s.writeOff-s.lastAsyncSync >= appendSyncStride {
 		start := s.lastAsyncSync &^ 4095 // page-align down
 		if start < uint64(len(s.data)) && s.writeOff <= uint64(len(s.data)) {
-			_ = unix.Msync(s.data[start:s.writeOff], unix.MS_ASYNC)
+			span := s.data[start:s.writeOff]
+			_ = unix.Msync(span, unix.MS_SYNC)
+			_ = unix.Madvise(span, unix.MADV_DONTNEED)
 		}
 		s.lastAsyncSync = s.writeOff
 	}
