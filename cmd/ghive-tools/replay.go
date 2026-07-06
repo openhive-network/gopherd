@@ -43,7 +43,17 @@ func snapBlockNum(path string) uint32 {
 	if !strings.HasPrefix(base, pfx) {
 		return 0
 	}
-	n, err := strconv.ParseUint(base[len(pfx):], 10, 32)
+	// Tolerate suffixed variants like "block-56000000-fixed" (repair copies):
+	// parse the leading digit run only. A parse-to-0 here silently selects
+	// the pre-HF17 by-root cold mode for the load spill (double cold writes).
+	digits := base[len(pfx):]
+	for i := 0; i < len(digits); i++ {
+		if digits[i] < '0' || digits[i] > '9' {
+			digits = digits[:i]
+			break
+		}
+	}
+	n, err := strconv.ParseUint(digits, 10, 32)
 	if err != nil {
 		return 0
 	}
