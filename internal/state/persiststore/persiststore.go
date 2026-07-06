@@ -78,6 +78,9 @@ type Store struct {
 	idx       *keyIndex
 	liveBytes uint64 // sum of live record spans (dead = writeOff-headerSize-liveBytes)
 	dirty     bool
+	// lastAsyncSync is the append frontier as of the last MS_ASYNC writeback
+	// kick (see alloc) — bounds the dirty-page pile during bulk loads.
+	lastAsyncSync uint64
 
 	// Undo (phase 2) — mirrors the typed-store SnapshotPoint/RestoreToPoint/
 	// CommitPoint contract so a persiststore-backed table participates in
@@ -273,8 +276,24 @@ func (s *Store) alloc(need uint32) (uint64, error) {
 	}
 	s.writeOff = off + uint64(need)
 	binary.LittleEndian.PutUint64(s.data[8:16], s.writeOff)
+	// Kick ASYNC writeback for every appendSyncStride of new data so a bulk
+	// load (snapshot spill: ~24GB of appends) doesn't pile up gigabytes of
+	// dirty mmap pages. Unbounded dirty accumulation drives system-wide
+	// reclaim pressure — systemd-oomd killed two 58M-snapshot loads at
+	// ">50% memory pressure for >20s" before this. MS_ASYNC only schedules
+	// the flush (no wait); steady-state per-block appends hit this every
+	// ~256MB, i.e. rarely.
+	if s.writeOff-s.lastAsyncSync >= appendSyncStride {
+		start := s.lastAsyncSync &^ 4095 // page-align down
+		if start < uint64(len(s.data)) && s.writeOff <= uint64(len(s.data)) {
+			_ = unix.Msync(s.data[start:s.writeOff], unix.MS_ASYNC)
+		}
+		s.lastAsyncSync = s.writeOff
+	}
 	return off, nil
 }
+
+const appendSyncStride = 256 << 20
 
 // recordSpan returns the on-disk byte length of a record holding (klen,vlen):
 // 1 type byte + uvarint(klen) + key + uvarint(vlen) + val.
