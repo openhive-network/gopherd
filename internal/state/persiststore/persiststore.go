@@ -293,6 +293,15 @@ func (s *Store) alloc(need uint32) (uint64, error) {
 			_ = unix.Msync(span, unix.MS_SYNC)
 			_ = unix.Madvise(span, unix.MADV_DONTNEED)
 		}
+		// The key index dirties RANDOM pages across its multi-GB mapping
+		// (hash-distributed slots) — instrumentation showed >4GB of dirty
+		// index pages during a bulk load, and THAT random-writeback pile is
+		// what spins cgroup reclaim (PSI >50% → systemd-oomd kill). Flush
+		// it wholesale each stride; probes refault clean pages on demand.
+		if s.idx != nil && len(s.idx.data) > 0 {
+			_ = unix.Msync(s.idx.data, unix.MS_SYNC)
+			_ = unix.Madvise(s.idx.data, unix.MADV_DONTNEED)
+		}
 		s.lastAsyncSync = s.writeOff
 	}
 	return off, nil
