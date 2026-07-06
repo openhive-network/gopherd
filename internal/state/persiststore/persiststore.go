@@ -500,9 +500,20 @@ func (s *Store) RangePrimaryByOffset(prefix []byte, fn func(val []byte) bool) {
 		return true
 	})
 	sort.Slice(ents, func(i, j int) bool { return ents[i].off < ents[j].off })
+	// Drop consumed mmap pages every 256MB: this streams the WHOLE cold
+	// tier (tens of GB) during a self-contained snapshot save, and the
+	// accumulated resident pages tripped systemd-oomd (">50% pressure for
+	// >20s" at 51.8%) right at the end of a 2h drill. Strictly-forward
+	// consumption, never re-read within the walk.
+	var dropped uint64
 	for _, e := range ents {
 		if !fn(s.data[e.valOff : e.valOff+uint64(e.valLen) : e.valOff+uint64(e.valLen)]) {
 			return
+		}
+		if e.valOff > dropped+(256<<20) {
+			start := dropped &^ 4095
+			_ = unix.Madvise(s.data[start:e.valOff&^4095], unix.MADV_DONTNEED)
+			dropped = e.valOff
 		}
 	}
 }
