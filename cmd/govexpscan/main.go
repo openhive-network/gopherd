@@ -54,15 +54,35 @@ func scanRange(path string, from, to uint32) map[string]last {
 			out[name] = last{Block: blk, Time: ts}
 		}
 	}
+	// C++ evaluators stamp with head_block_time() which during tx
+	// application is the PREVIOUS block's timestamp (dgpo.time advances
+	// in update_global_dynamic_data AFTER the tx loop). Using the action
+	// block's own timestamp made every stamp 3s late → every expiry fired
+	// one block after hived's expired_account_notification vop.
+	prevTs := func(n uint32) uint32 {
+		if n <= 1 {
+			return 0
+		}
+		praw, err := r.Block(n - 1)
+		if err != nil {
+			return 0
+		}
+		phdr, _, err := block.UnmarshalSignedHeader(praw)
+		if err != nil {
+			return 0
+		}
+		return phdr.Timestamp
+	}
 	for n := from; n <= to; n++ {
 		raw, err := r.Block(n)
 		if err != nil {
 			continue
 		}
-		hdr, hdrLen, err := block.UnmarshalSignedHeader(raw)
+		_, hdrLen, err := block.UnmarshalSignedHeader(raw)
 		if err != nil {
 			continue
 		}
+
 		rd := fcraw.NewReader(raw[hdrLen:])
 		txCount, _ := rd.ReadVarUint()
 		for i := uint32(0); i < txCount; i++ {
@@ -73,11 +93,11 @@ func scanRange(path string, from, to uint32) map[string]last {
 			for _, o := range txRes.SignedTx.Operations {
 				switch v := o.Operation().(type) {
 				case op.AccountWitnessVote:
-					note(string(v.Account), n, hdr.Timestamp)
+					note(string(v.Account), n, prevTs(n))
 				case op.AccountWitnessProxy:
-					note(string(v.Account), n, hdr.Timestamp)
+					note(string(v.Account), n, prevTs(n))
 				case op.UpdateProposalVotes:
-					note(string(v.Voter), n, hdr.Timestamp)
+					note(string(v.Voter), n, prevTs(n))
 				}
 			}
 		}
