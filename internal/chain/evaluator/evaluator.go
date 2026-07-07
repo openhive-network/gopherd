@@ -41,6 +41,11 @@ type Context struct {
 	// evaluators that match `_now = _db.head_block_time()` should read
 	// HeadBlockTime, not BlockTime, to stay byte-compatible with C++.
 	HeadBlockTime uint32
+	// InControl mirrors hived's `_db.is_in_control()` — true only when
+	// validating at the head (production / admission / unit tests),
+	// false in replay/sync. Gates the C++ asserts that only run at
+	// admission (e.g. delegate_rc min-delegation and RC sufficiency).
+	InControl bool
 	// Witness is the producer of the block currently being applied (the
 	// `witness` field of its signed_block_header). hived's DGPO is updated
 	// to point at this name BEFORE evaluators run, so any evaluator

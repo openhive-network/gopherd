@@ -236,6 +236,10 @@ func (f *Fixture) GenerateBlock() uint32 {
 		SkipTransactionSignatures: !f.RequireSignatures,
 		SkipBlockSignature:        true,
 		EnforceRC:                 f.EnforceRC,
+		// Fixture blocks are generated at the head — the C++ unit tests
+		// these port run with is_in_control()==true, so admission-only
+		// asserts (delegate_rc min/sufficiency) stay active.
+		InControl: true,
 	}, &stats)
 	if err != nil {
 		f.t.Fatalf("testfixture: ApplyBlock %d: %v", blockNum, err)
@@ -590,6 +594,10 @@ func (f *Fixture) tryGenerateBlock() error {
 		SkipTransactionSignatures: !f.RequireSignatures,
 		SkipBlockSignature:        true,
 		EnforceRC:                 f.EnforceRC,
+		// Fixture blocks are generated at the head — the C++ unit tests
+		// these port run with is_in_control()==true, so admission-only
+		// asserts (delegate_rc min/sufficiency) stay active.
+		InControl: true,
 	}, &stats)
 	if err != nil {
 		// Increment the block counter even on failure so the next call

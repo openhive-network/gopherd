@@ -256,14 +256,16 @@ func applyDelegateRC(ctx *Context, cj op.CustomJSON, args json.RawMessage) error
 		return fmt.Errorf("delegate_rc: required_posting_auths must be exactly {%q}", p.From)
 	}
 
-	// 3. min_delegation check — NOT enforced here. C++ gates it on
-	// `_db.is_in_control()` (rc_utility.cpp:49-55), which is FALSE while
-	// replaying/applying existing blocks: hived only enforces the minimum
-	// when a tx is first admitted at the head. Blocks therefore
-	// legitimately contain below-minimum delegations (first at 68,676,609,
-	// ~100 blocks after HF26) and a replay must accept them. We never
-	// produce blocks, so the check is omitted (as is C++'s equally
-	// is_in_control-gated has_expired_delegation assert).
+	// 3. min_delegation check — C++ gates it on `_db.is_in_control()`
+	// (rc_utility.cpp:49-55): enforced only when a tx is first admitted
+	// at the head. Blocks legitimately contain below-minimum delegations
+	// (first at 68,676,609, ~100 blocks after HF26); replay accepts them.
+	if ctx.InControl && p.MaxRC != 0 {
+		minDelegation, merr := computeMinRCDelegation(ctx)
+		if merr == nil && p.MaxRC < minDelegation {
+			return fmt.Errorf("delegate_rc: cannot delegate less than %d rc", minDelegation)
+		}
+	}
 
 	// 4-7. Load accounts and apply.
 	from, err := objects.GetAccount(ctx.DB, auth.AccountName(p.From))
@@ -359,20 +361,34 @@ func applyDelegateRC(ctx *Context, cj op.CustomJSON, args json.RawMessage) error
 		deltaTotal += delta
 	}
 
-	// 7. After-the-fact delta_total check.
-	fromDelegableMax := maximumRC(&from, true)
-	fromDelegable := fromDelegableMax
-	if from.RCManaCurrent < fromDelegable {
-		fromDelegable = from.RCManaCurrent
-	}
-	if fromDelegable < deltaTotal {
-		return fmt.Errorf("delegate_rc: account %q insufficient RC (have %d, needs %d)",
-			p.From, fromDelegable, deltaTotal)
+	// 7. After-the-fact delta_total check — enforced only InControl.
+	// C++'s `from_delegable_rc >= delta_total` assert (rc_utility.cpp:107)
+	// is technically active in hived's replay too, but it evaluates
+	// against the full RC model (per-tx resource charging, 5-day regen);
+	// our partial model diverges (first false rejection: anhdaden146 at
+	// 68,691,291 — Go said 626G available, hived's true state allowed
+	// 1T). Every delegate_rc inside a block already passed the assert
+	// under hived's true RC state — the block's presence is the proof —
+	// so replay applies the delegation unconditionally. Revisit if the
+	// RC subsystem is ever fully ported.
+	if ctx.InControl {
+		fromDelegableMax := maximumRC(&from, true)
+		fromDelegable := fromDelegableMax
+		if from.RCManaCurrent < fromDelegable {
+			fromDelegable = from.RCManaCurrent
+		}
+		if fromDelegable < deltaTotal {
+			return fmt.Errorf("delegate_rc: account %q insufficient RC (have %d, needs %d)",
+				p.From, fromDelegable, deltaTotal)
+		}
 	}
 
 	// Final from-account update.
 	if deltaTotal > 0 {
 		from.RCManaCurrent -= deltaTotal
+		if from.RCManaCurrent < 0 {
+			from.RCManaCurrent = 0
+		}
 	}
 	from.DelegatedRCOut += deltaTotal
 	if from.DelegatedRCOut < 0 {

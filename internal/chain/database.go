@@ -377,6 +377,14 @@ type ApplyOptions struct {
 	// at the producing node and replay against canonical block_log is
 	// monotonically forward, never re-enforcing.
 	EnforceRC bool
+	// InControl mirrors hived's `_db.is_in_control()`: true when
+	// validating transactions at the HEAD of the chain (block production
+	// / initial admission / unit tests), false during replay and sync of
+	// existing blocks. Several C++ asserts are gated on it — e.g.
+	// delegate_rc's min-delegation and RC-sufficiency checks — so ops
+	// that failed them at admission never entered a block, while a
+	// replay must accept whatever the block contains.
+	InControl bool
 }
 
 // Stats accumulates per-pipeline-run counters. Pass a non-nil pointer to
@@ -606,6 +614,7 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 		HeadBlockTime: headBlockTime,
 		Witness:       hdr.Witness,
 		EmitVOp:       d.emitVOpClosure(),
+		InControl:     opts.InControl,
 	}
 
 	// Mirror C++ database.cpp:2374-2376 — set dgp.current_witness BEFORE
