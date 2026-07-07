@@ -47,6 +47,19 @@ const (
 // is empty a fresh temp directory is created and removed on Close. NoSync is
 // used throughout: durability across process restarts is explicitly not
 // required.
+// coldCompression maps GHIVE_COLD_COMPRESS to a pebble compression mode.
+// Default NoCompression (CPU-cheapest); set zstd/snappy when disk space is
+// the binding constraint for the run.
+func coldCompression() pebble.Compression {
+	switch os.Getenv("GHIVE_COLD_COMPRESS") {
+	case "zstd":
+		return pebble.ZstdCompression
+	case "snappy":
+		return pebble.SnappyCompression
+	}
+	return pebble.NoCompression
+}
+
 func openColdKV(dir string) (*coldKV, error) {
 	owned := false
 	if dir == "" {
@@ -81,7 +94,9 @@ func openColdKV(dir string) (*coldKV, error) {
 		// snappy compression to reclaim the ~13% of replay CPU it burned
 		// (encodeBlock+decode in the cold-tier profile). One entry → pebble
 		// applies NoCompression to every level.
-		Levels: []pebble.LevelOptions{{Compression: pebble.NoCompression}},
+		// GHIVE_COLD_COMPRESS=zstd|snappy overrides when disk is the
+		// constraint instead (a ~24G comment corpus zstd-compresses ~3x).
+		Levels: []pebble.LevelOptions{{Compression: coldCompression()}},
 	})
 	if err != nil {
 		return nil, err
