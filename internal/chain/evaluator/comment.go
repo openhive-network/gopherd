@@ -1115,6 +1115,19 @@ func (voteEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		// post-HF20 recast (first hit: steemsportsfund's 100%→85% recast
 		// at block 26,305,775 on steemsports/dodgers-and-padres-..., which
 		// shifted every later curator's sqrt-curve weight on the comment).
+		//
+		// HF26's NO_VOTE_EDIT_PENALTY ALSO gives the edited vote a FRESH
+		// curation weight (hive_evaluator_social.cpp:757-830): the edit
+		// routes through the same W(R_new)−W(R_old) computation as a new
+		// vote, with the old curve base shifted down by the prior vote's
+		// positive rshares (`old_vote_rshares -= previous_positive_rshares`),
+		// then the HF25 early/mid-phase discounts. total_vote_weight
+		// accumulates `max_vote_weight − previous_vote_weight` (the
+		// subtraction above), and the stored vote gets the discounted
+		// weight. Leaving edits at weight 0 post-HF26 starved every
+		// re-voter's curation share (ace108 reward_vests 0.33% short at
+		// 68,735,093, ~58K blocks after HF26).
+		recastCurationWeight := uint64(0)
 		if ctx.Hardforks.Has(hardfork.HF26) {
 			posNew := int64(0)
 			if rshares > 0 {
@@ -1124,11 +1137,43 @@ func (voteEvaluator) Apply(ctx *Context, opArg op.Op) error {
 			if prev.Rshares > 0 {
 				posPrev = prev.Rshares
 			}
+			// Curve base BEFORE this edit's accumulation, minus the prior
+			// vote's positive contribution.
+			oldBase := c.VoteRshares - uint64(posPrev)
 			delta := posNew - posPrev
 			if delta >= 0 {
 				c.VoteRshares += uint64(delta)
 			} else {
 				c.VoteRshares -= uint64(-delta)
+			}
+			if rshares > 0 && c.AllowCurationRewards && !c.WasPaid {
+				oldW := curationWeightCurve(ctx, c, oldBase)
+				newW := curationWeightCurve(ctx, c, c.VoteRshares)
+				var w uint64
+				if newW > oldW {
+					w = newW - oldW
+				}
+				maxW := w
+				// HF26 implies HF25: reverse_auction_seconds is 0 (that
+				// branch never fires), only the early/mid phase discounts
+				// apply — same shape as the fresh-vote path.
+				if w > 0 {
+					const earlyVotingSeconds uint32 = 24 * 3600
+					const midVotingSeconds uint32 = 48 * 3600
+					elapsed := uint32(0)
+					if ctx.HeadBlockTime > c.Created {
+						elapsed = ctx.HeadBlockTime - c.Created
+					}
+					if elapsed >= earlyVotingSeconds+midVotingSeconds {
+						w /= 8
+						maxW = w
+					} else if elapsed >= earlyVotingSeconds {
+						w /= 2
+						maxW = w
+					}
+				}
+				recastCurationWeight = w
+				c.TotalVoteWeight += maxW
 			}
 		}
 		// Build a fresh CommentVote rather than mutating *prev — prev
@@ -1144,7 +1189,7 @@ func (voteEvaluator) Apply(ctx *Context, opArg op.Op) error {
 			NumChanges:     prev.NumChanges + 1,
 			Rshares:        rshares,
 			LastUpdate:     ctx.HeadBlockTime,
-			CurationWeight: 0,
+			CurationWeight: recastCurationWeight, // 0 pre-HF26 (edit penalty)
 		}
 		objects.PutCommentVote(ctx.DB, &recast)
 		if voteDebug {
