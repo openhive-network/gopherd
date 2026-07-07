@@ -27,6 +27,7 @@ package snapshot
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -43,6 +44,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/klauspost/compress/zstd"
 
 	"hived-go/internal/state"
 )
@@ -426,6 +429,41 @@ type countingWriter struct {
 
 const dropCacheStride = 256 << 20
 
+// snapshotZstd (GHIVE_SNAPSHOT_ZSTD=1) compresses every snapshot file with
+// zstd on save (~3x smaller for the text-heavy comment corpus — the
+// difference between a self-contained snapshot fitting a tight disk or
+// not). Loads ALWAYS auto-detect by sniffing the zstd frame magic, so
+// compressed and uncompressed snapshots interoperate transparently.
+// Manifest checksums cover the FILE bytes (compressed when enabled).
+var snapshotZstd = os.Getenv("GHIVE_SNAPSHOT_ZSTD") == "1"
+
+// zstdMagic is the 4-byte zstd frame header (RFC 8878). No snapshot
+// subsystem format begins with these bytes, so sniffing is unambiguous.
+var zstdMagic = []byte{0x28, 0xB5, 0x2F, 0xFD}
+
+// MaybeCompressedReader wraps r in a buffered reader that transparently
+// decompresses zstd snapshot files (sniffed by frame magic). For external
+// tools (witnesssnap, vstrepair, …) that read snapshot subsystem files
+// directly. The returned closer must be called when done.
+func MaybeCompressedReader(r io.Reader) (*bufio.Reader, func(), error) {
+	return maybeZstdReader(bufio.NewReaderSize(r, 1<<20))
+}
+
+// maybeZstdReader peeks br and, when it starts a zstd frame, returns a
+// buffered decompressing reader; otherwise returns br unchanged. The
+// returned closer must be closed (no-op for the passthrough case).
+func maybeZstdReader(br *bufio.Reader) (*bufio.Reader, func(), error) {
+	head, err := br.Peek(4)
+	if err != nil || !bytes.Equal(head, zstdMagic) {
+		return br, func() {}, nil // short/uncompressed files pass through
+	}
+	dec, err := zstd.NewReader(br, zstd.WithDecoderConcurrency(2))
+	if err != nil {
+		return nil, nil, err
+	}
+	return bufio.NewReaderSize(dec, 1<<20), dec.Close, nil
+}
+
 // loadPaceMBs, when >0 (GHIVE_SNAPSHOT_LOAD_PACE_MB), caps the aggregate
 // snapshot-load streaming rate. systemd-oomd kills any scope on a user box
 // whose reclaim pressure stays >50% for 20s; an unthrottled 25GB load (read
@@ -478,7 +516,16 @@ func writeMem(db *state.Database, path string) (string, error) {
 	defer f.Close()
 	h := newSnapshotHash(HashAlgoCRC32C)
 	cw := &countingWriter{w: io.MultiWriter(f, h), f: f}
-	w := bufio.NewWriterSize(cw, 1<<20)
+	var sink io.Writer = cw
+	var encClose func() error
+	if snapshotZstd {
+		enc, zerr := zstd.NewWriter(cw, zstd.WithEncoderConcurrency(2))
+		if zerr != nil {
+			return "", zerr
+		}
+		sink, encClose = enc, enc.Close
+	}
+	w := bufio.NewWriterSize(sink, 1<<20)
 
 	// Header: magic + format version. No block number here — manifest
 	// owns that.
@@ -496,6 +543,11 @@ func writeMem(db *state.Database, path string) (string, error) {
 	}
 	if err := w.Flush(); err != nil {
 		return "", err
+	}
+	if encClose != nil {
+		if err := encClose(); err != nil {
+			return "", err
+		}
 	}
 	if err := f.Sync(); err != nil {
 		return "", err
@@ -515,7 +567,12 @@ func loadMem(db *state.Database, path, expectedSHA, hashAlgo string) error {
 	defer f.Close()
 	h := newSnapshotHash(hashAlgo)
 	cr := &countingWriter{w: h, f: f, paceStart: time.Now()}
-	r := bufio.NewReaderSize(io.TeeReader(f, cr), 1<<20)
+	raw := bufio.NewReaderSize(io.TeeReader(f, cr), 1<<20)
+	r, decClose, err := maybeZstdReader(raw)
+	if err != nil {
+		return err
+	}
+	defer decClose()
 
 	var magic [8]byte
 	if _, err := io.ReadFull(r, magic[:]); err != nil {
@@ -534,6 +591,11 @@ func loadMem(db *state.Database, path, expectedSHA, hashAlgo string) error {
 	}
 	if err := state.ReadAllRows(db, r); err != nil {
 		return err
+	}
+	// Pull any compressed tail bytes through the tee so the hash covers
+	// the whole file (the decoder may stop reading before raw EOF).
+	if _, err := io.Copy(io.Discard, raw); err != nil {
+		return fmt.Errorf("drain: %w", err)
 	}
 	got := hex.EncodeToString(h.Sum(nil))
 	if expectedSHA != "" && got != expectedSHA {
@@ -554,12 +616,26 @@ func writeSubsystem(m state.SnapshotMarshaler, path, name string) (string, error
 	defer f.Close()
 	h := newSnapshotHash(HashAlgoCRC32C)
 	cw := &countingWriter{w: io.MultiWriter(f, h), f: f}
-	bw := bufio.NewWriterSize(cw, 1<<20)
+	var sink io.Writer = cw
+	var encClose func() error
+	if snapshotZstd {
+		enc, zerr := zstd.NewWriter(cw, zstd.WithEncoderConcurrency(2))
+		if zerr != nil {
+			return "", zerr
+		}
+		sink, encClose = enc, enc.Close
+	}
+	bw := bufio.NewWriterSize(sink, 1<<20)
 	if err := m.MarshalSnapshot(bw); err != nil {
 		return "", err
 	}
 	if err := bw.Flush(); err != nil {
 		return "", err
+	}
+	if encClose != nil {
+		if err := encClose(); err != nil {
+			return "", err
+		}
 	}
 	if err := f.Sync(); err != nil {
 		return "", err
@@ -579,15 +655,20 @@ func loadSubsystem(m state.SnapshotMarshaler, path, expectedSHA, hashAlgo, name 
 	defer f.Close()
 	var h hash.Hash
 	var cr *countingWriter
-	var src io.Reader = f
+	var rawSrc io.Reader = f
 	if expectedSHA != "" {
 		h = newSnapshotHash(hashAlgo)
 		cr = &countingWriter{w: h, f: f, paceStart: time.Now()}
-		src = io.TeeReader(f, cr)
+		rawSrc = io.TeeReader(f, cr)
 	}
 	// The unmarshalers read record-at-a-time; without buffering every tiny
 	// read goes through the TeeReader straight to a file read syscall.
-	src = bufio.NewReaderSize(src, 1<<20)
+	raw := bufio.NewReaderSize(rawSrc, 1<<20)
+	src, decClose, err := maybeZstdReader(raw)
+	if err != nil {
+		return err
+	}
+	defer decClose()
 	if err := m.UnmarshalSnapshot(src); err != nil {
 		return err
 	}
@@ -597,6 +678,10 @@ func loadSubsystem(m state.SnapshotMarshaler, path, expectedSHA, hashAlgo, name 
 	if h != nil {
 		if _, err := io.Copy(io.Discard, src); err != nil {
 			return fmt.Errorf("drain: %w", err)
+		}
+		// And the raw (compressed) side, so the hash covers the whole file.
+		if _, err := io.Copy(io.Discard, raw); err != nil {
+			return fmt.Errorf("drain raw: %w", err)
 		}
 		got := hex.EncodeToString(h.Sum(nil))
 		if got != expectedSHA {

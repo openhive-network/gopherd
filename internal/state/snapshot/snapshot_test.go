@@ -261,3 +261,13 @@ func TestSaveCreatesAtomicallyNamedDir(t *testing.T) {
 		t.Errorf(".tmp dir still present after save: %v", err)
 	}
 }
+
+// TestSaveLoadRoundtripZstd re-runs the round-trip with GHIVE_SNAPSHOT_ZSTD
+// semantics enabled: every file compressed on save, auto-detected on load,
+// manifest checksums over the compressed bytes.
+func TestSaveLoadRoundtripZstd(t *testing.T) {
+	old := snapshotZstd
+	snapshotZstd = true
+	defer func() { snapshotZstd = old }()
+	TestSaveLoadRoundtrip(t)
+}

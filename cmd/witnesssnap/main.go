@@ -7,6 +7,7 @@ import (
 	"hived-go/internal/protocol/auth"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
+	"hived-go/internal/state/snapshot"
 )
 
 // Usage: witnesssnap <witness_store.bin> <name> [name...]
@@ -19,9 +20,14 @@ func main() {
 		panic(err)
 	}
 	defer f.Close()
+	r, decClose, err := snapshot.MaybeCompressedReader(f)
+	if err != nil {
+		panic(err)
+	}
+	defer decClose()
 	boot := state.NewSession(state.OpenMem())
 	st := objects.EnsureWitnessStore(boot)
-	if err := st.UnmarshalSnapshot(f); err != nil {
+	if err := st.UnmarshalSnapshot(r); err != nil {
 		panic(err)
 	}
 	if len(os.Args) >= 3 && os.Args[2] == "--rates" {
