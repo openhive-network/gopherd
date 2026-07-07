@@ -224,8 +224,14 @@ func (delegateVestingSharesEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	// (with the 1:1000 genesis fallback when either is zero). HF20 scaled
 	// the fee meaning by 30×, so the thresholds were divided by ~10× to
 	// keep the absolute minimum in line.
+	// Threshold checks run only InControl (head admission). During replay
+	// the op's presence in a block proves hived's minima admitted it, and
+	// applying it yields byte-identical delegation state; our minima can
+	// sit a few sats off hived's (ppb-level vesting-pool residue flips
+	// knife-edge ops where clients send EXACTLY hived's minimum — first:
+	// 69,091,421, min 1806814152 vs op 1806814150).
 	minDelegation, minUpdate, vesterr := computeDelegationMinima(ctx)
-	if vesterr == nil {
+	if vesterr == nil && ctx.InControl {
 		// C++ branches on whether the delegation ROW exists, not on its
 		// amount: an amount-0 row left by account_create_with_delegation
 		// takes the "increase" path (min_update on the delta), NOT the
