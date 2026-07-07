@@ -210,31 +210,46 @@ func applyDelegateRC(ctx *Context, cj op.CustomJSON, args json.RawMessage) error
 		}
 	}
 
+	// Payload validation failures are TX-FATAL only at head admission.
+	// In-block custom_json payloads that fail rc_custom_operation
+	// validate/deserialize did NOT fail the tx in hived (proof: block
+	// 69,612,950 carries a delegatee "ogechukwu-martha\t" with a
+	// trailing tab — hived included the tx, so the payload was treated
+	// as a no-op). Mirror: pre-mutation validation errors become no-ops
+	// when not InControl. Mid-apply asserts (missing delegatee account)
+	// stay fatal — those are unconditional in hived's replay too.
+	reject := func(format string, args ...any) error {
+		if !ctx.InControl {
+			return nil
+		}
+		return fmt.Errorf(format, args...)
+	}
+
 	// 1. op.validate()
 	if p.From == "" {
-		return fmt.Errorf("delegate_rc: from is empty")
+		return reject("delegate_rc: from is empty")
 	}
 	if !auth.IsValidAccountName(p.From) {
-		return fmt.Errorf("delegate_rc: invalid from account name %q", p.From)
+		return reject("delegate_rc: invalid from account name %q", p.From)
 	}
 	if p.MaxRC < 0 {
-		return fmt.Errorf("delegate_rc: max_rc cannot be negative")
+		return reject("delegate_rc: max_rc cannot be negative")
 	}
 	if len(p.Delegatees) == 0 {
-		return fmt.Errorf("delegate_rc: must provide at least one delegatee")
+		return reject("delegate_rc: must provide at least one delegatee")
 	}
 	if len(p.Delegatees) > maxAccountsPerDelegationOp {
-		return fmt.Errorf("delegate_rc: cannot delegate to more than %d accounts", maxAccountsPerDelegationOp)
+		return reject("delegate_rc: cannot delegate to more than %d accounts", maxAccountsPerDelegationOp)
 	}
 	// Deduplicate (flat_set semantics).
 	seen := make(map[string]struct{}, len(p.Delegatees))
 	uniq := make([]string, 0, len(p.Delegatees))
 	for _, d := range p.Delegatees {
 		if d == p.From {
-			return fmt.Errorf("delegate_rc: cannot delegate to self %q", d)
+			return reject("delegate_rc: cannot delegate to self %q", d)
 		}
 		if !auth.IsValidAccountName(d) {
-			return fmt.Errorf("delegate_rc: invalid delegatee account name %q", d)
+			return reject("delegate_rc: invalid delegatee account name %q", d)
 		}
 		if _, ok := seen[d]; ok {
 			continue
@@ -253,7 +268,7 @@ func applyDelegateRC(ctx *Context, cj op.CustomJSON, args json.RawMessage) error
 	// Membership-only acceptance let multi-account custom_jsons with
 	// `from` plus other auths pass; hived rejects them.
 	if len(cj.RequiredPostingAuths) != 1 || string(cj.RequiredPostingAuths[0]) != p.From {
-		return fmt.Errorf("delegate_rc: required_posting_auths must be exactly {%q}", p.From)
+		return reject("delegate_rc: required_posting_auths must be exactly {%q}", p.From)
 	}
 
 	// 3. min_delegation check — C++ gates it on `_db.is_in_control()`
