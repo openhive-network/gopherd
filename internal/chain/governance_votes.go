@@ -44,31 +44,50 @@ func removeExpiredGovernanceVotes(s *state.Session, blockTime, blockNum uint32, 
 	// unchanged) and the exact next-due bound for the following blocks; the
 	// noteDelayedVotes chokepoint keeps the bound valid between scans.
 	accts := objects.EnsureAccountStore(s)
-	if accts.GovExpNoneDue(blockTime) {
-		return
-	}
 	type expired struct {
 		name string
 	}
 	var due []expired
-	nextDue := uint32(math.MaxUint32)
-	_ = accts.RangePrimaryUnordered(func(a *objects.Account) (bool, error) {
-		e := a.GovernanceVoteExpiration
-		if e == 0 {
-			return true, nil
+	if accts.GovExpHeapReady() {
+		// Heap mode: O(log n) pop of genuinely-due accounts. Past the
+		// HF25+365d onset expiries fire every ~40 blocks; the full-scan
+		// fallback ate 77% of replay CPU there (run79: 172 blocks/s).
+		for _, name := range accts.GovExpPopDue(blockTime) {
+			due = append(due, expired{name: name})
 		}
-		if e > blockTime {
-			if e < nextDue {
-				nextDue = e
+		accts.SetGovExpBound(accts.GovExpHeapTop())
+		if len(due) == 0 {
+			return
+		}
+	} else {
+		if accts.GovExpNoneDue(blockTime) {
+			return
+		}
+		// One-time seeding scan (fresh store, snapshot load, or rollback
+		// reset): collect due accounts AND seed the heap with pending ones.
+		nextDue := uint32(math.MaxUint32)
+		accts.GovExpSeedStart(1 << 17)
+		_ = accts.RangePrimaryUnordered(func(a *objects.Account) (bool, error) {
+			e := a.GovernanceVoteExpiration
+			if e == 0 {
+				return true, nil
 			}
+			if e > blockTime {
+				if e < nextDue {
+					nextDue = e
+				}
+				accts.GovExpSeedAdd(a.Name, e)
+				return true, nil
+			}
+			due = append(due, expired{name: a.Name})
 			return true, nil
-		}
-		due = append(due, expired{name: a.Name})
-		return true, nil
-	})
-	// Install BEFORE processing: expirations written while clearing (all 0 or
-	// future renewals) flow through the noteDelayedVotes min() automatically.
-	accts.SetGovExpBound(nextDue)
+		})
+		accts.GovExpSeedDone()
+		// Install BEFORE processing: expirations written while clearing
+		// (all 0 or future renewals) flow through noteDelayedVotes / the
+		// heap push automatically.
+		accts.SetGovExpBound(nextDue)
+	}
 	sort.Slice(due, func(i, j int) bool { return due[i].name < due[j].name })
 	if envGhivediffGovExp != "" {
 		for _, e := range due {

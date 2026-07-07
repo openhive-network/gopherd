@@ -1,9 +1,11 @@
 package objects
 
 import (
+	"container/heap"
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"runtime"
 	"sort"
@@ -142,6 +144,46 @@ type AccountStore struct {
 	// (forces a scan: fresh store, snapshot load, post-rollback);
 	// math.MaxUint32 = nothing pending. Not consensus state, not persisted.
 	govExpLB uint32
+
+	// govExpHeap + govExpKnown form a lazy-deletion min-heap over
+	// (expiration, name) — the Go analogue of hived's
+	// by_governance_vote_expiration_ts index. Once seeded (govExpSeeded)
+	// the sweep pops due entries in O(log n) instead of full-scanning
+	// ~2.4M accounts; that scan was fine while expiries were rare, but
+	// past the HF25+365d onset (~65.7M) expiries fire every ~40 blocks
+	// and the scans ate 77% of replay CPU (run79: 172 blocks/s).
+	// Entries are validated against the account's CURRENT stamp on pop
+	// (stale entries from restamps/rollbacks are discarded); govExpKnown
+	// dedups pushes so the heap stays ~#stamped-accounts. Not consensus
+	// state; reset to unseeded (one reseeding scan) on rollback.
+	govExpHeap   govExpHeap
+	govExpKnown  map[string]uint32
+	govExpSeeded bool
+}
+
+// govExpEntry is one (expiration, name) pair in the lazy min-heap.
+type govExpEntry struct {
+	exp  uint32
+	name string
+}
+
+type govExpHeap []govExpEntry
+
+func (h govExpHeap) Len() int      { return len(h) }
+func (h govExpHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+func (h govExpHeap) Less(i, j int) bool {
+	if h[i].exp != h[j].exp {
+		return h[i].exp < h[j].exp
+	}
+	return h[i].name < h[j].name
+}
+func (h *govExpHeap) Push(x any) { *h = append(*h, x.(govExpEntry)) }
+func (h *govExpHeap) Pop() any {
+	old := *h
+	n := len(old)
+	e := old[n-1]
+	*h = old[:n-1]
+	return e
 }
 
 type accountUndo struct {
@@ -210,6 +252,80 @@ func (s *AccountStore) noteDelayedVotes(name string, a *Account) {
 	if e := a.GovernanceVoteExpiration; e != 0 && s.govExpLB != 0 && e < s.govExpLB {
 		s.govExpLB = e
 	}
+	// Feed the lazy expiration heap: push only when the stamp changed
+	// from what the heap last saw for this account (govExpKnown dedup).
+	// Setting a stamp to 0 (expiry processed / HF23 clear) needs no push —
+	// the stale heap entry is discarded on pop by current-value validation.
+	if s.govExpSeeded {
+		if e := a.GovernanceVoteExpiration; e != 0 && s.govExpKnown[name] != e {
+			s.govExpKnown[name] = e
+			heap.Push(&s.govExpHeap, govExpEntry{exp: e, name: name})
+		}
+	}
+}
+
+// GovExpSeedStart begins heap seeding (caller then feeds every stamped
+// account via GovExpSeedAdd and finishes with GovExpSeedDone). Used by the
+// sweep's one-time full scan after a fresh load or rollback reset.
+func (s *AccountStore) GovExpSeedStart(capacityHint int) {
+	s.govExpHeap = make(govExpHeap, 0, capacityHint)
+	s.govExpKnown = make(map[string]uint32, capacityHint)
+	s.govExpSeeded = false
+}
+
+// GovExpSeedAdd records one stamped account during seeding (no heap
+// ordering yet — heap.Init happens in GovExpSeedDone).
+func (s *AccountStore) GovExpSeedAdd(name string, exp uint32) {
+	s.govExpHeap = append(s.govExpHeap, govExpEntry{exp: exp, name: name})
+	s.govExpKnown[name] = exp
+}
+
+// GovExpSeedDone heapifies the seeded entries and enables heap mode.
+func (s *AccountStore) GovExpSeedDone() {
+	heap.Init(&s.govExpHeap)
+	s.govExpSeeded = true
+}
+
+// GovExpHeapReady reports whether the lazy expiration heap is usable.
+func (s *AccountStore) GovExpHeapReady() bool { return s.govExpSeeded }
+
+// GovExpPopDue pops every heap entry with exp <= blockTime and returns the
+// names whose CURRENT GovernanceVoteExpiration is genuinely due (non-zero
+// and <= blockTime). Stale entries — the account was restamped later or the
+// stamp was cleared — are discarded; a restamped account's newer entry is
+// still in the heap (every stamp change pushes). May return duplicates in
+// pathological restamp patterns; callers dedup via the due-processing
+// itself (processing zeroes the stamp, so the second validation fails).
+func (s *AccountStore) GovExpPopDue(blockTime uint32) []string {
+	var due []string
+	for len(s.govExpHeap) > 0 && s.govExpHeap[0].exp <= blockTime {
+		e := heap.Pop(&s.govExpHeap).(govExpEntry)
+		a, ok := s.primary[e.name]
+		if !ok {
+			delete(s.govExpKnown, e.name)
+			continue
+		}
+		cur := a.GovernanceVoteExpiration
+		if cur == 0 {
+			delete(s.govExpKnown, e.name)
+			continue
+		}
+		if cur != e.exp {
+			// Restamped: the newer entry is elsewhere in the heap.
+			continue
+		}
+		due = append(due, e.name)
+	}
+	return due
+}
+
+// GovExpHeapTop returns the earliest pending expiration per the heap
+// (MaxUint32 when empty). Only meaningful when GovExpHeapReady.
+func (s *AccountStore) GovExpHeapTop() uint32 {
+	if len(s.govExpHeap) == 0 {
+		return math.MaxUint32
+	}
+	return s.govExpHeap[0].exp
 }
 
 // GovExpNoneDue reports whether NO account's governance-vote expiration can
@@ -314,8 +430,15 @@ func (s *AccountStore) RestoreToPoint(snap int) {
 		// Rolled-back writes may have fed govExpLB values that no longer
 		// exist; and a rollback ACROSS a hook's SetGovExpBound could leave
 		// the bound above a still-live expiration. Reset to unknown — one
-		// extra scan, never a missed expiration.
+		// extra scan, never a missed expiration. The lazy heap is dropped
+		// too: a rolled-back restamp leaves govExpKnown claiming a value
+		// the account no longer has, which would dedup-away a future push
+		// of that same value. Reseeding is one full scan — rollbacks are
+		// rare (failed tx in sync mode), correctness wins.
 		s.govExpLB = 0
+		s.govExpSeeded = false
+		s.govExpHeap = nil
+		s.govExpKnown = nil
 	}
 	for i := len(s.undoLog) - 1; i >= snap; i-- {
 		e := &s.undoLog[i]
