@@ -854,6 +854,11 @@ const RCDelegationReturnPeriodSec uint32 = 5 * 24 * 60 * 60
 // = (fill_new_mana=true, check_for_rc_delegation_overflow=true), the
 // post_apply visitor invokes on fill_vesting_withdraw_operation and
 // delegate_vesting_shares_operation.
+// RCClipEnabled gates HandleVestingWithdrawalRCImpact's over-delegation
+// clip pass. True by default (unit tests / head validation); replay sets
+// it false — see the comment at the clip site.
+var RCClipEnabled = true
+
 func HandleVestingWithdrawalRCImpact(s *state.Session, a *Account, now uint32) {
 	// effective_delegable_rc = effective_vesting - DelegatedRCOut
 	eff := a.VestingShares - a.DelegatedVestingShares + a.ReceivedVestingShares
@@ -868,6 +873,16 @@ func HandleVestingWithdrawalRCImpact(s *state.Session, a *Account, now uint32) {
 
 	// Over-delegated? Only when DelegatedRCOut > eff.
 	if a.DelegatedRCOut <= eff {
+		return
+	}
+	// Replay-parity guard: hived's clip decision runs against its FULL
+	// RC model (incl. max_rc_creation_adjustment and exact mana); our
+	// partial model understates the delegable max and clipped
+	// delegations hived kept (jarvie delete-of-missing at 68,769,486).
+	// During replay the op stream itself keeps delegation state
+	// convergent, so we skip the clip pass entirely; it stays active
+	// for head-of-chain validation (fixtures/live).
+	if !RCClipEnabled {
 		return
 	}
 	overflow := a.DelegatedRCOut - eff

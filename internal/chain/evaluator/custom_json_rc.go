@@ -324,7 +324,15 @@ func applyDelegateRC(ctx *Context, cj op.CustomJSON, args json.RawMessage) error
 		delta := p.MaxRC - pr.prev
 		if !pr.has {
 			if p.MaxRC == 0 {
-				return fmt.Errorf("delegate_rc: cannot create delegation to %q with max_rc=0", dn)
+				// C++ asserts unconditionally — but hived only reaches
+				// the create path when ITS state has no delegation. Our
+				// partial RC model can lack a delegation hived kept
+				// (clip divergence, jarvie 68,769,486): in replay a
+				// delete-of-missing is a convergent no-op.
+				if ctx.InControl {
+					return fmt.Errorf("delegate_rc: cannot create delegation to %q with max_rc=0", dn)
+				}
+				continue
 			}
 			objects.PutRCDirectDelegationFull(ctx.DB, &objects.RCDirectDelegation{
 				From:        from.Name,
@@ -333,7 +341,14 @@ func applyDelegateRC(ctx *Context, cj op.CustomJSON, args json.RawMessage) error
 			})
 		} else {
 			if pr.prev == p.MaxRC {
-				return fmt.Errorf("delegate_rc: delegation to %q with same amount already exists", dn)
+				// Same replay-parity reasoning as delete-of-missing: if
+				// hived applied this op, ITS prior amount differed; our
+				// row disagreeing means our clip/state diverged — treat
+				// the (identical-amount) update as a no-op.
+				if ctx.InControl {
+					return fmt.Errorf("delegate_rc: delegation to %q with same amount already exists", dn)
+				}
+				continue
 			}
 			if p.MaxRC == 0 {
 				objects.DeleteRCDirectDelegationFull(ctx.DB, from.Name, to.Name)

@@ -143,6 +143,12 @@ func cmdReplay(args []string) int {
 	// correct there.
 	var stopRequested atomic.Bool
 
+	// Replay is never "in control" (hived is_in_control()==false): RC
+	// over-delegation clipping decisions depend on hived's full RC model
+	// and misfire under our partial one — the delegate_rc op stream keeps
+	// delegation state convergent instead. See objects.RCClipEnabled.
+	objects.RCClipEnabled = false
+
 	var stateDB *state.Database
 	switch *backend {
 	case "mem":
