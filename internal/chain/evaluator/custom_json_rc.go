@@ -256,13 +256,14 @@ func applyDelegateRC(ctx *Context, cj op.CustomJSON, args json.RawMessage) error
 		return fmt.Errorf("delegate_rc: required_posting_auths must be exactly {%q}", p.From)
 	}
 
-	// 3. min_delegation check.
-	if p.MaxRC != 0 {
-		minDelegation, err := computeMinRCDelegation(ctx)
-		if err == nil && p.MaxRC < minDelegation {
-			return fmt.Errorf("delegate_rc: cannot delegate less than %d rc", minDelegation)
-		}
-	}
+	// 3. min_delegation check — NOT enforced here. C++ gates it on
+	// `_db.is_in_control()` (rc_utility.cpp:49-55), which is FALSE while
+	// replaying/applying existing blocks: hived only enforces the minimum
+	// when a tx is first admitted at the head. Blocks therefore
+	// legitimately contain below-minimum delegations (first at 68,676,609,
+	// ~100 blocks after HF26) and a replay must accept them. We never
+	// produce blocks, so the check is omitted (as is C++'s equally
+	// is_in_control-gated has_expired_delegation assert).
 
 	// 4-7. Load accounts and apply.
 	from, err := objects.GetAccount(ctx.DB, auth.AccountName(p.From))
