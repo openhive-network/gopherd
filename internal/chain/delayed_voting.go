@@ -82,13 +82,13 @@ func processDelayedVoting(s *state.Session, blockTime, blockNum uint32) {
 	for _, m := range due {
 		// Now that the bucket is mature, propagate the val to the
 		// account's witness vote totals (and any proxy chain).
-		if m.val > 0 {
-			a, err := objects.GetAccount(s, m.name)
-			if err != nil {
-				continue
-			}
-			objects.AdjustProxiedWitnessVotes(s, &a, int64(m.val))
+		// No val>0 guard — C++'s delayed_voting::run calls
+		// adjust_proxied_witness_votes for every matured bucket.
+		a, err := objects.GetAccount(s, m.name)
+		if err != nil {
+			continue
 		}
+		objects.AdjustProxiedWitnessVotes(s, &a, int64(m.val))
 	}
 
 	// Refresh the min-front-time lower bound so subsequent blocks can O(1)-skip

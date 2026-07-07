@@ -33,9 +33,12 @@ func AdjustProxiedWitnessVotes(s *state.Session, a *Account, delta int64) {
 }
 
 func adjustProxiedWitnessVotesScalar(s *state.Session, a *Account, delta int64, depth int) {
-	if delta == 0 {
-		return
-	}
+	// NO zero-delta guard: C++ has none anywhere in this chain, and a
+	// delta=0 call still matters — adjust_witness_vote advances each
+	// voted witness's virtual_position, stamps virtual_last_update to
+	// the current virtual time, and re-rolls virtual_scheduled_time.
+	// Skipping those calls leaves votes identical but phase-drifts the
+	// timeshare scheduling (root of the 49.6M/59.07M/65.8M median walls).
 	if a.Proxy != "" {
 		if depth >= MaxProxyRecursionDepth {
 			return
@@ -95,9 +98,9 @@ func adjustProxiedWitnessVotesArray(s *state.Session, a *Account, delta [MaxProx
 	for i := MaxProxyRecursionDepth - depth; i >= 0; i-- {
 		total += delta[i]
 	}
-	if total != 0 {
-		AdjustWitnessVotesForVoter(s, a.Name, total)
-	}
+	// Unconditional, like C++ — a total of 0 still re-rolls each voted
+	// witness's virtual scheduling state (see adjustProxiedWitnessVotesScalar).
+	AdjustWitnessVotesForVoter(s, a.Name, total)
 }
 
 // NullifyProxiedWitnessVotes mirrors hived's database.cpp:1131. Used

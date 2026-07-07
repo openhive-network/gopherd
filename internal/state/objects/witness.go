@@ -438,9 +438,9 @@ func DeleteWitnessVote(s *state.Session, account, witness auth.AccountName) {
 // we credit the proxy target as if it were the direct voter, which
 // approximates the hived semantics one level deep.
 func AdjustWitnessVotesForVoter(s *state.Session, account auth.AccountName, delta int64) {
-	if delta == 0 {
-		return
-	}
+	// NO zero-delta guard — C++'s adjust_witness_votes walks the rows
+	// and re-rolls each witness's virtual scheduling state even for
+	// delta=0 (position advance + last_update stamp + VST re-roll).
 	wvs := EnsureWitnessVoteStore(s)
 	// VotesForCount was checked here before the loop; the inner
 	// VotesForEachWitness already short-circuits on an empty set, so

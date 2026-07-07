@@ -138,11 +138,11 @@ func (claimRewardBalanceEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		})
 	}
 
-	// hive_evaluator_transfer.cpp:686 — propagate the new VESTS into the
-	// witness-vote totals up the proxy chain.
-	if cr.RewardVests.Amount != 0 {
-		objects.AdjustProxiedWitnessVotes(ctx.DB, &a, cr.RewardVests.Amount)
-	}
+	// hive_evaluator_transfer.cpp:720 — propagate the new VESTS into the
+	// witness-vote totals up the proxy chain. Unconditional like C++:
+	// claiming 0 VESTS (HBD/HIVE-only claims) still re-rolls the voted
+	// witnesses' virtual scheduling state.
+	objects.AdjustProxiedWitnessVotes(ctx.DB, &a, cr.RewardVests.Amount)
 	return nil
 }
 

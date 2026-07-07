@@ -220,7 +220,9 @@ func createVestingImpl(s *state.Session, accountName string, hiveSatoshi int64, 
 	// C++ create_vesting2 calls adjust_proxied_witness_votes when
 	// !to_reward_balance. aSlot points at the post-mutation slot so we
 	// pass it directly — saves one AccountStore.Get per CreateVesting.
-	if adjustVotes && !toReward && vestsAmount != 0 {
+	// Unconditional on the amount, like C++ — 0 new vests still re-rolls
+	// the recipient's voted witnesses' virtual scheduling state.
+	if adjustVotes && !toReward {
 		objects.AdjustProxiedWitnessVotes(s, aSlot, vestsAmount)
 	}
 	return vestsAmount, nil
