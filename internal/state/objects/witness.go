@@ -469,6 +469,13 @@ func AdjustWitnessVotesForVoter(s *state.Session, account auth.AccountName, delt
 	if wsRef != nil {
 		currentVT = wsRef.CurrentVirtualTime
 	}
+	// HF27+: the live virtual time is the FUTURE schedule's (see
+	// AdjustWitnessVote).
+	if hf.Has(hardfork.HF27) {
+		if fref, ok := EnsureFutureWitnessScheduleStore(s).GetRef(); ok {
+			currentVT = fref.CurrentVirtualTime
+		}
+	}
 	// Direct map iteration replaces VotesForEachWitness's closure
 	// callback — the closure dispatch was ~50ns × ~30 witnesses ×
 	// millions of calls ≈ 1-2s of wasted cycles.
@@ -514,6 +521,21 @@ func AdjustWitnessVotesForVoter(s *state.Session, account auth.AccountName, delt
 // Without this, by_schedule_time becomes stale and timeshare picks
 // drift from C++ even when total vesting matches.
 func AdjustWitnessVote(s *state.Session, w *Witness, delta int64, hf hardfork.Set) {
+	// HF27 (FIX_TIMESHARE_WITNESS_SCHEDULING): C++ reads the schedule
+	// via get_witness_schedule_object_for_irreversibility() — the FUTURE
+	// schedule post-HF26 — whose current_virtual_time is the live value
+	// the round rebuilds advance. Between HF26 and HF27 mainnet ran with
+	// the stale CURRENT object (the bug HF27 fixed) — we reproduce that
+	// by keeping the current-schedule read pre-HF27. Reading the wrong
+	// object post-HF27 phase-drifted VSTs (one round stale) → timeshare
+	// pick flip at 69,091,2xx → feed median → fund/pending ppb → the
+	// 69,093,288 curator-claim wall.
+	if hf.Has(hardfork.HF27) {
+		if fref, ok := EnsureFutureWitnessScheduleStore(s).GetRef(); ok {
+			adjustWitnessVoteWith(w, delta, hf, fref.CurrentVirtualTime)
+			return
+		}
+	}
 	ws, err := GetWitnessSchedule(s)
 	if err != nil {
 		// No schedule yet (genesis) — fall back to plain vote bump.
