@@ -70,6 +70,11 @@ func removeExpiredGovernanceVotes(s *state.Session, blockTime, blockNum uint32, 
 	// future renewals) flow through the noteDelayedVotes min() automatically.
 	accts.SetGovExpBound(nextDue)
 	sort.Slice(due, func(i, j int) bool { return due[i].name < due[j].name })
+	if envGhivediffGovExp != "" {
+		for _, e := range due {
+			ghiveDiff("GHIVEDIFF GOVEXP block=%d account=%s\n", blockNum, e.name)
+		}
+	}
 
 	for _, e := range due {
 		a, err := objects.GetAccount(s, e.name)
