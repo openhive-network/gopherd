@@ -633,13 +633,17 @@ func (voteEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		manaForCalc := currentPower
 		if ctx.Hardforks.Has(hardfork.HF28) {
 			// HIVE_HARDFORK_1_28_STABLE_VOTE (hive_evaluator_social.cpp:660):
-			// vote strength uses the voter's FULL effective_vesting_shares
-			// (the basic variant: vesting - delegated + received, NOT the
-			// excl-withdraw manabar cap), so rshares are independent of
-			// manabar depletion. Bypasses the downvote-pool scaling. The
-			// manabar is still regenerated + consumed below; only the
-			// rshares basis changes.
-			manaForCalc = voter.EffectiveVestingShares()
+			// vote strength uses voter.get_effective_vesting_shares() —
+			// whose default excludeWeeklyPowerDown=true EXCLUDES the next
+			// power-down slice (same basis as the manabar cap). Using the
+			// basic variant overcharged every powering-down voter by
+			// 2%×weight×(weekly slice) per vote; guitarmcy's mana ran
+			// ~83G short of hived's within 2,500 post-HF28 blocks
+			// (false "not enough power" at 101,322,426). rshares become
+			// stake-based (independent of manabar depletion) and bypass
+			// the downvote-pool scaling; the manabar is still
+			// regenerated + consumed below.
+			manaForCalc = voter.EffectiveVestingSharesExclWithdraw()
 		} else if dvPoolPct > 0 && v.Weight < 0 {
 			var scaled int64
 			if ctx.Hardforks.Has(hardfork.HF22) {
