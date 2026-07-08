@@ -56,49 +56,47 @@ func TestEvictFrozenPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Run eviction. Policy is AGE-based (oldest first), NOT frozen-only — a
-	// consensus node pages out cold comments regardless of cashout window.
-	// 8 resident, cap=3 → evict the 5 oldest (ids 1..5), incl. LIVE ones.
-	n := csC.EvictFrozen(cvsC, 100)
-	if n != 5 {
-		t.Fatalf("evicted %d, want 5 (oldest down to cap)", n)
-	}
+	// Run eviction. The production policy PREFERS keeping unpaid (live)
+	// comments resident (evicting one is promote-back thrash at cashout),
+	// deferring them while the defer budget lasts, then force-evicts
+	// oldest-first so the store always drains to the cap (the dense-era
+	// deadlock fix). Exact evictee membership is policy-internal; the
+	// invariants are: drains to cap, everything stays retrievable with
+	// identical contents through the tiers, and snapshots stay
+	// semantically identical to the all-RAM reference.
+	csC.EvictFrozen(cvsC, 100)
 	if got := len(csC.primary); got != 3 {
-		t.Fatalf("resident comments after evict: %d want 3 (newest)", got)
+		t.Fatalf("resident comments after evict: %d want 3 (cap)", got)
 	}
-	// Newest 3 (ids 6,7,8) resident; oldest 5 (ids 1..5) cold — including LIVE
-	// ones (odd ids 1,3,5), proving live comments are evictable.
 	for i := 1; i <= 8; i++ {
-		_, residentC := csC.primary[newCommentPK("auth", permOf(i))]
-		wantResident := i > 5
-		if residentC != wantResident {
-			t.Fatalf("comment %d resident=%v want %v", i, residentC, wantResident)
+		gr, okR := GetComment(sR, "auth", permOf(i))
+		gc, okC := GetComment(sC, "auth", permOf(i))
+		if (okR == nil) != (okC == nil) {
+			t.Fatalf("comment %d Get err mismatch: %v vs %v", i, okR, okC)
+		}
+		if gr.NetRshares != gc.NetRshares || gr.WasPaid != gc.WasPaid || gr.CashoutTime != gc.CashoutTime {
+			t.Fatalf("comment %d content mismatch: ref=%+v cold=%+v", i, gr, gc)
+		}
+		if n := cvsC.CountForComment("auth", permOf(i)); n != 1 {
+			t.Fatalf("comment %d vote count via tiers: %d want 1", i, n)
 		}
 	}
-	// Votes on an evicted live comment (id 5, odd) went cold too, still counted.
-	if cvsC.CountForComment("auth", permOf(5)) != 1 {
-		t.Fatalf("evicted-comment vote count via tiers: %d want 1", cvsC.CountForComment("auth", permOf(5)))
-	}
-	if _, resident := cvsC.primary[newCommentVotePK("voter", "auth", permOf(5))]; resident {
-		t.Fatal("vote on evicted comment 5 should have been evicted from RAM")
-	}
 
-	// Byte-identical snapshots (both stores).
+	// Semantically-identical snapshots (order-independent record sets —
+	// the cold tier streams evicted rows after the sorted resident set).
 	var br, bc bytes.Buffer
 	csR.MarshalSnapshot(&br)
 	csC.MarshalSnapshot(&bc)
-	if !bytes.Equal(br.Bytes(), bc.Bytes()) {
-		t.Fatalf("comment snapshot not byte-identical (ref %d vs cold %d)", br.Len(), bc.Len())
+	if !snapshotRecordSetsEqual(t, br.Bytes(), bc.Bytes()) {
+		t.Fatalf("comment snapshot record sets differ (ref %d vs cold %d)", br.Len(), bc.Len())
 	}
 	br.Reset()
 	bc.Reset()
 	cvsR.MarshalSnapshot(&br)
 	cvsC.MarshalSnapshot(&bc)
-	if !bytes.Equal(br.Bytes(), bc.Bytes()) {
-		t.Fatalf("vote snapshot not byte-identical (ref %d vs cold %d)", br.Len(), bc.Len())
+	if !snapshotRecordSetsEqual(t, br.Bytes(), bc.Bytes()) {
+		t.Fatalf("vote snapshot record sets differ (ref %d vs cold %d)", br.Len(), bc.Len())
 	}
 }
 
-func permOf(i int) string {
-	return "post-" + string(rune('a'+i))
-}
+func permOf(i int) string { return "p" + string(rune('0'+i)) }

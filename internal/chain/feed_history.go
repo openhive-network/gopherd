@@ -121,6 +121,27 @@ func updateMedianFeed(s *state.Session, blockNum, blockTime uint32) {
 		sort.Strings(sched)
 		fmt.Fprintf(os.Stderr, "GHIVEDIFF FEED-SCHED block=%d feeds=%d schedule=[%s]\n",
 			blockNum, len(feeds), strings.Join(sched, ","))
+		// Per-scheduled-witness exchange rate + last-update, so a feed
+		// median divergence can be pinned to the exact witness whose
+		// stored rate differs from hived's.
+		if ws2, e2 := objects.GetWitnessSchedule(s); e2 == nil {
+			cnt := int(ws2.NumScheduledWitnesses)
+			if cnt > len(ws2.CurrentShuffledWitnesses) {
+				cnt = len(ws2.CurrentShuffledWitnesses)
+			}
+			var rates []string
+			for i := 0; i < cnt; i++ {
+				nm := string(ws2.CurrentShuffledWitnesses[i])
+				if nm == "" {
+					continue
+				}
+				if w2, we := objects.GetWitness(s, auth.AccountName(nm)); we == nil {
+					rates = append(rates, fmt.Sprintf("%s=%d/%d@%d", nm,
+						w2.HBDExchangeRate.Base.Amount, w2.HBDExchangeRate.Quote.Amount, w2.LastHBDExchangeUpdate))
+				}
+			}
+			fmt.Fprintf(os.Stderr, "GHIVEDIFF FEED-RATES block=%d [%s]\n", blockNum, strings.Join(rates, ","))
+		}
 		// Also dump top-25 witnesses by votes to compare voted-set composition.
 		// Uses the typed WitnessStore — the legacy K/V WitnessTable ranges went
 		// permanently empty after the typed-store overhaul, which silently

@@ -41,7 +41,7 @@ func expectedInterest(hbd int64, seconds uint32, rateBP int64) int64 {
 func TestHBDInterestPayoutPreHF25(t *testing.T) {
 	f := New(t)
 	f.Actors("alice", "bob")
-	f.GenerateBlock()
+	f.GenerateBlocks(22) // cross block 21: median rebuild stamps dgpo.HBDInterestRate (C++ fixture init does this)
 	f.FundLiquidHBD("alice", 31_903)
 
 	preBlockTime := f.HeadBlockTime()
@@ -76,7 +76,7 @@ func TestHBDInterestPayoutPreHF25(t *testing.T) {
 	got := f.HBDBalance("alice")
 	if got != want {
 		t.Fatalf("alice HBD after interest: got %d, want %d (elapsed=%d, rate=%d)",
-			got, elapsed, want, rate)
+			got, want, elapsed, rate)
 	}
 }
 
@@ -89,7 +89,7 @@ func TestHBDInterestPayoutPreHF25(t *testing.T) {
 func TestHBDSavingsInterestPayout(t *testing.T) {
 	f := New(t)
 	f.Actor("alice")
-	f.GenerateBlock()
+	f.GenerateBlocks(22) // cross block 21: median rebuild stamps dgpo.HBDInterestRate (C++ fixture init does this)
 
 	// Seed alice with 31.903 HBD on savings + 3.000 HBD liquid.
 	f.FundLiquidHBD("alice", 31_903)
@@ -140,7 +140,7 @@ func TestHBDSavingsInterestPayout(t *testing.T) {
 func TestHBDSavingsInterestLongerPeriodWithCoindays(t *testing.T) {
 	f := New(t)
 	f.Actor("alice")
-	f.GenerateBlock()
+	f.GenerateBlocks(22) // cross block 21: median rebuild stamps dgpo.HBDInterestRate (C++ fixture init does this)
 
 	f.FundLiquidHBD("alice", 31_903)
 	if err := f.ApplyOp(op.TransferToSavings{
@@ -208,7 +208,7 @@ func TestHBDSavingsInterestLongerPeriodWithCoindays(t *testing.T) {
 func TestHBDInterestLongerPeriodWithCoindays(t *testing.T) {
 	f := New(t)
 	f.Actors("alice", "bob")
-	f.GenerateBlock()
+	f.GenerateBlocks(22) // cross block 21: median rebuild stamps dgpo.HBDInterestRate (C++ fixture init does this)
 	f.FundLiquidHBD("alice", 31_903)
 
 	// Warmup: 30 days + transfer → interest fires, last_payment refreshed.
@@ -272,7 +272,7 @@ func TestHBDInterestLongerPeriodWithCoindays(t *testing.T) {
 func TestHBDInterestNoPayoutBelowInterval(t *testing.T) {
 	f := New(t)
 	f.Actors("alice", "bob")
-	f.GenerateBlock()
+	f.GenerateBlocks(22) // cross block 21: median rebuild stamps dgpo.HBDInterestRate (C++ fixture init does this)
 	f.FundLiquidHBD("alice", 31_903)
 
 	// Warmup: run one full 30-day window so hbd_last_interest_payment

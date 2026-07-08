@@ -579,6 +579,11 @@ func TestProposalRemove012_cpp(t *testing.T) {
 // proposals are rejected while votes on still-active ones succeed.
 func TestExpiredProposalsForbiddenVoting_cpp(t *testing.T) {
 	f := dhfFixture(t, "carol", "carol1", "carol2")
+	// The expired-proposal vote rejection is HF25-gated in C++
+	// (dhf_evaluator.cpp:183-190, HIVE_CHAIN_TIME_ASSERT under
+	// HIVE_HARDFORK_1_25); the C++ original runs at latest HF. The
+	// shared dhfFixture sits at HF21 where such votes are legal.
+	f.HardforksUpTo(hardfork.HF25)
 	f.FundVesting("carol", 1_000_000)
 	f.FundVesting("carol1", 1_000_000)
 	f.FundVesting("carol2", 1_000_000)

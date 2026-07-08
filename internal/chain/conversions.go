@@ -58,6 +58,11 @@ func processConversions(s *state.Session, blockTime uint32, hooks *blockHookScra
 		// median is HBD/HIVE: base.symbol = HBD, quote.symbol = HIVE
 		// (post-HF20 normalization). hive_amount = hbd × quote / base.
 		hiveAmount := convertHBDToHive(req.Amount, fh.CurrentMedianHistory)
+		if envGhivediffFills != "" {
+			ghiveDiff("GHIVEDIFF CONVV t=%d owner=%s reqid=%d hbd=%d hive=%d median=%d/%d\n",
+				blockTime, p.owner, p.requestID, req.Amount, hiveAmount,
+				fh.CurrentMedianHistory.Base.Amount, fh.CurrentMedianHistory.Quote.Amount)
+		}
 		if hiveAmount > 0 {
 			a, aerr := objects.GetAccount(s, p.owner)
 			if aerr == nil {

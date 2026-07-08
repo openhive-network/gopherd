@@ -111,7 +111,8 @@ func TestColdVoteEvictionEquivalence(t *testing.T) {
 		}
 	}
 
-	// THE GATE: byte-identical snapshot.
+	// THE GATE: semantically-identical snapshot (order-independent record
+	// sets; see the comment-store variant for rationale) + determinism.
 	var bRef, bCold bytes.Buffer
 	if err := EnsureCommentVoteStore(sRef).MarshalSnapshot(&bRef); err != nil {
 		t.Fatal(err)
@@ -119,8 +120,15 @@ func TestColdVoteEvictionEquivalence(t *testing.T) {
 	if err := cvs.MarshalSnapshot(&bCold); err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(bRef.Bytes(), bCold.Bytes()) {
-		t.Fatalf("snapshot NOT byte-identical: ref=%d bytes cold=%d bytes", bRef.Len(), bCold.Len())
+	if !snapshotRecordSetsEqual(t, bRef.Bytes(), bCold.Bytes()) {
+		t.Fatalf("snapshot record sets differ: ref=%d bytes cold=%d bytes", bRef.Len(), bCold.Len())
+	}
+	var bCold2 bytes.Buffer
+	if err := cvs.MarshalSnapshot(&bCold2); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(bCold.Bytes(), bCold2.Bytes()) {
+		t.Fatalf("cold snapshot not deterministic across marshals")
 	}
 }
 

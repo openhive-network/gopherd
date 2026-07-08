@@ -279,6 +279,12 @@ var envGhivediffLP = os.Getenv("GHIVEDIFF_LP")
 // remaining amount_to_receive becomes zero — a dust safety valve from
 // hived). Returns true when the order was fully consumed.
 func fillLimitOrder(ctx *Context, order *objects.LimitOrder, pays, receives int64) bool {
+	// GHIVEDIFF_FILLS=1: one line per fill side — diffable against the
+	// public API's fill_order vops to bisect order-book divergences.
+	if envGhivediffFills != "" {
+		ghiveDiff("GHIVEDIFF FILLV block=%d owner=%s orderid=%d pays=%d receives=%d\n",
+			ctx.BlockNum, order.Owner, order.OrderID, pays, receives)
+	}
 	if (ctx.BlockNum >= 2889020 && ctx.BlockNum <= 2891791) || vestTraceAccount(order.Owner) {
 		preHive := int64(0)
 		preHbd := int64(0)

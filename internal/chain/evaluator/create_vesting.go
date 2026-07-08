@@ -20,6 +20,7 @@ import (
 var (
 	envGhivediff        = os.Getenv("GHIVEDIFF")
 	envGhivediffAllVest = os.Getenv("GHIVEDIFF_ALL_VEST")
+	envGhivediffFills   = os.Getenv("GHIVEDIFF_FILLS")
 	envGhivediffPowbump = os.Getenv("GHIVEDIFF_POWBUMP")
 	envGhivediffSimpleV = envGhivediff != "" && (envGhivediff == "1" || (!strings.ContainsRune(envGhivediff, ',') && len(envGhivediff) <= 2))
 	envGhivediffNamesV  = splitTraceNames(envGhivediff)
