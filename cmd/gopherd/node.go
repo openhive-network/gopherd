@@ -36,6 +36,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"runtime/pprof"
 	"sync/atomic"
 	"syscall"
@@ -46,6 +47,7 @@ import (
 	p2pnode "hived-go/internal/p2p/node"
 	p2psync "hived-go/internal/p2p/sync"
 	"hived-go/internal/protocol/block"
+	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/network"
 	"hived-go/internal/state"
 	"hived-go/internal/state/genesis"
@@ -100,6 +102,9 @@ func wipePebbleFiles(dir string) error {
 
 func cmdNode(args []string) int {
 	cfg := parseNodeFlags(args)
+	if cfg.memLimitGiB > 0 {
+		debug.SetMemoryLimit(int64(cfg.memLimitGiB) << 30)
+	}
 
 	if cfg.showSeeds {
 		for _, s := range network.MainnetSeeds {
@@ -150,6 +155,11 @@ type flags struct {
 	targetBlock    uint32
 	verifyAgainst  string
 	sourceBlockLog string
+	coldDir        string
+	coldBackend    string
+	residentCap    int
+	evictBudget    int
+	memLimitGiB    int
 	// loadSnapshot warm-starts the state from a directory snapshot
 	// (block-N/ produced by ghive-tools replay --snapshot-every /
 	// --save-dir-snapshot-at) BEFORE dialing peers. Use to skip the
@@ -228,6 +238,11 @@ func parseNodeFlags(args []string) flags {
 	fs.IntVar(&f.maxOutboundPeers, "max-outbound-peers", 0, "max active outbound P2P peers (0 = default 32)")
 	fs.IntVar(&f.maxConcurrentDials, "max-concurrent-dials", 0, "max in-flight dial attempts (0 = default 24)")
 	fs.BoolVar(&f.logAdaptiveBatch, "log-adaptive-batch", false, "log one trace per per-peer FetchBatch decision (peer X batch=N rate=Y bps)")
+	fs.IntVar(&f.residentCap, "comment-resident-cap", 0, "if >0, cap RAM-resident comments to this many; frozen comments + votes spill to an on-disk cold tier (required for a full-chain node — otherwise the whole comment corpus is resident and OOMs)")
+	fs.StringVar(&f.coldDir, "cold-dir", "", "directory for the cold tier (used when --comment-resident-cap>0). With --cold-backend=persist it must be stable across restarts")
+	fs.StringVar(&f.coldBackend, "cold-backend", "", "cold-tier backend: \"\"/mmap|pebble|persist")
+	fs.IntVar(&f.evictBudget, "evict-budget", 20000, "max comments evicted per block when over the resident cap")
+	fs.IntVar(&f.memLimitGiB, "mem-limit-gib", 0, "if >0, set the Go soft memory limit (debug.SetMemoryLimit) to this many GiB")
 	fs.Parse(args)
 	f.targetBlock = uint32(target)
 	f.maxBlocks = uint32(max)
@@ -284,6 +299,14 @@ type app struct {
 	// historical mainnet bytes reuse the same applyBlock flow but flip
 	// this since there's no signing-key infrastructure in unit tests.
 	skipSigsForTest bool
+
+	// Cold tier (only when --comment-resident-cap>0): frozen comments +
+	// their votes spill to disk so a full-chain node's RAM stays bounded.
+	// EvictFrozen runs after each applied block. Nil when off.
+	cold             objects.ColdStore
+	commentStore     *objects.CommentStore
+	voteStore        *objects.CommentVoteStore
+	evictBudget      int
 }
 
 func newApp(cfg flags) (*app, error) {
@@ -330,6 +353,9 @@ func newApp(cfg flags) (*app, error) {
 	// set matches the producing process. Skips genesis.Apply because
 	// the snapshot already carries the bootstrapped state.
 	loadedFromSnapshot := false
+	var cold objects.ColdStore
+	var commentStore *objects.CommentStore
+	var voteStore *objects.CommentVoteStore
 	if cfg.loadSnapshot != "" {
 		boot := state.NewSession(stateDB)
 		// Register EVERY typed subsystem the snapshot may carry — the
@@ -338,8 +364,8 @@ func newApp(cfg flags) (*app, error) {
 		objects.EnsureWitnessStore(boot)
 		objects.EnsureWitnessVoteStore(boot)
 		objects.EnsureAccountStore(boot)
-		objects.EnsureCommentStore(boot)
-		objects.EnsureCommentVoteStore(boot)
+		cs := objects.EnsureCommentStore(boot)
+		cvs := objects.EnsureCommentVoteStore(boot)
 		objects.EnsureBlockSummaryStore(boot)
 		objects.EnsureWitnessScheduleStore(boot)
 		objects.EnsureFutureWitnessScheduleStore(boot)
@@ -349,6 +375,29 @@ func newApp(cfg flags) (*app, error) {
 		objects.EnsureVestingWithdrawalScheduleStore(boot)
 		objects.EnsureTransactionStore(boot)
 		objects.EnsureConvertRequestStore(boot)
+		// Attach the cold tier BEFORE loading so the multi-GB comment +
+		// vote corpus spills to disk during the load instead of piling
+		// up resident (a full-chain snapshot loaded all-resident OOMs).
+		if cfg.residentCap > 0 {
+			backendName := cfg.coldBackend
+			if backendName == "persist" && cfg.coldDir == "" {
+				stateDB.Close()
+				return nil, fmt.Errorf("--cold-backend=persist requires a stable --cold-dir")
+			}
+			c, cerr := objects.OpenColdTierBackend(cfg.coldDir, backendName)
+			if cerr != nil {
+				stateDB.Close()
+				return nil, fmt.Errorf("open cold tier: %w", cerr)
+			}
+			cold = c
+			cs.SetColdTier(cold)
+			cs.SetResidentCap(cfg.residentCap)
+			cvs.SetColdTier(cold)
+			commentStore = cs
+			voteStore = cvs
+			fmt.Fprintf(os.Stderr, "gopherd node: cold tier ON — resident cap %d, evict budget %d/block, dir %s\n",
+				cfg.residentCap, cfg.evictBudget, cold.Dir())
+		}
 		man, err := snap.Load(stateDB, cfg.loadSnapshot)
 		if err != nil {
 			stateDB.Close()
@@ -419,6 +468,10 @@ func newApp(cfg flags) (*app, error) {
 		progressBlocks:   1000,
 		progressInterval: time.Second,
 		progressStartT:   time.Now(),
+		cold:             cold,
+		commentStore:     commentStore,
+		voteStore:        voteStore,
+		evictBudget:      cfg.evictBudget,
 	}
 	a.progressLastT.Store(a.progressStartT.UnixNano())
 
@@ -468,6 +521,10 @@ func (a *app) close() {
 	if a.p2p != nil {
 		a.p2p.Stop()
 		a.p2p = nil
+	}
+	if a.cold != nil {
+		_ = a.cold.Close()
+		a.cold = nil
 	}
 	// Flush any partial batched-commit before closing pebble — otherwise
 	// up to commitBatch blocks of K/V state would be lost. The block_log
@@ -729,6 +786,15 @@ func (a *app) applyBlock(rawBlock []byte, blockNum uint32) error {
 
 	if err := a.writer.Append(rawBlock); err != nil {
 		return fmt.Errorf("append block %d: %w", blockNum, err)
+	}
+
+	// Post-commit: spill frozen comments + votes to the cold tier when
+	// over the resident cap (no-op when the cold tier is off). Keeps a
+	// full-chain node's RAM bounded. Post-HF17 skips the dead by-root
+	// cold writes.
+	if a.commentStore != nil {
+		a.commentStore.SetColdByRootEnabled(!hardfork.SetForBlock(blockNum).Has(hardfork.HF17))
+		a.commentStore.EvictFrozen(a.voteStore, a.evictBudget)
 	}
 
 	if blockNum%1000 == 0 {
