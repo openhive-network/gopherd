@@ -280,6 +280,15 @@ func saveOnce(db *state.Database, dir string, blockNum uint32, headBlockID strin
 		return "", fmt.Errorf("snapshot: write manifest: %w", err)
 	}
 
+	// Atomic rename into place. A snapshot at block N is deterministic, so
+	// an existing block-N dir (from an earlier run sharing this
+	// snapshot-dir) is stale and safe to replace — os.Rename refuses to
+	// overwrite a non-empty dir, which would otherwise abort a long replay
+	// at the first periodic-snapshot collision. Remove any existing target
+	// first (best-effort; a concurrent reader is not a supported mode).
+	if _, statErr := os.Stat(finalDir); statErr == nil {
+		_ = os.RemoveAll(finalDir)
+	}
 	// Atomic rename into place.
 	if err := os.Rename(tmpDir, finalDir); err != nil {
 		return "", fmt.Errorf("snapshot: rename: %w", err)
