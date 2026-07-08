@@ -198,10 +198,14 @@ func updateMedianFeed(s *state.Session, blockNum, blockTime uint32) {
 		copy(copyHist, fh.PriceHistory)
 		sort.Slice(copyHist, func(i, j int) bool { return priceLess(copyHist[i], copyHist[j]) })
 		if envGhivediffFeed != "" && vsDumpFrom != 0 && uint64(blockNum) >= vsDumpFrom && uint64(blockNum) <= vsDumpTo {
-			fmt.Fprintf(os.Stderr, "GHIVEDIFF FEED-HIST block=%d hist_len=%d cmh_base=%d cmh_quote=%d\n",
+			var hb []string
+			for _, ph := range copyHist {
+				hb = append(hb, fmt.Sprintf("%d/%d", ph.Base.Amount, ph.Quote.Amount))
+			}
+			fmt.Fprintf(os.Stderr, "GHIVEDIFF FEED-HIST block=%d hist_len=%d cmh_base=%d cmh_quote=%d sorted=[%s]\n",
 				blockNum, len(fh.PriceHistory),
 				copyHist[len(copyHist)/2].Base.Amount,
-				copyHist[len(copyHist)/2].Quote.Amount)
+				copyHist[len(copyHist)/2].Quote.Amount, strings.Join(hb, ","))
 		}
 		fh.CurrentMedianHistory = copyHist[len(copyHist)/2]
 		fh.MarketMedianHistory = fh.CurrentMedianHistory
