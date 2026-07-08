@@ -80,13 +80,18 @@ func newTimeshareFixture(t *testing.T, hf hardfork.ID) *timeshareFixture {
 	dgpo := f.DGPO()
 	t.Logf("PRE-FUND dgpo: total_vesting_shares=%d total_vesting_fund_hive=%d current_supply=%d",
 		dgpo.TotalVestingShares, dgpo.TotalVestingFundHive, dgpo.CurrentSupply)
-	f.FundVesting("staticvoter", 100_000_000_000)     // 100M HIVE
+	// NOTE ON SCALE: the testnet genesis vesting price is 1e9 sat-VESTS
+	// per sat-HIVE, so funding amounts above ~9.2 HIVE overflow the
+	// int64 vests product and mint ZERO (the old 100M/10M HIVE numbers
+	// silently gave every voter no stake). Scaled ÷10⁴ — the ratios are
+	// what the schedule assertions depend on.
+	f.FundVesting("staticvoter", 10_000_000)          // 10K HIVE
 	dgpo = f.DGPO()
 	t.Logf("POST staticvoter dgpo: total_vesting_shares=%d total_vesting_fund_hive=%d",
 		dgpo.TotalVestingShares, dgpo.TotalVestingFundHive)
 	t.Logf("staticvoter vest after FundVesting=%d", f.Vests("staticvoter"))
-	f.FundVesting("timesharevoter1", 10_000_000_000)  // 10M HIVE
-	f.FundVesting("timesharevoter2", 10_000_000_000)  // 10M HIVE
+	f.FundVesting("timesharevoter1", 1_000_000)       // 1K HIVE
+	f.FundVesting("timesharevoter2", 1_000_000)       // 1K HIVE
 	f.FundVesting("timesharevoter3", 100)             // 100 sat
 	for _, lv := range littlevoters {
 		f.FundVesting(lv, 1) // 1 sat

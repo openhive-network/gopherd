@@ -256,12 +256,15 @@ func TestBlockSkipBlockGap(t *testing.T) {
 	startNum := f.BlockNum
 	startTime := f.HeadBlockTime()
 
-	// Hived's test skips 60s = 20 × HIVE_BLOCK_INTERVAL.
+	// Hived's skip_block test misses 20 slots: ONE block is produced at
+	// the future slot — head advances by 1, time by 60s (block numbers
+	// stay dense; skipped slots are MISSED, mirroring generate_blocks
+	// with miss_intermediate=true).
 	f.SkipSeconds(60)
 
 	got := f.BlockNum - startNum
-	if got != 20 {
-		t.Errorf("SkipSeconds(60) bumped BlockNum by %d, want 20", got)
+	if got != 1 {
+		t.Errorf("SkipSeconds(60) bumped BlockNum by %d, want 1", got)
 	}
 	gotTime := f.HeadBlockTime() - startTime
 	if gotTime != 60 {
@@ -271,8 +274,8 @@ func TestBlockSkipBlockGap(t *testing.T) {
 	// A regular GenerateBlock after the gap must advance by exactly one
 	// more block and HIVE_BLOCK_INTERVAL seconds.
 	f.GenerateBlock()
-	if f.BlockNum != startNum+21 {
-		t.Errorf("post-skip GenerateBlock: BlockNum %d, want %d", f.BlockNum, startNum+21)
+	if f.BlockNum != startNum+2 {
+		t.Errorf("post-skip GenerateBlock: BlockNum %d, want %d", f.BlockNum, startNum+2)
 	}
 	if f.HeadBlockTime() != startTime+63 {
 		t.Errorf("post-skip GenerateBlock: HeadBlockTime %d, want %d", f.HeadBlockTime(), startTime+63)

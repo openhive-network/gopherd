@@ -289,19 +289,16 @@ func (f *Fixture) SkipSeconds(secs uint32) {
 		f.GenerateBlock()
 		return
 	}
-	// Jump DGPO directly.
-	s := state.NewSession(f.State)
-	dgpo, err := objects.GetDGPO(s)
-	if err != nil {
-		f.t.Fatalf("SkipSeconds: read dgpo: %v", err)
-	}
-	dgpo.HeadBlockNumber += blocks - 1
-	dgpo.Time += (blocks - 1) * BlockInterval
-	objects.PutDGPO(s, &dgpo)
-	if err := s.Commit(false); err != nil {
-		f.t.Fatalf("SkipSeconds: commit dgpo: %v", err)
-	}
-	f.BlockNum += blocks - 1
+	// Mirror C++ db_fixture generate_blocks(timestamp, miss_intermediate=
+	// true): ONE real block lands at the target time and every skipped
+	// slot is a MISSED slot — block numbers stay DENSE, only time jumps.
+	// The old implementation bumped HeadBlockNumber by the slot count,
+	// which made the %21 witness-schedule rebuild fire only when the
+	// landing number happened to be ≡0 (mod 21): medians (e.g.
+	// dgpo.HBDInterestRate) stayed at their genesis zeros for the rest
+	// of the test, silently zeroing HBD interest and freezing schedule
+	// maintenance — the root of the long-standing interest/timeshare
+	// fixture failures.
 	f.curBlockTime += (blocks - 1) * BlockInterval
 	// One real block at the target so hooks fire.
 	f.GenerateBlock()

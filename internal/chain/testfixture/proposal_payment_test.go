@@ -255,11 +255,14 @@ func TestProposalPreHF21NoOp(t *testing.T) {
 // proposalMaintenanceUntilNext returns the seconds to skip to land on
 // the next 1-hour boundary (when processProposals fires).
 func proposalMaintenanceUntilNext(f *Fixture) uint32 {
-	const period = uint32(60 * 60)
+	// hived's DHF maintenance is anchored to LAST-RUN + 3600
+	// (set_next_maintenance_time), NOT the wall-clock hour grid — skip
+	// to dgpo.NextMaintenanceTime, plus one block so the landing block's
+	// timestamp is past it.
 	now := f.HeadBlockTime()
-	rem := now % period
-	if rem == 0 {
-		return period
+	next := f.DGPO().NextMaintenanceTime
+	if next <= now {
+		return BlockInterval
 	}
-	return period - rem
+	return next - now + BlockInterval
 }

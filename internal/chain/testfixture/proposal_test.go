@@ -102,13 +102,16 @@ func TestProposalVoteApply(t *testing.T) {
 		t.Fatal("carol's vote should be removed")
 	}
 
-	t.Log("--- failure voting on non-existent proposal")
+	t.Log("--- voting on non-existent proposal: pre-HF28 silently skips")
 	if err := f.ApplyOp(op.UpdateProposalVotes{
 		Voter:       "carol",
 		ProposalIDs: []int64{99},
 		Approve:     true,
-	}); err == nil {
-		t.Fatal("expected proposal-not-found failure")
+	}); err != nil {
+		t.Fatalf("pre-HF28 vote on nonexistent proposal must silently skip (C++ dhf_evaluator continue), got %v", err)
+	}
+	if has, _ := objects.HasProposalVote(state.NewSession(f.State), 99, "carol"); has {
+		t.Fatal("skipped vote must not create a row")
 	}
 }
 

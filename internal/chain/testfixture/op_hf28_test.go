@@ -114,18 +114,30 @@ func TestHF28DifferentBehaviourForNonexistentProposals(t *testing.T) {
 		t.Fatalf("create_proposal: %v", err)
 	}
 
-	// vote on non-existent id 666 — Go evaluator must reject.
+	// PRE-HF28 (C++ dhf_evaluator.cpp:172-180): a vote on a non-existent
+	// proposal id is silently SKIPPED — the op succeeds, no vote row.
 	if err := f.ApplyOp(op.UpdateProposalVotes{
 		Voter: "alice", ProposalIDs: []int64{666}, Approve: true,
-	}); err == nil {
-		t.Error("expected proposal-not-found rejection for id=666 (Go is strict from HF21)")
+	}); err != nil {
+		t.Errorf("pre-HF28 vote on nonexistent id must silently skip, got %v", err)
+	}
+	if has, _ := objects.HasProposalVote(state.NewSession(f.State), 666, "alice"); has {
+		t.Error("pre-HF28 skipped vote must not create a row")
 	}
 
-	// vote on mixed valid+invalid id list — Go evaluator must reject.
+	// Mixed valid+invalid list: the valid id gets its vote, invalid skipped.
 	if err := f.ApplyOp(op.UpdateProposalVotes{
 		Voter: "alice", ProposalIDs: []int64{1, 667}, Approve: true,
+	}); err != nil {
+		t.Errorf("pre-HF28 mixed-id vote must succeed, got %v", err)
+	}
+
+	// POST-HF28 (DONT_TRY_VOTE_FOR_NONEXISTENT_PROPOSAL): same ops REJECT.
+	f.HardforksUpTo(hardfork.HF28)
+	if err := f.ApplyOp(op.UpdateProposalVotes{
+		Voter: "alice", ProposalIDs: []int64{668}, Approve: true,
 	}); err == nil {
-		t.Error("expected proposal-not-found rejection for mixed-id list")
+		t.Error("post-HF28 vote on nonexistent id must be rejected")
 	}
 
 	// remove_proposal on non-existent id — Go evaluator silently

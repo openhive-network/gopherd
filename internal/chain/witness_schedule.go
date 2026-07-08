@@ -651,22 +651,7 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 	ws.NextShuffleBlockNum = blockNum + uint32(ws.NumScheduledWitnesses)
 	ws.MajorityVersion = majorityVersion
 
-	updateMedianWitnessProps(s, ws)
-
-	// C++ update_global_witness_properties (witness_schedule.cpp:51-55)
-	// assigns dgpo.hbd_interest_rate = median UNCONDITIONALLY — including
-	// when the median is 0. The earlier `> 0` guard left the rate stuck at
-	// its last positive value once witnesses voted it to 0 (mainnet: the
-	// median hit 0 between blocks 10.77M and 11.42M; Go held 10 while hived
-	// dropped to 0), causing Go to pay HBD interest hived never paid
-	// (+15,417 sat current_hbd_supply / ~34 accounts by block 11.42M).
-	//
-	// HF28 GLOBAL_WITNESS_PROPS: this compute-time activation is gated
-	// OFF (witness_schedule.cpp:146-147) — dgpo picks the medians up at
-	// promotion time instead (see the HF26 rotation block).
-	if !hf.Has(hardfork.HF28) {
-		dgpo.HBDInterestRate = ws.MedianHBDInterestRate
-	}
+	updateMedianWitnessProps(s, ws, dgpo, hf)
 
 	// Persist grown capacities back into the scratch — next round
 	// resets to len=0 but keeps cap.
@@ -843,7 +828,7 @@ func updateWitnessSchedulePreHF4(s *state.Session, ws *objects.WitnessSchedule, 
 	}
 	ws.NextShuffleBlockNum = blockNum + uint32(ws.NumScheduledWitnesses)
 	ws.WitnessPayNormalizationFactor = uint32(len(active))
-	updateMedianWitnessProps(s, ws)
+	updateMedianWitnessProps(s, ws, dgpo, hf)
 }
 
 // resetVirtualScheduleTime mirrors witness_schedule.cpp:21-40. Sets
@@ -898,7 +883,7 @@ func xorshiftShuffleSchedule(witnesses []auth.AccountName, headBlockTime uint32)
 
 // updateMedianWitnessProps mirrors witness_schedule.cpp:58. Sorts the
 // active set by each witness-property field and picks the median.
-func updateMedianWitnessProps(s *state.Session, ws *objects.WitnessSchedule) {
+func updateMedianWitnessProps(s *state.Session, ws *objects.WitnessSchedule, dgpo *objects.DynamicGlobalProperty, hf hardfork.Set) {
 	if len(ws.CurrentShuffledWitnesses) == 0 {
 		return
 	}
@@ -991,6 +976,18 @@ func updateMedianWitnessProps(s *state.Session, ws *objects.WitnessSchedule) {
 	ws.MedianAccountCreationFee = acf[n/2]
 	ws.MedianMaximumBlockSize = size[n/2]
 	ws.MedianHBDInterestRate = rate[n/2]
+
+	// C++ nests the dgpo activation at the END of
+	// update_median_witness_props (witness_schedule.cpp:147-148,
+	// pre-HF28 only) — so BOTH the modern update_witness_schedule_4 and
+	// the legacy pre-HF4 path stamp dgpo. Assign UNCONDITIONALLY on the
+	// value — including median 0 (a `> 0` guard once left the rate stuck
+	// when witnesses voted it to 0 around blocks 10.77M-11.42M and Go
+	// paid interest hived never paid). Post-HF28 dgpo picks the medians
+	// up at future→current promotion instead (GLOBAL_WITNESS_PROPS).
+	if dgpo != nil && !hf.Has(hardfork.HF28) {
+		dgpo.HBDInterestRate = ws.MedianHBDInterestRate
+	}
 	ws.MedianAccountSubsidyBudget = budget[n/2]
 	ws.MedianAccountSubsidyDecay = decay[n/2]
 	ws.MedianAvailableWitnessAccountSubsidies = subs[n/2]
