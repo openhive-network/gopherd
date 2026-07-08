@@ -93,6 +93,13 @@ type part struct {
 	first uint32 // first block num in this part
 	count uint32 // number of blocks in this part
 
+	// bias is the CANONICAL block_log offset of this part file's byte 0.
+	// 0 for a normal file. For a "<main>.tail" continuation file — a
+	// ranged download of the canonical log's suffix — the trailers inside
+	// still encode canonical offsets, so every file position is
+	// (canonical_offset - bias). See Open's tail discovery.
+	bias uint64
+
 	// readSinceAdvise accumulates bytes read from main since the last
 	// FADV_DONTNEED. Forward replay over a huge block_log (e.g. the 420 GB
 	// mainnet log) would otherwise fill the page cache with consumed block
@@ -121,12 +128,28 @@ func Open(path string) (*Reader, error) {
 		return nil, err
 	}
 
+	// "<main>.tail" continuation: a ranged download of the canonical
+	// log's suffix placed next to the (immutable) main file. Discovered
+	// only for the legacy single-file layout. Its bias/first are filled
+	// in below once the main part's clamped size and count are known.
+	if base == legacyFileName && len(parts) == 1 {
+		tailPath := parts[0].mainPath + ".tail"
+		if _, err := os.Stat(tailPath); err == nil {
+			parts = append(parts, &part{mainPath: tailPath})
+		}
+	}
+
 	r := &Reader{
 		parts:        parts,
 		decompressor: zstd.NewDecompressor(),
 	}
 
-	for _, p := range parts {
+	for pi, p := range parts {
+		if pi > 0 && strings.HasSuffix(p.mainPath, ".tail") {
+			prev := parts[pi-1]
+			p.bias = uint64(prev.mainSize)
+			p.first = prev.first + prev.count
+		}
 		main, err := os.Open(p.mainPath)
 		if err != nil {
 			r.Close()
@@ -275,10 +298,10 @@ func (r *Reader) blockInto(blockNum uint32, rawScratch, outScratch []byte) ([]by
 	} else {
 		raw = make([]byte, size)
 	}
-	if _, err := p.main.ReadAt(raw, int64(off)); err != nil {
+	if _, err := p.main.ReadAt(raw, int64(off-p.bias)); err != nil {
 		return nil, raw, fmt.Errorf("blocklog: read block %d: %w", blockNum, err)
 	}
-	p.adviseConsumed(int64(size), int64(endOff))
+	p.adviseConsumed(int64(size), int64(endOff-p.bias))
 
 	if !attr.Compressed {
 		// Uncompressed block: we have to return owned bytes. Avoid handing
@@ -438,7 +461,7 @@ func (p *part) endOffset(blockIdx uint32) (uint64, error) {
 		nextOff, _ := decodeTrailer(next)
 		return nextOff - trailerSize, nil
 	}
-	return uint64(p.mainSize) - trailerSize, nil
+	return uint64(p.mainSize) + p.bias - trailerSize, nil
 }
 
 // buildInMemoryIndex walks the main file backward from EOF, following the
@@ -495,13 +518,15 @@ func buildInMemoryIndex(p *part) error {
 		trailers = append(trailers, packed)
 
 		blockOffset, _ := decodeTrailer(packed)
-		// Block 1 has blockOffset == 0, and we should stop after recording it.
-		if blockOffset == 0 {
+		// The part's first block starts at canonical offset == bias (block 1
+		// of a normal file has blockOffset 0); stop after recording it.
+		if blockOffset == p.bias {
 			break
 		}
 		// Next block's trailer ends at blockOffset (since [blockOffset, ...) is
 		// the current block, and the previous trailer sits at blockOffset-8).
-		trailerPos = int64(blockOffset) - trailerSize
+		// Convert the canonical offset to a file position via the bias.
+		trailerPos = int64(blockOffset-p.bias) - trailerSize
 	}
 
 	// Reverse so trailers[0] is block 1 (relative to this part).
@@ -540,12 +565,13 @@ func recoverValidEnd(p *part) (int64, bool) {
 			return false
 		}
 		off, _ := decodeTrailer(binary.LittleEndian.Uint64(buf[:]))
-		bo := int64(off)
-		if bo < 0 || bo >= tp || tp+trailerSize-bo > maxBlockLen {
+		// Trailer offsets are canonical; convert to a file position.
+		bo := int64(off - p.bias)
+		if off < p.bias || bo >= tp || tp+trailerSize-bo > maxBlockLen {
 			return false
 		}
 		if bo == 0 {
-			return true // block 1
+			return true // first block of this part
 		}
 		// One more hop: the preceding block's trailer sits at bo-8.
 		prevTp := bo - trailerSize
@@ -556,8 +582,8 @@ func recoverValidEnd(p *part) (int64, bool) {
 			return false
 		}
 		poff, _ := decodeTrailer(binary.LittleEndian.Uint64(buf[:]))
-		pbo := int64(poff)
-		return pbo >= 0 && pbo < prevTp && prevTp+trailerSize-pbo <= maxBlockLen
+		pbo := int64(poff - p.bias)
+		return poff >= p.bias && pbo < prevTp && prevTp+trailerSize-pbo <= maxBlockLen
 	}
 
 	// Tail already valid → no recovery needed.

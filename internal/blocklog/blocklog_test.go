@@ -168,3 +168,71 @@ func TestEndToEndChainConsistency(t *testing.T) {
 		prevComputed = id
 	}
 }
+
+// TestReaderTailContinuation exercises the "<main>.tail" continuation file:
+// a ranged download of the canonical log's suffix whose trailers keep
+// canonical (whole-log) offsets. The reader must stitch main+tail, apply the
+// offset bias on every read, and rebuild the tail's index in memory.
+func TestReaderTailContinuation(t *testing.T) {
+	dir := t.TempDir()
+	blocks := [][]byte{
+		[]byte("block-one-payload"),
+		[]byte("second-block"),
+		[]byte("third-block-data-x"),
+		[]byte("fourth"),
+		[]byte("fifth-block-payload-zz"),
+	}
+	// Build the FULL canonical log in memory first.
+	var full bytes.Buffer
+	var offs []uint64
+	off := uint64(0)
+	for _, b := range blocks {
+		offs = append(offs, off)
+		full.Write(b)
+		var tr [trailerSize]byte
+		binary.LittleEndian.PutUint64(tr[:], off)
+		full.Write(tr[:])
+		off += uint64(len(b)) + trailerSize
+	}
+	// Split after block 3: main = canonical prefix, tail = canonical suffix.
+	cut := offs[3] // start of block 4
+	mainPath := filepath.Join(dir, legacyFileName)
+	if err := os.WriteFile(mainPath, full.Bytes()[:cut], 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Main has a sidecar index for its 3 blocks (tail has none — rebuilt).
+	var idx bytes.Buffer
+	for _, o := range offs[:3] {
+		var e [indexEntrySize]byte
+		binary.LittleEndian.PutUint64(e[:], o)
+		idx.Write(e[:])
+	}
+	if err := os.WriteFile(mainPath+indexExtension, idx.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mainPath+".tail", full.Bytes()[cut:], 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := Open(mainPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	if r.headBlock != 5 {
+		t.Fatalf("head = %d, want 5", r.headBlock)
+	}
+	for i, want := range blocks {
+		got, err := r.Block(uint32(i + 1))
+		if err != nil {
+			t.Fatalf("Block(%d): %v", i+1, err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("Block(%d) = %q, want %q", i+1, got, want)
+		}
+	}
+	// The tail's rebuilt index must have been persisted as a sidecar.
+	if _, err := os.Stat(mainPath + ".tail" + indexExtension); err != nil {
+		t.Fatalf("tail index sidecar not persisted: %v", err)
+	}
+}
