@@ -332,11 +332,23 @@ func newApp(cfg flags) (*app, error) {
 	loadedFromSnapshot := false
 	if cfg.loadSnapshot != "" {
 		boot := state.NewSession(stateDB)
+		// Register EVERY typed subsystem the snapshot may carry — the
+		// loader fails if the snapshot has a subsystem the DB hasn't
+		// registered. Must match the replay-side set exactly.
 		objects.EnsureWitnessStore(boot)
 		objects.EnsureWitnessVoteStore(boot)
 		objects.EnsureAccountStore(boot)
 		objects.EnsureCommentStore(boot)
 		objects.EnsureCommentVoteStore(boot)
+		objects.EnsureBlockSummaryStore(boot)
+		objects.EnsureWitnessScheduleStore(boot)
+		objects.EnsureFutureWitnessScheduleStore(boot)
+		objects.EnsureDGPOStore(boot)
+		objects.EnsureCommentCashoutScheduleStore(boot)
+		objects.EnsureLimitOrderStore(boot)
+		objects.EnsureVestingWithdrawalScheduleStore(boot)
+		objects.EnsureTransactionStore(boot)
+		objects.EnsureConvertRequestStore(boot)
 		man, err := snap.Load(stateDB, cfg.loadSnapshot)
 		if err != nil {
 			stateDB.Close()
