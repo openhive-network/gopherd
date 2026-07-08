@@ -5,6 +5,7 @@ import (
 
 	"hived-go/internal/crypto"
 	"hived-go/internal/protocol/auth"
+	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/network"
 	"hived-go/internal/protocol/op"
 	"hived-go/internal/protocol/tx"
@@ -236,15 +237,19 @@ func VerifyAuthorityWithKeys(s *state.Session, signedTx *tx.SignedTransaction, k
 
 	// Mirror C++ transaction_util.cpp:69-73 — pre-HF28 reject any tx
 	// that combines posting-required ops with active- or owner-required
-	// ops (the "mixed_with_posting" verify_authority_problem). HF28 is
-	// set to block 100,000,000 (a placeholder past any current mainnet
-	// height), so this check unconditionally fires today; when HF28
-	// actually activates the guard should be gated on
-	// !hf.Has(HF28). The current `required` map captures bucket-per-
-	// level membership; checking length per bucket is enough.
+	// ops (the "mixed_with_posting" verify_authority_problem). HF28's
+	// HIVE_HARDFORK_1_28_ALLOW_STRICT_AND_MIXED_AUTHORITIES lifts the
+	// restriction (database.cpp:2646 passes the flag into
+	// verify_authority), so the guard is pre-HF28 only.
 	if len(required[AuthorityPosting]) > 0 &&
 		(len(required[AuthorityActive]) > 0 || len(required[AuthorityOwner]) > 0) {
-		return fmt.Errorf("verify_authority: tx mixes posting-required ops with active/owner-required ops")
+		mixedAllowed := false
+		if dgpoRef, ok := objects.GetDGPORef(s); ok {
+			mixedAllowed = hardfork.SetForBlock(dgpoRef.HeadBlockNumber).Has(hardfork.HF28)
+		}
+		if !mixedAllowed {
+			return fmt.Errorf("verify_authority: tx mixes posting-required ops with active/owner-required ops")
+		}
 	}
 
 	fetcher := &sessionAuthFetcher{s: s}

@@ -214,6 +214,15 @@ func updateWitnessSchedule(s *state.Session, blockNum uint32, scratch *witnessSc
 		if fws, err := objects.GetFutureWitnessSchedule(s); err == nil {
 			ws.CopyValuesFrom(&fws)
 		}
+		// HF28 GLOBAL_WITNESS_PROPS (witness_schedule.cpp:147,428): the
+		// dgpo medians are activated at PROMOTION time from the newly-
+		// promoted current schedule, and NO LONGER at compute time inside
+		// update_witness_schedule_4 (which post-HF26 runs on the future
+		// object — so pre-HF28 dgpo saw the future's fresh medians one
+		// round EARLY relative to the schedule that actually validates).
+		if hf.Has(hardfork.HF28) {
+			dgpo.HBDInterestRate = ws.MedianHBDInterestRate
+		}
 		// Recompute future schedule (working copy of ws, then write to
 		// future store).
 		future := ws
@@ -651,7 +660,13 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 	// median hit 0 between blocks 10.77M and 11.42M; Go held 10 while hived
 	// dropped to 0), causing Go to pay HBD interest hived never paid
 	// (+15,417 sat current_hbd_supply / ~34 accounts by block 11.42M).
-	dgpo.HBDInterestRate = ws.MedianHBDInterestRate
+	//
+	// HF28 GLOBAL_WITNESS_PROPS: this compute-time activation is gated
+	// OFF (witness_schedule.cpp:146-147) — dgpo picks the medians up at
+	// promotion time instead (see the HF26 rotation block).
+	if !hf.Has(hardfork.HF28) {
+		dgpo.HBDInterestRate = ws.MedianHBDInterestRate
+	}
 
 	// Persist grown capacities back into the scratch — next round
 	// resets to len=0 but keeps cap.
