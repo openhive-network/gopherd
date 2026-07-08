@@ -335,19 +335,21 @@ func (witnessSetPropertiesEvaluator) Apply(ctx *Context, opArg op.Op) error {
 }
 
 // decodeFCPrice parses an fc::raw-packed price (base + quote, each an
-// asset = int64 amount LE + 8-byte symbol). Returns the decoded price
-// or an error if the buffer is too short.
+// asset = int64 amount LE + symbol). The symbol has TWO on-wire forms:
+// the legacy 8-byte packed string ("STEEM\0\0\0") → 16-byte asset → 32-byte
+// price, and the modern 4-byte NAI form (precision byte + 3 NAI bytes) →
+// 12-byte asset → 24-byte price. A fixed `len < 32` minimum silently
+// rejected every 24-byte compact price: a witness adopting the NAI form
+// (aliento at ts 1762488705) had its hbd_exchange_rate frozen forever,
+// because the storing caller drops the rate when this returns an error.
+// That froze aliento's feed at 115/1000 while the chain moved to ~102,
+// tipping the 84-hour median-of-medians one slot high (103 vs 102) and
+// underpaying every HBD→HIVE conversion — surfacing as the hbds
+// limit_order wall at 102,011,534. asset.ReadPrice already handles both
+// symbol forms via ReadSymbol and errors on genuine truncation, so we
+// trust it rather than pre-guarding a specific length.
 func decodeFCPrice(buf []byte) (asset.Price, error) {
-	if len(buf) < 32 {
-		return asset.Price{}, fmt.Errorf("price: short buffer (%d)", len(buf))
-	}
-	r := fcraw.NewReader(buf)
-	var p asset.Price
-	var err error
-	if p, err = asset.ReadPrice(r); err != nil {
-		return p, err
-	}
-	return p, nil
+	return asset.ReadPrice(fcraw.NewReader(buf))
 }
 
 // decodeFCString parses an fc::raw-packed std::string (varuint length +
