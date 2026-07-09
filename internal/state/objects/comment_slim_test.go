@@ -11,7 +11,7 @@ func TestCommentSlimRoundTrip(t *testing.T) {
 		Author: "alice", Permlink: "post-1",
 		ParentAuthor: "", ParentPermlink: "hive-1",
 		RootAuthor: "alice", RootPermlink: "post-1",
-		Created: 111, LastUpdate: 222, CashoutTime: ^uint32(0),
+		Created: 111, LastUpdate: 222, CashoutTime: 0,
 		Children: 3, ID: 42, MaxAcceptedPayout: 1_000_000_000,
 		PercentHbd: 10000, AllowVotes: true, AllowCurationRewards: true,
 		WasVotedOn: true, WasPaid: true,
@@ -33,7 +33,7 @@ func TestCommentSlimRoundTrip(t *testing.T) {
 	}
 	// Permanent fields preserved.
 	if got.Author != "alice" || got.Permlink != "post-1" || got.RootAuthor != "alice" ||
-		got.RootPermlink != "post-1" || got.Created != 111 || got.CashoutTime != ^uint32(0) ||
+		got.RootPermlink != "post-1" || got.Created != 111 || got.CashoutTime != 0 ||
 		got.Children != 3 || got.ID != 42 || got.MaxAcceptedPayout != 1_000_000_000 ||
 		got.PercentHbd != 10000 || !got.AllowVotes || !got.AllowCurationRewards ||
 		!got.WasVotedOn || !got.WasPaid {

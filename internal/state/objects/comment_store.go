@@ -448,11 +448,13 @@ func (s *CommentStore) Evict(author auth.AccountName, permlink string) bool {
 // commentFrozenForSlim reports whether a comment is fully paid out and
 // frozen — its heavy reward accumulators are dead (hived has removed its
 // comment_cashout_object) and can be dropped from the cold archive.
-// WasPaid AND CashoutTime==max: a pre-HF17 comment between its first and
-// second cashout has WasPaid=true but CashoutTime != max, so it is NOT
-// slimmed (its heavy state is still needed). See commentSlimSentinel.
+// WasPaid AND CashoutTime==0 (gopherd's "frozen" sentinel — see
+// comment_cashout.go: rescheduleTime defaults to 0 after final payout):
+// a pre-HF17 comment between its first and second cashout has WasPaid=true
+// but CashoutTime = blockTime+secondWindow (non-zero), so it is NOT slimmed
+// (its heavy state is still needed). See commentSlimSentinel.
 func commentFrozenForSlim(c *Comment) bool {
-	return c.WasPaid && c.CashoutTime == ^uint32(0)
+	return c.WasPaid && c.CashoutTime == 0
 }
 
 func (s *CommentStore) spillToCold(c *Comment) {
