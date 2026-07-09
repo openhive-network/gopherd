@@ -119,6 +119,21 @@ func (s *signState) satisfies(a *auth.Authority, level AuthorityLevel, depth int
 		subLevel = AuthorityActive
 	}
 	for _, aa := range a.AccountAuths {
+		// Mirror hive sign_state.hpp:216 — at the recursion limit, account_auths
+		// are NOT followed AND NOT counted (the depth check precedes the
+		// account_auth_count bump). gopherd previously incremented
+		// accountAuthsFollowed and recursed one level deeper before the depth
+		// guard in checkAuthority rejected it, so the depth-(max+1) edges that
+		// hived skips were still counted. On a deeply-delegated authority those
+		// spurious counts blow past HIVE_MAX_SIG_CHECK_ACCOUNTS and spuriously
+		// fail a valid signature: block 107,990,471 tx 18 (a superslayer0040
+		// vote signed by rafiki.vote's posting key — rafiki.vote is the 12th of
+		// 16 posting account_auths, and earlier apps like cryptobrewmaster carry
+		// ~17 sub-auths each, so the pre-fix count exceeded 125 before reaching
+		// rafiki.vote → "missing posting authority").
+		if depth >= maxSigCheckDepth {
+			continue
+		}
 		// HIVE_MAX_SIG_CHECK_ACCOUNTS — cumulative cap. A pathological
 		// graph with >125 account_auths short-circuits as unsatisfied.
 		s.accountAuthsFollowed++
