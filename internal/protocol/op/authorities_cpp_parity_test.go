@@ -101,8 +101,16 @@ func TestAccountUpdateAuthorities(t *testing.T) {
 }
 
 func TestAccountUpdate2Authorities(t *testing.T) {
-	op := AccountUpdate2{Account: "alice"}
-	wantAuths(t, []Operation{op}, nil, []string{"alice"}, nil)
+	// hive_operations.hpp:88-95 exact rule.
+	// Only posting_json_metadata / nothing → POSTING.
+	wantAuths(t, []Operation{AccountUpdate2{Account: "alice", PostingJSONMetadata: "{}"}}, nil, nil, []string{"alice"})
+	wantAuths(t, []Operation{AccountUpdate2{Account: "alice"}}, nil, nil, []string{"alice"})
+	// json_metadata set → ACTIVE.
+	wantAuths(t, []Operation{AccountUpdate2{Account: "alice", JSONMetadata: "{}"}}, nil, []string{"alice"}, nil)
+	// posting/active/memo_key set → ACTIVE.
+	wantAuths(t, []Operation{AccountUpdate2{Account: "alice", Posting: &auth.Authority{}}}, nil, []string{"alice"}, nil)
+	// owner set → OWNER.
+	wantAuths(t, []Operation{AccountUpdate2{Account: "alice", Owner: &auth.Authority{}}}, []string{"alice"}, nil, nil)
 }
 
 // ---- comment ----------------------------------------------------------

@@ -100,16 +100,24 @@ func RequiredAuthorities(signedTx *tx.SignedTransaction) map[AuthorityLevel]map[
 				add(AuthorityActive, string(au.Account))
 			}
 		case op.TagAccountUpdate2:
+			// Mirror hived account_update2_operation exactly
+			// (hive_operations.hpp:88-95):
+			//   owner   iff owner set
+			//   active  iff !owner && (active||posting||memo_key||json_metadata)
+			//   posting iff none of the above (only posting_json_metadata /
+			//           extensions) — a posting key alone signs it.
+			// depressed-dev's block 107,981,294 tx updates only
+			// posting_json_metadata → posting authority; demanding active
+			// (the old conservative default) rejected the valid posting
+			// signature and stalled live P2P sync.
 			au := o.AsAccountUpdate2()
-			if au.Owner != nil {
+			switch {
+			case au.Owner != nil:
 				add(AuthorityOwner, string(au.Account))
-			} else {
-				// account_update2 with no owner change: posting auths
-				// can sign if only posting/json_metadata is updated
-				// (hive_evaluator_account.cpp:451+). Defaulting to
-				// active is conservative; tighten if a real block
-				// uses the posting-only path.
+			case au.Active != nil || au.Posting != nil || au.MemoKey != nil || len(au.JSONMetadata) > 0:
 				add(AuthorityActive, string(au.Account))
+			default:
+				add(AuthorityPosting, string(au.Account))
 			}
 
 		// Owner-only ops where the required authority is a STATE LOOKUP
