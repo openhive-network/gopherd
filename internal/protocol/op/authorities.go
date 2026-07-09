@@ -306,11 +306,18 @@ func (o SetWithdrawVestingRoute) RequiredAuthorities(dst []AuthorityRequirement)
 	return append(dst, AuthorityRequirement{Account: o.FromAccount, Level: AuthActive})
 }
 
-// AccountUpdate2 — same authority semantics as account_update: active
-// for non-owner-rotation, owner when owner is touched. We require
-// active by default; live-sync layer adds owner if op.Owner is set.
+// AccountUpdate2 — exact hived rule (hive_operations.hpp:88-95): owner
+// iff owner set; active iff active/posting/memo_key/json_metadata set;
+// posting iff ONLY posting_json_metadata/extensions (a posting key signs).
 func (o AccountUpdate2) RequiredAuthorities(dst []AuthorityRequirement) []AuthorityRequirement {
-	return append(dst, AuthorityRequirement{Account: o.Account, Level: AuthActive})
+	switch {
+	case o.Owner != nil:
+		return append(dst, AuthorityRequirement{Account: o.Account, Level: AuthOwner})
+	case o.Active != nil || o.Posting != nil || o.MemoKey != nil || len(o.JSONMetadata) > 0:
+		return append(dst, AuthorityRequirement{Account: o.Account, Level: AuthActive})
+	default:
+		return append(dst, AuthorityRequirement{Account: o.Account, Level: AuthPosting})
+	}
 }
 
 // AccountCreateWithDelegation — same as account_create.
