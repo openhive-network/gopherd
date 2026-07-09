@@ -124,6 +124,21 @@ func (d *Delegate) markCompressedSeen(id block.ID) bool {
 	return false
 }
 
+// unmarkCompressedSeen removes id from the dedup set so a re-delivery is
+// re-processed rather than short-circuited as a duplicate. Called when a
+// compressed block was marked seen but then DROPPED before reaching the apply
+// queue (queue-full back-pressure): without this the block is deduped on every
+// retry and never enqueued, wedging catch-up at the tip once the queue that
+// caused the drop has drained (blocks 542-545 seen, head stuck, 0 in-flight).
+// The stale FIFO entry is left in place — harmless: a later eviction deleting
+// an already-re-added id at worst forces one extra re-decompress, and applyLoop
+// dedups by block_num, so correctness is unaffected.
+func (d *Delegate) unmarkCompressedSeen(id block.ID) {
+	d.recentCompMu.Lock()
+	delete(d.recentCompSeen, id)
+	d.recentCompMu.Unlock()
+}
+
 // blockIDFromRaw derives the canonical 20-byte block_id from a freshly
 // decompressed signed_block byte sequence. Mirrors gossip's helper but
 // is duplicated here so the sync package doesn't depend on gossip.

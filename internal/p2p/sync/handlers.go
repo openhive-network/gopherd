@@ -619,6 +619,13 @@ func (d *Delegate) handleBlockBytes(p *node.Peer, signedBlockBytes []byte, bid b
 			delete(st.known, bid)
 			st.mu.Unlock()
 		}
+		// Un-mark the compressed-dedup ring too: this block was recorded as
+		// "seen" by handleCompressedBlock BEFORE it reached us, so without this
+		// the re-fetch we just re-armed (via st.known delete) would be
+		// short-circuited as a duplicate and never re-enqueued — wedging the
+		// tip once the queue drains. (No-op for the uncompressed BlockMessage
+		// path, which never populates recentCompSeen.)
+		d.unmarkCompressedSeen(bid)
 		d.logf("apply queue full (%d/%d), dropping block %d",
 			d.QueueDepth(), d.QueueCapacity(), job.blockNum)
 	}
