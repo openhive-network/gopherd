@@ -307,8 +307,125 @@ func AppendComment(dst []byte, c *Comment) []byte {
 	return dst
 }
 
+// commentSlimSentinel marks a slimmed cold record: a fully-paid, frozen
+// comment whose heavy reward accumulators (net/abs/vote rshares, vote
+// weight/count, beneficiaries, children_abs_rshares, max_cashout_time,
+// reward_weight, last_payout) have been dropped. hived removes the
+// comment_cashout_object at payout (HF19+); a frozen comment's heavy
+// fields are never read again post-HF17 (replies read only permanent
+// linking fields, votes on paid comments are no-ops, cashout only
+// touches live comments), so dropping them is behaviour-preserving and
+// shrinks the archive ~2-3x (plus the whole Beneficiaries slice).
+//
+// The full format begins with varuint(len(Author)) — author names are
+// 3-16 chars, so the first byte is never 0xFF, making it an unambiguous
+// slim marker. A slimmed record decodes with heavy fields = zero-value.
+const commentSlimSentinel = 0xFF
+
+// AppendCommentSlim writes the permanent-only form of a frozen comment.
+func AppendCommentSlim(dst []byte, c *Comment) []byte {
+	dst = append(dst, commentSlimSentinel)
+	dst = fcraw.AppendVarUint(dst, uint32(len(c.Author)))
+	dst = append(dst, c.Author...)
+	dst = fcraw.AppendVarUint(dst, uint32(len(c.Permlink)))
+	dst = append(dst, c.Permlink...)
+	dst = fcraw.AppendVarUint(dst, uint32(len(c.ParentAuthor)))
+	dst = append(dst, c.ParentAuthor...)
+	dst = fcraw.AppendVarUint(dst, uint32(len(c.ParentPermlink)))
+	dst = append(dst, c.ParentPermlink...)
+	dst = fcraw.AppendVarUint(dst, uint32(len(c.RootAuthor)))
+	dst = append(dst, c.RootAuthor...)
+	dst = fcraw.AppendVarUint(dst, uint32(len(c.RootPermlink)))
+	dst = append(dst, c.RootPermlink...)
+	dst = appendU32LE(dst, c.Created)
+	dst = appendU32LE(dst, c.LastUpdate)
+	dst = appendU32LE(dst, c.CashoutTime)
+	dst = appendU32LE(dst, c.Children)
+	dst = appendU64LE(dst, c.ID)
+	dst = appendI64LE(dst, c.MaxAcceptedPayout)
+	dst = append(dst, byte(c.PercentHbd), byte(c.PercentHbd>>8))
+	var flags byte
+	if c.AllowVotes {
+		flags |= 1
+	}
+	if c.AllowCurationRewards {
+		flags |= 2
+	}
+	if c.WasVotedOn {
+		flags |= 4
+	}
+	if c.WasPaid {
+		flags |= 8
+	}
+	dst = append(dst, flags)
+	return dst
+}
+
+func readCommentSlim(src []byte) (Comment, error) {
+	r := fcraw.NewReader(src[1:]) // skip sentinel
+	var c Comment
+	var err error
+	if c.Author, err = r.ReadString(); err != nil {
+		return c, fmt.Errorf("slim.author: %w", err)
+	}
+	if c.Permlink, err = r.ReadString(); err != nil {
+		return c, fmt.Errorf("slim.permlink: %w", err)
+	}
+	if c.ParentAuthor, err = r.ReadString(); err != nil {
+		return c, fmt.Errorf("slim.parent_author: %w", err)
+	}
+	if c.ParentPermlink, err = r.ReadString(); err != nil {
+		return c, fmt.Errorf("slim.parent_permlink: %w", err)
+	}
+	if c.RootAuthor, err = r.ReadString(); err != nil {
+		return c, fmt.Errorf("slim.root_author: %w", err)
+	}
+	if c.RootPermlink, err = r.ReadString(); err != nil {
+		return c, fmt.Errorf("slim.root_permlink: %w", err)
+	}
+	if c.Created, err = r.ReadUint32(); err != nil {
+		return c, err
+	}
+	if c.LastUpdate, err = r.ReadUint32(); err != nil {
+		return c, err
+	}
+	if c.CashoutTime, err = r.ReadUint32(); err != nil {
+		return c, err
+	}
+	if c.Children, err = r.ReadUint32(); err != nil {
+		return c, err
+	}
+	if c.ID, err = r.ReadUint64(); err != nil {
+		return c, err
+	}
+	if c.MaxAcceptedPayout, err = r.ReadInt64(); err != nil {
+		return c, err
+	}
+	lo, err := r.ReadByte()
+	if err != nil {
+		return c, err
+	}
+	hi, err := r.ReadByte()
+	if err != nil {
+		return c, err
+	}
+	c.PercentHbd = uint16(lo) | uint16(hi)<<8
+	flags, err := r.ReadByte()
+	if err != nil {
+		return c, err
+	}
+	c.AllowVotes = flags&1 != 0
+	c.AllowCurationRewards = flags&2 != 0
+	c.WasVotedOn = flags&4 != 0
+	c.WasPaid = flags&8 != 0
+	return c, nil
+}
+
 // ReadComment decodes a Comment from src.
 func ReadComment(src []byte) (Comment, error) {
+	if len(src) > 0 && src[0] == commentSlimSentinel {
+		return readCommentSlim(src)
+	}
 	r := fcraw.NewReader(src)
 	var c Comment
 	var err error
@@ -466,6 +583,36 @@ func ReadComment(src []byte) (Comment, error) {
 // Kept next to AppendComment/ReadComment: any schema change there must be
 // mirrored here (the layout offsets below are AppendComment's, verbatim).
 func peekCommentSpillRouting(src []byte) (author, permlink, rootAuthor, rootPermlink string, wasPaid, ok bool) {
+	if len(src) > 0 && src[0] == commentSlimSentinel {
+		// Slim record: only fully-paid frozen comments are slimmed, so
+		// wasPaid is always true (→ routed cold). Layout after sentinel:
+		// Author, Permlink, ParentAuthor, ParentPermlink, RootAuthor,
+		// RootPermlink, then fixed ints (unneeded for routing).
+		r := fcraw.NewReader(src[1:])
+		var err error
+		if author, err = r.ReadStringAlias(); err != nil {
+			return "", "", "", "", false, false
+		}
+		if permlink, err = r.ReadStringAlias(); err != nil {
+			return "", "", "", "", false, false
+		}
+		for i := 0; i < 2; i++ { // skip ParentAuthor, ParentPermlink
+			var n uint32
+			if n, err = r.ReadVarUint(); err != nil || r.Skip(int(n)) != nil {
+				return "", "", "", "", false, false
+			}
+		}
+		if rootAuthor, err = r.ReadStringAlias(); err != nil {
+			return "", "", "", "", false, false
+		}
+		if rootPermlink, err = r.ReadStringAlias(); err != nil {
+			return "", "", "", "", false, false
+		}
+		if rootAuthor == "" {
+			rootAuthor, rootPermlink = author, permlink
+		}
+		return author, permlink, rootAuthor, rootPermlink, true, true
+	}
 	r := fcraw.NewReader(src)
 	var err error
 	if author, err = r.ReadStringAlias(); err != nil {

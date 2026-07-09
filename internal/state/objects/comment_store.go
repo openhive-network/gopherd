@@ -4,12 +4,20 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strings"
 
 	"hived-go/internal/protocol/auth"
 	"hived-go/internal/state"
 )
+
+// slimColdOnLoad (GHIVE_SLIM_COLD=1): decode every cold-bound record on
+// snapshot load and route it through spillToCold, which drops the heavy
+// reward accumulators of frozen comments. Trades the verbatim fast path
+// for a much smaller cold tier — required so a full-chain node warm-starts
+// without the mmap OOM. Replays leave it unset to keep the fast load.
+var slimColdOnLoad = os.Getenv("GHIVE_SLIM_COLD") == "1"
 
 // CommentStore is the in-memory typed container for the Comment table.
 // Replaces the K/V serde path with a primary map + per-root index.
@@ -437,9 +445,23 @@ func (s *CommentStore) Evict(author auth.AccountName, permlink string) bool {
 // millions of comments) without OOMing — frozen/paid comments go straight to
 // disk instead of the resident map. Mirrors Evict's cold-write half but skips
 // the resident-map removal (the comment was never inserted).
+// commentFrozenForSlim reports whether a comment is fully paid out and
+// frozen — its heavy reward accumulators are dead (hived has removed its
+// comment_cashout_object) and can be dropped from the cold archive.
+// WasPaid AND CashoutTime==max: a pre-HF17 comment between its first and
+// second cashout has WasPaid=true but CashoutTime != max, so it is NOT
+// slimmed (its heavy state is still needed). See commentSlimSentinel.
+func commentFrozenForSlim(c *Comment) bool {
+	return c.WasPaid && c.CashoutTime == ^uint32(0)
+}
+
 func (s *CommentStore) spillToCold(c *Comment) {
 	rootKey := s.rootKeyOf(c)
-	s.scratchBlob = AppendComment(s.scratchBlob[:0], c)
+	if commentFrozenForSlim(c) {
+		s.scratchBlob = AppendCommentSlim(s.scratchBlob[:0], c)
+	} else {
+		s.scratchBlob = AppendComment(s.scratchBlob[:0], c)
+	}
 	s.scratchKey = appendColdPrimaryKey(s.scratchKey[:0], c.Author, c.Permlink)
 	s.cold.bset(s.scratchKey, s.scratchBlob)
 	if s.coldByRootEnabled {
@@ -1198,10 +1220,14 @@ func (s *CommentStore) UnmarshalSnapshot(r io.Reader) error {
 		if _, err := io.ReadFull(br, rec); err != nil {
 			return fmt.Errorf("comment_store: read rec[%d]: %w", i, err)
 		}
-		if spill {
+		if spill && !slimColdOnLoad {
 			// Cold-bound records go to the tier VERBATIM (the snapshot record
 			// IS the cold blob format) — no decode, no re-encode, no allocs.
 			// The peek's strings alias rec; spillToColdRaw copies what it keeps.
+			// Skipped under GHIVE_SLIM_COLD: there we decode every paid record
+			// and route it through spillToCold, which SLIMS frozen comments
+			// (drops the heavy accumulators) — trading the verbatim fast path
+			// for a much smaller cold tier + mmap (the full-chain node boot).
 			author, permlink, ra, rp, wasPaid, ok := peekCommentSpillRouting(rec)
 			if ok && wasPaid {
 				s.spillToColdRaw(rec, author, permlink, ra, rp)
