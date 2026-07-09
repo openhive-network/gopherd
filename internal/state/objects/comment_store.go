@@ -19,6 +19,18 @@ import (
 // without the mmap OOM. Replays leave it unset to keep the fast load.
 var slimColdOnLoad = os.Getenv("GHIVE_SLIM_COLD") == "1"
 
+// coldReuseOnLoad (GHIVE_COLD_REUSE=1): the attached cold tier is ALREADY
+// populated with the correct paid/frozen records (e.g. a replay-built pebble
+// cold dir reused across a warm-start), so a self-contained snapshot's
+// cold-bound records must NOT be re-written — that bulk rewrite is what
+// explodes a from-snapshot pebble load into thousands of tiny L0 SSTs. Under
+// this flag the load READS each cold-bound record from the snapshot (to keep
+// counts + bloom + coldTotal bookkeeping exact) but SKIPS the s.cold.bset
+// write, trusting the pre-populated tier. The tier and snapshot MUST come from
+// the same block/run (identical partition of resident vs cold, identical slim
+// blob format) or lookups return stale/missing records.
+var coldReuseOnLoad = os.Getenv("GHIVE_COLD_REUSE") == "1"
+
 // CommentStore is the in-memory typed container for the Comment table.
 // Replaces the K/V serde path with a primary map + per-root index.
 //
@@ -505,6 +517,26 @@ func (s *CommentStore) spillToColdRaw(blob []byte, author, permlink, rootAuthor,
 	if s.coldByRootEnabled {
 		// The map key must own its bytes — root* may alias the caller's
 		// scratch buffer (commentPK stores string headers, not copies).
+		s.coldRoot[newCommentPK(auth.AccountName(strings.Clone(rootAuthor)), strings.Clone(rootPermlink))]++
+	}
+}
+
+// spillToColdReuse is spillToColdRaw WITHOUT the cold-tier write: the record is
+// assumed to already live in the pre-populated cold tier (GHIVE_COLD_REUSE), so
+// only the resident-side bookkeeping (bloom membership + coldTotal, and coldRoot
+// when the by-root index is on) is rebuilt. Skipping s.cold.bset is what avoids
+// the from-snapshot L0-SST explosion. Mirrors spillToColdRaw's bookkeeping half
+// exactly so a RAM miss still probes the tier for this key.
+func (s *CommentStore) spillToColdReuse(author, permlink, rootAuthor, rootPermlink string) {
+	if rootAuthor == "" {
+		rootAuthor, rootPermlink = author, permlink
+	}
+	if s.bloom != nil {
+		s.scratchKey2 = appendCommentKeyRaw(s.scratchKey2[:0], auth.AccountName(author), permlink)
+		s.bloom.add(s.scratchKey2)
+	}
+	s.coldTotal++
+	if s.coldByRootEnabled {
 		s.coldRoot[newCommentPK(auth.AccountName(strings.Clone(rootAuthor)), strings.Clone(rootPermlink))]++
 	}
 }
@@ -1232,7 +1264,13 @@ func (s *CommentStore) UnmarshalSnapshot(r io.Reader) error {
 			// for a much smaller cold tier + mmap (the full-chain node boot).
 			author, permlink, ra, rp, wasPaid, ok := peekCommentSpillRouting(rec)
 			if ok && wasPaid {
-				s.spillToColdRaw(rec, author, permlink, ra, rp)
+				if coldReuseOnLoad {
+					// Tier already holds this record (warm reuse) — skip the
+					// write, keep the bookkeeping so lookups still probe cold.
+					s.spillToColdReuse(author, permlink, ra, rp)
+				} else {
+					s.spillToColdRaw(rec, author, permlink, ra, rp)
+				}
 				continue
 			}
 		}
@@ -1241,7 +1279,12 @@ func (s *CommentStore) UnmarshalSnapshot(r io.Reader) error {
 			return fmt.Errorf("comment_store: decode rec[%d]: %w", i, err)
 		}
 		if spill && c.WasPaid {
-			s.spillToCold(&c)
+			if coldReuseOnLoad {
+				// Warm reuse: tier already holds it — bookkeeping only, no write.
+				s.spillToColdReuse(string(c.Author), c.Permlink, string(c.RootAuthor), c.RootPermlink)
+			} else {
+				s.spillToCold(&c)
+			}
 			continue
 		}
 		// Resident (unpaid working set, or all-RAM when no cold tier).
