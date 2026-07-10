@@ -207,6 +207,13 @@ type flags struct {
 	// maxConcurrentDials caps in-flight dial attempts. 0 = p2pnode
 	// default (24).
 	maxConcurrentDials int
+	// p2pServe enables ADVERTISING our inventory + SERVING blocks to peers.
+	// DEFAULT false = passive fetch-only leecher (download only, never push).
+	// A safety default: an unfinished/slow node that advertises but can't
+	// serve promptly gets peers to drop it and can churn the network.
+	p2pServe bool
+	// logWorkTiming enables the periodic per-block apply "work" timing line.
+	logWorkTiming bool
 	// logAdaptiveBatch, when set, asks the sync delegate to log one
 	// trace line per per-peer FetchBatch decision. Useful for tuning
 	// the adaptive sizing curve; off by default to avoid noise.
@@ -238,6 +245,8 @@ func parseNodeFlags(args []string) flags {
 	fs.IntVar(&f.maxOutboundPeers, "max-outbound-peers", 0, "max active outbound P2P peers (0 = default 32)")
 	fs.IntVar(&f.maxConcurrentDials, "max-concurrent-dials", 0, "max in-flight dial attempts (0 = default 24)")
 	fs.BoolVar(&f.logAdaptiveBatch, "log-adaptive-batch", false, "log one trace per per-peer FetchBatch decision (peer X batch=N rate=Y bps)")
+	fs.BoolVar(&f.p2pServe, "p2p-serve", false, "advertise inventory + serve blocks to peers (default false = passive fetch-only; enable ONLY for a known-correct node that keeps up in real time)")
+	fs.BoolVar(&f.logWorkTiming, "log-work-timing", false, "log periodic per-block apply work-timing (avg/p50/p99/max ms) — comparable to hived's block-processing timing")
 	fs.IntVar(&f.residentCap, "comment-resident-cap", 0, "if >0, cap RAM-resident comments to this many; frozen comments + votes spill to an on-disk cold tier (required for a full-chain node — otherwise the whole comment corpus is resident and OOMs)")
 	fs.StringVar(&f.coldDir, "cold-dir", "", "directory for the cold tier (used when --comment-resident-cap>0). With --cold-backend=persist it must be stable across restarts")
 	fs.StringVar(&f.coldBackend, "cold-backend", "", "cold-tier backend: \"\"/mmap|pebble|persist")
@@ -666,6 +675,8 @@ func (a *app) run() error {
 	}, a.chain, nil)
 	syncDel := p2psync.New(p2psync.Config{
 		LogAdaptiveBatch: a.cfg.logAdaptiveBatch,
+		Serve:            a.cfg.p2pServe,
+		LogWorkTiming:    a.cfg.logWorkTiming,
 	}, a.chain)
 	a.p2p.SetDelegate(syncDel)
 	if err := a.p2p.Start(); err != nil {

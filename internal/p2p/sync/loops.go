@@ -1,6 +1,7 @@
 package sync
 
 import (
+	"sort"
 	"time"
 
 	"hived-go/internal/chain"
@@ -8,6 +9,18 @@ import (
 	"hived-go/internal/p2p/proto"
 	"hived-go/internal/protocol/block"
 )
+
+// percentileMs returns the p-th percentile (0-100) of the nanosecond samples,
+// expressed in milliseconds. Sorts a copy so the caller's ring is untouched.
+func percentileMs(samples []int64, p int) float64 {
+	if len(samples) == 0 {
+		return 0
+	}
+	cp := append([]int64(nil), samples...)
+	sort.Slice(cp, func(i, j int) bool { return cp[i] < cp[j] })
+	idx := (p * (len(cp) - 1)) / 100
+	return float64(cp[idx]) / 1e6
+}
 
 // invLoop periodically broadcasts an item_ids_inventory_message to every
 // connected peer listing the IDs of recently-applied blocks. Backs off
@@ -56,6 +69,13 @@ func (d *Delegate) invLoop() {
 // peer. Each peer's known-set acts as a per-peer dedup so we don't keep
 // re-advertising blocks the peer already has.
 func (d *Delegate) broadcastInv() {
+	// Passive (fetch-only) node: never advertise our inventory. Advertising an
+	// item we can't then serve promptly (GC-stalled / wedged) is what gets a
+	// node dropped by peers and can churn the network — a passive node is
+	// structurally incapable of that. See Config.Serve.
+	if !d.cfg.Serve {
+		return
+	}
 	nums := d.chain.RecentBlockNums()
 	if len(nums) == 0 {
 		// Nothing to advertise. Bump the idle counter.
@@ -283,6 +303,13 @@ func (d *Delegate) applyLoop() {
 
 	pending := make(map[uint32]applyJob)
 
+	// Per-block apply "work" timing accumulators (Config.LogWorkTiming). This
+	// loop is the single ApplyBlock caller, so plain locals are race-free.
+	// Summarized + reset on each diag tick.
+	var workCount int
+	var workSumNs, workMaxNs int64
+	workSamples := make([]int64, 0, 8192)
+
 	// Drop the highest-num pending entry to keep the reorder buffer
 	// bounded. Returns the dropped block_num (0 if the map was empty).
 	evictHighest := func() uint32 {
@@ -354,6 +381,10 @@ func (d *Delegate) applyLoop() {
 			// replay carries the block forward unchanged, so we have to
 			// as well. TolerateFailingOps reproduces hived's behavior
 			// at the per-op granularity.
+			var applyStart time.Time
+			if d.cfg.LogWorkTiming {
+				applyStart = time.Now()
+			}
 			if _, err := d.chain.ApplyBlock(job.rawBlock, job.blockNum, chain.ApplyOptions{
 				Sync:                      false,
 				SkipTransactionSignatures: historical,
@@ -366,6 +397,21 @@ func (d *Delegate) applyLoop() {
 				// Drop and continue — gossip / next INV will re-deliver
 				// if the chain is on a recoverable fork.
 				continue
+			}
+			if d.cfg.LogWorkTiming {
+				// Per-block apply "work" time (comparable to hived's block-
+				// processing timing). Accumulated here and summarized on the
+				// diag tick; large p99/max vs a ~few-ms norm flags the node
+				// falling behind (GC pressure, disk, etc.).
+				ns := time.Since(applyStart).Nanoseconds()
+				workCount++
+				workSumNs += ns
+				if ns > workMaxNs {
+					workMaxNs = ns
+				}
+				if len(workSamples) < cap(workSamples) {
+					workSamples = append(workSamples, ns)
+				}
 			}
 			// Update the head hint that handleBlock reads to early-skip
 			// duplicate deliveries. Slight lag (vs HeadBlock()) is OK —
@@ -400,6 +446,19 @@ func (d *Delegate) applyLoop() {
 		case <-d.stopCh:
 			return
 		case <-diag.C:
+			// Per-block apply "work" timing summary (Config.LogWorkTiming).
+			// avg/p50/p99/max over the window — comparable to hived's block-
+			// processing time; a p99/max blowing past the ~3s block interval
+			// means the node can't keep up (GC pressure, disk, cold-tier
+			// thrash) and would advertise-but-not-serve if Serve were on.
+			if d.cfg.LogWorkTiming && workCount > 0 {
+				avgMs := float64(workSumNs) / float64(workCount) / 1e6
+				p50, p99 := percentileMs(workSamples, 50), percentileMs(workSamples, 99)
+				d.logf("WORK apply n=%d avg=%.2fms p50=%.2fms p99=%.2fms max=%.2fms",
+					workCount, avgMs, p50, p99, float64(workMaxNs)/1e6)
+				workCount, workSumNs, workMaxNs = 0, 0, 0
+				workSamples = workSamples[:0]
+			}
 			// Stall diagnostics: if we're sitting on a non-empty reorder
 			// buffer but the immediate next block isn't in it, log what
 			// we're waiting for and the buffered range so a catch-up that

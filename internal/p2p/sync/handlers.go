@@ -196,6 +196,11 @@ func (d *Delegate) handleInv(p *node.Peer, body []byte) {
 // reply with blockchain_item_ids_inventory_message listing the block
 // IDs immediately after the synopsis-implied head, up to MaxBlocksPerInv.
 func (d *Delegate) handleFetchBlockchainItemIDs(p *node.Peer, body []byte) {
+	// Passive (fetch-only) node: never serve our block-id synopsis to peers.
+	// See Config.Serve.
+	if !d.cfg.Serve {
+		return
+	}
 	var msg proto.FetchBlockchainItemIDsMessage
 	if err := msg.Unmarshal(body); err != nil {
 		d.logf("fetch_blockchain_item_ids decode: %v", err)
@@ -397,6 +402,13 @@ func (d *Delegate) handleBlockchainItemIDsInventory(p *node.Peer, body []byte) {
 // hash. Reply with one block_message per known block, or
 // item_not_available per unknown.
 func (d *Delegate) handleFetchItems(p *node.Peer, body []byte) {
+	// Passive (fetch-only) node: never serve blocks to peers. Combined with
+	// broadcastInv's gate, a passive node never advertises AND never answers a
+	// fetch, so it cannot be the "advertised then didn't provide" node that
+	// peers drop. See Config.Serve.
+	if !d.cfg.Serve {
+		return
+	}
 	var msg proto.FetchItemsMessage
 	if err := msg.Unmarshal(body); err != nil {
 		d.logf("fetch_items decode: %v", err)
