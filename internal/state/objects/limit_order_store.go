@@ -302,6 +302,16 @@ func (s *LimitOrderStore) Get(owner auth.AccountName, orderID uint32) (LimitOrde
 	return *lo, true
 }
 
+// RangeOrders calls fn for every open order (unordered). Return false to stop.
+// Read-only; used by the API's get_order_book / get_open_orders.
+func (s *LimitOrderStore) RangeOrders(fn func(*LimitOrder) bool) {
+	for _, lo := range s.primary {
+		if !fn(lo) {
+			return
+		}
+	}
+}
+
 // Has reports whether the order exists.
 func (s *LimitOrderStore) Has(owner auth.AccountName, orderID uint32) bool {
 	_, ok := s.primary[newOrderPK(owner, orderID)]
