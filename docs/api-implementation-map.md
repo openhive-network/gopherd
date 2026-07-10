@@ -104,34 +104,43 @@ Start point: **A** (transport + database_api globals + block_api) — pure expos
 of state we already compute, no new indexes, and immediately useful (block
 explorers / health checks hit these first).
 
-## Implemented status (2026-07-11) — phases A–C core
+## Implemented status (2026-07-11) — phases A–C
 
-Transport DONE (internal/api/jsonrpc): JSON-RPC 2.0 HTTP + batch + legacy `call`
-convention; registry keyed by api.method; named+positional param decoding.
-`--api-endpoint host:port` serves it read-only. All offline-tested.
+Transport DONE (internal/api/jsonrpc): JSON-RPC 2.0 over HTTP + batch + legacy
+`call` convention; registry keyed by api.method; named + positional param
+decoding; `--api-endpoint host:port` serves it read-only (offline-tested).
 
-**28 methods live** across database_api / block_api / condenser_api:
-- Globals: get_dynamic_global_properties, get_version, get_feed_history,
-  get_current_price_feed / get_current_median_history_price, get_witness_schedule,
-  get_active_witnesses, get_reward_funds / get_reward_fund, get_hardfork_properties /
-  get_hardfork_version.
-- Blocks: get_block_header, get_block (FULL operation→JSON expansion — reflection
-  renderer covering all ~50 op types, legacy `["name",{...}]` + modern
-  `{type,value}` forms). Reads the recent-block cache.
-- Accounts: find_accounts / get_accounts (full account object + authorities),
-  get_account_count, lookup_accounts.
-- Witnesses: find_witnesses, get_witness_by_account.
-- Market: get_order_book (HIVE/HBD).
-- Every method exists in both database_api (NAI object assets) and condenser
-  (legacy "X.XXX HIVE" strings, positional args) where applicable.
+**49 methods live** across database_api / block_api / condenser_api — the full
+read surface of A–C that is backed by existing state:
+- Globals/config: get_dynamic_global_properties, get_config, get_chain_properties,
+  get_version, get_feed_history, get_current_price_feed / median, get_witness_schedule,
+  get_active_witnesses, get_reward_funds/fund, get_hardfork_properties/version,
+  get_next_scheduled_hardfork.
+- Blocks: get_block_header, get_block (FULL operation→JSON, all ~50 op types,
+  reflection renderer; legacy + modern forms).
+- Accounts: find_accounts/get_accounts (full object + authorities), get_account_count,
+  lookup_accounts, get_owner_history, get_recovery_request.
+- Witnesses: find_witnesses, get_witness_by_account, get_witness_count,
+  lookup_witness_accounts, get_witnesses_by_vote.
+- Market/DHF/expiring-object list-find: get_order_book, get_open_orders,
+  get_conversion_requests, get_collateralized_conversion_requests,
+  get_vesting_delegations, get_savings_withdraw_from/to, find_recurrent_transfers,
+  get_escrow, list_proposals, find_proposals.
+- Every method in both database_api (NAI assets) and condenser (legacy strings,
+  positional) where applicable.
 
-**Remaining in A–C (follow the same pattern; need small store-iteration helpers):**
-list/find over proposals, conversions, escrows, delegations, savings withdrawals,
-recurrent transfers; get_open_orders; get_witnesses_by_vote / get_witness_count /
-lookup_witness_accounts; get_config (constants table); historical get_block via a
-block_log reader (recent-cache only today).
+**Not done — but each is a Phase D or Phase E dependency, NOT A–C read work:**
+- Need **JSON→operation parsing + mempool** (Phase D): broadcast_transaction(_synchronous),
+  verify_authority, verify_account_authority, get_required_signatures,
+  get_potential_signatures, get_transaction_hex. (The op→JSON renderer exists; the
+  inverse parser + a mempool are the Phase-D build.)
+- Need a **new index subsystem** (Phase E): account_history_api (get_ops_in_block,
+  get_account_history, enum_virtual_ops, get_transaction), account_by_key
+  (get_key_references), market_history (ticker/volume/trades/buckets),
+  transaction_status (is_known_transaction, find_transaction), reputation
+  (get_account_reputations), rc_api, get_active_votes (comment-vote index),
+  list_proposal_votes (proposal-vote index).
 
-**Out of A–C (Phase E, index-backed — each a new subsystem):** account_history_api
-(get_ops_in_block, get_account_history, enum_virtual_ops, get_transaction),
-account_by_key_api, market_history_api, transaction_status_api, reputation_api,
-rc_api. **Broadcast (Phase D):** needs mempool + p2p tx relay.
+So phases A–C (transport + read exposure of existing state + condenser aggregation)
+are substantially complete; the remaining condenser methods are gated on the
+Phase D (broadcast) and Phase E (index) subsystems by design.
