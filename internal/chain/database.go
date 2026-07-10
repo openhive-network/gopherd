@@ -194,6 +194,17 @@ func New(s *state.Database) *Database {
 // State returns the underlying state.Database.
 func (d *Database) State() *state.Database { return d.state }
 
+// WithReadSession runs fn with a fresh read Session while holding applyMu in
+// READ mode, so the read is consistent against the single ApplyBlock writer
+// (which takes applyMu in write mode). Concurrent API reads share the RLock and
+// only read the typed stores, so they don't race each other or the applier.
+// The session sees committed state; on a per-block-commit node that is the head.
+func (d *Database) WithReadSession(fn func(s *state.Session) error) error {
+	d.applyMu.RLock()
+	defer d.applyMu.RUnlock()
+	return fn(state.NewSession(d.state))
+}
+
 // WithApplyLock runs fn while holding the apply write lock. The chain
 // state (Pebble overlay + every typed in-memory store) is guaranteed
 // not to be mutated by ApplyBlock for the duration. Used by the
