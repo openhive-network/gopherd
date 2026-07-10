@@ -142,6 +142,12 @@ type Database struct {
 	// level driver since the per-block Sync flag is meaningless in
 	// batched mode.
 	commitSync bool
+	// reversiblePending holds the identity of the one block applied under
+	// ApplyOptions.Reversible whose writes are still uncommitted (live in the
+	// Session overlay + subsystem undo). nil when no reversible block is
+	// pending. Finalize/UndoReversible clear it. The fork driver reads it to
+	// decide extend-vs-reorg.
+	reversiblePending *reversibleBlock
 
 	// customOpCountByAccount tracks per-account count of custom /
 	// custom_json / custom_binary ops applied in the CURRENT block.
@@ -323,6 +329,16 @@ type ApplyOptions struct {
 	TolerateFailingOps bool
 	// Sync controls whether each block's commit fsyncs.
 	Sync bool
+	// Reversible, when true, leaves the block's writes UNCOMMITTED in the
+	// Session overlay + subsystem undo logs (neither Commit nor SoftCommit
+	// runs), so the block can later be finalized (FinalizeReversible) once it
+	// extends the chain, or rolled back (UndoReversible) on a fork switch.
+	// Requires SkipTxSavepoints=false (the block savepoint + UndoEnabled must
+	// be active so the subsystem undo captures every mutation, including
+	// per-block hooks). At most one reversible block may be pending at a time:
+	// the caller must Finalize or Undo it before applying the next block.
+	// Live tip-follow only — the replay path never sets this.
+	Reversible bool
 	// SoftCommit, when true, finalizes the block via Session.SoftCommit
 	// instead of Session.Commit. The session's overlay accumulates across
 	// blocks and reads in subsequent blocks see the latest writes from
@@ -1142,6 +1158,16 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	//     the size, then fire one real Commit (with fsync per d.commitSync).
 	//   - else: legacy per-block Commit using opts.Sync.
 	switch {
+	case opts.Reversible:
+		// Leave the block UNCOMMITTED: overlay + subsystem undo logs + the
+		// block savepoint stay live so FinalizeReversible (Commit) or
+		// UndoReversible (Session.Undo) can act on it. Record the pending
+		// block identity for the fork driver.
+		d.reversiblePending = &reversibleBlock{
+			num:  blockNum,
+			id:   dgpo.HeadBlockID,
+			prev: hdr.Previous,
+		}
 	case opts.SoftCommit:
 		session.SoftCommit()
 	case d.commitBatchSize > 1:
@@ -1190,6 +1216,61 @@ func (d *Database) FlushBatch(sync bool) error {
 		return nil
 	}
 	return d.session.Commit(sync)
+}
+
+// reversibleBlock identifies a block applied under ApplyOptions.Reversible
+// whose writes are still uncommitted (in the Session overlay + subsystem undo).
+type reversibleBlock struct {
+	num  uint32
+	id   block.ID
+	prev block.ID
+}
+
+// ReversiblePending returns the identity of the currently-pending reversible
+// block (num, id, prev) and whether one exists. The fork driver uses this to
+// decide, on the next inbound block, whether it extends the pending head
+// (Finalize the pending, then apply) or forks off it / its parent (Undo, then
+// apply the competing branch).
+func (d *Database) ReversiblePending() (num uint32, id, prev block.ID, ok bool) {
+	d.applyMu.RLock()
+	defer d.applyMu.RUnlock()
+	if d.reversiblePending == nil {
+		return 0, block.ID{}, block.ID{}, false
+	}
+	r := d.reversiblePending
+	return r.num, r.id, r.prev, true
+}
+
+// FinalizeReversible commits the pending reversible block's writes to the
+// backend (flushing the overlay + dropping the subsystem undo), making it
+// irreversible from the node's perspective. Called once the block is confirmed
+// to extend the node's chain (the next block builds on it). No-op if nothing is
+// pending. sync controls fsync.
+func (d *Database) FinalizeReversible(sync bool) error {
+	d.applyMu.Lock()
+	defer d.applyMu.Unlock()
+	if d.reversiblePending == nil || d.session == nil {
+		return nil
+	}
+	if err := d.session.Commit(sync); err != nil {
+		return err
+	}
+	d.reversiblePending = nil
+	return nil
+}
+
+// UndoReversible rolls the pending reversible block's writes back out of the
+// Session overlay + subsystem undo logs, restoring state to the last committed
+// (irreversible) block. Used by the fork driver when switching to a competing
+// branch. No-op if nothing is pending.
+func (d *Database) UndoReversible() {
+	d.applyMu.Lock()
+	defer d.applyMu.Unlock()
+	if d.reversiblePending == nil || d.session == nil {
+		return
+	}
+	d.session.Undo()
+	d.reversiblePending = nil
 }
 
 // HeadBlock returns the current head block number per DGPO. Returns 0
