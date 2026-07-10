@@ -19,6 +19,8 @@ func (s *Server) registerDatabaseAPI() {
 	s.reg.Register("database_api.get_active_witnesses", s.mGetActiveWitnesses())
 	s.reg.Register("database_api.get_reward_funds", s.mGetRewardFunds(false))
 	s.reg.Register("database_api.get_hardfork_properties", s.mGetHardforkProps())
+	s.reg.Register("database_api.find_accounts", s.mFindAccounts(false))
+	s.reg.Register("database_api.find_witnesses", s.mFindWitnesses(false))
 }
 
 // dgpoResult builds get_dynamic_global_properties. legacy=true → "1.234 HIVE"

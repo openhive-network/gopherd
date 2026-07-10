@@ -8,8 +8,11 @@ import (
 
 	"hived-go/internal/api/jsonrpc"
 	"hived-go/internal/chain"
+	"hived-go/internal/protocol/asset"
+	"hived-go/internal/protocol/auth"
 	"hived-go/internal/state"
 	"hived-go/internal/state/genesis"
+	"hived-go/internal/state/objects"
 )
 
 // call runs one JSON-RPC request through the server and returns the decoded
@@ -83,6 +86,39 @@ func TestDatabaseAPIGlobals(t *testing.T) {
 	// get_feed_history + get_active_witnesses just need to not error.
 	call(t, srv, "database_api.get_feed_history", "{}")
 	call(t, srv, "condenser_api.get_active_witnesses", "[]")
+
+	// Accounts: seed alice with an authority, then read via both conventions.
+	{
+		sess := state.NewSession(db)
+		objects.PutAccount(sess, &objects.Account{Name: "alice", Balance: 1234, HBDBalance: 5, VestingShares: 999})
+		objects.PutAccountAuthority(sess, &objects.AccountAuthority{
+			Account: "alice",
+			Owner:   auth.Authority{WeightThreshold: 1},
+			Active:  auth.Authority{WeightThreshold: 1},
+			Posting: auth.Authority{WeightThreshold: 1},
+		})
+		if err := sess.Commit(false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// condenser get_accounts (positional, legacy assets, bare array).
+	ga := call(t, srv, "condenser_api.get_accounts", `[["alice","ghost"]]`)
+	arr, _ := ga.Result.([]map[string]interface{})
+	if len(arr) != 1 || arr[0]["name"] != "alice" {
+		t.Fatalf("get_accounts should return exactly alice, got %#v", ga.Result)
+	}
+	if bal, _ := arr[0]["balance"].(legacyAsset); asset.Asset(bal).String() != "1.234 HIVE" {
+		t.Fatalf("alice legacy balance = %#v want 1.234 HIVE", arr[0]["balance"])
+	}
+	// database_api find_accounts (named, NAI assets, {accounts:[...]}).
+	fa := resultMap(t, call(t, srv, "database_api.find_accounts", `{"accounts":["alice"]}`))
+	accts, _ := fa["accounts"].([]interface{})
+	if len(accts) != 1 {
+		t.Fatalf("find_accounts should return 1 account, got %#v", fa["accounts"])
+	}
+	if a0, _ := accts[0].(map[string]interface{}); a0["name"] != "alice" {
+		t.Fatalf("find_accounts[0] name = %v want alice", accts[0])
+	}
 
 	// Unknown method → method-not-found error.
 	bad := srv.Registry().Handle(context.Background(),
