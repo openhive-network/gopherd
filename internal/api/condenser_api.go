@@ -21,6 +21,8 @@ func (s *Server) registerCondenserAPI() {
 	s.reg.Register("condenser_api.get_witness_schedule", s.mGetWitnessSchedule())
 	s.reg.Register("condenser_api.get_reward_fund", s.mCondenserGetRewardFund())
 	s.reg.Register("condenser_api.get_hardfork_version", s.mCondenserHardforkVersion())
+	s.reg.Register("condenser_api.get_accounts", s.mGetAccounts(true))
+	s.reg.Register("condenser_api.get_witness_by_account", s.mGetWitnessByAccount(true))
 }
 
 // mCondenserGetRewardFund: condenser positional get_reward_fund(["post"]) →
