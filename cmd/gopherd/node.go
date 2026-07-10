@@ -32,6 +32,7 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -42,6 +43,7 @@ import (
 	"syscall"
 	"time"
 
+	"hived-go/internal/api"
 	"hived-go/internal/blocklog"
 	"hived-go/internal/chain"
 	p2pnode "hived-go/internal/p2p/node"
@@ -218,6 +220,10 @@ type flags struct {
 	// (chain.PushLiveBlock) so the node can ride the live head through depth-1
 	// tip micro-forks. DEFAULT false = strictly-linear apply (replay/catch-up).
 	forkSwitching bool
+	// apiEndpoint, when set (host:port), serves the read-only JSON-RPC API over
+	// HTTP. Empty = off. Bind to loopback (127.0.0.1:PORT) unless deliberately
+	// exposing it; it is read-only and unrelated to the p2p port.
+	apiEndpoint string
 	// logAdaptiveBatch, when set, asks the sync delegate to log one
 	// trace line per per-peer FetchBatch decision. Useful for tuning
 	// the adaptive sizing curve; off by default to avoid noise.
@@ -252,6 +258,7 @@ func parseNodeFlags(args []string) flags {
 	fs.BoolVar(&f.p2pServe, "p2p-serve", false, "advertise inventory + serve blocks to peers (default false = passive fetch-only; enable ONLY for a known-correct node that keeps up in real time)")
 	fs.BoolVar(&f.logWorkTiming, "log-work-timing", false, "log periodic per-block apply work-timing (avg/p50/p99/max ms) — comparable to hived's block-processing timing")
 	fs.BoolVar(&f.forkSwitching, "fork-switching", false, "route inbound blocks through the fork-choice engine (depth-1 tip reorg) instead of strictly-linear apply (default off)")
+	fs.StringVar(&f.apiEndpoint, "api-endpoint", "", "serve the read-only JSON-RPC API over HTTP at host:port (e.g. 127.0.0.1:8090); empty = off")
 	fs.IntVar(&f.residentCap, "comment-resident-cap", 0, "if >0, cap RAM-resident comments to this many; frozen comments + votes spill to an on-disk cold tier (required for a full-chain node — otherwise the whole comment corpus is resident and OOMs)")
 	fs.StringVar(&f.coldDir, "cold-dir", "", "directory for the cold tier (used when --comment-resident-cap>0). With --cold-backend=persist it must be stable across restarts")
 	fs.StringVar(&f.coldBackend, "cold-backend", "", "cold-tier backend: \"\"/mmap|pebble|persist")
@@ -652,6 +659,20 @@ func (a *app) run() error {
 		seeds = append(seeds, a.cfg.extraSeeds)
 	}
 	a.logger.printf("starting (seeds=%d, listen=%q, target=%d)", len(seeds), a.cfg.listenEndpoint, a.cfg.targetBlock)
+
+	// Read-only JSON-RPC API (opt-in). Serves committed state; independent of
+	// the p2p layer. Bind loopback unless deliberately exposed.
+	if a.cfg.apiEndpoint != "" {
+		apiSrv := api.New(a.chain)
+		httpSrv := &http.Server{Addr: a.cfg.apiEndpoint, Handler: apiSrv.Registry().HTTPHandler()}
+		go func() {
+			a.logger.printf("api: serving JSON-RPC on http://%s (%d methods)", a.cfg.apiEndpoint, len(apiSrv.Registry().Names()))
+			if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				a.logger.printf("api: server error: %v", err)
+			}
+		}()
+		defer httpSrv.Close()
+	}
 
 	// Wire the per-block hook BEFORE starting the sync delegate so the
 	// first APPLIED already lands in the block_log.
