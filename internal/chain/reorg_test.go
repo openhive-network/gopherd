@@ -110,3 +110,80 @@ func TestPushLiveBlockReorg(t *testing.T) {
 		t.Fatalf("post-reorg head=%x want 3B=%x", hid[:4], id3b[:4])
 	}
 }
+
+// TestReversibleFinalizeCallbacks verifies the Phase-2 side-effect routing: a
+// reversible (uncommitted tip) block fires NEITHER onBlockApplied NOR
+// onBlockFinalized; FinalizeReversible fires onBlockFinalized (with the block's
+// raw bytes); UndoReversible fires neither (an orphaned tip must not
+// block_log-append or evict); a non-reversible apply fires onBlockApplied.
+func TestReversibleFinalizeCallbacks(t *testing.T) {
+	db, err := state.Open(t.TempDir(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := genesis.Apply(db); err != nil {
+		t.Fatal(err)
+	}
+	{
+		s := state.NewSession(db)
+		objects.PutAccount(s, &objects.Account{Name: "alice", Balance: 1000})
+		objects.PutAccount(s, &objects.Account{Name: "bob", Balance: 0})
+		_ = s.Commit(false)
+	}
+	c := New(db)
+
+	var applied, finalized []uint32
+	var finalizedRaw [][]byte
+	c.SetOnBlockApplied(func(n uint32, _ block.ID) { applied = append(applied, n) })
+	c.SetOnBlockFinalized(func(n uint32, raw []byte) {
+		finalized = append(finalized, n)
+		finalizedRaw = append(finalizedRaw, raw)
+	})
+
+	mk := func(num uint32, ts uint32, amount int64) []byte {
+		st := tx.SignedTransaction{Transaction: tx.Transaction{
+			Operations: op.Ops(op.Transfer{From: "alice", To: "bob", Amount: hiveAsset(amount), Memo: "m"}),
+			Expiration: network.GenesisTimeUnix + 600,
+		}}
+		return buildBlock(t, num, "initminer", ts, []tx.SignedTransaction{st})
+	}
+	rev := ApplyOptions{SkipTransactionSignatures: true, SkipBlockSignature: true, SkipDedupAndTaPOS: true, Reversible: true}
+	norm := ApplyOptions{SkipTransactionSignatures: true, SkipBlockSignature: true, SkipDedupAndTaPOS: true}
+
+	// Reversible apply → neither callback fires yet.
+	raw1 := mk(1, network.GenesisTimeUnix+3, 10)
+	if _, err := c.ApplyBlock(raw1, 1, rev, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(applied) != 0 || len(finalized) != 0 {
+		t.Fatalf("reversible apply must fire no callback: applied=%v finalized=%v", applied, finalized)
+	}
+	// Finalize → onBlockFinalized fires with the block's raw bytes.
+	if err := c.FinalizeReversible(false); err != nil {
+		t.Fatal(err)
+	}
+	if len(finalized) != 1 || finalized[0] != 1 || string(finalizedRaw[0]) != string(raw1) {
+		t.Fatalf("finalize should fire onBlockFinalized(1, raw1); got %v", finalized)
+	}
+	if len(applied) != 0 {
+		t.Fatalf("onBlockApplied must not fire for the reversible path: %v", applied)
+	}
+
+	// Reversible apply then UNDO (orphaned tip) → still no new side-effects.
+	if _, err := c.ApplyBlock(mk(2, network.GenesisTimeUnix+6, 20), 2, rev, nil); err != nil {
+		t.Fatal(err)
+	}
+	c.UndoReversible()
+	if len(finalized) != 1 || len(applied) != 0 {
+		t.Fatalf("undo must fire nothing: applied=%v finalized=%v", applied, finalized)
+	}
+
+	// Non-reversible apply → onBlockApplied fires (unchanged replay path).
+	if _, err := c.ApplyBlock(mk(2, network.GenesisTimeUnix+6, 30), 2, norm, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(applied) != 1 || applied[0] != 2 {
+		t.Fatalf("non-reversible apply should fire onBlockApplied(2); got %v", applied)
+	}
+}

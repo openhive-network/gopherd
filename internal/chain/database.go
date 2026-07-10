@@ -118,8 +118,18 @@ type Database struct {
 	// AFTER the recent-block cache is updated. Used by the p2p sync
 	// layer to wake its INV broadcaster from idle backoff so the
 	// new block reaches peers without waiting a full tick. nil =
-	// no hook (default for replay/test contexts).
+	// no hook (default for replay/test contexts). NOT fired for
+	// reversible (uncommitted tip) blocks — those fire onBlockFinalized
+	// instead, once they commit.
 	onBlockApplied func(blockNum uint32, id block.ID)
+
+	// onBlockFinalized is fired when a reversible block COMMITS (via
+	// FinalizeReversible), i.e. once it is confirmed to extend the chain.
+	// The fork-aware node wires block_log-append + cold-tier eviction here
+	// instead of onBlockApplied, so those irreversible side-effects never
+	// run for a tip block that a reorg might undo (a cold spill can't be
+	// undone; an orphan must not enter the block_log). nil = no hook.
+	onBlockFinalized func(blockNum uint32, raw []byte)
 
 	// commitBatchSize controls how many blocks accumulate in the
 	// session overlay before ApplyBlock fires a real backend Commit.
@@ -214,6 +224,14 @@ func (d *Database) EnableRecentBlockCache(capacity int) {
 // ApplyBlock, so it should return quickly (just notify a channel).
 func (d *Database) SetOnBlockApplied(cb func(blockNum uint32, id block.ID)) {
 	d.onBlockApplied = cb
+}
+
+// SetOnBlockFinalized registers a callback fired when a reversible block
+// COMMITS (FinalizeReversible). The fork-aware node wires block_log-append +
+// eviction here so those irreversible side-effects run only for confirmed
+// blocks, never for a tip block a reorg may undo.
+func (d *Database) SetOnBlockFinalized(cb func(blockNum uint32, raw []byte)) {
+	d.onBlockFinalized = cb
 }
 
 // SetCommitBatch enables batched commits at end of ApplyBlock.
@@ -1171,6 +1189,7 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 			num:  blockNum,
 			id:   dgpo.HeadBlockID,
 			prev: hdr.Previous,
+			raw:  append([]byte(nil), rawBlock...),
 		}
 	case opts.SoftCommit:
 		session.SoftCommit()
@@ -1196,7 +1215,10 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 		raw := append([]byte(nil), rawBlock...)
 		d.recent.Put(blockNum, dgpo.HeadBlockID, raw)
 	}
-	if d.onBlockApplied != nil {
+	// Reversible (uncommitted tip) blocks defer their irreversible side-effects
+	// to FinalizeReversible via onBlockFinalized — firing onBlockApplied here
+	// would block_log-append + evict a block a reorg might still undo.
+	if !opts.Reversible && d.onBlockApplied != nil {
 		d.onBlockApplied(blockNum, dgpo.HeadBlockID)
 	}
 	return dgpo, nil
@@ -1228,6 +1250,7 @@ type reversibleBlock struct {
 	num  uint32
 	id   block.ID
 	prev block.ID
+	raw  []byte // owned copy, handed to onBlockFinalized at commit time
 }
 
 // ReversiblePending returns the identity of the currently-pending reversible
@@ -1252,14 +1275,23 @@ func (d *Database) ReversiblePending() (num uint32, id, prev block.ID, ok bool) 
 // pending. sync controls fsync.
 func (d *Database) FinalizeReversible(sync bool) error {
 	d.applyMu.Lock()
-	defer d.applyMu.Unlock()
 	if d.reversiblePending == nil || d.session == nil {
+		d.applyMu.Unlock()
 		return nil
 	}
 	if err := d.session.Commit(sync); err != nil {
+		d.applyMu.Unlock()
 		return err
 	}
+	fin := d.reversiblePending
 	d.reversiblePending = nil
+	d.applyMu.Unlock()
+	// Now committed → run the irreversible side-effects (block_log append,
+	// eviction) the reversible apply deferred. Fired OUTSIDE applyMu so the
+	// hook may re-enter the chain safely.
+	if d.onBlockFinalized != nil {
+		d.onBlockFinalized(fin.num, fin.raw)
+	}
 	return nil
 }
 
