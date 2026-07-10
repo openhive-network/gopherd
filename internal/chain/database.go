@@ -148,6 +148,10 @@ type Database struct {
 	// pending. Finalize/UndoReversible clear it. The fork driver reads it to
 	// decide extend-vs-reorg.
 	reversiblePending *reversibleBlock
+	// fork is the fork DAG of recent blocks, used by PushLiveBlock to detect +
+	// resolve tip forks. nil until the first PushLiveBlock. Single-owner (the
+	// applyLoop goroutine); no lock of its own.
+	fork *forkDB
 
 	// customOpCountByAccount tracks per-account count of custom /
 	// custom_json / custom_binary ops applied in the CURRENT block.

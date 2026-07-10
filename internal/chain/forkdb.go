@@ -1,4 +1,4 @@
-package sync
+package chain
 
 import "hived-go/internal/protocol/block"
 
