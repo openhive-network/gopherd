@@ -81,6 +81,16 @@ func (s *stubChain) ApplyBlock(raw []byte, n uint32, _ chain.ApplyOptions, _ *ch
 	s.order = append(s.order, n)
 	return nil, nil
 }
+
+// PushLiveBlock satisfies the Chain interface for the fork-aware path. These
+// tests exercise the linear (ForkAware=false) path, so this just mirrors a
+// linear apply.
+func (s *stubChain) PushLiveBlock(raw []byte, n uint32, opts chain.ApplyOptions) (chain.PushOutcome, error) {
+	if _, err := s.ApplyBlock(raw, n, opts, nil); err != nil {
+		return 0, err
+	}
+	return chain.PushExtended, nil
+}
 func (s *stubChain) seed(n uint32, raw []byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -438,6 +438,53 @@ func (d *Delegate) applyLoop() {
 		}
 	}
 
+	// forkApply routes one inbound block through the fork-choice engine
+	// (chain.PushLiveBlock): extend / buffer / depth-1 tip reorg. Used instead
+	// of tryApply when Config.ForkAware. Out-of-order + competing blocks are
+	// buffered by the chain's fork DB, so no reorder buffer is needed here. A
+	// tip block stays reversible until its child confirms it (block_log-append
+	// + eviction fire via SetOnBlockFinalized, not here), so nothing is
+	// re-broadcast from this path.
+	forkApply := func(job applyJob) {
+		var applyStart time.Time
+		if d.cfg.LogWorkTiming {
+			applyStart = time.Now()
+		}
+		historical := false
+		if ts := blockTimestamp(job.rawBlock); ts != 0 && uint32(time.Now().Unix())-ts > 5*60 {
+			historical = true
+		}
+		outcome, err := d.chain.PushLiveBlock(job.rawBlock, job.blockNum, chain.ApplyOptions{
+			Sync:                      false,
+			SkipTransactionSignatures: historical,
+			SkipBlockSignature:        historical,
+			TolerateFailingOps:        historical,
+			PreVerifiedBlockSigner:    job.preVerifiedSigner,
+			PreRecoveredTxKeys:        job.preRecoveredTxKeys,
+		})
+		if err != nil {
+			d.logf("push_live_block %d failed: %v", job.blockNum, err)
+			return
+		}
+		if d.cfg.LogWorkTiming {
+			ns := time.Since(applyStart).Nanoseconds()
+			workCount++
+			workSumNs += ns
+			if ns > workMaxNs {
+				workMaxNs = ns
+			}
+			if len(workSamples) < cap(workSamples) {
+				workSamples = append(workSamples, ns)
+			}
+		}
+		h, _ := d.chain.HeadBlock()
+		d.headBlockHint.Store(h)
+		if outcome == chain.PushReorged {
+			d.logf("fork: reorged to head %d", h)
+		}
+		d.poke()
+	}
+
 	diag := time.NewTicker(10 * time.Second)
 	defer diag.Stop()
 
@@ -490,6 +537,13 @@ func (d *Delegate) applyLoop() {
 			}
 		case job := <-d.applyQ:
 			d.onDequeue()
+			if d.cfg.ForkAware {
+				// Fork-choice engine owns ordering + forks; feed every block
+				// (including same-height competitors the linear path would
+				// drop) straight to it.
+				forkApply(job)
+				continue
+			}
 			head := d.headBlockHint.Load()
 			if head == 0 {
 				h, _ := d.chain.HeadBlock()
