@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"sort"
 	"strconv"
 
 	"hived-go/internal/api/jsonrpc"
@@ -160,5 +161,48 @@ func (s *Server) mGetAccounts(legacy bool) jsonrpc.Handler {
 			return nil, err
 		}
 		return s.loadAccounts(names, legacy), nil
+	}
+}
+
+// mGetAccountCount: condenser_api.get_account_count [] → total account count.
+func (s *Server) mGetAccountCount() jsonrpc.Handler {
+	return func(_ context.Context, _ json.RawMessage) (interface{}, error) {
+		n := 0
+		_ = s.chain.WithReadSession(func(sess *state.Session) error {
+			return objects.RangeAccounts(sess, func(*objects.Account) (bool, error) { n++; return true, nil })
+		})
+		return n, nil
+	}
+}
+
+// mLookupAccounts: condenser_api.lookup_accounts ["lower", limit] → up to `limit`
+// account names in ascending order starting at lower_bound.
+func (s *Server) mLookupAccounts() jsonrpc.Handler {
+	return func(_ context.Context, params json.RawMessage) (interface{}, error) {
+		var arr []json.RawMessage
+		if json.Unmarshal(params, &arr) != nil || len(arr) < 2 {
+			return nil, jsonrpc.Errorf(jsonrpc.CodeInvalidParams, "expected [lower_bound, limit]")
+		}
+		var lower string
+		var limit int
+		_ = json.Unmarshal(arr[0], &lower)
+		_ = json.Unmarshal(arr[1], &limit)
+		if limit <= 0 || limit > 1000 {
+			limit = 1000
+		}
+		var names []string
+		_ = s.chain.WithReadSession(func(sess *state.Session) error {
+			return objects.RangeAccounts(sess, func(a *objects.Account) (bool, error) {
+				if string(a.Name) >= lower {
+					names = append(names, string(a.Name))
+				}
+				return true, nil
+			})
+		})
+		sort.Strings(names)
+		if len(names) > limit {
+			names = names[:limit]
+		}
+		return names, nil
 	}
 }
