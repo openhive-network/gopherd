@@ -103,3 +103,35 @@ find_rc_accounts, list_rc_accounts, list_rc_direct_delegations.
 Start point: **A** (transport + database_api globals + block_api) — pure exposure
 of state we already compute, no new indexes, and immediately useful (block
 explorers / health checks hit these first).
+
+## Implemented status (2026-07-11) — phases A–C core
+
+Transport DONE (internal/api/jsonrpc): JSON-RPC 2.0 HTTP + batch + legacy `call`
+convention; registry keyed by api.method; named+positional param decoding.
+`--api-endpoint host:port` serves it read-only. All offline-tested.
+
+**28 methods live** across database_api / block_api / condenser_api:
+- Globals: get_dynamic_global_properties, get_version, get_feed_history,
+  get_current_price_feed / get_current_median_history_price, get_witness_schedule,
+  get_active_witnesses, get_reward_funds / get_reward_fund, get_hardfork_properties /
+  get_hardfork_version.
+- Blocks: get_block_header, get_block (FULL operation→JSON expansion — reflection
+  renderer covering all ~50 op types, legacy `["name",{...}]` + modern
+  `{type,value}` forms). Reads the recent-block cache.
+- Accounts: find_accounts / get_accounts (full account object + authorities),
+  get_account_count, lookup_accounts.
+- Witnesses: find_witnesses, get_witness_by_account.
+- Market: get_order_book (HIVE/HBD).
+- Every method exists in both database_api (NAI object assets) and condenser
+  (legacy "X.XXX HIVE" strings, positional args) where applicable.
+
+**Remaining in A–C (follow the same pattern; need small store-iteration helpers):**
+list/find over proposals, conversions, escrows, delegations, savings withdrawals,
+recurrent transfers; get_open_orders; get_witnesses_by_vote / get_witness_count /
+lookup_witness_accounts; get_config (constants table); historical get_block via a
+block_log reader (recent-cache only today).
+
+**Out of A–C (Phase E, index-backed — each a new subsystem):** account_history_api
+(get_ops_in_block, get_account_history, enum_virtual_ops, get_transaction),
+account_by_key_api, market_history_api, transaction_status_api, reputation_api,
+rc_api. **Broadcast (Phase D):** needs mempool + p2p tx relay.
