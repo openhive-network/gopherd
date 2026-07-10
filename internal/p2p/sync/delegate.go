@@ -219,6 +219,25 @@ type Config struct {
 	// sizing is engaged. Off by default — high-rate runs would spam
 	// hundreds of lines per second.
 	LogAdaptiveBatch bool
+
+	// Serve controls whether this node ADVERTISES its inventory and SERVES
+	// blocks/ids to peers. DEFAULT false (zero value) = a purely passive,
+	// fetch-only leecher: it dials peers and downloads blocks but NEVER runs
+	// broadcastInv and NEVER answers a peer's fetch_items / fetch_ids request.
+	//
+	// This is a safety default: an unfinished/underperforming consensus node
+	// that advertises an item and then can't serve it promptly (e.g. while
+	// GC-stalled or wedged at the tip) gets dropped by peers as
+	// out-of-contact/malicious, and repeated across the peer set that churn
+	// can disrupt the wider network (see the 2026-07-09 mainnet incident:
+	// "advertising an item and then not providing it when asked"). A passive
+	// node cannot cause that failure mode. Set true only for a node that is
+	// known-correct, keeps up in real time, and is meant to relay.
+	Serve bool
+	// LogWorkTiming, when true, emits a periodic per-block work-timing line
+	// ("apply avg=Xms p50=Y p99=Z over N blocks; serve avg=Wms/req") so
+	// slowness is measurable and comparable to hived's block-processing timing.
+	LogWorkTiming bool
 }
 
 // EnableAdaptiveFetchBatch is a setter for AdaptiveFetchBatch that
