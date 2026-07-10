@@ -25,6 +25,8 @@ func (s *Server) registerCondenserAPI() {
 	s.reg.Register("condenser_api.get_witness_by_account", s.mGetWitnessByAccount(true))
 	s.reg.Register("condenser_api.get_block", s.mGetBlock(true))
 	s.reg.Register("condenser_api.get_block_header", s.mGetBlockHeader())
+	s.reg.Register("condenser_api.get_account_count", s.mGetAccountCount())
+	s.reg.Register("condenser_api.lookup_accounts", s.mLookupAccounts())
 }
 
 // mCondenserGetRewardFund: condenser positional get_reward_fund(["post"]) →
