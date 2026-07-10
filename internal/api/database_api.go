@@ -21,6 +21,33 @@ func (s *Server) registerDatabaseAPI() {
 	s.reg.Register("database_api.get_hardfork_properties", s.mGetHardforkProps())
 	s.reg.Register("database_api.find_accounts", s.mFindAccounts(false))
 	s.reg.Register("database_api.find_witnesses", s.mFindWitnesses(false))
+	s.reg.Register("database_api.get_config", s.mGetConfig())
+}
+
+// mGetConfig returns the commonly-read chain constants. (hived returns ~100;
+// this is the subset apps actually read; extend as needed.)
+func (s *Server) mGetConfig() jsonrpc.Handler {
+	cfg := map[string]interface{}{
+		"HIVE_CHAIN_ID":                  networkChainIDHex(),
+		"HIVE_ADDRESS_PREFIX":            "STM",
+		"HIVE_BLOCK_INTERVAL":            3,
+		"HIVE_BLOCKS_PER_YEAR":           uint32(60 * 60 * 24 * 365 / 3),
+		"HIVE_BLOCKS_PER_DAY":            uint32(60 * 60 * 24 / 3),
+		"HIVE_MAX_WITNESSES":             21,
+		"HIVE_MAX_VOTED_WITNESSES_HF17":  20,
+		"HIVE_MAX_RUNNER_WITNESSES_HF17": 1,
+		"HIVE_HARDFORK_REQUIRED_WITNESSES": 17,
+		"HIVE_100_PERCENT":               10000,
+		"HIVE_1_PERCENT":                 100,
+		"HIVE_MAX_TIME_UNTIL_EXPIRATION": 3600,
+		"HIVE_MIN_BLOCK_SIZE_LIMIT":      65536,
+		"HIVE_IRREVERSIBLE_THRESHOLD":    7500,
+		"HIVE_VESTING_WITHDRAW_INTERVALS": 13,
+		"HIVE_VOTE_REGENERATION_SECONDS": 432000,
+		"HIVE_MAX_SIG_CHECK_DEPTH":       2,
+		"HIVE_MAX_SIG_CHECK_ACCOUNTS":    125,
+	}
+	return func(_ context.Context, _ json.RawMessage) (interface{}, error) { return cfg, nil }
 }
 
 // dgpoResult builds get_dynamic_global_properties. legacy=true → "1.234 HIVE"
