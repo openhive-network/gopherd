@@ -27,6 +27,8 @@ func (s *Server) registerCondenserAPI() {
 	s.reg.Register("condenser_api.get_block_header", s.mGetBlockHeader())
 	s.reg.Register("condenser_api.get_account_count", s.mGetAccountCount())
 	s.reg.Register("condenser_api.lookup_accounts", s.mLookupAccounts())
+	s.reg.Register("condenser_api.get_order_book", s.mGetOrderBook(true))
+	s.reg.Register("database_api.get_order_book", s.mGetOrderBook(false))
 }
 
 // mCondenserGetRewardFund: condenser positional get_reward_fund(["post"]) →
