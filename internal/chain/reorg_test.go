@@ -111,6 +111,62 @@ func TestPushLiveBlockReorg(t *testing.T) {
 	}
 }
 
+// TestPushLiveBlockOutOfOrder checks the drain-forward engine: a block that
+// arrives BEFORE its parent is buffered, and once the parent lands both apply.
+func TestPushLiveBlockOutOfOrder(t *testing.T) {
+	db, err := state.Open(t.TempDir(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := genesis.Apply(db); err != nil {
+		t.Fatal(err)
+	}
+	{
+		s := state.NewSession(db)
+		objects.PutAccount(s, &objects.Account{Name: "alice", Balance: 1000})
+		objects.PutAccount(s, &objects.Account{Name: "bob", Balance: 0})
+		_ = s.Commit(false)
+	}
+	c := New(db)
+	opts := ApplyOptions{SkipTransactionSignatures: true, SkipBlockSignature: true, SkipDedupAndTaPOS: true}
+	buildAt := func(num, ts uint32, prev block.ID, amount int64) ([]byte, block.ID) {
+		st := tx.SignedTransaction{Transaction: tx.Transaction{
+			Operations: op.Ops(op.Transfer{From: "alice", To: "bob", Amount: hiveAsset(amount), Memo: "m"}),
+			Expiration: network.GenesisTimeUnix + 600,
+		}}
+		hdr := block.SignedHeader{Header: block.Header{Timestamp: ts, Witness: "initminer", Previous: prev, Extensions: []byte{0x00}}}
+		out := block.MarshalSignedHeader(nil, &hdr)
+		out = append(out, 1)
+		out = tx.AppendSignedTransaction(out, &st)
+		_, hl, _ := block.UnmarshalSignedHeader(out)
+		return out, block.ConstructID(out[:hl], num)
+	}
+	bal := func(n string) int64 { a, _ := objects.GetAccount(c.session, n); return a.Balance }
+
+	gid, _ := c.HeadBlockID()
+	r1, id1 := buildAt(1, network.GenesisTimeUnix+3, gid, 100)
+	r2, _ := buildAt(2, network.GenesisTimeUnix+6, id1, 50)
+
+	// Block 2 arrives FIRST → buffered, no state change.
+	if o, err := c.PushLiveBlock(r2, 2, opts); err != nil || o != PushBuffered {
+		t.Fatalf("early block2 outcome=%v err=%v want buffered", o, err)
+	}
+	if bal("alice") != 1000 {
+		t.Fatalf("buffered block must not mutate state: alice=%d", bal("alice"))
+	}
+	// Block 1 lands → drain-forward applies 1 then 2.
+	if o, err := c.PushLiveBlock(r1, 1, opts); err != nil || o != PushExtended {
+		t.Fatalf("block1 outcome=%v err=%v want extended", o, err)
+	}
+	if bal("alice") != 850 || bal("bob") != 150 {
+		t.Fatalf("after drain: alice=%d bob=%d want 850,150 (both blocks applied)", bal("alice"), bal("bob"))
+	}
+	if hn, _ := c.HeadBlock(); hn != 2 {
+		t.Fatalf("head=%d want 2", hn)
+	}
+}
+
 // TestReversibleFinalizeCallbacks verifies the Phase-2 side-effect routing: a
 // reversible (uncommitted tip) block fires NEITHER onBlockApplied NOR
 // onBlockFinalized; FinalizeReversible fires onBlockFinalized (with the block's

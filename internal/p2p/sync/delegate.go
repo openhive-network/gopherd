@@ -114,6 +114,7 @@ type Chain interface {
 	HeadBlock() (uint32, error)
 	HeadBlockID() (block.ID, error)
 	ApplyBlock(rawBlock []byte, blockNum uint32, opts chain.ApplyOptions, stats *chain.Stats) (interface{}, error)
+	PushLiveBlock(rawBlock []byte, blockNum uint32, opts chain.ApplyOptions) (chain.PushOutcome, error)
 	RecentBlockBytes(blockNum uint32) []byte
 	RecentBlockBytesByID(id block.ID) []byte
 	RecentBlockNums() []uint32
@@ -136,6 +137,9 @@ func (c *chainAdapter) RecentBlockIDForNum(n uint32) (block.ID, bool) {
 }
 func (c *chainAdapter) ApplyBlock(raw []byte, n uint32, opts chain.ApplyOptions, stats *chain.Stats) (interface{}, error) {
 	return c.db.ApplyBlock(raw, n, opts, stats)
+}
+func (c *chainAdapter) PushLiveBlock(raw []byte, n uint32, opts chain.ApplyOptions) (chain.PushOutcome, error) {
+	return c.db.PushLiveBlock(raw, n, opts)
 }
 
 // Config tunes the sync delegate.
@@ -238,6 +242,14 @@ type Config struct {
 	// ("apply avg=Xms p50=Y p99=Z over N blocks; serve avg=Wms/req") so
 	// slowness is measurable and comparable to hived's block-processing timing.
 	LogWorkTiming bool
+
+	// ForkAware routes inbound blocks through chain.PushLiveBlock (the
+	// fork-choice engine: extend / buffer / depth-1 tip reorg) instead of the
+	// strictly-linear head+1 ApplyBlock. DEFAULT false — the linear path is
+	// unchanged for replay/catch-up. Enable for a tip-follower that must ride
+	// the live head through micro-forks. The node must also wire
+	// SetOnBlockFinalized so block_log-append + eviction fire only on commit.
+	ForkAware bool
 }
 
 // EnableAdaptiveFetchBatch is a setter for AdaptiveFetchBatch that

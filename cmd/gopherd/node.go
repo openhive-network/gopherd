@@ -214,6 +214,10 @@ type flags struct {
 	p2pServe bool
 	// logWorkTiming enables the periodic per-block apply "work" timing line.
 	logWorkTiming bool
+	// forkSwitching routes inbound blocks through the fork-choice engine
+	// (chain.PushLiveBlock) so the node can ride the live head through depth-1
+	// tip micro-forks. DEFAULT false = strictly-linear apply (replay/catch-up).
+	forkSwitching bool
 	// logAdaptiveBatch, when set, asks the sync delegate to log one
 	// trace line per per-peer FetchBatch decision. Useful for tuning
 	// the adaptive sizing curve; off by default to avoid noise.
@@ -247,6 +251,7 @@ func parseNodeFlags(args []string) flags {
 	fs.BoolVar(&f.logAdaptiveBatch, "log-adaptive-batch", false, "log one trace per per-peer FetchBatch decision (peer X batch=N rate=Y bps)")
 	fs.BoolVar(&f.p2pServe, "p2p-serve", false, "advertise inventory + serve blocks to peers (default false = passive fetch-only; enable ONLY for a known-correct node that keeps up in real time)")
 	fs.BoolVar(&f.logWorkTiming, "log-work-timing", false, "log periodic per-block apply work-timing (avg/p50/p99/max ms) — comparable to hived's block-processing timing")
+	fs.BoolVar(&f.forkSwitching, "fork-switching", false, "route inbound blocks through the fork-choice engine (depth-1 tip reorg) instead of strictly-linear apply (default off)")
 	fs.IntVar(&f.residentCap, "comment-resident-cap", 0, "if >0, cap RAM-resident comments to this many; frozen comments + votes spill to an on-disk cold tier (required for a full-chain node — otherwise the whole comment corpus is resident and OOMs)")
 	fs.StringVar(&f.coldDir, "cold-dir", "", "directory for the cold tier (used when --comment-resident-cap>0). With --cold-backend=persist it must be stable across restarts")
 	fs.StringVar(&f.coldBackend, "cold-backend", "", "cold-tier backend: \"\"/mmap|pebble|persist")
@@ -665,6 +670,22 @@ func (a *app) run() error {
 			}
 		}
 	})
+	// Fork-aware path: a block's irreversible side-effects (block_log append +
+	// eviction) run only when it COMMITS (FinalizeReversible), never on the
+	// reversible tip a reorg might undo. onBlockApplied does NOT fire for
+	// reversible blocks, so this is the sole side-effect path when
+	// --fork-switching is on. raw is handed in directly (no cache lookup).
+	a.chain.SetOnBlockFinalized(func(blockNum uint32, raw []byte) {
+		if err := a.afterApply(raw, blockNum); err != nil {
+			a.logger.printf("ERROR post-finalize hook block %d: %v", blockNum, err)
+		}
+		if a.cfg.targetBlock > 0 && blockNum >= a.cfg.targetBlock {
+			select {
+			case stopCh <- struct{}{}:
+			default:
+			}
+		}
+	})
 
 	a.p2p = p2pnode.New(p2pnode.Config{
 		Endpoint:           a.cfg.listenEndpoint,
@@ -677,6 +698,7 @@ func (a *app) run() error {
 		LogAdaptiveBatch: a.cfg.logAdaptiveBatch,
 		Serve:            a.cfg.p2pServe,
 		LogWorkTiming:    a.cfg.logWorkTiming,
+		ForkAware:        a.cfg.forkSwitching,
 	}, a.chain)
 	a.p2p.SetDelegate(syncDel)
 	if err := a.p2p.Start(); err != nil {

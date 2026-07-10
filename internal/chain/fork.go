@@ -6,25 +6,25 @@ import (
 	"hived-go/internal/protocol/block"
 )
 
-// PushOutcome reports what PushLiveBlock did with a block.
+// PushOutcome reports the net effect of a PushLiveBlock call.
 type PushOutcome int
 
 const (
-	PushExtended  PushOutcome = iota // linear apply on top of the current head
-	PushBuffered                     // a fork block stored; current head still best
+	PushBuffered  PushOutcome = iota // stored in the DAG; head did not move
+	PushExtended                     // head advanced by ≥1 block on the current branch
 	PushReorged                      // switched to a strictly-longer competing branch
 	PushDuplicate                    // block id already known
 	PushStale                        // at/below the committed (irreversible) head; ignored
-	PushTooDeep                      // reorg would need to undo a committed block (beyond the
-	// single-block reversible window); left buffered, head unchanged
+	PushTooDeep                      // a longer branch exists but forks below the committed
+	// head — beyond the single-block reversible window; left buffered
 )
 
 func (o PushOutcome) String() string {
 	switch o {
-	case PushExtended:
-		return "extended"
 	case PushBuffered:
 		return "buffered"
+	case PushExtended:
+		return "extended"
 	case PushReorged:
 		return "reorged"
 	case PushDuplicate:
@@ -39,120 +39,198 @@ func (o PushOutcome) String() string {
 
 // PushLiveBlock is the fork-aware entry point for live (tip) blocks. Unlike
 // ApplyBlock — which strictly requires head+1 and rejects anything else — it
-// tracks recent blocks in a fork DAG and, on a strictly-longer competing branch
-// that forks at the committed head, UNDOes the node's uncommitted tip block and
-// re-applies the winning branch (a depth-1 reorg, the common tip micro-fork).
+// records blocks in an id-keyed fork DAG and drives the fork choice:
+//   - extends the head with the block (and any already-buffered children), OR
+//   - buffers an out-of-order / competing block, OR
+//   - on a strictly-longer branch that forks at the COMMITTED head, UNDOes the
+//     uncommitted tip and re-applies the winning branch (a depth-1 tip reorg).
 //
 // Model (1-block commit lag): the node's single tip block is kept UNCOMMITTED
-// (reversible); the block below it is the committed head. A block that extends
-// the tip finalizes the old tip and applies the new one reversibly; a competing
-// branch that outgrows the tip is switched to by undoing the uncommitted tip.
-//
-// Reorgs deeper than the committed head (which would require undoing an already-
-// committed block) return PushTooDeep and leave the chain untouched — those need
-// a multi-block reversible window (future work). Micro-forks at the tip, which
-// dominate in practice, are depth-1 and handled here.
+// (reversible); the block below it is the committed head. Reorgs that would need
+// to undo a committed block return PushTooDeep and leave the chain untouched
+// (those need a multi-block reversible window — future work); tip micro-forks,
+// which dominate, are depth-1 and handled here.
 //
 // MUST be called from a single goroutine (like ApplyBlock). opts is applied to
-// every ApplyBlock this drives, with Reversible forced on.
+// every ApplyBlock it drives, with Reversible forced on.
 func (d *Database) PushLiveBlock(raw []byte, num uint32, opts ApplyOptions) (PushOutcome, error) {
-	if d.fork == nil {
-		d.fork = newForkDB()
-		if hid, err := d.HeadBlockID(); err == nil && hid != (block.ID{}) {
-			hn, _ := d.HeadBlock()
-			d.fork.add(hid, block.ID{}, hn, nil)
-			d.fork.setHead(hid)
-		}
-	}
+	d.ensureForkDB()
 
 	sh, hdrLen, err := block.UnmarshalSignedHeader(raw)
 	if err != nil {
 		return 0, fmt.Errorf("push_live_block %d: header: %w", num, err)
 	}
 	id := block.ConstructID(raw[:hdrLen], num)
-	prev := sh.Previous
-
 	if _, dup := d.fork.get(id); dup {
 		return PushDuplicate, nil
 	}
-
-	// HeadBlock/HeadBlockID read THROUGH the session overlay, so they reflect
-	// the uncommitted pending (tip) block, not the committed head. The
-	// EFFECTIVE head is therefore what they return; the COMMITTED head is the
-	// pending block's parent (pendPrev) when a reversible block is pending.
-	effHeadNum, _ := d.HeadBlock()
-	effHeadID, _ := d.HeadBlockID()
-	pendNum, _, pendPrev, hasPend := d.ReversiblePending()
-	committedID, committedNum := effHeadID, effHeadNum
-	if hasPend {
-		committedID, committedNum = pendPrev, pendNum-1
-	}
-
-	// At or below the committed (irreversible) head — a depth-1 window cannot
-	// undo committed blocks, so record it for topology and ignore.
-	if num <= committedNum {
-		d.fork.add(id, prev, num, raw)
+	if num <= d.committedNum() {
+		// At/below the irreversible head: record for topology, can't act on it.
+		d.fork.add(id, sh.Previous, num, raw)
 		return PushStale, nil
 	}
+	d.fork.add(id, sh.Previous, num, raw)
 
 	opts.Reversible = true
+	moved := false
 
-	// Case A — linear extension of the current (possibly uncommitted) head.
-	if prev == effHeadID {
-		if hasPend {
-			// The old tip is now confirmed (a child builds on it): commit it.
-			if err := d.FinalizeReversible(false); err != nil {
-				return 0, fmt.Errorf("push_live_block %d: finalize prev tip: %w", num, err)
-			}
-		}
-		if _, err := d.ApplyBlock(raw, num, opts, nil); err != nil {
+	// 1) Extend the head forward as far as buffered blocks allow.
+	ext, err := d.drainForward(opts)
+	if err != nil {
+		return 0, err
+	}
+	moved = moved || ext
+
+	// 2) If a strictly-longer branch now forks at the committed head, reorg to
+	//    it, then keep draining on the new branch.
+	reorged, err := d.tryReorg(opts)
+	if err != nil {
+		return 0, err
+	}
+	if reorged {
+		if _, err := d.drainForward(opts); err != nil {
 			return 0, err
 		}
-		d.fork.add(id, prev, num, raw)
-		d.fork.setHead(id)
+		return PushReorged, nil
+	}
+	if moved {
 		return PushExtended, nil
 	}
+	// Nothing applied: either buffered (waiting for a parent) or a longer branch
+	// forks too deep to switch to with a 1-block window.
+	if best := d.fork.longestKnownTip(); best != nil && best.num > d.effHeadNum() {
+		if anc, ok := d.fork.commonAncestor(d.effHeadID(), best.id); ok && anc != d.committedID() {
+			return PushTooDeep, nil
+		}
+	}
+	return PushBuffered, nil
+}
 
-	// Case B — a fork block. Buffer it; reorg only if a strictly-longer branch
-	// now exists AND it forks at the committed head (depth-1 reach).
-	d.fork.add(id, prev, num, raw)
+// ensureForkDB lazily creates the DAG, seeding it with the current committed
+// head so the first inbound block can link to it.
+func (d *Database) ensureForkDB() {
+	if d.fork != nil {
+		return
+	}
+	d.fork = newForkDB()
+	// Seed with the current committed head so the first inbound block links to
+	// it — even at genesis (head id zero), so a real block whose previous is the
+	// zero id is recognised as a linear extension rather than a phantom reorg.
+	hid, _ := d.HeadBlockID()
+	hn, _ := d.HeadBlock()
+	d.fork.add(hid, block.ID{}, hn, nil)
+	d.fork.setHead(hid)
+}
+
+// effHeadID/effHeadNum are the CURRENT tip (the uncommitted reversible block if
+// one is pending, else the committed head) — HeadBlock*/ID read through the
+// session so they already reflect the pending block.
+func (d *Database) effHeadID() block.ID  { id, _ := d.HeadBlockID(); return id }
+func (d *Database) effHeadNum() uint32    { n, _ := d.HeadBlock(); return n }
+
+// committedID/committedNum are the last IRREVERSIBLE block — the pending block's
+// parent when a reversible block is pending, else the effective head.
+func (d *Database) committedID() block.ID {
+	if _, _, prev, ok := d.ReversiblePending(); ok {
+		return prev
+	}
+	return d.effHeadID()
+}
+func (d *Database) committedNum() uint32 {
+	if n, _, _, ok := d.ReversiblePending(); ok {
+		return n - 1
+	}
+	return d.effHeadNum()
+}
+
+// drainForward applies buffered blocks that extend the current head, one at a
+// time (finalizing the prior tip so only the newest stays reversible), until no
+// buffered child of the head exists. Returns whether it advanced the head.
+func (d *Database) drainForward(opts ApplyOptions) (bool, error) {
+	moved := false
+	for {
+		head := d.effHeadID()
+		child := d.childOf(head)
+		if child == nil {
+			return moved, nil
+		}
+		if err := d.applyReversibleExtend(child, opts); err != nil {
+			return moved, err
+		}
+		moved = true
+	}
+}
+
+// childOf returns a buffered node whose parent is head and whose height is
+// head+1 (a linear extension), or nil.
+func (d *Database) childOf(head block.ID) *forkNode {
+	hn, ok := d.fork.get(head)
+	if !ok {
+		return nil
+	}
+	for _, n := range d.fork.byID {
+		if n.prev == head && n.num == hn.num+1 && n.raw != nil {
+			return n
+		}
+	}
+	return nil
+}
+
+// applyReversibleExtend finalizes the current uncommitted tip (if any) and
+// applies node reversibly, making it the new tip.
+func (d *Database) applyReversibleExtend(node *forkNode, opts ApplyOptions) error {
+	if _, _, _, hasPend := d.ReversiblePending(); hasPend {
+		if err := d.FinalizeReversible(false); err != nil {
+			return fmt.Errorf("push_live_block: finalize tip: %w", err)
+		}
+	}
+	opts.Reversible = true
+	if _, err := d.ApplyBlock(node.raw, node.num, opts, nil); err != nil {
+		return fmt.Errorf("push_live_block: apply %d: %w", node.num, err)
+	}
+	d.fork.setHead(node.id)
+	return nil
+}
+
+// tryReorg switches to the longest known branch when it strictly outgrows the
+// current tip AND forks at the committed head (depth-1 reach). Returns whether
+// it reorged.
+func (d *Database) tryReorg(opts ApplyOptions) (bool, error) {
 	best := d.fork.longestKnownTip()
-	if best == nil || best.id == effHeadID || best.num <= effHeadNum {
-		return PushBuffered, nil
+	effID, effNum := d.effHeadID(), d.effHeadNum()
+	if best == nil || best.id == effID || best.num <= effNum {
+		return false, nil
 	}
-	anc, ok := d.fork.commonAncestor(effHeadID, best.id)
+	committed := d.committedID()
+	anc, ok := d.fork.commonAncestor(effID, best.id)
+	if !ok || anc != committed {
+		return false, nil // not resolvable, or forks below the committed head
+	}
+	branch, ok := d.fork.branchFrom(committed, best.id)
 	if !ok {
-		return PushBuffered, nil // ancestor not resolvable yet (missing blocks)
+		return false, nil // winning branch not fully present yet
 	}
-	if anc != committedID {
-		// Fork point is above the committed head is fine; below it we can't undo.
-		return PushTooDeep, nil
-	}
-	branch, ok := d.fork.branchFrom(committedID, best.id)
-	if !ok {
-		return PushBuffered, nil // winning branch not fully present yet
-	}
-
-	// Switch: undo our uncommitted tip back to the committed common ancestor,
-	// then apply the winning branch. Finalize all but the last so only the new
-	// tip stays reversible (preserving the depth-1 invariant).
-	if hasPend {
+	// Undo the uncommitted tip back to the committed common ancestor, then apply
+	// the winning branch (finalize all but the last so only the new tip stays
+	// reversible).
+	if _, _, _, hasPend := d.ReversiblePending(); hasPend {
 		d.UndoReversible()
 	}
+	opts.Reversible = true
 	for i, bn := range branch {
 		if bn.raw == nil {
-			return 0, fmt.Errorf("push_live_block: reorg branch block %d missing raw", bn.num)
+			return false, fmt.Errorf("push_live_block: reorg branch %d missing raw", bn.num)
 		}
 		if _, err := d.ApplyBlock(bn.raw, bn.num, opts, nil); err != nil {
-			d.UndoReversible() // drop the partial; committed head stays the ancestor
-			return 0, fmt.Errorf("push_live_block: reorg apply %d: %w", bn.num, err)
+			d.UndoReversible()
+			return false, fmt.Errorf("push_live_block: reorg apply %d: %w", bn.num, err)
 		}
 		if i < len(branch)-1 {
 			if err := d.FinalizeReversible(false); err != nil {
-				return 0, fmt.Errorf("push_live_block: reorg finalize %d: %w", bn.num, err)
+				return false, fmt.Errorf("push_live_block: reorg finalize %d: %w", bn.num, err)
 			}
 		}
 	}
 	d.fork.setHead(best.id)
-	return PushReorged, nil
+	return true, nil
 }
