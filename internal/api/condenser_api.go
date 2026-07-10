@@ -23,6 +23,8 @@ func (s *Server) registerCondenserAPI() {
 	s.reg.Register("condenser_api.get_hardfork_version", s.mCondenserHardforkVersion())
 	s.reg.Register("condenser_api.get_accounts", s.mGetAccounts(true))
 	s.reg.Register("condenser_api.get_witness_by_account", s.mGetWitnessByAccount(true))
+	s.reg.Register("condenser_api.get_block", s.mGetBlock(true))
+	s.reg.Register("condenser_api.get_block_header", s.mGetBlockHeader())
 }
 
 // mCondenserGetRewardFund: condenser positional get_reward_fund(["post"]) →
