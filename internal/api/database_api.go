@@ -22,6 +22,55 @@ func (s *Server) registerDatabaseAPI() {
 	s.reg.Register("database_api.find_accounts", s.mFindAccounts(false))
 	s.reg.Register("database_api.find_witnesses", s.mFindWitnesses(false))
 	s.reg.Register("database_api.get_config", s.mGetConfig())
+	s.reg.Register("condenser_api.get_chain_properties", s.mGetChainProperties(true))
+	s.reg.Register("condenser_api.get_next_scheduled_hardfork", s.mGetNextScheduledHardfork())
+}
+
+// mGetChainProperties returns the median witness chain properties.
+func (s *Server) mGetChainProperties(legacy bool) jsonrpc.Handler {
+	return func(_ context.Context, _ json.RawMessage) (interface{}, error) {
+		var out map[string]interface{}
+		if err := s.chain.WithReadSession(func(sess *state.Session) error {
+			ws, e := objects.GetWitnessSchedule(sess)
+			if e != nil {
+				return e
+			}
+			fee := interface{}(hiveAsset(ws.MedianAccountCreationFee))
+			if legacy {
+				fee = legacyAsset(hiveAsset(ws.MedianAccountCreationFee))
+			}
+			out = map[string]interface{}{
+				"account_creation_fee": fee,
+				"maximum_block_size":   ws.MedianMaximumBlockSize,
+				"hbd_interest_rate":    ws.MedianHBDInterestRate,
+			}
+			return nil
+		}); err != nil {
+			return nil, jsonrpc.Errorf(jsonrpc.CodeServerError, "get_chain_properties: %v", err)
+		}
+		return out, nil
+	}
+}
+
+// mGetNextScheduledHardfork returns the pending hardfork version + live time.
+func (s *Server) mGetNextScheduledHardfork() jsonrpc.Handler {
+	return func(_ context.Context, _ json.RawMessage) (interface{}, error) {
+		var out map[string]interface{}
+		if err := s.chain.WithReadSession(func(sess *state.Session) error {
+			hp, e := objects.GetHardforkPropertyObject(sess)
+			if e != nil {
+				return e
+			}
+			out = map[string]interface{}{
+				"hf_version": "1." + itoa(hp.NextHardfork) + ".0",
+				"live_time":  timeString(hp.NextHardforkTime),
+			}
+			return nil
+		}); err != nil {
+			return nil, jsonrpc.Errorf(jsonrpc.CodeServerError, "get_next_scheduled_hardfork: %v", err)
+		}
+		return out, nil
+	}
 }
 
 // mGetConfig returns the commonly-read chain constants. (hived returns ~100;
