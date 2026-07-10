@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"sort"
 	"strconv"
 
 	"hived-go/internal/api/jsonrpc"
@@ -10,6 +11,85 @@ import (
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
 )
+
+// registerWitnessListAPI wires the witness enumeration methods (count / lookup /
+// by-vote) backed by WitnessStore.RangePrimary / RangeByVote.
+func (s *Server) registerWitnessListAPI() {
+	s.reg.Register("condenser_api.get_witness_count", s.mGetWitnessCount())
+	s.reg.Register("condenser_api.lookup_witness_accounts", s.mLookupWitnessAccounts())
+	s.reg.Register("condenser_api.get_witnesses_by_vote", s.mGetWitnessesByVote(true))
+}
+
+func (s *Server) mGetWitnessCount() jsonrpc.Handler {
+	return func(_ context.Context, _ json.RawMessage) (interface{}, error) {
+		n := 0
+		_ = s.chain.WithReadSession(func(sess *state.Session) error {
+			return objects.EnsureWitnessStore(sess).RangePrimary(func(*objects.Witness) (bool, error) { n++; return true, nil })
+		})
+		return n, nil
+	}
+}
+
+func (s *Server) mLookupWitnessAccounts() jsonrpc.Handler {
+	return func(_ context.Context, params json.RawMessage) (interface{}, error) {
+		var arr []json.RawMessage
+		if json.Unmarshal(params, &arr) != nil || len(arr) < 2 {
+			return nil, jsonrpc.Errorf(jsonrpc.CodeInvalidParams, "expected [lower_bound, limit]")
+		}
+		var lower string
+		var limit int
+		_ = json.Unmarshal(arr[0], &lower)
+		_ = json.Unmarshal(arr[1], &limit)
+		if limit <= 0 || limit > 1000 {
+			limit = 1000
+		}
+		var names []string
+		_ = s.chain.WithReadSession(func(sess *state.Session) error {
+			return objects.EnsureWitnessStore(sess).RangePrimary(func(w *objects.Witness) (bool, error) {
+				if string(w.Owner) >= lower {
+					names = append(names, string(w.Owner))
+				}
+				return true, nil
+			})
+		})
+		sort.Strings(names)
+		if len(names) > limit {
+			names = names[:limit]
+		}
+		return names, nil
+	}
+}
+
+// mGetWitnessesByVote: ["start_name", limit] → up to `limit` witnesses ordered by
+// vote descending. (start_name pagination simplified: returns the top `limit`.)
+func (s *Server) mGetWitnessesByVote(legacy bool) jsonrpc.Handler {
+	return func(_ context.Context, params json.RawMessage) (interface{}, error) {
+		limit := 21
+		var arr []json.RawMessage
+		if json.Unmarshal(params, &arr) == nil && len(arr) >= 2 {
+			_ = json.Unmarshal(arr[1], &limit)
+		}
+		if limit <= 0 || limit > 100 {
+			limit = 100
+		}
+		var all []objects.Witness
+		_ = s.chain.WithReadSession(func(sess *state.Session) error {
+			return objects.EnsureWitnessStore(sess).RangePrimary(func(w *objects.Witness) (bool, error) {
+				all = append(all, *w)
+				return true, nil
+			})
+		})
+		sort.Slice(all, func(i, j int) bool { return all[i].TotalVotesVests > all[j].TotalVotesVests })
+		if len(all) > limit {
+			all = all[:limit]
+		}
+		out := make([]map[string]interface{}, 0, len(all))
+		for i := range all {
+			out = append(out, witnessResult(all[i], legacy))
+		}
+		return out, nil
+	}
+}
 
 func witnessResult(w objects.Witness, legacy bool) map[string]interface{} {
 	fee := func(x int64) interface{} {
