@@ -723,6 +723,19 @@ func (a *app) afterApply(rawBlock []byte, blockNum uint32) error {
 	if err := a.writer.Append(rawBlock); err != nil {
 		return fmt.Errorf("append block %d: %w", blockNum, err)
 	}
+	// Post-commit: spill frozen comments + votes to the cold tier when over
+	// the resident cap (no-op when the cold tier is off). This is the P2P
+	// apply path — the sync delegate calls chain.ApplyBlock directly, which
+	// fires this SetOnBlockApplied callback but NOT app.applyBlock, so without
+	// this the cold tier never engages during a P2P sync: resident comments
+	// accumulate unbounded and the heap climbs into the mem-limit, GC-crawling
+	// the dense HF17+ era (observed: genesis P2P sync cold-empty, RSS pinned at
+	// the limit, throughput collapsing 5.5K->180 bps by ~19M). Mirrors
+	// applyBlock's post-commit eviction.
+	if a.commentStore != nil {
+		a.commentStore.SetColdByRootEnabled(!hardfork.SetForBlock(blockNum).Has(hardfork.HF17))
+		a.commentStore.EvictFrozen(a.voteStore, a.evictBudget)
+	}
 	a.logProgress(blockNum)
 	return nil
 }
