@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"sort"
 	"strconv"
 
@@ -253,7 +254,12 @@ func (s *Server) mGetResourcePool() jsonrpc.Handler {
 				poolEq := int64(params.Entries[i].Dynamics.PoolEq)
 				var fill int64
 				if poolEq != 0 {
-					fill = p * 10000 / poolEq
+					// p*10000 can exceed int64 for large pools (state/exec
+					// resources reach ~1e15+), so do it in big.Int like hived's
+					// uint128 path; the quotient is small (≈ bps of equilibrium).
+					q := new(big.Int).Mul(big.NewInt(p), big.NewInt(10000))
+					q.Quo(q, big.NewInt(poolEq))
+					fill = q.Int64()
 				}
 				pools[rcResourceNames[i]] = map[string]interface{}{
 					"pool":       p,

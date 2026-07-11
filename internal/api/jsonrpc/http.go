@@ -8,6 +8,11 @@ import (
 	"net/http"
 )
 
+// maxBatchRequests caps the number of requests in one JSON-RPC batch. Each is
+// dispatched sequentially and may hold the apply read lock, so an uncapped batch
+// (bounded only by the 8 MiB body) is a work-amplification vector.
+const maxBatchRequests = 500
+
 // HTTPHandler serves the registry over HTTP JSON-RPC. POST a single request
 // object or a batch array. Read-only APIs; GET/other methods are rejected.
 func (r *Registry) HTTPHandler() http.Handler {
@@ -38,6 +43,9 @@ func (r *Registry) Handle(ctx context.Context, body []byte) interface{} {
 		}
 		if len(batch) == 0 {
 			return Response{JSONRPC: "2.0", Error: Errorf(CodeInvalidRequest, "empty batch")}
+		}
+		if len(batch) > maxBatchRequests {
+			return Response{JSONRPC: "2.0", Error: Errorf(CodeInvalidRequest, "batch too large (%d > %d)", len(batch), maxBatchRequests)}
 		}
 		out := make([]Response, 0, len(batch))
 		for i := range batch {

@@ -113,7 +113,7 @@ func (s *Server) mGetVestingDelegations(legacy bool) jsonrpc.Handler {
 				if vd, err := objects.ReadVestingDelegation(body); err == nil && string(vd.Delegator) == acct {
 					out = append(out, map[string]interface{}{
 						"id": 0, "delegator": string(vd.Delegator), "delegatee": string(vd.Delegatee),
-						"vesting_shares": symAsset(vd.VestingShares, uint32(asset.VestsSymbol), legacy),
+						"vesting_shares":      symAsset(vd.VestingShares, uint32(asset.VestsSymbol), legacy),
 						"min_delegation_time": timeString(vd.MinDelegation),
 					})
 				}
@@ -220,7 +220,7 @@ func (s *Server) mGetEscrow(legacy bool) jsonrpc.Handler {
 				"hbd_balance":  symAsset(e.HBDAmount, hbdSym, legacy),
 				"hive_balance": symAsset(e.HiveAmount, hiveSym, legacy),
 				"pending_fee":  symAsset(e.PendingFee, ternU32(e.PendingFeeIsHBD, hbdSym, hiveSym), legacy),
-				"to_approved": e.ToApproved, "agent_approved": e.AgentApproved, "disputed": e.Disputed,
+				"to_approved":  e.ToApproved, "agent_approved": e.AgentApproved, "disputed": e.Disputed,
 				"ratification_deadline": timeString(e.RatificationDeadline),
 				"escrow_expiration":     timeString(e.EscrowExpiration),
 			}
@@ -288,6 +288,9 @@ func (s *Server) mListProposals(legacy bool) jsonrpc.Handler {
 		}
 		if json.Unmarshal(params, &obj) == nil && obj.Limit > 0 {
 			limit = obj.Limit
+		}
+		if limit > 1000 { // hived clamps list queries to DATABASE_API_SINGLE_QUERY_LIMIT
+			limit = 1000
 		}
 		out := []map[string]interface{}{}
 		_ = s.chain.WithReadSession(func(sess *state.Session) error {
