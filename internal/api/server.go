@@ -32,8 +32,6 @@ func New(c *chain.Database) *Server {
 	s.registerWitnessListAPI()
 	s.registerAccountByKeyAPI()
 	s.registerTxAPI()
-	s.registerAccountHistoryAPI()
-	s.registerCommentAPI()
 	return s
 }
 

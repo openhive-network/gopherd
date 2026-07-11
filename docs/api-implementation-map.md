@@ -204,6 +204,23 @@ subsystems. gopherd's job is the consensus-backed core the node owns:
 Net effect on the earlier "Phase E remaining" list: account_history, market_history,
 reputation are **HAF/Hivemind's job, not gopherd's** — drop them. What genuinely
 remains for the node itself: **rc_api** (needs the RC subsystem port) and any
-polish on the consensus-core APIs already built. (The get_ops_in_block /
-get_active_votes we added are harmless conveniences, but HAFAH/Hivemind are the
-real source for those in production.)
+polish on the consensus-core APIs already built. (get_ops_in_block + get_active_votes were REMOVED — they are HAFAH/Hivemind's
+job, not the node's.)
+
+
+## Index-building workflow (directive 2026-07-11)
+
+We are NOT HAF-compatible for now, so any index a node method needs (e.g. rc_api,
+or an account_by_key index) is built by gopherd itself. RULE: **do NOT build
+indexes during historical replay** — that cripples replay throughput. Instead:
+
+1. Replay / p2p-sync clean to the LIVE head (no index overhead).
+2. At head, STOP applying, build the index(es) in one pass over state/block_log
+   (~an hour).
+3. Resume p2p and CATCH UP the handful of blocks produced during the build
+   (~1 block/3s, so ~1200 blocks per hour of build), keeping the index updated
+   incrementally from there.
+
+So replay stays fast; the index is a one-time head-time build + incremental
+maintenance. Removed methods (get_ops_in_block, get_active_votes) are gone —
+history/social live in HAFAH/Hivemind, not gopherd.
