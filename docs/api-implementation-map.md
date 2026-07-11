@@ -26,7 +26,7 @@ loopback/opt-in port (NOT the p2p port; unrelated to the mainnet-safety rule).
 | **account_history_api** | 4 | **NEW index** | get_ops_in_block, get_transaction, get_account_history, enum_virtual_ops. Needs an account-history op index (big). |
 | **account_by_key_api** | 2 | **NEW index** | get_key_references (pubkey→accounts). Needs a key→account index. |
 | **market_history_api** | 7 | **NEW index** | ticker/volume/order_book/trade_history/market_history buckets. Needs trade+bucket index. |
-| **rc_api** | 7 | **NEW (RC subsystem, deferred)** | resource params/pool, rc_accounts, direct delegations, rc_stats. See RC roadmap memo. |
+| **rc_api** | 7 | **DONE** (`rc_api.go`) | get_resource_params, get_resource_pool, find/list_rc_accounts, list_rc_direct_delegations, get_rc_stats, get_rc_operation_stats — all read committed RC state (per-account RC fields, rc_direct_delegation table, rc_pool/rc_resource_param singletons, archived rc_stats). +3 condenser aliases. RC subsystem itself is ported. |
 | **reputation_api** | 1 | **NEW index** | get_account_reputations (from vote rshares). |
 | **transaction_status_api** | 1 | **NEW index** | find_transaction (tx_id→block+status). |
 | **witness_api** | 3 | witness-node feature | enable/disable/is_fast_confirm_enabled. |
@@ -202,10 +202,11 @@ subsystems. gopherd's job is the consensus-backed core the node owns:
   block/vop stream that HAF can ingest.
 
 Net effect on the earlier "Phase E remaining" list: account_history, market_history,
-reputation are **HAF/Hivemind's job, not gopherd's** — drop them. What genuinely
-remains for the node itself: **rc_api** (needs the RC subsystem port) and any
-polish on the consensus-core APIs already built. (get_ops_in_block + get_active_votes were REMOVED — they are HAFAH/Hivemind's
-job, not the node's.)
+reputation are **HAF/Hivemind's job, not gopherd's** — drop them. **rc_api is now
+DONE** (`rc_api.go`, all 7 methods + 3 condenser aliases, over the already-ported
+RC subsystem state — no new index required). What genuinely remains for the node
+itself is polish on the consensus-core APIs already built. (get_ops_in_block +
+get_active_votes were REMOVED — they are HAFAH/Hivemind's job, not the node's.)
 
 
 ## Index-building workflow (directive 2026-07-11)
