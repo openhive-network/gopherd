@@ -17,13 +17,14 @@ import (
 
 // Server exposes gopherd chain state over a JSON-RPC registry.
 type Server struct {
-	chain *chain.Database
-	reg   *jsonrpc.Registry
+	chain   *chain.Database
+	reg     *jsonrpc.Registry
+	mempool *Mempool
 }
 
 // New builds a Server and registers every implemented API method.
 func New(c *chain.Database) *Server {
-	s := &Server{chain: c, reg: jsonrpc.NewRegistry()}
+	s := &Server{chain: c, reg: jsonrpc.NewRegistry(), mempool: newMempool()}
 	s.registerDatabaseAPI()
 	s.registerBlockAPI()
 	s.registerCondenserAPI()
