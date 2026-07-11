@@ -71,7 +71,22 @@ func (s *Server) mIsKnownTransaction() jsonrpc.Handler {
 		if json.Unmarshal(params, &arr) == nil && len(arr) > 0 {
 			_ = json.Unmarshal(arr[0], &id)
 		}
-		return s.mempool.Has(id), nil
+		if s.mempool.Has(id) {
+			return true, nil
+		}
+		// Also consult the applied-tx dedup window (existing consensus state).
+		b, err := hex.DecodeString(id)
+		if err != nil || len(b) != 20 {
+			return false, nil
+		}
+		var trx [20]byte
+		copy(trx[:], b)
+		known := false
+		_ = s.chain.WithReadSession(func(sess *state.Session) error {
+			known, _ = objects.HasTransaction(sess, trx)
+			return nil
+		})
+		return known, nil
 	}
 }
 
