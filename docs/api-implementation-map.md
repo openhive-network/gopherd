@@ -144,3 +144,41 @@ read surface of A–C that is backed by existing state:
 So phases A–C (transport + read exposure of existing state + condenser aggregation)
 are substantially complete; the remaining condenser methods are gated on the
 Phase D (broadcast) and Phase E (index) subsystems by design.
+
+
+## Phases D & E status (2026-07-11)
+
+**Phase D (broadcast / tx utilities) — DONE (safe subset):**
+- JSON→operation parser (op_parse.go): inverse of op→JSON, 46 wallet-broadcast op
+  types via a prototype registry + reflection populator.
+- get_transaction_hex, verify_authority, get_potential_signatures,
+  get_required_signatures — reuse the chain's RequiredAuthorities + VerifyAuthority
+  + sessionAuthFetcher.
+- broadcast_transaction / _synchronous / network_broadcast_api.broadcast_transaction —
+  parse + authority-validate + park in an in-memory Mempool. **Relay is deliberately
+  NOT wired** (a network write must never hit live mainnet — the never-touch-mainnet
+  rule); enabling relay is a future opt-in gated off mainnet.
+- is_known_transaction — mempool + the applied-tx dedup window (objects.HasTransaction).
+
+**Phase E — the parts backed by existing state are DONE:**
+- account_by_key.get_key_references — on-demand authority scan (no index).
+- get_ops_in_block — real ops from a parsed block (virtual ops omitted).
+- get_active_votes — comment votes via RangeCommentVotesByComment.
+
+**Phase E — remaining methods each need a NEW apply-time index subsystem (not built):**
+- account_history_api.get_account_history / enum_virtual_ops / get_transaction — a
+  per-account op index; ALSO blocked on gopherd emitting the full virtual-op stream
+  (only a subset is emitted today). The biggest + highest-value; multi-day.
+- market_history_api (ticker/volume/trade_history/market_history buckets) — a trade
+  + OHLC-bucket index fed from fill_order.
+- transaction_status_api.find_transaction — a tx_id→block index (the dedup window
+  stores tx_id+expiration but not the block).
+- reputation_api.get_account_reputations — a reputation index fed from vote rshares.
+- rc_api — the whole RC consensus subsystem (separately deferred).
+
+These are substantial subsystems (apply hooks + persistence + replay-time build);
+the API methods are wired to slot in once each index exists.
+
+**Total: 64 JSON-RPC methods across 7 APIs (database / condenser / block /
+account_by_key / account_history / network_broadcast). All offline-tested; the
+API is read-only except broadcast, which parks locally and never relays.**
