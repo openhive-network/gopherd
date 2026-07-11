@@ -22,6 +22,57 @@ func (s *Server) registerTxAPI() {
 	s.reg.Register("database_api.verify_authority", s.mVerifyAuthority(true))
 	s.reg.Register("condenser_api.get_potential_signatures", s.mGetPotentialSignatures(true))
 	s.reg.Register("condenser_api.get_required_signatures", s.mGetRequiredSignatures(true))
+	s.reg.Register("condenser_api.broadcast_transaction", s.mBroadcast(false))
+	s.reg.Register("condenser_api.broadcast_transaction_synchronous", s.mBroadcast(true))
+	s.reg.Register("network_broadcast_api.broadcast_transaction", s.mBroadcast(false))
+	s.reg.Register("condenser_api.is_known_transaction", s.mIsKnownTransaction())
+}
+
+// mBroadcast parses + authority-validates a transaction and parks it in the
+// local mempool. It does NOT relay to peers (network write — see Mempool doc /
+// the never-touch-mainnet rule). Returns {} (async) or {id,block_num,...}
+// (synchronous); the block_num is 0 because, without relay, we can't confirm
+// on-chain inclusion.
+func (s *Server) mBroadcast(sync bool) jsonrpc.Handler {
+	return func(_ context.Context, params json.RawMessage) (interface{}, error) {
+		txRaw, err := txParam(params, false)
+		if err != nil {
+			return nil, err
+		}
+		st, perr := parseTransaction(txRaw)
+		if perr != nil {
+			return nil, jsonrpc.Errorf(jsonrpc.CodeInvalidParams, "parse transaction: %v", perr)
+		}
+		unsigned := tx.AppendTransactionBody(nil, &st.Transaction)
+		var verr error
+		_ = s.chain.WithReadSession(func(sess *state.Session) error {
+			verr = chain.VerifyAuthority(sess, &st, unsigned, network.ChainID, false)
+			return nil
+		})
+		if verr != nil {
+			return nil, jsonrpc.Errorf(jsonrpc.CodeInvalidParams, "verify_authority: %v", verr)
+		}
+		id := txID(unsigned)
+		s.mempool.Add(id, st)
+		if sync {
+			return map[string]interface{}{"id": id, "block_num": 0, "trx_num": 0, "expired": false}, nil
+		}
+		return map[string]interface{}{}, nil
+	}
+}
+
+// mIsKnownTransaction reports whether a tx id is in the local mempool. (A full
+// node also checks the applied-tx dedup window; that needs the transaction_status
+// index — a future Phase-E subsystem.)
+func (s *Server) mIsKnownTransaction() jsonrpc.Handler {
+	return func(_ context.Context, params json.RawMessage) (interface{}, error) {
+		var arr []json.RawMessage
+		var id string
+		if json.Unmarshal(params, &arr) == nil && len(arr) > 0 {
+			_ = json.Unmarshal(arr[0], &id)
+		}
+		return s.mempool.Has(id), nil
+	}
 }
 
 func authorityForLevel(au objects.AccountAuthority, level chain.AuthorityLevel) auth.Authority {
