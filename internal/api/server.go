@@ -29,6 +29,7 @@ func New(c *chain.Database) *Server {
 	s.registerCondenserAPI()
 	s.registerListsAPI()
 	s.registerWitnessListAPI()
+	s.registerAccountByKeyAPI()
 	return s
 }
 
