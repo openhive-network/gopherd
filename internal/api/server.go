@@ -30,6 +30,7 @@ func New(c *chain.Database) *Server {
 	s.registerListsAPI()
 	s.registerWitnessListAPI()
 	s.registerAccountByKeyAPI()
+	s.registerTxAPI()
 	return s
 }
 
@@ -59,6 +60,15 @@ func timeString(sec uint32) string {
 
 // hexID renders a 20-byte block_id as lowercase hex.
 func hexID(id [20]byte) string { return hex.EncodeToString(id[:]) }
+
+// parseTimeString inverts timeString: "2006-01-02T15:04:05" → time_point_sec.
+func parseTimeString(s string) (uint32, error) {
+	t, err := time.Parse("2006-01-02T15:04:05", s)
+	if err != nil {
+		return 0, err
+	}
+	return uint32(t.Unix()), nil
+}
 
 // u128dec renders a 16-byte big-endian uint128 (e.g. total_reward_shares2) as a
 // decimal string.

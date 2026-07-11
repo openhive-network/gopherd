@@ -58,3 +58,26 @@ func TestOpToJSONTransfer(t *testing.T) {
 		t.Fatalf("NAI amount wrong: %v", amt)
 	}
 }
+
+func TestOpParseRoundTrip(t *testing.T) {
+	orig := op.Transfer{From: "alice", To: "bob", Amount: hiveAsset(2500), Memo: "x"}
+	// legacy render → parse back.
+	j, _ := json.Marshal(opToJSON(op.FromOperation(orig), true))
+	got, err := parseOp(j)
+	if err != nil {
+		t.Fatalf("parseOp: %v", err)
+	}
+	tr := got.Operation().(op.Transfer)
+	if tr.From != "alice" || tr.To != "bob" || tr.Memo != "x" || tr.Amount.Amount != 2500 {
+		t.Fatalf("round-trip mismatch: %+v", tr)
+	}
+	// modern variant render → parse back.
+	jv, _ := json.Marshal(opToVariant(op.FromOperation(orig), false))
+	got2, err := parseOp(jv)
+	if err != nil {
+		t.Fatalf("parseOp variant: %v", err)
+	}
+	if got2.Operation().(op.Transfer).Amount.Amount != 2500 {
+		t.Fatal("variant round-trip amount mismatch")
+	}
+}
