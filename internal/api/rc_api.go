@@ -147,31 +147,24 @@ func (s *Server) mListRCAccounts(condenserArgs, legacy bool) jsonrpc.Handler {
 		var start string
 		_ = json.Unmarshal(startRaw, &start)
 
-		// Collect names >= start, sort, take limit — matching hived's by_name
-		// lower_bound walk.
-		type rcAcct struct {
-			name string
-			res  map[string]interface{}
-		}
-		var accts []rcAcct
+		// RangeAccounts (RangePrimary) yields accounts in ascending name order,
+		// so we skip names < start and stop as soon as we've collected `limit`
+		// — matching hived's by_name lower_bound walk. Building a result only
+		// for the returned page (not for every account ≥ start) bounds the work
+		// to `limit`, which matters because the whole scan runs under the apply
+		// read lock: an unbounded scan would stall ApplyBlock.
+		out := make([]map[string]interface{}, 0, limit)
 		err := s.chain.WithReadSession(func(sess *state.Session) error {
 			return objects.RangeAccounts(sess, func(a *objects.Account) (bool, error) {
-				if string(a.Name) >= start {
-					accts = append(accts, rcAcct{string(a.Name), rcAccountResult(a, legacy)})
+				if string(a.Name) < start {
+					return true, nil // keep skipping toward the lower bound
 				}
-				return true, nil
+				out = append(out, rcAccountResult(a, legacy))
+				return len(out) < limit, nil // stop once the page is full
 			})
 		})
 		if err != nil {
 			return nil, jsonrpc.Errorf(jsonrpc.CodeServerError, "list_rc_accounts: %v", err)
-		}
-		sort.Slice(accts, func(i, j int) bool { return accts[i].name < accts[j].name })
-		if len(accts) > limit {
-			accts = accts[:limit]
-		}
-		out := make([]map[string]interface{}, len(accts))
-		for i := range accts {
-			out[i] = accts[i].res
 		}
 		if condenserArgs {
 			return out, nil

@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"sort"
 	"strconv"
 
 	"hived-go/internal/api/jsonrpc"
@@ -66,40 +65,40 @@ func accountResult(a objects.Account, au objects.AccountAuthority, legacy bool) 
 	memo := crypto.PublicKey(a.MemoKey).String()
 	proxy := string(a.Proxy)
 	return map[string]interface{}{
-		"name":                    string(a.Name),
-		"owner":                   authorityResult(au.Owner),
-		"active":                  authorityResult(au.Active),
-		"posting":                 authorityResult(au.Posting),
-		"memo_key":                memo,
-		"json_metadata":           a.JSONMetadata,
-		"proxy":                   proxy,
-		"last_owner_update":       timeString(a.LastOwnerUpdate),
-		"created":                 timeString(a.Created),
-		"recovery_account":        string(a.RecoveryAccount),
-		"post_count":              a.PostCount,
-		"can_vote":                !a.VoteRevoked,
-		"voting_manabar":          manabar(a.VotingManaCurrent, a.VotingManaLastUpdate),
-		"downvote_manabar":        manabar(a.DownvoteManaCurrent, a.DownvoteManaLastUpdate),
-		"balance":                 hv(a.Balance),
-		"savings_balance":         hv(a.SavingsBalance),
-		"hbd_balance":             sbd(a.HBDBalance),
-		"savings_hbd_balance":     sbd(a.SavingsHBDBalance),
-		"reward_hive_balance":     hv(a.RewardHive),
-		"reward_hbd_balance":      sbd(a.RewardHBD),
-		"reward_vesting_balance":  vs(a.RewardVests),
-		"reward_vesting_hive":     hv(a.RewardVestingHive),
-		"vesting_shares":          vs(a.VestingShares),
-		"delegated_vesting_shares": vs(a.DelegatedVestingShares),
-		"received_vesting_shares":  vs(a.ReceivedVestingShares),
-		"vesting_withdraw_rate":    vs(a.VestingWithdrawRate),
-		"next_vesting_withdrawal":  timeString(a.NextVestingWithdrawal),
-		"withdrawn":                a.Withdrawn,
-		"to_withdraw":              a.ToWithdraw,
-		"witnesses_voted_for":      a.WitnessesVotedFor,
-		"proxied_vsf_votes":        pvsf,
-		"last_vote_time":           timeString(a.LastVoteTime),
-		"last_post":                timeString(a.LastPost),
-		"last_root_post":           timeString(a.LastRootPost),
+		"name":                          string(a.Name),
+		"owner":                         authorityResult(au.Owner),
+		"active":                        authorityResult(au.Active),
+		"posting":                       authorityResult(au.Posting),
+		"memo_key":                      memo,
+		"json_metadata":                 a.JSONMetadata,
+		"proxy":                         proxy,
+		"last_owner_update":             timeString(a.LastOwnerUpdate),
+		"created":                       timeString(a.Created),
+		"recovery_account":              string(a.RecoveryAccount),
+		"post_count":                    a.PostCount,
+		"can_vote":                      !a.VoteRevoked,
+		"voting_manabar":                manabar(a.VotingManaCurrent, a.VotingManaLastUpdate),
+		"downvote_manabar":              manabar(a.DownvoteManaCurrent, a.DownvoteManaLastUpdate),
+		"balance":                       hv(a.Balance),
+		"savings_balance":               hv(a.SavingsBalance),
+		"hbd_balance":                   sbd(a.HBDBalance),
+		"savings_hbd_balance":           sbd(a.SavingsHBDBalance),
+		"reward_hive_balance":           hv(a.RewardHive),
+		"reward_hbd_balance":            sbd(a.RewardHBD),
+		"reward_vesting_balance":        vs(a.RewardVests),
+		"reward_vesting_hive":           hv(a.RewardVestingHive),
+		"vesting_shares":                vs(a.VestingShares),
+		"delegated_vesting_shares":      vs(a.DelegatedVestingShares),
+		"received_vesting_shares":       vs(a.ReceivedVestingShares),
+		"vesting_withdraw_rate":         vs(a.VestingWithdrawRate),
+		"next_vesting_withdrawal":       timeString(a.NextVestingWithdrawal),
+		"withdrawn":                     a.Withdrawn,
+		"to_withdraw":                   a.ToWithdraw,
+		"witnesses_voted_for":           a.WitnessesVotedFor,
+		"proxied_vsf_votes":             pvsf,
+		"last_vote_time":                timeString(a.LastVoteTime),
+		"last_post":                     timeString(a.LastPost),
+		"last_root_post":                timeString(a.LastRootPost),
 		"governance_vote_expiration_ts": timeString(a.GovernanceVoteExpiration),
 		"pending_claimed_accounts":      a.PendingClaimedAccounts,
 	}
@@ -123,8 +122,9 @@ func (s *Server) loadAccounts(names []string, legacy bool) []map[string]interfac
 }
 
 // namesFromParams decodes account-name lists from both conventions:
-//   condenser get_accounts: [["alice","bob"]]
-//   database_api find_accounts: {"accounts":["alice","bob"]}
+//
+//	condenser get_accounts: [["alice","bob"]]
+//	database_api find_accounts: {"accounts":["alice","bob"]}
 func namesFromParams(params json.RawMessage) ([]string, error) {
 	var obj struct {
 		Accounts []string `json:"accounts"`
@@ -169,7 +169,9 @@ func (s *Server) mGetAccountCount() jsonrpc.Handler {
 	return func(_ context.Context, _ json.RawMessage) (interface{}, error) {
 		n := 0
 		_ = s.chain.WithReadSession(func(sess *state.Session) error {
-			return objects.RangeAccounts(sess, func(*objects.Account) (bool, error) { n++; return true, nil })
+			// O(1) store count — not an O(N) scan under the apply read lock.
+			n = objects.EnsureAccountStore(sess).Count()
+			return nil
 		})
 		return n, nil
 	}
@@ -190,19 +192,20 @@ func (s *Server) mLookupAccounts() jsonrpc.Handler {
 		if limit <= 0 || limit > 1000 {
 			limit = 1000
 		}
-		var names []string
+		// RangeAccounts yields ascending name order: skip below the lower bound,
+		// then stop once `limit` names are collected — bounds the work to `limit`
+		// (the scan runs under the apply read lock, so an unbounded collect would
+		// stall ApplyBlock).
+		names := make([]string, 0, limit)
 		_ = s.chain.WithReadSession(func(sess *state.Session) error {
 			return objects.RangeAccounts(sess, func(a *objects.Account) (bool, error) {
-				if string(a.Name) >= lower {
-					names = append(names, string(a.Name))
+				if string(a.Name) < lower {
+					return true, nil
 				}
-				return true, nil
+				names = append(names, string(a.Name))
+				return len(names) < limit, nil
 			})
 		})
-		sort.Strings(names)
-		if len(names) > limit {
-			names = names[:limit]
-		}
 		return names, nil
 	}
 }
