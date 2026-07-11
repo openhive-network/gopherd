@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"sort"
 	"strconv"
 
 	"hived-go/internal/api/jsonrpc"
@@ -43,19 +42,18 @@ func (s *Server) mLookupWitnessAccounts() jsonrpc.Handler {
 		if limit <= 0 || limit > 1000 {
 			limit = 1000
 		}
-		var names []string
+		// RangePrimary yields ascending owner order with early termination, so
+		// skip below the lower bound and stop at `limit` — no full collect+sort.
+		names := make([]string, 0, limit)
 		_ = s.chain.WithReadSession(func(sess *state.Session) error {
 			return objects.EnsureWitnessStore(sess).RangePrimary(func(w *objects.Witness) (bool, error) {
-				if string(w.Owner) >= lower {
-					names = append(names, string(w.Owner))
+				if string(w.Owner) < lower {
+					return true, nil
 				}
-				return true, nil
+				names = append(names, string(w.Owner))
+				return len(names) < limit, nil
 			})
 		})
-		sort.Strings(names)
-		if len(names) > limit {
-			names = names[:limit]
-		}
 		return names, nil
 	}
 }
@@ -72,21 +70,16 @@ func (s *Server) mGetWitnessesByVote(legacy bool) jsonrpc.Handler {
 		if limit <= 0 || limit > 100 {
 			limit = 100
 		}
-		var all []objects.Witness
+		// RangeByVote iterates vote-descending with early termination, so build
+		// only the top `limit` witnesses instead of copying + sorting the whole
+		// witness set under the apply read lock.
+		out := make([]map[string]interface{}, 0, limit)
 		_ = s.chain.WithReadSession(func(sess *state.Session) error {
-			return objects.EnsureWitnessStore(sess).RangePrimary(func(w *objects.Witness) (bool, error) {
-				all = append(all, *w)
-				return true, nil
+			return objects.EnsureWitnessStore(sess).RangeByVote(func(w *objects.Witness) (bool, error) {
+				out = append(out, witnessResult(*w, legacy))
+				return len(out) < limit, nil
 			})
 		})
-		sort.Slice(all, func(i, j int) bool { return all[i].TotalVotesVests > all[j].TotalVotesVests })
-		if len(all) > limit {
-			all = all[:limit]
-		}
-		out := make([]map[string]interface{}, 0, len(all))
-		for i := range all {
-			out = append(out, witnessResult(all[i], legacy))
-		}
 		return out, nil
 	}
 }
@@ -99,29 +92,29 @@ func witnessResult(w objects.Witness, legacy bool) map[string]interface{} {
 		return hiveAsset(x)
 	}
 	return map[string]interface{}{
-		"owner":                  string(w.Owner),
-		"created":                timeString(w.Created),
-		"url":                    w.URL,
-		"votes":                  strconv.FormatInt(w.TotalVotesVests, 10),
-		"virtual_last_update":    u128dec(w.VirtualLastUpdate),
-		"virtual_position":       u128dec(w.VirtualPosition),
-		"virtual_scheduled_time": u128dec(w.VirtualScheduledTime),
-		"total_missed":           w.TotalMissedBlocks,
+		"owner":                    string(w.Owner),
+		"created":                  timeString(w.Created),
+		"url":                      w.URL,
+		"votes":                    strconv.FormatInt(w.TotalVotesVests, 10),
+		"virtual_last_update":      u128dec(w.VirtualLastUpdate),
+		"virtual_position":         u128dec(w.VirtualPosition),
+		"virtual_scheduled_time":   u128dec(w.VirtualScheduledTime),
+		"total_missed":             w.TotalMissedBlocks,
 		"last_confirmed_block_num": w.LastConfirmedBlockNum,
-		"pow_worker":             w.PowWorker,
-		"signing_key":            w.BlockSigningKey.String(),
+		"pow_worker":               w.PowWorker,
+		"signing_key":              w.BlockSigningKey.String(),
 		"props": map[string]interface{}{
-			"account_creation_fee": fee(w.AccountCreationFee),
-			"maximum_block_size":   w.MaximumBlockSize,
-			"hbd_interest_rate":    w.HBDInterestRate,
+			"account_creation_fee":   fee(w.AccountCreationFee),
+			"maximum_block_size":     w.MaximumBlockSize,
+			"hbd_interest_rate":      w.HBDInterestRate,
 			"account_subsidy_budget": w.AccountSubsidyBudget,
 			"account_subsidy_decay":  w.AccountSubsidyDecay,
 		},
-		"hbd_exchange_rate":        priceResult(w.HBDExchangeRate, legacy),
-		"last_hbd_exchange_update": timeString(w.LastHBDExchangeUpdate),
-		"running_version":          versionString(w.RunningVersion),
-		"hardfork_version_vote":    versionString(w.HardforkVersionVote),
-		"hardfork_time_vote":       timeString(w.HardforkTimeVote),
+		"hbd_exchange_rate":                   priceResult(w.HBDExchangeRate, legacy),
+		"last_hbd_exchange_update":            timeString(w.LastHBDExchangeUpdate),
+		"running_version":                     versionString(w.RunningVersion),
+		"hardfork_version_vote":               versionString(w.HardforkVersionVote),
+		"hardfork_time_vote":                  timeString(w.HardforkTimeVote),
 		"available_witness_account_subsidies": w.AvailableWitnessAccountSubsidies,
 	}
 }
