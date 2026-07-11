@@ -182,3 +182,28 @@ the API methods are wired to slot in once each index exists.
 **Total: 64 JSON-RPC methods across 7 APIs (database / condenser / block /
 account_by_key / account_history / network_broadcast). All offline-tested; the
 API is read-only except broadcast, which parks locally and never relays.**
+
+## Scope correction — HAF / Hivemind boundary (2026-07-11)
+
+In the modern Hive stack the CONSENSUS NODE (hived/gopherd) does NOT serve the
+heavy history/social/market APIs — those are supplanted by the HAF stack, which
+reads the node's block stream into Postgres and serves them from separate apps:
+- **HAFAH** → account_history_api (get_account_history, enum_virtual_ops,
+  get_ops_in_block, get_transaction).
+- **Hivemind** → social/discussion/tags/follow + reputation_api + much of
+  condenser's content/discussion surface (get_content, get_discussions_by_*,
+  get_followers, get_active_votes reputation, etc.).
+- **HAF market service** → market_history_api (ticker/volume/trades/buckets).
+
+Therefore these are **out of scope for gopherd** — do NOT build them as node
+subsystems. gopherd's job is the consensus-backed core the node owns:
+- database_api, block_api, network_broadcast_api, condenser_api (consensus subset),
+  account_by_key_api, transaction_status_api, rc_api — plus emitting a clean
+  block/vop stream that HAF can ingest.
+
+Net effect on the earlier "Phase E remaining" list: account_history, market_history,
+reputation are **HAF/Hivemind's job, not gopherd's** — drop them. What genuinely
+remains for the node itself: **rc_api** (needs the RC subsystem port) and any
+polish on the consensus-core APIs already built. (The get_ops_in_block /
+get_active_votes we added are harmless conveniences, but HAFAH/Hivemind are the
+real source for those in production.)
