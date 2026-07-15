@@ -108,6 +108,26 @@ func (d *Delegate) BuildAddressReply(p *node.Peer) []proto.AddressInfo { return 
 // item hashes the peer has. We dedup against our local known set and
 // queue any unknowns onto a fetch_items request.
 func (d *Delegate) handleInv(p *node.Peer, body []byte) {
+	// While catching up (initial sync / warm-start from an old snapshot),
+	// IGNORE regular tip-inventory advertisements entirely. This mirrors
+	// hived 1.28.7's _ignore_item_ids_inventory_message
+	// (commit f762fe09e): a node that is far behind must not react to a
+	// peer's newly-produced tip block. Reacting would fetch blocks millions
+	// ahead of our sync frontier that can never apply in order — they pile
+	// into the reorder buffer, consume the per-peer/global fetch budget, and
+	// get evicted unused — and, combined with re-advertising, is the
+	// amplification that caused the block-p2p-time network storm (the
+	// 2026-07-09 mainnet incident). Sequential catch-up is unaffected: it
+	// runs over the fetch_blockchain_item_ids / fetch_items path
+	// (handleBlockchainItemIDsInventory + catchupKickerLoop), NOT this one.
+	// The gate is self-clearing: the instant our head reaches the live tip
+	// (head timestamp within liveAdvertiseWindowSec of wall-clock) we resume
+	// processing tip inventory, which is when in-order tip-fetching is
+	// actually useful. This is the inbound twin of broadcastInv's own
+	// isCatchingUp() suppression.
+	if d.isCatchingUp() {
+		return
+	}
 	var msg proto.ItemIDsInventoryMessage
 	if err := msg.Unmarshal(body); err != nil {
 		d.logf("inv decode: %v", err)

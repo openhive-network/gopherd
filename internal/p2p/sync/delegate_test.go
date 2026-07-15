@@ -103,6 +103,18 @@ func (s *stubChain) seed(n uint32, raw []byte) {
 	s.order = append(s.order, n)
 }
 
+// liveBlockBytes builds a minimal raw-block buffer whose timestamp field
+// (offset 20, 4 bytes LE — see blockTimestamp) is `ts`. Enough to drive
+// isCatchingUp(): a head block with a recent ts reads as "live".
+func liveBlockBytes(ts uint32) []byte {
+	b := make([]byte, 24)
+	b[20] = byte(ts)
+	b[21] = byte(ts >> 8)
+	b[22] = byte(ts >> 16)
+	b[23] = byte(ts >> 24)
+	return b
+}
+
 // makeStubID synthesises a 20-byte ID with the block num in the first
 // 4 BE bytes (matches block.ConstructID's invariant).
 func makeStubID(num uint32) block.ID {
@@ -160,6 +172,10 @@ func TestSyncDelegateIdleBackoff(t *testing.T) {
 		FetchBatch:      10,
 		MaxBlocksPerInv: 50,
 		MaxTxPerInv:     10,
+		// broadcastInv short-circuits before the idle counter when Serve is
+		// off (passive default); the idle-backoff path only runs on a serving
+		// node, so exercise it with Serve on.
+		Serve: true,
 	}
 	d := newWithChain(cfg, chn)
 	d.Start()
@@ -278,6 +294,11 @@ func TestOutstandingCapsThrottle(t *testing.T) {
 	}
 	d := newWithChain(cfg, chn)
 	d.inhibitFetching.Store(true)
+	// handleInv now ignores tip inventory while catching up (mirrors hived
+	// 1.28.7). Seed a LIVE head so isCatchingUp() is false and the throttle
+	// path under test actually runs.
+	chn.seed(100, liveBlockBytes(uint32(time.Now().Unix())))
+	d.headBlockHint.Store(100)
 	// Pre-load Delegate with a fake peer state.
 	st := newPeerState()
 	var fake node.Peer
@@ -323,6 +344,67 @@ func TestOutstandingCapsThrottle(t *testing.T) {
 	}
 	if d.outstandingThrottled.Load() == 0 {
 		t.Errorf("expected outstandingThrottled > 0")
+	}
+}
+
+// TestHandleInvIgnoredWhileCatchingUp locks in the hived-1.28.7 network-storm
+// fix: while catching up (head timestamp far behind wall-clock), an inbound
+// item_ids_inventory_message must be ignored wholesale — no fetch budget
+// reserved, no per-peer state mutated — so a syncing node can't be pulled
+// into fetching/re-advertising tip blocks it can't apply in order. Once the
+// head is live, the same INV is processed normally.
+func TestHandleInvIgnoredWhileCatchingUp(t *testing.T) {
+	chn := newStubChain()
+	cfg := Config{
+		INVInterval:           time.Hour,
+		IdleINVRounds:         1,
+		Logger:                devNullWriter{},
+		FetchBatch:            10,
+		MaxBlocksPerInv:       50,
+		MaxOutstandingTotal:   100,
+		MaxOutstandingPerPeer: 100,
+	}
+	d := newWithChain(cfg, chn)
+	d.inhibitFetching.Store(true) // keep sendFetchItems from needing a live conn
+	st := newPeerState()
+	var fake node.Peer
+	d.peers[&fake] = st
+
+	// Hashes are all well ABOVE the head (201..203) so they're never skipped
+	// as already-applied — the only thing that suppresses them is the gate.
+	hashes := []proto.ItemHash{
+		proto.ItemHash(makeStubID(201)),
+		proto.ItemHash(makeStubID(202)),
+		proto.ItemHash(makeStubID(203)),
+	}
+	msg := proto.ItemIDsInventoryMessage{ItemType: proto.ItemTypeBlock, ItemHashesAvailable: hashes}
+	body, err := msg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// CATCHING UP: seed an old head (timestamp 1 hour behind). handleInv must
+	// be a complete no-op — nothing touched.
+	chn.seed(100, liveBlockBytes(uint32(time.Now().Unix())-3600))
+	d.headBlockHint.Store(100)
+	d.handleInv(&fake, body)
+	if got := len(st.known); got != 0 {
+		t.Fatalf("catching up: st.known=%d, want 0 (INV must be ignored wholesale)", got)
+	}
+	if got := d.outstandingTotal.Load(); got != 0 {
+		t.Fatalf("catching up: outstandingTotal=%d, want 0", got)
+	}
+	if got := d.inhibitedFetches.Load(); got != 0 {
+		t.Fatalf("catching up: inhibitedFetches=%d, want 0 (never reached sendFetchItems)", got)
+	}
+
+	// LIVE: same INV, but head timestamp is now. handleInv should process the
+	// three fresh hashes (they flow into sendFetchItems → inhibited refund).
+	chn.seed(100, liveBlockBytes(uint32(time.Now().Unix())))
+	d.headBlockHint.Store(100)
+	d.handleInv(&fake, body)
+	if d.inhibitedFetches.Load() != 3 {
+		t.Fatalf("live: inhibitedFetches=%d, want 3 (INV processed, all 3 hashes hit sendFetchItems)", d.inhibitedFetches.Load())
 	}
 }
 
