@@ -126,6 +126,7 @@ func (d *Delegate) handleInv(p *node.Peer, body []byte) {
 	// actually useful. This is the inbound twin of broadcastInv's own
 	// isCatchingUp() suppression.
 	if d.isCatchingUp() {
+		d.invIgnoredCatchup.Add(1)
 		return
 	}
 	var msg proto.ItemIDsInventoryMessage
