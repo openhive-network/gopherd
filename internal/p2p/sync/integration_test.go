@@ -51,6 +51,7 @@ func TestLateJoinerCatchesUp(t *testing.T) {
 		MaxTxPerInv:     10,
 		IdleINVRounds:   100, // never sleep during the test
 		Logger:          devNullWriter{},
+		Serve:           true, // A is the block source; it must answer fetches
 	}, chainA)
 	multiA := node.NewMultiDelegate(syncA)
 	nodeA := node.New(node.Config{
@@ -124,13 +125,40 @@ func TestLateJoinerCatchesUp(t *testing.T) {
 	}
 }
 
-// TestINVPropagation verifies that A's periodic INV broadcast reaches
-// B and triggers B to fetch the advertised blocks. (Cousin of
-// TestLateJoinerCatchesUp but exercises the steady-state INV path
-// rather than the one-shot fetch_blockchain_item_ids handshake.)
+// syntheticBlock builds an 80-byte round-trip block whose payload encodes
+// `n` in the first 4 BE bytes and whose timestamp field (offset 20, LE — see
+// blockTimestamp) is `ts`. A live `ts` makes a node holding it read as
+// in-sync (isCatchingUp() == false).
+func syntheticBlock(n, ts uint32) []byte {
+	raw := make([]byte, 80)
+	raw[0] = byte(n >> 24)
+	raw[1] = byte(n >> 16)
+	raw[2] = byte(n >> 8)
+	raw[3] = byte(n)
+	raw[20] = byte(ts)
+	raw[21] = byte(ts >> 8)
+	raw[22] = byte(ts >> 16)
+	raw[23] = byte(ts >> 24)
+	return raw
+}
+
+// TestINVPropagation verifies the steady-state (live-tip) INV path: an
+// IN-SYNC node B receives A's item_ids_inventory advertisement for a newly
+// produced tip block and fetches it. B must be live (recent head timestamp)
+// for this to fire — a catching-up node deliberately ignores tip inventory
+// (hived 1.28.7 network-storm fix, see handleInv), so B is pre-seeded at the
+// live tip and only the final block arrives via INV. (Cousin of
+// TestLateJoinerCatchesUp, which covers the initial-sync
+// fetch_blockchain_item_ids handshake for a from-scratch node.)
 func TestINVPropagation(t *testing.T) {
 	chainA := newStubChain()
 	chainB := newStubChain()
+	now := uint32(time.Now().Unix())
+	// B starts IN SYNC: it already holds live blocks 1..4 (head=4, live ts),
+	// so isCatchingUp() is false and handleInv will act on A's advert.
+	for n := uint32(1); n <= 4; n++ {
+		chainB.seed(n, syntheticBlock(n, now))
+	}
 
 	rawL, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -146,6 +174,7 @@ func TestINVPropagation(t *testing.T) {
 		MaxTxPerInv:     10,
 		IdleINVRounds:   100,
 		Logger:          devNullWriter{},
+		Serve:           true, // A advertises + serves the tip block
 	}
 
 	syncA := newWithChain(cfg, chainA)
@@ -184,15 +213,11 @@ func TestINVPropagation(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 
-	// Now seed a block on A AFTER both peers are connected.
-	// B should learn about it via the next INV round.
+	// Now A produces the chain up to block 5 (live timestamps) AFTER both
+	// peers are connected. B already holds 1..4, so the only block it must
+	// learn about via A's INV advert is the new tip, block 5.
 	for n := uint32(1); n <= 5; n++ {
-		raw := make([]byte, 80)
-		raw[0] = byte(n >> 24)
-		raw[1] = byte(n >> 16)
-		raw[2] = byte(n >> 8)
-		raw[3] = byte(n)
-		chainA.seed(n, raw)
+		chainA.seed(n, syntheticBlock(n, now))
 	}
 	syncA.NotifyHeadAdvanced()
 
