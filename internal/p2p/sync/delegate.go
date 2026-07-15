@@ -362,6 +362,11 @@ type Delegate struct {
 	droppedReorder     atomic.Uint64
 	inhibitedFetches   atomic.Uint64
 	outstandingThrottled atomic.Uint64
+	// invIgnoredCatchup counts item_ids_inventory_message adverts dropped by
+	// handleInv's catch-up gate (the hived-1.28.7 storm fix). It climbs while
+	// we're behind and flatlines the instant we reach the live tip — a direct,
+	// observable signal that the gate is doing its job and self-clearing.
+	invIgnoredCatchup atomic.Uint64
 
 	// compressed-block accounting. compressedReceived counts every
 	// compressed_block_message that decoded cleanly (regardless of whether
@@ -856,6 +861,11 @@ type Stats struct {
 	// GlobalInflight is the size of the global in-flight reservation set.
 	// With dedup working it tracks DistinctOutstanding closely.
 	GlobalInflight int
+	// InvIgnoredCatchup is the cumulative count of tip-inventory adverts
+	// dropped by handleInv's catch-up gate (hived-1.28.7 storm fix). Nonzero
+	// and climbing == we're behind and correctly ignoring tip INV; stops
+	// climbing once we reach the live tip.
+	InvIgnoredCatchup uint64
 }
 
 func (d *Delegate) distinctOutstanding() (distinct, peers int) {
@@ -893,5 +903,6 @@ func (d *Delegate) Stats() Stats {
 		PeerCount:              peers,
 		DistinctOutstanding:    distinct,
 		GlobalInflight:         inflight,
+		InvIgnoredCatchup:      d.invIgnoredCatchup.Load(),
 	}
 }
