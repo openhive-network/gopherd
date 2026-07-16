@@ -120,6 +120,11 @@ func cmdNode(args []string) int {
 		return 2
 	}
 
+	if cfg.noBlockLog && cfg.sourceBlockLog != "" {
+		fmt.Fprintln(os.Stderr, "gopherd node: --no-block-log is incompatible with --source-block-log (self-replay writes the local log)")
+		return 2
+	}
+
 	app, err := newApp(cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "gopherd node: %v\n", err)
@@ -178,6 +183,14 @@ type flags struct {
 	// downstream tooling that compares byte-identical against an
 	// uncompressed reference unchanged.
 	compressBlocks bool
+	// noBlockLog runs the node WITHOUT writing a local block_log — state +
+	// cold tier only. Turns a from-scratch p2p sync from a ~400 GB disk write
+	// (a redundant copy of the chain) into tens of GB, for validation runs
+	// where the local archive isn't wanted. Trade-off: no local block_log
+	// means recover()-on-restart is impossible (typed-stores are volatile), so
+	// a restart must warm-start from a snapshot or begin again from genesis.
+	// Incompatible with --source-block-log (self-replay needs the writer).
+	noBlockLog bool
 	// backend selects the state backend. "pebble" (default, persistent)
 	// or "mem" (in-memory btree — volatile, ~3-5x faster, suitable for
 	// sync-verification runs that reset state on restart).
@@ -245,6 +258,7 @@ func parseNodeFlags(args []string) flags {
 	fs.StringVar(&f.extraSeeds, "extra-seed", "", "additional seed (host:port); pass --extra-seed multiple times to add more")
 	fs.BoolVar(&f.disableMainSeeds, "no-default-seeds", false, "skip the compiled-in mainnet seeds; only --extra-seed peers will be dialed")
 	fs.BoolVar(&f.compressBlocks, "compress-blocks", false, "zstd-compress each block in the local block_log (matches hived's on-disk format byte-for-byte)")
+	fs.BoolVar(&f.noBlockLog, "no-block-log", false, "do NOT write a local block_log (state + cold tier only); shrinks a from-scratch p2p sync from ~400GB to tens of GB. No local log = no recover-on-restart. Incompatible with --source-block-log")
 	fs.StringVar(&f.backend, "backend", "", "state backend: pebble (persistent) or mem (volatile, ~3-5x faster); default = pebble unless --verify-against is set, in which case mem (since the run is throwaway anyway)")
 	fs.StringVar(&f.cpuProfile, "cpuprofile", "", "write runtime/pprof CPU profile to this path")
 	fs.StringVar(&f.memProfile, "memprofile", "", "write runtime/pprof heap profile to this path at shutdown")
@@ -451,10 +465,17 @@ func newApp(cfg flags) (*app, error) {
 		stateDB.Close()
 		return nil, fmt.Errorf("mkdir blockchain: %w", err)
 	}
-	w, err := blocklog.OpenForWrite(blockLogPath, cfg.compressBlocks)
-	if err != nil {
-		stateDB.Close()
-		return nil, fmt.Errorf("open block_log writer: %w", err)
+	// Ephemeral (--no-block-log): skip the writer entirely. State + cold tier
+	// only; afterApply's append is guarded on writer!=nil, and recoverFrom
+	// stays 0 (no local log to replay from on a restart).
+	var w blocklog.Writer
+	if !cfg.noBlockLog {
+		var werr error
+		w, werr = blocklog.OpenForWrite(blockLogPath, cfg.compressBlocks)
+		if werr != nil {
+			stateDB.Close()
+			return nil, fmt.Errorf("open block_log writer: %w", werr)
+		}
 	}
 
 	// Crash recovery: if the local block_log has blocks (writer reopened
@@ -471,7 +492,7 @@ func newApp(cfg flags) (*app, error) {
 	// proceeds, so the persistedHead is only relevant as a sanity hint
 	// (we expect blocklog.HeadBlock >= persistedHead).
 	recoverFrom := uint32(0)
-	if w.HeadBlock() > 0 || persistedHead > 0 {
+	if w != nil && (w.HeadBlock() > 0 || persistedHead > 0) {
 		recoverFrom = w.HeadBlock()
 		if persistedHead > recoverFrom {
 			recoverFrom = persistedHead
@@ -774,8 +795,10 @@ func (a *app) afterApply(rawBlock []byte, blockNum uint32) error {
 				blockNum, len(rawBlock), len(want))
 		}
 	}
-	if err := a.writer.Append(rawBlock); err != nil {
-		return fmt.Errorf("append block %d: %w", blockNum, err)
+	if a.writer != nil {
+		if err := a.writer.Append(rawBlock); err != nil {
+			return fmt.Errorf("append block %d: %w", blockNum, err)
+		}
 	}
 	// Post-commit: spill frozen comments + votes to the cold tier when over
 	// the resident cap (no-op when the cold tier is off). This is the P2P
