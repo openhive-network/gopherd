@@ -28,9 +28,14 @@ MEM_LIMIT_GIB="${MEM_LIMIT_GIB:-24}"
 RESIDENT_CAP="${RESIDENT_CAP:-500000}"
 MAX_PEERS="${MAX_PEERS:-12}"
 API="${API:-127.0.0.1:8091}"
+# Resume source: the on-disk mirror block_log. On a fresh run (no marker) this
+# is unused and the node syncs from 0; on a restart it replays the mirror to
+# the last recorded head and continues — no self-written 400GB log needed.
+MIRROR="${MIRROR:-/home/martin/blocklog-full/block_log}"
 
 # ---- safety asserts --------------------------------------------------------
 [ -x "$BIN" ] || { echo "no gopherd at $BIN" >&2; exit 1; }
+[ -e "$MIRROR" ] || { echo "mirror block_log not found at $MIRROR (set MIRROR=)" >&2; exit 1; }
 # `node --help` exits non-zero (flag help convention); capture then grep so
 # pipefail doesn't misread the help exit code as "flag missing".
 HELP_OUT="$("$BIN" node --help 2>&1 || true)"
@@ -51,6 +56,7 @@ cat <<BANNER
  target-block : $TARGET   (live tip must stay above this)
  serve        : OFF  (never --p2p-serve; cannot provide blocks)
  block_log    : OFF  (--no-block-log; state+cold only)
+ resume       : mirror-replay to marker ($MIRROR)
  mem cap      : $MEM_MAX cgroup / ${MEM_LIMIT_GIB}GiB soft ; peers<=$MAX_PEERS
  data=$DATA
  cold=$COLD
@@ -67,6 +73,7 @@ exec systemd-run --user --scope --collect \
     --data-dir="$DATA" \
     --backend=pebble \
     --no-block-log \
+    --recover-block-log="$MIRROR" \
     --target-block="$TARGET" \
     --comment-resident-cap="$RESIDENT_CAP" \
     --cold-backend=pebble --cold-dir="$COLD" \
