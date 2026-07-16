@@ -39,6 +39,8 @@ import (
 	"runtime"
 	"runtime/debug"
 	"runtime/pprof"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -56,6 +58,52 @@ import (
 	"hived-go/internal/state/objects"
 	snap "hived-go/internal/state/snapshot"
 )
+
+// resumeMarkerInterval is how often (in blocks) an ephemeral run records its
+// applied head, so a restart can rebuild to that point from the mirror. Small
+// enough that a crash re-replays little; the write is a cheap atomic rename.
+// Overridable via GHIVE_RESUME_MARKER_INTERVAL (used by tests).
+var resumeMarkerInterval uint32 = 50000
+
+func init() {
+	if v := os.Getenv("GHIVE_RESUME_MARKER_INTERVAL"); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 32); err == nil && n > 0 {
+			resumeMarkerInterval = uint32(n)
+		}
+	}
+}
+
+// resumeMarkerPath is where the ephemeral resume head is stored. It lives under
+// blockchain/ so wipePebbleFiles (which preserves that subtree) doesn't delete
+// it when we clean stale pebble state on resume.
+func resumeMarkerPath(dataDir string) string {
+	return filepath.Join(dataDir, "blockchain", "resume_head")
+}
+
+// readResumeMarker returns the last recorded ephemeral head, or 0 if none.
+func readResumeMarker(dataDir string) uint32 {
+	b, err := os.ReadFile(resumeMarkerPath(dataDir))
+	if err != nil {
+		return 0
+	}
+	n, err := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 32)
+	if err != nil {
+		return 0
+	}
+	return uint32(n)
+}
+
+// writeResumeMarker atomically records the applied head for --recover-block-log
+// resume. Best-effort: a failure just means the next restart replays from an
+// older marker (or from 0).
+func writeResumeMarker(dataDir string, head uint32) error {
+	p := resumeMarkerPath(dataDir)
+	tmp := p + ".tmp"
+	if err := os.WriteFile(tmp, []byte(strconv.FormatUint(uint64(head), 10)), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, p)
+}
 
 // peekPersistedHead reads the DGPO row from the state backend without
 // constructing a chain.Database (so genesis.Apply hasn't reset it yet)
@@ -122,6 +170,10 @@ func cmdNode(args []string) int {
 
 	if cfg.noBlockLog && cfg.sourceBlockLog != "" {
 		fmt.Fprintln(os.Stderr, "gopherd node: --no-block-log is incompatible with --source-block-log (self-replay writes the local log)")
+		return 2
+	}
+	if cfg.recoverBlockLog != "" && !cfg.noBlockLog {
+		fmt.Fprintln(os.Stderr, "gopherd node: --recover-block-log requires --no-block-log (else the writer would target it)")
 		return 2
 	}
 
@@ -191,6 +243,14 @@ type flags struct {
 	// a restart must warm-start from a snapshot or begin again from genesis.
 	// Incompatible with --source-block-log (self-replay needs the writer).
 	noBlockLog bool
+	// recoverBlockLog is an EXTERNAL block_log used only to rebuild the
+	// volatile typed-stores on restart (resume), decoupled from the writer.
+	// Point it at the on-disk mirror so an ephemeral (--no-block-log) node can
+	// resume after a crash: on startup, if pebble already has a persisted
+	// head N>0, replay this log 1..N to rebuild the typed-stores, then
+	// continue P2P from N — no self-written 400GB log required. Requires
+	// --no-block-log (else the writer would target this path and corrupt it).
+	recoverBlockLog string
 	// backend selects the state backend. "pebble" (default, persistent)
 	// or "mem" (in-memory btree — volatile, ~3-5x faster, suitable for
 	// sync-verification runs that reset state on restart).
@@ -259,6 +319,7 @@ func parseNodeFlags(args []string) flags {
 	fs.BoolVar(&f.disableMainSeeds, "no-default-seeds", false, "skip the compiled-in mainnet seeds; only --extra-seed peers will be dialed")
 	fs.BoolVar(&f.compressBlocks, "compress-blocks", false, "zstd-compress each block in the local block_log (matches hived's on-disk format byte-for-byte)")
 	fs.BoolVar(&f.noBlockLog, "no-block-log", false, "do NOT write a local block_log (state + cold tier only); shrinks a from-scratch p2p sync from ~400GB to tens of GB. No local log = no recover-on-restart. Incompatible with --source-block-log")
+	fs.StringVar(&f.recoverBlockLog, "recover-block-log", "", "external block_log used ONLY to rebuild typed-stores on restart (resume). Point at the on-disk mirror so a --no-block-log node resumes from its persisted pebble head instead of re-syncing from 0. Requires --no-block-log")
 	fs.StringVar(&f.backend, "backend", "", "state backend: pebble (persistent) or mem (volatile, ~3-5x faster); default = pebble unless --verify-against is set, in which case mem (since the run is throwaway anyway)")
 	fs.StringVar(&f.cpuProfile, "cpuprofile", "", "write runtime/pprof CPU profile to this path")
 	fs.StringVar(&f.memProfile, "memprofile", "", "write runtime/pprof heap profile to this path at shutdown")
@@ -358,6 +419,26 @@ func newApp(cfg flags) (*app, error) {
 		if _, err := os.Stat(blockLogPath); err == nil {
 			if err := wipePebbleFiles(cfg.dataDir); err != nil {
 				return nil, fmt.Errorf("wipe stale pebble at %s: %w", cfg.dataDir, err)
+			}
+		}
+	}
+
+	// Ephemeral resume (--recover-block-log + a resume marker from a prior run):
+	// rebuild deterministically from the mirror up to the marked head. Wipe
+	// stale pebble K/V (a hard crash may have left state PAST the marker that a
+	// replay-to-marker wouldn't overwrite) and the cold tier, so the rebuild is
+	// clean. The marker lives under blockchain/, which wipePebbleFiles preserves.
+	resumeHead := uint32(0)
+	if cfg.recoverBlockLog != "" && cfg.backend != "mem" {
+		resumeHead = readResumeMarker(cfg.dataDir)
+		if resumeHead > 0 {
+			if err := wipePebbleFiles(cfg.dataDir); err != nil {
+				return nil, fmt.Errorf("resume: wipe stale pebble: %w", err)
+			}
+			if cfg.coldDir != "" {
+				if err := os.RemoveAll(cfg.coldDir); err != nil {
+					return nil, fmt.Errorf("resume: wipe stale cold dir: %w", err)
+				}
 			}
 		}
 	}
@@ -497,6 +578,15 @@ func newApp(cfg flags) (*app, error) {
 		if persistedHead > recoverFrom {
 			recoverFrom = persistedHead
 		}
+	}
+	// Resume (--no-block-log + --recover-block-log): the typed-stores AND the
+	// pebble K/V were just wiped/started-fresh, so rebuild everything by
+	// replaying the EXTERNAL mirror log 1..resumeHead (the marker recorded by
+	// the prior run), then P2P continues from there. recover() reads
+	// a.blockLogPath, so point it at the mirror.
+	if cfg.recoverBlockLog != "" && resumeHead > 0 {
+		blockLogPath = cfg.recoverBlockLog
+		recoverFrom = resumeHead
 	}
 
 	a := &app{
@@ -643,6 +733,16 @@ func (a *app) recover() error {
 			Sync:                      false,
 		}, nil); err != nil {
 			return fmt.Errorf("recover: apply block %d: %w", n, err)
+		}
+		// Spill frozen comments/votes to the cold tier DURING recovery too.
+		// recover() runs before the afterApply callback is wired, so without
+		// this a full-chain resume (replaying tens of millions of blocks)
+		// would accumulate every comment resident and OOM in the dense era —
+		// the exact failure the cold tier exists to prevent. Mirrors
+		// afterApply's post-commit eviction.
+		if a.commentStore != nil {
+			a.commentStore.SetColdByRootEnabled(!hardfork.SetForBlock(n).Has(hardfork.HF17))
+			a.commentStore.EvictFrozen(a.voteStore, a.evictBudget)
 		}
 		if n%5000 == 0 {
 			elapsed := time.Since(startedAt).Seconds()
@@ -812,6 +912,16 @@ func (a *app) afterApply(rawBlock []byte, blockNum uint32) error {
 	if a.commentStore != nil {
 		a.commentStore.SetColdByRootEnabled(!hardfork.SetForBlock(blockNum).Has(hardfork.HF17))
 		a.commentStore.EvictFrozen(a.voteStore, a.evictBudget)
+	}
+	// Ephemeral resume marker: periodically record the applied head so a restart
+	// with --recover-block-log can rebuild to here from the mirror instead of
+	// re-syncing from 0. Only meaningful for --no-block-log (the writer's head
+	// is the anchor otherwise). Best-effort; a failed write just costs a little
+	// re-replay next time.
+	if a.cfg.noBlockLog && blockNum%resumeMarkerInterval == 0 {
+		if err := writeResumeMarker(a.cfg.dataDir, blockNum); err != nil {
+			a.logger.printf("WARN write resume marker at %d: %v", blockNum, err)
+		}
 	}
 	a.logProgress(blockNum)
 	return nil
