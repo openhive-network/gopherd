@@ -1006,8 +1006,9 @@ func chainISqrt64(n uint64) uint64 {
 // Without a median feed (early chain), all of hive_amount becomes
 // liquid HIVE balance — same as hived's pre-feed branch.
 //
-// hbd_print_rate is not yet tracked; we use HIVE_100_PERCENT (10000),
-// the post-genesis default, until the HF14 hard-cap logic lands.
+// hbd_print_rate IS tracked: update_virtual_supply recomputes it each block
+// (virtual_supply.go) and the body below reads the live DGPO value. 0 is a
+// valid rate (0% to HBD) — see the guard-bug note at the read site.
 func payCreateHbd(s *state.Session, a *objects.Account, blockTime uint32, hiveAmount int64, toReward bool) {
 	if hiveAmount <= 0 {
 		return
