@@ -25,7 +25,7 @@ TARGET="${TARGET:-107900000}"     # stop here — must stay BELOW the live tip
 TARGET_CEILING=108500000          # refuse anything at/above this (tip-safety)
 MEM_MAX="${MEM_MAX:-28G}"         # cgroup hard cap (box has 31G)
 MEM_LIMIT_GIB="${MEM_LIMIT_GIB:-24}"
-RESIDENT_CAP="${RESIDENT_CAP:-500000}"
+RESIDENT_CAP="${RESIDENT_CAP:-4000000}"   # gen60: <=1M thrashes EvictFrozen in the spam era; 4M is stable
 MAX_PEERS="${MAX_PEERS:-12}"
 API="${API:-127.0.0.1:8091}"
 # Resume source: the on-disk mirror block_log. On a fresh run (no marker) this

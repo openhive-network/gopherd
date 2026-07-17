@@ -527,6 +527,34 @@ func newApp(cfg flags) (*app, error) {
 			// Apply tolerates an already-bootstrapped dir.
 			_ = err
 		}
+		// Wire the cold tier for the FROM-0 path too. The snapshot branch above
+		// attaches it before loading; without the same wiring here, a
+		// from-scratch P2P sync keeps EVERY comment resident (commentStore stays
+		// nil so afterApply's EvictFrozen is a no-op) and GC-spirals into the
+		// mem-limit in the dense era (~20M) — throughput collapses to ~100 bps.
+		if cfg.residentCap > 0 {
+			boot := state.NewSession(stateDB)
+			cs := objects.EnsureCommentStore(boot)
+			cvs := objects.EnsureCommentVoteStore(boot)
+			backendName := cfg.coldBackend
+			if backendName == "persist" && cfg.coldDir == "" {
+				stateDB.Close()
+				return nil, fmt.Errorf("--cold-backend=persist requires a stable --cold-dir")
+			}
+			c, cerr := objects.OpenColdTierBackend(cfg.coldDir, backendName)
+			if cerr != nil {
+				stateDB.Close()
+				return nil, fmt.Errorf("open cold tier: %w", cerr)
+			}
+			cold = c
+			cs.SetColdTier(cold)
+			cs.SetResidentCap(cfg.residentCap)
+			cvs.SetColdTier(cold)
+			commentStore = cs
+			voteStore = cvs
+			fmt.Fprintf(os.Stderr, "gopherd node: cold tier ON — resident cap %d, evict budget %d/block, dir %s\n",
+				cfg.residentCap, cfg.evictBudget, cold.Dir())
+		}
 	}
 	cdb := chain.New(stateDB)
 	// Enable the recent-block cache so afterApply can pull each freshly-
