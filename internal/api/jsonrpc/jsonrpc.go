@@ -79,6 +79,20 @@ func (r *Registry) Register(name string, h Handler) {
 	r.methods[name] = h
 }
 
+// Replace overwrites an already-registered method's handler. Returns true if
+// the name existed (and was replaced), false otherwise. Unlike Register it does
+// not panic — used to swap in a guard (e.g. disabling expensive methods on a
+// public endpoint) after the normal handlers are wired.
+func (r *Registry) Replace(name string, h Handler) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.methods[name]; !ok {
+		return false
+	}
+	r.methods[name] = h
+	return true
+}
+
 // Alias registers an existing method under another name (e.g. bare "get_block"
 // aliased to "block_api.get_block"). No-op if target is missing.
 func (r *Registry) Alias(alias, target string) {
