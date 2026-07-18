@@ -32,6 +32,7 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -103,6 +104,29 @@ func writeResumeMarker(dataDir string, head uint32) error {
 		return err
 	}
 	return os.Rename(tmp, p)
+}
+
+// apiEndpointIsLoopback reports whether a host:port bind address is restricted
+// to the loopback interface. An empty/unspecified host (":8090", "0.0.0.0",
+// "::") binds all interfaces and is treated as PUBLIC (not loopback); an
+// unresolvable hostname is also treated as public (safe default — the caller
+// uses this to decide whether to disable the DoS-prone unbounded-scan methods).
+func apiEndpointIsLoopback(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr // no port / unparseable — treat the whole string as the host
+	}
+	switch host {
+	case "":
+		return false // ":8090" binds all interfaces
+	case "localhost":
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || ip.IsUnspecified() {
+		return false
+	}
+	return ip.IsLoopback()
 }
 
 // peekPersistedHead reads the DGPO row from the state backend without
@@ -813,6 +837,13 @@ func (a *app) run() error {
 	// the p2p layer. Bind loopback unless deliberately exposed.
 	if a.cfg.apiEndpoint != "" {
 		apiSrv := api.New(a.chain)
+		// On a non-loopback (public) endpoint, disable the unbounded-scan
+		// methods so a remote caller can't stall block application with an
+		// O(store) scan under the apply read lock. Loopback keeps them enabled.
+		if !apiEndpointIsLoopback(a.cfg.apiEndpoint) {
+			n := apiSrv.RestrictForPublicEndpoint()
+			a.logger.printf("api: non-loopback endpoint %q — disabled %d unbounded-scan methods (DoS guard)", a.cfg.apiEndpoint, n)
+		}
 		httpSrv := &http.Server{Addr: a.cfg.apiEndpoint, Handler: apiSrv.Registry().HTTPHandler()}
 		go func() {
 			a.logger.printf("api: serving JSON-RPC on http://%s (%d methods)", a.cfg.apiEndpoint, len(apiSrv.Registry().Names()))
