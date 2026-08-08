@@ -243,6 +243,13 @@ type flags struct {
 	residentCap    int
 	evictBudget    int
 	memLimitGiB    int
+	// shutdownSnapshotDir, if set, saves a directory snapshot of the state at
+	// the current head on clean exit / SIGTERM (block-<head>/), after flushing
+	// the cold tier. Without it, `node` can LOAD a snapshot but never SAVE one,
+	// so every restart rewinds to whenever --load-snapshot was taken and has to
+	// re-sync the delta over P2P — a month-old snapshot costs ~2h of catch-up.
+	// Mirrors replay's --shutdown-snapshot-dir.
+	shutdownSnapshotDir string
 	// loadSnapshot warm-starts the state from a directory snapshot
 	// (block-N/ produced by ghive-tools replay --snapshot-every /
 	// --save-dir-snapshot-at) BEFORE dialing peers. Use to skip the
@@ -336,6 +343,7 @@ func parseNodeFlags(args []string) flags {
 	fs.StringVar(&f.verifyAgainst, "verify-against", "", "path to a reference block_log; assert each applied block's bytes match")
 	fs.StringVar(&f.sourceBlockLog, "source-block-log", "", "self-replay mode: read blocks from this block_log instead of P2P")
 	fs.StringVar(&f.loadSnapshot, "load-snapshot", "", "warm-start from a directory snapshot (block-N/) before dialing peers; skips genesis catch-up")
+	fs.StringVar(&f.shutdownSnapshotDir, "shutdown-snapshot-dir", "", "on clean exit OR SIGINT/SIGTERM, save a dir snapshot here (block-<head>/) after flushing the cold tier — so a restart with --load-snapshot=<that> + the same --cold-dir resumes at head instead of re-syncing the delta over P2P")
 	fs.UintVar(&max, "max-blocks", 0, "in self-replay mode, stop after this many blocks (0 = the source's head)")
 	fs.BoolVar(&f.showSeeds, "show-seeds", false, "print the compiled-in mainnet seed list and exit")
 	fs.StringVar(&f.listenEndpoint, "p2p-endpoint", "", "local listen address (host:port); empty = outbound-only")
@@ -706,19 +714,26 @@ func (a *app) close() {
 		a.p2p.Stop()
 		a.p2p = nil
 	}
-	if a.cold != nil {
-		_ = a.cold.Close()
-		a.cold = nil
-	}
 	// Flush any partial batched-commit before closing pebble — otherwise
 	// up to commitBatch blocks of K/V state would be lost. The block_log
 	// is independent so the bytes survive regardless, but the persisted
 	// DGPO head would be a batch-boundary behind on next start, forcing
 	// the crash-recovery replay to redo work.
+	//
+	// Ordered BEFORE the shutdown snapshot: P2P is stopped (head is stable)
+	// and the K/V is consistent, so the snapshot captures a coherent state.
 	if a.chain != nil && a.chain.CommitBatchSize() > 1 {
 		if err := a.chain.FlushBatch(true); err != nil {
 			a.logger.printf("WARN final FlushBatch: %v", err)
 		}
+	}
+	// Shutdown snapshot — must run while the cold tier is still OPEN, since a
+	// self-contained snapshot serializes cold-resident comments/votes by
+	// reading them back out of it.
+	a.saveShutdownSnapshot()
+	if a.cold != nil {
+		_ = a.cold.Close()
+		a.cold = nil
 	}
 	if a.writer != nil {
 		_ = a.writer.Close()
@@ -737,6 +752,46 @@ func (a *app) close() {
 		_ = a.cpuProfileFile.Close()
 		a.cpuProfileFile = nil
 	}
+}
+
+// saveShutdownSnapshot writes a directory snapshot of the current head so the
+// next start can warm-start from it instead of re-syncing over P2P.
+//
+// Why this exists: `node` could LOAD a snapshot but never SAVE one, so every
+// restart rewound to whenever the --load-snapshot was produced. Once that
+// snapshot is a month old, a restart costs the full delta over P2P (~900K
+// blocks, ~2h) purely to get back to where the process already was. The typed
+// stores are in-memory and pebble's DGPO is not durably anchored, so there is
+// no cheaper resume path — the snapshot IS the anchor.
+//
+// Must be called with the cold tier still open (see close()). Failures are
+// logged, never fatal: a missing snapshot costs time on the next start, but
+// aborting shutdown over it would be worse.
+func (a *app) saveShutdownSnapshot() {
+	if a.cfg.shutdownSnapshotDir == "" || a.state == nil || a.chain == nil {
+		return
+	}
+	head, err := a.chain.HeadBlock()
+	if err != nil || head == 0 {
+		a.logger.printf("WARN shutdown snapshot: no head to save (err=%v head=%d)", err, head)
+		return
+	}
+	// Flush the cold tier first so its on-disk contents match the snapshot —
+	// a restart pairs --load-snapshot with the same --cold-dir.
+	if cc, ok := a.cold.(objects.CompactableCold); ok && cc != nil {
+		if ferr := cc.Flush(); ferr != nil {
+			a.logger.printf("WARN shutdown snapshot: cold flush: %v", ferr)
+		}
+	}
+	a.logger.printf("saving shutdown snapshot at block %d -> %s (this can take several minutes)", head, a.cfg.shutdownSnapshotDir)
+	start := time.Now()
+	path, serr := snap.Save(a.state, a.cfg.shutdownSnapshotDir, head, "")
+	if serr != nil {
+		a.logger.printf("WARN shutdown snapshot at %d failed: %v", head, serr)
+		return
+	}
+	a.logger.printf("shutdown snapshot %s at block %d in %.1fs — restart with --load-snapshot=%s to resume here",
+		path, head, time.Since(start).Seconds(), path)
 }
 
 // recover replays blocks 1..a.recoverFrom from the local block_log
