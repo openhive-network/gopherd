@@ -37,12 +37,22 @@ SERVE="${SERVE:-0}"
 # "advertise then can't serve" shape of the 2026-07-09 incident. Off by default
 # (it adds a log line every 10s); turn it ON for any run that leads to serving.
 WORK_TIMING="${WORK_TIMING:-0}"
+# On clean exit / SIGTERM, save a dir snapshot at the head here. Without this a
+# restart rewinds to whatever --load-snapshot was taken (currently 2026-07-08)
+# and re-syncs the whole delta over P2P — ~900K blocks, ~2h. With it, restart
+# from the newest block-<N>/ in this dir and resume at head in ~25min.
+# Set to "" to disable.
+SNAP_DIR="${SNAP_DIR:-/home/martin/p2p-live-snaps}"
 
 [ -x "$BIN" ] || { echo "no gopherd at $BIN" >&2; exit 1; }
 [ -d "$SNAPSHOT" ] || { echo "snapshot dir not found: $SNAPSHOT" >&2; exit 1; }
 
 SERVE_ARGS=()
 [ "$WORK_TIMING" = "1" ] && SERVE_ARGS+=(--log-work-timing)
+if [ -n "$SNAP_DIR" ]; then
+  mkdir -p "$SNAP_DIR"
+  SERVE_ARGS+=(--shutdown-snapshot-dir="$SNAP_DIR")
+fi
 if [ "$SERVE" = "1" ]; then
   SERVE_ARGS+=(--p2p-serve)
   echo "!! SERVE=1 — this node will ADVERTISE INVENTORY AND SERVE BLOCKS to mainnet peers."
@@ -60,6 +70,7 @@ cat <<BANNER
  serve      : $([ "$SERVE" = 1 ] && echo "ON (advertise+serve)" || echo "OFF (passive leech)")
  block_log  : OFF (--no-block-log; state+cold only)
  mem        : $MEM_MAX cgroup / ${MEM_LIMIT_GIB}GiB soft ; peers<=$MAX_PEERS
+ head snap  : ${SNAP_DIR:-OFF (restart will re-sync the full delta)}
  data=$DATA
  cold=$COLD
  log =$LOG
