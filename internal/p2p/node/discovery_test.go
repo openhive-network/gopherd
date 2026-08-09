@@ -89,10 +89,15 @@ func TestDiscoveryPropagatesEndpoints(t *testing.T) {
 	}
 	defer nodeC.Stop()
 
-	// Wait until A reports >= 2 active peers (B + discovered C).
+	// Wait for EVERY condition asserted below, not just the peer counts.
+	// A's peerdb entry for C is written on connect, slightly after PeerCount
+	// rises, so waiting only on the counts left a window where the counts were
+	// satisfied but the peerdb assertion had not landed yet — a flake that
+	// showed up reliably under -race, which widens that window.
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if nodeA.PeerCount() >= 2 && nodeC.PeerCount() >= 2 {
+		_, inDB := nodeA.PeerDB().Get(addrC)
+		if nodeA.PeerCount() >= 2 && nodeC.PeerCount() >= 2 && inDB {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
