@@ -266,6 +266,12 @@ type flags struct {
 	residentCap    int
 	evictBudget    int
 	memLimitGiB    int
+	// persistStateDir keeps the typed stores in an mmap-backed persiststore so a
+	// restart resumes at head. This is the structural answer to "why does hived
+	// restart instantly and we don't": hived mmaps chainbase and is immediately
+	// at head, whereas our typed stores live in the Go heap and are volatile, so
+	// every start otherwise rebuilds them from a multi-GB snapshot.
+	persistStateDir string
 	// shutdownSnapshotDir, if set, saves a directory snapshot of the state at
 	// the current head on clean exit / SIGTERM (block-<head>/), after flushing
 	// the cold tier. Without it, `node` can LOAD a snapshot but never SAVE one,
@@ -379,6 +385,7 @@ func parseNodeFlags(args []string) flags {
 	fs.BoolVar(&f.produceReal, "produce", false, "REAL block production: when the schedule names one of our witnesses AND the chain's registered signing key for it matches the key we hold, build, sign, APPLY and BROADCAST the block. If the key does not match, log it and skip the slot (mirrors hived, which will not emit a block the network would reject). Requires --witness-keys; mutually exclusive with --produce-dry-run")
 	fs.BoolVar(&f.produceDryRun, "produce-dry-run", false, "exercise the full block-production pipeline (schedule -> assemble -> merkle -> sign -> self-verify -> timing) and DISCARD every block. Never applies, never broadcasts. This is the ONLY production mode the daemon offers: real production is deliberately not wired up")
 	fs.BoolVar(&f.produceEverySlot, "produce-dry-run-every-slot", false, "with --produce-dry-run, build a block EVERY slot instead of only when the schedule names one of our witnesses. On mainnet we are never scheduled, so this is what produces measurable data; such blocks are built for our own account and logged as SIMULATED")
+	fs.StringVar(&f.persistStateDir, "persist-state-dir", "", "ZERO-SNAPSHOT RESTART: keep all non-cold typed state (accounts, witnesses, singletons, …) in a persiststore container here — mmap-backed, like hived's chainbase shared_memory.bin. Saved on clean exit/SIGTERM; a restart with the SAME dir (and the same --cold-dir) resumes AT HEAD in seconds instead of rebuilding ~27GB of typed stores from a snapshot (~20min). Takes precedence over --load-snapshot")
 	fs.StringVar(&f.shutdownSnapshotDir, "shutdown-snapshot-dir", "", "on clean exit OR SIGINT/SIGTERM, save a dir snapshot here (block-<head>/) after flushing the cold tier — so a restart with --load-snapshot=<that> + the same --cold-dir resumes at head instead of re-syncing the delta over P2P")
 	fs.UintVar(&max, "max-blocks", 0, "in self-replay mode, stop after this many blocks (0 = the source's head)")
 	fs.BoolVar(&f.showSeeds, "show-seeds", false, "print the compiled-in mainnet seed list and exit")
@@ -541,7 +548,36 @@ func newApp(cfg flags) (*app, error) {
 	var cold objects.ColdStore
 	var commentStore *objects.CommentStore
 	var voteStore *objects.CommentVoteStore
-	if cfg.loadSnapshot != "" {
+	// ZERO-SNAPSHOT RESTART. If a persiststore container exists at
+	// --persist-state-dir, restore from it and skip both genesis and the
+	// snapshot load entirely: the typed stores come back mmap-backed at head,
+	// the way hived resumes from chainbase. Falls through to the normal paths
+	// when the container is absent (first ever run), so the flag can be set
+	// permanently and simply starts working after the first clean shutdown.
+	if cfg.persistStateDir != "" {
+		if _, ok := snap.PersistStateHead(cfg.persistStateDir); ok {
+			boot := state.NewSession(stateDB)
+			registerTypedSubsystems(boot)
+			var cerr error
+			cold, commentStore, voteStore, cerr = attachColdTier(stateDB, boot, cfg)
+			if cerr != nil {
+				stateDB.Close()
+				return nil, cerr
+			}
+			h, lerr := snap.LoadPersist(stateDB, cfg.persistStateDir)
+			if lerr != nil {
+				stateDB.Close()
+				return nil, fmt.Errorf("load persist-state %s: %w", cfg.persistStateDir, lerr)
+			}
+			fmt.Fprintf(os.Stderr, "gopherd node: RESUMED from persist-state %s at block %d — no snapshot load\n",
+				cfg.persistStateDir, h)
+			loadedFromSnapshot = true
+		} else {
+			fmt.Fprintf(os.Stderr, "gopherd node: persist-state %s is empty — starting normally; it will be written on clean shutdown\n",
+				cfg.persistStateDir)
+		}
+	}
+	if !loadedFromSnapshot && cfg.loadSnapshot != "" {
 		boot := state.NewSession(stateDB)
 		// Register EVERY typed subsystem the snapshot may carry — the
 		// loader fails if the snapshot has a subsystem the DB hasn't
@@ -778,6 +814,10 @@ func (a *app) close() {
 			a.logger.printf("WARN final FlushBatch: %v", err)
 		}
 	}
+	// Persist the typed stores so the next start resumes at head instead of
+	// rebuilding them from a snapshot. Runs BEFORE the (much slower) shutdown
+	// snapshot and, when configured, makes it redundant.
+	a.savePersistState()
 	// Shutdown snapshot — must run while the cold tier is still OPEN, since a
 	// self-contained snapshot serializes cold-resident comments/votes by
 	// reading them back out of it.
@@ -803,6 +843,31 @@ func (a *app) close() {
 		_ = a.cpuProfileFile.Close()
 		a.cpuProfileFile = nil
 	}
+}
+
+// savePersistState writes the typed stores into the persiststore container so
+// the next start resumes AT HEAD in seconds, the way hived resumes from
+// chainbase, instead of rebuilding them from a multi-GB snapshot (~20 min).
+//
+// Must be called with the cold tier still open (see close()). Failures are
+// logged, never fatal: losing this costs time on the next start, whereas
+// aborting shutdown over it risks losing more.
+func (a *app) savePersistState() {
+	if a.cfg.persistStateDir == "" || a.state == nil || a.chain == nil {
+		return
+	}
+	head, err := a.chain.HeadBlock()
+	if err != nil || head == 0 {
+		a.logger.printf("WARN persist-state: no head to save (err=%v head=%d)", err, head)
+		return
+	}
+	start := time.Now()
+	if serr := snap.SavePersist(a.state, a.cfg.persistStateDir, head); serr != nil {
+		a.logger.printf("WARN persist-state save at %d failed: %v", head, serr)
+		return
+	}
+	a.logger.printf("persist-state saved at block %d in %.1fs — restart with the same --persist-state-dir resumes here without a snapshot load",
+		head, time.Since(start).Seconds())
 }
 
 // saveShutdownSnapshot writes a directory snapshot of the current head so the
@@ -1329,4 +1394,56 @@ func loadWitnessKeys(path string) ([]witness.Producer, error) {
 		return nil, fmt.Errorf("witness-keys %s: no entries", path)
 	}
 	return out, nil
+}
+
+// registerTypedSubsystems registers every typed store a full node needs.
+//
+// The set must match the producing process exactly: the snapshot loader fails
+// if the snapshot carries a subsystem the DB has not registered, and the
+// persiststore restore has the same requirement. Factored out so the
+// snapshot, persist-state and from-genesis paths cannot drift apart — a
+// mismatch between them is silent until a load fails.
+func registerTypedSubsystems(boot *state.Session) {
+	objects.EnsureWitnessStore(boot)
+	objects.EnsureWitnessVoteStore(boot)
+	objects.EnsureAccountStore(boot)
+	objects.EnsureCommentStore(boot)
+	objects.EnsureCommentVoteStore(boot)
+	objects.EnsureBlockSummaryStore(boot)
+	objects.EnsureWitnessScheduleStore(boot)
+	objects.EnsureFutureWitnessScheduleStore(boot)
+	objects.EnsureDGPOStore(boot)
+	objects.EnsureCommentCashoutScheduleStore(boot)
+	objects.EnsureLimitOrderStore(boot)
+	objects.EnsureVestingWithdrawalScheduleStore(boot)
+	objects.EnsureTransactionStore(boot)
+	objects.EnsureConvertRequestStore(boot)
+}
+
+// attachColdTier wires the comment/vote cold tier when --comment-resident-cap
+// is set. Returns (nil, nil, nil, nil) when the cap is 0 (cold tier off).
+//
+// Must run BEFORE any bulk load so the multi-GB comment corpus spills to disk
+// during the load instead of piling up resident — a full-chain load with the
+// tier unattached OOMs.
+func attachColdTier(stateDB *state.Database, boot *state.Session, cfg flags) (objects.ColdStore, *objects.CommentStore, *objects.CommentVoteStore, error) {
+	if cfg.residentCap <= 0 {
+		return nil, nil, nil, nil
+	}
+	backendName := cfg.coldBackend
+	if backendName == "persist" && cfg.coldDir == "" {
+		return nil, nil, nil, fmt.Errorf("--cold-backend=persist requires a stable --cold-dir")
+	}
+	c, err := objects.OpenColdTierBackend(cfg.coldDir, backendName)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("open cold tier: %w", err)
+	}
+	cs := objects.EnsureCommentStore(boot)
+	cvs := objects.EnsureCommentVoteStore(boot)
+	cs.SetColdTier(c)
+	cs.SetResidentCap(cfg.residentCap)
+	cvs.SetColdTier(c)
+	fmt.Fprintf(os.Stderr, "gopherd node: cold tier ON — resident cap %d, evict budget %d/block, dir %s\n",
+		cfg.residentCap, cfg.evictBudget, c.Dir())
+	return c, cs, cvs, nil
 }
