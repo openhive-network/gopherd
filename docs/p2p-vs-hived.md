@@ -28,18 +28,20 @@ Sources compared:
 last round" — normally one. **Staleness is structurally impossible**, so hived
 needs no age check anywhere in the advert path.
 
-**gopherd is state-derived.** `broadcastInv` reconstructs the advert set by
+**gopherd WAS state-derived.** `broadcastInv` reconstructed the advert set by
 scanning the recent-block ring. Nothing about that scan is inherently fresh, so
-every freshness property hived gets for free must be re-established explicitly.
+every freshness property hived gets for free had to be re-established explicitly.
+It now uses hived's shape (see below).
 
 That difference *is* the incident: the original code advertised the last 200
 ring entries (~10 minutes of history) to any peer whose per-peer `known` set was
 empty — i.e. every newly connected peer.
 
-> **Recommended follow-up:** port the event-driven shape. Capture newly-applied
-> blocks into an explicit pending-advert set in the apply path and drain it per
-> round, instead of scanning the ring. The current guards emulate the outcome
-> but re-derive it defensively every time.
+> **DONE (`8ee1394`).** The event-driven shape is now ported: `queueAdvert` is
+> called from the apply path (hived's `broadcast()`) and `broadcastInv` drains
+> the set per round (hived's `swap`). The ring is no longer consulted by the
+> advert path, so freshness is structural. The watermark and age gate remain as
+> backstops for a starved advert loop rather than as the primary mechanism.
 
 ---
 
@@ -47,9 +49,9 @@ empty — i.e. every newly connected peer.
 
 | # | Area | hived | gopherd | Status |
 |---|---|---|---|---|
-| 1 | Advert set | `_new_block_inventory`, drained per round | ring scan + watermark + age gate | **Fixed** (`0f486ae`, `6452bbd`, `2effa3c`) |
+| 1 | Advert set | `_new_block_inventory`, drained per round | **same shape** — `queueAdvert` from apply path, drained per round | **Closed** (`8ee1394`) |
 | 2 | Advert freshness | implicit (only just-accepted blocks) | explicit `advertiseMaxAgeSec = 3` | **Fixed**, ours stricter by construction |
-| 3 | Block id vs legacy hash | per-peer, by `core_protocol_version` | always block id; peer version **not stored** | ⚠️ **OPEN — risk** |
+| 3 | Block id vs legacy hash | per-peer, by `core_protocol_version` | version captured; **withhold** from peers < 107 | **Closed** (`8ee1394`) |
 | 4 | "May I advertise at all" | per-peer `peer_needs_sync_items_from_us` | global `isCatchingUp()` (120s) | ⚠️ **Divergent** |
 | 5 | Advert dedup | two sets: advertised-to-peer + peer-advertised-to-us | one `st.known` set written by both paths | Equivalent |
 | 6 | Dedup expiry | time-based, 1 minute (`GRAPHENE_NET_MAX_INVENTORY_SIZE_IN_MINUTES`) | prune by `num <= head` | Divergent, benign |
@@ -59,7 +61,7 @@ empty — i.e. every newly connected peer.
 
 ---
 
-## 3. Block id vs legacy hash — OPEN, and a plausible incident contributor
+## 3. Block id vs legacy hash — CLOSED; was a plausible incident contributor
 
 hived picks the inventory hash **per peer**:
 
@@ -76,10 +78,10 @@ bool peer_connection::advertise_blocks_by_block_id() const {
 ```
 
 We advertise `CoreProtocolVersion = 107` in our own hello
-(`internal/p2p/proto/types.go:40`) and **always** advertise block ids
-(`loops.go`, `proto.ItemHash(id)`). We never store the *peer's*
-`core_protocol_version` — `node.Peer` has no such field, and the value parsed in
-`handshake.go` is discarded.
+(`internal/p2p/proto/types.go`) and only ever speak block ids. Before `8ee1394`
+we never stored the *peer's* `core_protocol_version` — `node.Peer` had no such
+field and the parsed hello value was discarded, so we advertised block ids to
+everyone regardless of whether they could interpret them.
 
 **Risk:** a peer below protocol 107 interprets our inventory entries as legacy
 `block_message` hashes. It then either cannot match them, or requests an item we
@@ -91,10 +93,11 @@ item you claim to have, your database is probably corrupted"*
 in the incident, and it selectively affects **older** nodes, matching the
 reported symptom that pre-1.28.7 nodes forked away.
 
-**Not yet fixed.** The minimal safe fix is to record the peer's
-`core_protocol_version` at handshake and simply **not advertise** to peers below
-107 (rather than implementing legacy-hash advertisement we would then have to
-serve consistently).
+**Fixed (`8ee1394`)** with exactly that minimal approach: `Peer` captures
+`core_protocol_version` from either hello form, and `broadcastInv` withholds
+from peers below 107. We do not implement legacy-hash advertisement, since we
+would then have to serve consistently under that identity. Version 0 (hello not
+parsed) is withheld as well — unknown is not permission.
 
 ## 4. In-sync determination — divergent by design, worth knowing
 
@@ -142,5 +145,7 @@ than the tip. That wording is why the defect survived two readings of
    not.
 4. **Never serve a different block than the one requested**, by any fallback.
 
-Regression tests: `internal/p2p/sync/advertise_age_test.go`. Three of them were
-verified to fail against the pre-incident code.
+Regression tests: `internal/p2p/sync/advertise_age_test.go` (7 cases). Three were
+verified to fail against the pre-incident code, with its own signature
+(`advertised 200 blocks, want <= 11`). They drive the event path — `queueAdvert`
+then drain — so they exercise how blocks actually enter the advert set.
