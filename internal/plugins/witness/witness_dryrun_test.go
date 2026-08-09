@@ -249,3 +249,58 @@ func TestDryRunSkipsStaleHead(t *testing.T) {
 		t.Fatalf("built=%d against a years-old head, want 0 — the dry run must only measure at the tip", st.Built)
 	}
 }
+
+// TestRealProductionRefusesWrongKey pins the gate that stands between "log and
+// skip" and publishing a real consensus block.
+//
+// hived declines to produce when it lacks the private key for the witness's
+// registered signing key, rather than emitting a block the network rejects.
+// Producing with the wrong key is strictly worse than not producing: the block
+// is rejected, the slot is missed anyway, and the slot is spent.
+func TestRealProductionRefusesWrongKey(t *testing.T) {
+	seed := sha256.Sum256([]byte("real-prod-gate"))
+	chainKey, err := crypto.PrivateKeyFromBytes(seed[:])
+	if err != nil {
+		t.Fatalf("PrivateKeyFromBytes: %v", err)
+	}
+	// Fixture registers chainKey as initminer's on-chain signing key.
+	cdb, db := newSigningFixture(t, chainKey)
+
+	// We hold a DIFFERENT key — the situation when a witness is configured with
+	// a stale or wrong signing key.
+	other := sha256.Sum256([]byte("a-key-the-chain-does-not-know"))
+	wrong, err := crypto.PrivateKeyFromBytes(other[:])
+	if err != nil {
+		t.Fatalf("PrivateKeyFromBytes: %v", err)
+	}
+	prod := Producer{Account: genesis.MainnetInitminer, PrivateKey: wrong, PublicKey33: wrong.PublicKey()}
+
+	rec := &recordingBroadcaster{}
+	p := New(cdb, db, []Producer{prod})
+	p.Broadcaster = rec // REAL production mode: DryRun stays false
+
+	before, err := objects.GetDGPO(state.NewSession(db))
+	if err != nil {
+		t.Fatalf("GetDGPO: %v", err)
+	}
+	for i := 0; i < 4; i++ {
+		if err := p.maybeProduceBlock(); err != nil {
+			t.Fatalf("maybeProduceBlock: %v", err)
+		}
+	}
+
+	if n := p.SkippedNoKey(); n == 0 {
+		t.Fatal("wrong key: no slots recorded as skipped — the key gate did not fire")
+	}
+	if rec.calls != 0 {
+		t.Fatalf("wrong key: broadcast %d block(s) — a block the network would reject must never be published", rec.calls)
+	}
+	after, err := objects.GetDGPO(state.NewSession(db))
+	if err != nil {
+		t.Fatalf("GetDGPO after: %v", err)
+	}
+	if after.HeadBlockNumber != before.HeadBlockNumber {
+		t.Fatalf("wrong key: head advanced %d -> %d; nothing should have been produced",
+			before.HeadBlockNumber, after.HeadBlockNumber)
+	}
+}

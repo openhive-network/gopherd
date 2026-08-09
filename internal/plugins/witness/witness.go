@@ -112,6 +112,11 @@ type Plugin struct {
 	// slot is 3s, so without this one slot would yield ~6 identical blocks.
 	lastDrySlot uint32
 
+	// skippedNoKey counts slots we declined because the chain's signing key for
+	// that witness is not the key we hold. Surfaced so a misconfigured witness
+	// shows up as a number rather than only as a log line.
+	skippedNoKey int
+
 	// DryRunMaxHeadAgeSec overrides DryRunStaleHeadSec. 0 = use the constant.
 	// Exists so tests can drive the pipeline against a genesis fixture, whose
 	// head is years old and would otherwise be (correctly) skipped as stale.
@@ -255,6 +260,37 @@ func (p *Plugin) maybeProduceBlock() error {
 	// commit.
 	headBN, _ := p.Chain.HeadBlock()
 	fmt.Fprintf(os.Stderr, "witness: producing for %s (head=%d)\n", scheduled, headBN)
+
+	// KEY GATE — the only thing standing between "log and skip" and publishing a
+	// real consensus block. Compare the key we hold against the witness's
+	// REGISTERED block-signing key before producing anything.
+	//
+	// Mirrors hived, which declines to produce when it lacks the private key for
+	// the witness's signing key rather than emitting a block the network will
+	// reject. Producing with the wrong key is worse than not producing: the
+	// block is rejected, the slot is missed anyway, and we have spent the slot.
+	//
+	// Dry run skips this gate deliberately — measuring the pipeline against a
+	// witness whose key we do not hold is its whole purpose, and it reports the
+	// mismatch as chain-key=IMPERSONATED instead.
+	if !p.DryRun && scheduledOurs {
+		w, werr := objects.GetWitness(state.NewSession(p.State), auth.AccountName(prod.Account))
+		switch {
+		case werr != nil:
+			p.logEvery(10*time.Second, "our turn (%s) but no witness object on chain — NOT producing", prod.Account)
+			return nil
+		case w.BlockSigningKey != prod.PublicKey33:
+			// hived's equivalent: "Not producing block because I don't have the
+			// private key for <key>".
+			p.logEvery(10*time.Second,
+				"it's our turn to produce (%s) but NO KEY MATCHES — chain expects %s, we hold %s. NOT producing.",
+				prod.Account, w.BlockSigningKey, prod.PublicKey33)
+			p.mu.Lock()
+			p.skippedNoKey++
+			p.mu.Unlock()
+			return nil
+		}
+	}
 
 	// Time-of-block: align to the next 3-second boundary AFTER head.
 	// On a fresh chain (block 1) dgpo.Time is genesis (years ago);
@@ -468,6 +504,13 @@ func (p *Plugin) dryRunProduce(prod *Producer, dgpo objects.DynamicGlobalPropert
 		len(rawBlock), st.LastTxs, status,
 		st.Slots, st.Built, st.Ours, st.VerifyOK, st.VerifyFail, st.Errors, st.ChainKeyOK, st.Imperson,
 		float64(st.TotalNs)/float64(max64(st.Built, 1))/1e6, float64(st.MaxNs)/1e6)
+}
+
+// SkippedNoKey returns how many slots were declined for a key mismatch.
+func (p *Plugin) SkippedNoKey() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.skippedNoKey
 }
 
 // DryRunSnapshot returns a copy of the dry-run counters.

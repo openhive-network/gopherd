@@ -50,6 +50,7 @@ import (
 	"hived-go/internal/blocklog"
 	"hived-go/internal/chain"
 	"hived-go/internal/crypto"
+	"hived-go/internal/p2p/gossip"
 	p2pnode "hived-go/internal/p2p/node"
 	"hived-go/internal/plugins/witness"
 	p2psync "hived-go/internal/p2p/sync"
@@ -206,12 +207,16 @@ func cmdNode(args []string) int {
 	// without --produce-dry-run is refused rather than silently ignored, so
 	// nobody can believe they configured a witness and get neither a dry run
 	// nor an error. Real production is not wired up at all.
-	if cfg.witnessKeyFile != "" && !cfg.produceDryRun {
-		fmt.Fprintln(os.Stderr, "gopherd node: --witness-keys requires --produce-dry-run (real block production is not available from this command)")
+	if cfg.produceReal && cfg.produceDryRun {
+		fmt.Fprintln(os.Stderr, "gopherd node: --produce and --produce-dry-run are mutually exclusive")
 		return 2
 	}
-	if cfg.produceDryRun && cfg.witnessKeyFile == "" {
-		fmt.Fprintln(os.Stderr, "gopherd node: --produce-dry-run requires --witness-keys (there is nothing to sign with otherwise)")
+	if cfg.witnessKeyFile != "" && !cfg.produceDryRun && !cfg.produceReal {
+		fmt.Fprintln(os.Stderr, "gopherd node: --witness-keys requires --produce or --produce-dry-run")
+		return 2
+	}
+	if (cfg.produceDryRun || cfg.produceReal) && cfg.witnessKeyFile == "" {
+		fmt.Fprintln(os.Stderr, "gopherd node: block production requires --witness-keys (there is nothing to sign with otherwise)")
 		return 2
 	}
 	if cfg.produceEverySlot && !cfg.produceDryRun {
@@ -274,6 +279,7 @@ type flags struct {
 	// the chain it is following, and one that got broadcast would be a witness
 	// action taken by an unproven implementation.
 	witnessKeyFile   string
+	produceReal      bool
 	produceDryRun    bool
 	produceEverySlot bool
 	// loadSnapshot warm-starts the state from a directory snapshot
@@ -369,7 +375,8 @@ func parseNodeFlags(args []string) flags {
 	fs.StringVar(&f.verifyAgainst, "verify-against", "", "path to a reference block_log; assert each applied block's bytes match")
 	fs.StringVar(&f.sourceBlockLog, "source-block-log", "", "self-replay mode: read blocks from this block_log instead of P2P")
 	fs.StringVar(&f.loadSnapshot, "load-snapshot", "", "warm-start from a directory snapshot (block-N/) before dialing peers; skips genesis catch-up")
-	fs.StringVar(&f.witnessKeyFile, "witness-keys", "", "file of `account WIF` lines (one per witness) enabling the block-production DRY RUN. Keys go in a file, not a flag, so they aren't exposed in ps output. Requires --produce-dry-run")
+	fs.StringVar(&f.witnessKeyFile, "witness-keys", "", "file of `account WIF` lines (one per witness). Keys go in a file, not a flag, so they aren't exposed in ps output. Requires --produce or --produce-dry-run")
+	fs.BoolVar(&f.produceReal, "produce", false, "REAL block production: when the schedule names one of our witnesses AND the chain's registered signing key for it matches the key we hold, build, sign, APPLY and BROADCAST the block. If the key does not match, log it and skip the slot (mirrors hived, which will not emit a block the network would reject). Requires --witness-keys; mutually exclusive with --produce-dry-run")
 	fs.BoolVar(&f.produceDryRun, "produce-dry-run", false, "exercise the full block-production pipeline (schedule -> assemble -> merkle -> sign -> self-verify -> timing) and DISCARD every block. Never applies, never broadcasts. This is the ONLY production mode the daemon offers: real production is deliberately not wired up")
 	fs.BoolVar(&f.produceEverySlot, "produce-dry-run-every-slot", false, "with --produce-dry-run, build a block EVERY slot instead of only when the schedule names one of our witnesses. On mainnet we are never scheduled, so this is what produces measurable data; such blocks are built for our own account and logged as SIMULATED")
 	fs.StringVar(&f.shutdownSnapshotDir, "shutdown-snapshot-dir", "", "on clean exit OR SIGINT/SIGTERM, save a dir snapshot here (block-<head>/) after flushing the cold tier — so a restart with --load-snapshot=<that> + the same --cold-dir resumes at head instead of re-syncing the delta over P2P")
@@ -945,11 +952,21 @@ func (a *app) run() error {
 			names = append(names, pr.Account)
 		}
 		a.witness = witness.New(a.chain, a.state, producers)
-		a.witness.DryRun = true
+		a.witness.DryRun = a.cfg.produceDryRun
 		a.witness.DryRunEverySlot = a.cfg.produceEverySlot
-		a.witness.Start()
-		a.logger.printf("block production DRY RUN active for %v (every-slot=%v) — blocks are built, signed, verified and DISCARDED; never applied, never broadcast",
-			names, a.cfg.produceEverySlot)
+		if a.cfg.produceDryRun {
+			// Dry run needs no broadcaster and starts immediately: it never
+			// publishes anything, so it does not depend on the p2p node.
+			a.witness.Start()
+			a.logger.printf("block production DRY RUN active for %v (every-slot=%v) — blocks are built, signed, verified and DISCARDED; never applied, never broadcast",
+				names, a.cfg.produceEverySlot)
+		} else {
+			// REAL production is started later, once the p2p node exists, so it
+			// has somewhere to broadcast. Starting it here would mean producing
+			// blocks with no way to publish them.
+			a.logger.printf("REAL block production armed for %v — will produce ONLY when the schedule names one of these AND the chain's registered signing key matches ours; otherwise the slot is logged and skipped",
+				names)
+		}
 	}
 
 	// Read-only JSON-RPC API (opt-in). Serves committed state; independent of
@@ -1027,6 +1044,20 @@ func (a *app) run() error {
 	syncDel.Start()
 	defer syncDel.Stop()
 	defer a.p2p.Stop()
+
+	// REAL block production starts here, not earlier: it needs the p2p node to
+	// broadcast through. gossip.Service supplies BroadcastBlock and its own
+	// seen-set dedup, so a block we publish is not re-broadcast when it comes
+	// back to us from a peer.
+	//
+	// The witness plugin still refuses to produce unless the chain's registered
+	// signing key for the scheduled witness matches the key we hold, so arming
+	// this does not by itself mean blocks will be published.
+	if a.witness != nil && a.cfg.produceReal {
+		a.witness.Broadcaster = gossip.New(gossip.Config{Node: a.p2p})
+		a.witness.Start()
+		a.logger.printf("REAL block production STARTED — blocks will be applied and BROADCAST when the key matches")
+	}
 
 	// Diagnostic: periodically dump the sync delegate's load-shedding
 	// counters so we can see queue depth / outstanding budget / throttle

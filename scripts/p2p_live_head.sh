@@ -50,6 +50,11 @@ SNAP_DIR="${SNAP_DIR:-/home/martin/p2p-live-snaps}"
 # us; on mainnet we are never scheduled, so that is what yields timing data.
 WITNESS_KEYS="${WITNESS_KEYS:-}"
 PRODUCE_EVERY_SLOT="${PRODUCE_EVERY_SLOT:-0}"
+# PRODUCE_REAL=1 switches from dry run to REAL production: when the schedule
+# names one of our witnesses AND the chain's registered signing key matches the
+# key we hold, the block is applied and BROADCAST. A key mismatch is logged and
+# the slot skipped (what hived does), so this is inert without the right key.
+PRODUCE_REAL="${PRODUCE_REAL:-0}"
 
 [ -x "$BIN" ] || { echo "no gopherd at $BIN" >&2; exit 1; }
 [ -d "$SNAPSHOT" ] || { echo "snapshot dir not found: $SNAPSHOT" >&2; exit 1; }
@@ -58,8 +63,13 @@ SERVE_ARGS=()
 [ "$WORK_TIMING" = "1" ] && SERVE_ARGS+=(--log-work-timing)
 if [ -n "$WITNESS_KEYS" ]; then
   [ -r "$WITNESS_KEYS" ] || { echo "WITNESS_KEYS not readable: $WITNESS_KEYS" >&2; exit 1; }
-  SERVE_ARGS+=(--produce-dry-run --witness-keys="$WITNESS_KEYS")
-  [ "$PRODUCE_EVERY_SLOT" = "1" ] && SERVE_ARGS+=(--produce-dry-run-every-slot)
+  if [ "$PRODUCE_REAL" = "1" ]; then
+    SERVE_ARGS+=(--produce --witness-keys="$WITNESS_KEYS")
+    echo "!! PRODUCE_REAL=1 — this node will APPLY and BROADCAST blocks when the signing key matches."
+  else
+    SERVE_ARGS+=(--produce-dry-run --witness-keys="$WITNESS_KEYS")
+    [ "$PRODUCE_EVERY_SLOT" = "1" ] && SERVE_ARGS+=(--produce-dry-run-every-slot)
+  fi
 fi
 if [ -n "$SNAP_DIR" ]; then
   mkdir -p "$SNAP_DIR"
@@ -83,7 +93,7 @@ cat <<BANNER
  block_log  : OFF (--no-block-log; state+cold only)
  mem        : $MEM_MAX cgroup / ${MEM_LIMIT_GIB}GiB soft ; peers<=$MAX_PEERS
  head snap  : ${SNAP_DIR:-OFF (restart will re-sync the full delta)}
- produce    : $([ -n "$WITNESS_KEYS" ] && echo "DRY RUN (build+sign+verify+discard; every-slot=$PRODUCE_EVERY_SLOT)" || echo "OFF")
+ produce    : $([ -n "$WITNESS_KEYS" ] && { [ "$PRODUCE_REAL" = "1" ] && echo "REAL (apply+broadcast IF key matches)" || echo "DRY RUN (build+sign+verify+discard; every-slot=$PRODUCE_EVERY_SLOT)"; } || echo "OFF")
  data=$DATA
  cold=$COLD
  log =$LOG
