@@ -34,7 +34,7 @@ func TestAdvertiseNeverOffersStaleBlocks(t *testing.T) {
 	d := newWithChain(Config{Serve: true}, c)
 	got := d.selectAdvertIDs(c.RecentBlockNums(), now)
 
-	// Only blocks within advertiseMaxAgeSec (30s ≈ 10 blocks at 3s) qualify.
+	// Only blocks within advertiseMaxAgeSec (8s ≈ 2-3 blocks at 3s) qualify.
 	maxAllowed := advertiseMaxAgeSec/3 + 1
 	if len(got) == 0 {
 		t.Fatal("advertised nothing at the live tip — the fresh blocks should still be offered")
@@ -100,5 +100,37 @@ func TestAdvertiseWarmStartOffersNoBacklog(t *testing.T) {
 
 	if got := d.selectAdvertIDs(c.RecentBlockNums(), now); len(got) != 0 {
 		t.Fatalf("warm start advertised %d stale blocks, want 0", len(got))
+	}
+}
+
+// TestAdvertiseGoesSilentWhenBehind covers the CPU-starvation path, which is
+// distinct from the new-peer backlog above and needs no new peer at all.
+//
+// isCatchingUp() — the gate deciding whether we advertise AT ALL — tolerates a
+// head up to liveAdvertiseWindowSec (120s) old, i.e. ~40 blocks behind. On a
+// contended box we fall behind, still believe we are "live", and keep offering
+// a head that is now a minute old to ESTABLISHED peers. Nodes older than hived
+// 1.28.7 act on those stale offers and fork away.
+//
+// The per-block age gate must make this self-correcting: when we cannot keep
+// up, nothing qualifies and we go silent until we are back at the tip.
+func TestAdvertiseGoesSilentWhenBehind(t *testing.T) {
+	now := time.Now().Unix()
+	c := newStubChain()
+	base := uint32(108_000_000)
+	// Newest block is 60s old: we are ~20 blocks behind, but still WELL inside
+	// the 120s isCatchingUp window, so the outer gate would let us advertise.
+	for i := 0; i < 20; i++ {
+		c.seed(base+uint32(i), liveBlockBytes(uint32(now-60-int64(3*(19-i)))))
+	}
+	d := newWithChain(Config{Serve: true}, c)
+
+	// Precondition: the outer gate really would have permitted advertising —
+	// otherwise this test proves nothing about the age gate.
+	if d.isCatchingUp() {
+		t.Fatal("precondition failed: isCatchingUp() already suppresses this case, test is not exercising the age gate")
+	}
+	if got := d.selectAdvertIDs(c.RecentBlockNums(), now); len(got) != 0 {
+		t.Fatalf("advertised %d blocks while ~20 blocks behind, want 0 (silence) — this forks pre-1.28.7 peers", len(got))
 	}
 }
