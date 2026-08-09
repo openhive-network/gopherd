@@ -5,168 +5,178 @@ import (
 	"time"
 )
 
-// TestAdvertiseNeverOffersStaleBlocks reproduces the mainnet incident: a serving
-// node at the live tip advertised the last MaxBlocksPerInv (200) entries of its
-// recent ring on every round, filtered only by the per-peer `known` set. A
-// freshly-connected peer has an EMPTY known set, so it received 200 block ids
-// spanning ~10 minutes of history. The isCatchingUp() gate does not prevent
-// this — it tests only the HEAD block's timestamp, not the other 199 entries.
-// Nodes older than hived 1.28.7 do not ignore inventory while syncing, so they
-// acted on those stale adverts and forked away.
+// The advert set is EVENT-DRIVEN (hived's _new_block_inventory): blocks enter
+// it only via queueAdvert from the apply path, and each round drains it whole.
+// These tests drive that path — seed the chain so the id is resolvable, then
+// queue as the apply loop would.
+func advertHarness(t *testing.T) (*stubChain, *Delegate) {
+	t.Helper()
+	c := newStubChain()
+	return c, newWithChain(Config{Serve: true}, c)
+}
+
+// TestAdvertiseNeverOffersStaleBlocks is the incident test. Originally the
+// advert set was DERIVED by scanning the last MaxBlocksPerInv (200) entries of
+// the recent ring, filtered only by the per-peer `known` set — so a newly
+// connected peer (empty known set) received 200 ids spanning ~10 minutes of
+// history. The isCatchingUp() gate does not prevent that: it tests only the
+// HEAD block's timestamp, not the rest of the batch. Nodes older than hived
+// 1.28.7 act on stale adverts and fork away.
 //
-// The invariant: a block older than advertiseMaxAgeSec is NEVER offered, no
-// matter how fresh our head is or how empty a peer's known set is.
+// Now the ring is never consulted, so a full ring of history is simply not
+// advertisable — the property holds structurally, not by filtering.
 func TestAdvertiseNeverOffersStaleBlocks(t *testing.T) {
 	now := time.Now().Unix()
-	c := newStubChain()
+	c, d := advertHarness(t)
 
-	// A full ring: 200 blocks at 3s spacing, i.e. ~10 minutes of history,
-	// ending at a head produced right now. Exactly the steady state of a
-	// healthy serving node at the tip.
+	// A full ring: 200 blocks at 3s spacing (~10 min), head produced now.
 	const ring = 200
 	base := uint32(108_000_000)
 	for i := 0; i < ring; i++ {
-		n := base + uint32(i)
-		ts := uint32(now - int64(3*(ring-1-i))) // oldest first, head at `now`
-		c.seed(n, liveBlockBytes(ts))
+		c.seed(base+uint32(i), liveBlockBytes(uint32(now-int64(3*(ring-1-i)))))
 	}
 
-	d := newWithChain(Config{Serve: true}, c)
-	got := d.selectAdvertIDs(c.RecentBlockNums(), now)
+	// Nothing was applied through us, so nothing may be offered — regardless of
+	// how full the ring is or how fresh its head looks.
+	if got := d.selectAdvertIDs(now); len(got) != 0 {
+		t.Fatalf("advertised %d blocks from the ring alone; the advert set must be event-driven (this is the incident)", len(got))
+	}
 
-	// Only blocks within advertiseMaxAgeSec (8s ≈ 2-3 blocks at 3s) qualify.
-	maxAllowed := advertiseMaxAgeSec/3 + 1
-	if len(got) == 0 {
-		t.Fatal("advertised nothing at the live tip — the fresh blocks should still be offered")
+	// Applying one block queues exactly that block.
+	head := base + ring - 1
+	d.queueAdvert(liveBlockBytes(uint32(now)), head)
+	got := d.selectAdvertIDs(now)
+	if len(got) != 1 {
+		t.Fatalf("after applying 1 block, advertised %d, want exactly 1", len(got))
 	}
-	if len(got) > maxAllowed {
-		t.Fatalf("advertised %d blocks, want <= %d: stale history is being gossiped (this is the incident)", len(got), maxAllowed)
-	}
-	// Every offered block must be inside the age bound.
-	for _, id := range got {
-		raw := c.RecentBlockBytesByID(id)
-		if raw == nil {
-			t.Fatalf("advertised id %x not in the ring", id[:4])
-		}
-		if age := now - int64(blockTimestamp(raw)); age > advertiseMaxAgeSec {
-			t.Fatalf("advertised a block %ds old (limit %ds) — pre-1.28.7 peers fork on this", age, advertiseMaxAgeSec)
-		}
+	if id, _ := c.RecentBlockIDForNum(head); got[0] != id {
+		t.Fatalf("advertised the wrong block: got %x want %x", got[0][:4], id[:4])
 	}
 }
 
-// TestAdvertiseWatermarkStopsRepeatOffers checks the second guard: once a block
-// has been offered it is never offered again, so a peer that connects later
-// receives the ongoing new-block stream rather than a replayed backlog.
+// TestAdvertiseWatermarkStopsRepeatOffers: a block is offered at most once, so
+// a peer that connects later gets the ongoing new-block stream, not a replay.
 func TestAdvertiseWatermarkStopsRepeatOffers(t *testing.T) {
 	now := time.Now().Unix()
-	c := newStubChain()
+	c, d := advertHarness(t)
 	base := uint32(108_000_000)
-	for i := 0; i < 5; i++ {
-		c.seed(base+uint32(i), liveBlockBytes(uint32(now-int64(3*(4-i)))))
-	}
-	d := newWithChain(Config{Serve: true}, c)
+	c.seed(base, liveBlockBytes(uint32(now)))
 
-	first := d.selectAdvertIDs(c.RecentBlockNums(), now)
-	if len(first) == 0 {
-		t.Fatal("first round advertised nothing")
+	d.queueAdvert(liveBlockBytes(uint32(now)), base)
+	if got := d.selectAdvertIDs(now); len(got) != 1 {
+		t.Fatalf("first round advertised %d, want 1", len(got))
 	}
-	// Same ring, nothing newly applied: must offer nothing the second time.
-	second := d.selectAdvertIDs(c.RecentBlockNums(), now)
-	if len(second) != 0 {
-		t.Fatalf("re-advertised %d already-offered blocks; a late-joining peer would get a backlog", len(second))
+	// Drained and watermarked: a second round has nothing, and even a duplicate
+	// queue of the same block must not re-offer it.
+	if got := d.selectAdvertIDs(now); len(got) != 0 {
+		t.Fatalf("second round advertised %d, want 0", len(got))
 	}
-
-	// One genuinely new block → exactly that block is offered.
-	c.seed(base+5, liveBlockBytes(uint32(now)))
-	third := d.selectAdvertIDs(c.RecentBlockNums(), now)
-	if len(third) != 1 {
-		t.Fatalf("after one new block, advertised %d blocks, want exactly 1", len(third))
+	d.queueAdvert(liveBlockBytes(uint32(now)), base)
+	if got := d.selectAdvertIDs(now); len(got) != 0 {
+		t.Fatalf("re-queued an already-offered block and it was advertised again (%d)", len(got))
 	}
 }
 
-// TestAdvertiseWarmStartOffersNoBacklog covers the startup case the age gate
-// exists for: a node warm-started from a snapshot has a ring full of blocks
-// that are minutes-to-hours old. Its very first advertise round (watermark
-// still unset) must not dump that history at its peers.
+// TestAdvertiseWarmStartOffersNoBacklog: a node warm-started from a snapshot
+// has a ring full of blocks minutes-to-hours old. Its first advert round must
+// not dump that history. With an event-driven set this cannot happen at all.
 func TestAdvertiseWarmStartOffersNoBacklog(t *testing.T) {
 	now := time.Now().Unix()
-	c := newStubChain()
+	c, d := advertHarness(t)
 	base := uint32(108_000_000)
-	// Whole ring is an hour old — nothing here is safe to advertise.
 	for i := 0; i < 50; i++ {
 		c.seed(base+uint32(i), liveBlockBytes(uint32(now-3600)))
 	}
-	d := newWithChain(Config{Serve: true}, c)
-
-	if got := d.selectAdvertIDs(c.RecentBlockNums(), now); len(got) != 0 {
+	if got := d.selectAdvertIDs(now); len(got) != 0 {
 		t.Fatalf("warm start advertised %d stale blocks, want 0", len(got))
 	}
 }
 
-// TestAdvertiseGoesSilentWhenBehind covers the CPU-starvation path, which is
-// distinct from the new-peer backlog above and needs no new peer at all.
-//
-// isCatchingUp() — the gate deciding whether we advertise AT ALL — tolerates a
-// head up to liveAdvertiseWindowSec (120s) old, i.e. ~40 blocks behind. On a
-// contended box we fall behind, still believe we are "live", and keep offering
-// a head that is now a minute old to ESTABLISHED peers. Nodes older than hived
-// 1.28.7 act on those stale offers and fork away.
-//
-// The per-block age gate must make this self-correcting: when we cannot keep
-// up, nothing qualifies and we go silent until we are back at the tip.
+// TestAdvertiseGoesSilentWhenBehind covers the CPU-starvation path. isCatchingUp()
+// — the gate deciding whether we advertise at all — tolerates a head up to
+// liveAdvertiseWindowSec (120s) old, i.e. ~40 blocks behind, so it cannot be
+// relied on here. If the advert loop is starved long enough that a queued block
+// ages out, it must be dropped rather than shipped.
 func TestAdvertiseGoesSilentWhenBehind(t *testing.T) {
 	now := time.Now().Unix()
-	c := newStubChain()
+	c, d := advertHarness(t)
 	base := uint32(108_000_000)
-	// Newest block is 60s old: we are ~20 blocks behind, but still WELL inside
-	// the 120s isCatchingUp window, so the outer gate would let us advertise.
-	for i := 0; i < 20; i++ {
-		c.seed(base+uint32(i), liveBlockBytes(uint32(now-60-int64(3*(19-i)))))
-	}
-	d := newWithChain(Config{Serve: true}, c)
+	c.seed(base, liveBlockBytes(uint32(now-60)))
 
-	// Precondition: the outer gate really would have permitted advertising —
-	// otherwise this test proves nothing about the age gate.
+	// Applied 60s ago, advert loop starved since: still queued, now stale.
+	d.queueAdvert(liveBlockBytes(uint32(now-60)), base)
+
+	// Precondition: the outer gate would have permitted this round.
 	if d.isCatchingUp() {
-		t.Fatal("precondition failed: isCatchingUp() already suppresses this case, test is not exercising the age gate")
+		t.Fatal("precondition failed: isCatchingUp() already suppresses this; test is not exercising the age gate")
 	}
-	if got := d.selectAdvertIDs(c.RecentBlockNums(), now); len(got) != 0 {
-		t.Fatalf("advertised %d blocks while ~20 blocks behind, want 0 (silence) — this forks pre-1.28.7 peers", len(got))
+	if got := d.selectAdvertIDs(now); len(got) != 0 {
+		t.Fatalf("advertised %d blocks aged 60s, want 0 (silence) — this forks pre-1.28.7 peers", len(got))
 	}
 }
 
-// TestAdvertiseNeverOffersBelowPeerLIB pins the bound to hived's definition of
-// "too old" rather than to a number we picked.
-//
-// Under ONE-BLOCK IRREVERSIBILITY a peer's last irreversible block is head-1.
-// So a block TWO intervals old (6s) is already at or below a synced peer's LIB,
-// and hived treats that as irreversibly-on-the-wrong-fork — a block it can
-// never accept. Offering one is what triggered the 2026-08 forking incident.
-//
-// The damage is not bounded by "we get disconnected": peers relay the offered
-// block onward before they determine it is bad, so the kick cascades. Hence
-// this must hold even for a single block.
+// TestAdvertiseNeverOffersBelowPeerLIB pins the age bound to hived's rule
+// rather than to a number we chose. Under ONE-BLOCK IRREVERSIBILITY a peer's
+// last irreversible block is head-1, so a block two intervals old (6s) is
+// already at/below a synced peer's LIB — hived deems it irreversibly on the
+// wrong fork and can never accept it. Offering one triggered the 2026-08
+// incident, and the damage is not bounded by "we get disconnected": peers relay
+// it onward before determining it is bad, so the kick cascades.
 func TestAdvertiseNeverOffersBelowPeerLIB(t *testing.T) {
 	const blockInterval = 3
 	now := time.Now().Unix()
-	c := newStubChain()
+	c, d := advertHarness(t)
 	base := uint32(108_000_000)
 
-	// Head is exactly 2 block intervals old: we are 2 behind, so our head sits
-	// at/below a synced peer's LIB.
-	c.seed(base, liveBlockBytes(uint32(now-3*blockInterval)))
-	c.seed(base+1, liveBlockBytes(uint32(now-2*blockInterval)))
-
-	d := newWithChain(Config{Serve: true}, c)
-	if got := d.selectAdvertIDs(c.RecentBlockNums(), now); len(got) != 0 {
-		t.Fatalf("advertised %d blocks at/below a synced peer's LIB (head %ds old); "+
-			"hived deems these 'too old' and forks/kicks on them", len(got), 2*blockInterval)
+	c.seed(base, liveBlockBytes(uint32(now-2*blockInterval)))
+	d.queueAdvert(liveBlockBytes(uint32(now-2*blockInterval)), base)
+	if got := d.selectAdvertIDs(now); len(got) != 0 {
+		t.Fatalf("advertised %d blocks at/below a synced peer's LIB (%ds old); hived deems these 'too old'",
+			len(got), 2*blockInterval)
 	}
 
-	// Sanity: a block within one interval is still advertised, so the gate has
-	// not simply silenced us permanently.
-	c.seed(base+2, liveBlockBytes(uint32(now)))
-	if got := d.selectAdvertIDs(c.RecentBlockNums(), now); len(got) != 1 {
+	// Sanity: a block within one interval is still offered, so the gate has not
+	// regressed into permanent silence.
+	c.seed(base+1, liveBlockBytes(uint32(now)))
+	d.queueAdvert(liveBlockBytes(uint32(now)), base+1)
+	if got := d.selectAdvertIDs(now); len(got) != 1 {
 		t.Fatalf("fresh block: advertised %d, want exactly 1", len(got))
+	}
+}
+
+// TestAdvertiseQueueIsPassiveNoOp: a passive node must not even accumulate an
+// advert set, so flipping Serve on later cannot ship a backlog.
+func TestAdvertiseQueueIsPassiveNoOp(t *testing.T) {
+	now := time.Now().Unix()
+	c := newStubChain()
+	d := newWithChain(Config{Serve: false}, c)
+	base := uint32(108_000_000)
+	c.seed(base, liveBlockBytes(uint32(now)))
+
+	d.queueAdvert(liveBlockBytes(uint32(now)), base)
+	d.pendingAdvertMu.Lock()
+	n := len(d.pendingAdvert)
+	d.pendingAdvertMu.Unlock()
+	if n != 0 {
+		t.Fatalf("passive node queued %d adverts, want 0", n)
+	}
+}
+
+// TestAdvertiseQueueBounded: if the advert loop is starved the queue must not
+// grow without bound.
+func TestAdvertiseQueueBounded(t *testing.T) {
+	now := time.Now().Unix()
+	c, d := advertHarness(t)
+	base := uint32(108_000_000)
+	for i := 0; i < d.cfg.MaxBlocksPerInv*3; i++ {
+		n := base + uint32(i)
+		c.seed(n, liveBlockBytes(uint32(now)))
+		d.queueAdvert(liveBlockBytes(uint32(now)), n)
+	}
+	d.pendingAdvertMu.Lock()
+	n := len(d.pendingAdvert)
+	d.pendingAdvertMu.Unlock()
+	if n > d.cfg.MaxBlocksPerInv {
+		t.Fatalf("advert queue grew to %d, want <= MaxBlocksPerInv (%d)", n, d.cfg.MaxBlocksPerInv)
 	}
 }

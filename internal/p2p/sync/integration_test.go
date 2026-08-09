@@ -217,7 +217,12 @@ func TestINVPropagation(t *testing.T) {
 	// peers are connected. B already holds 1..4, so the only block it must
 	// learn about via A's INV advert is the new tip, block 5.
 	for n := uint32(1); n <= 5; n++ {
-		chainA.seed(n, syntheticBlock(n, now))
+		raw := syntheticBlock(n, now)
+		chainA.seed(n, raw)
+		// Simulate A APPLYING the block: the advert set is event-driven
+		// (hived's _new_block_inventory), fed only from the apply path, so
+		// seeding the chain alone must not — and does not — advertise anything.
+		syncA.queueAdvert(raw, n)
 	}
 	syncA.NotifyHeadAdvanced()
 

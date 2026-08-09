@@ -171,3 +171,14 @@ const (
 	ItemTypeBlock            = uint32(BlockMessageType)            // 1001
 	ItemTypeBlockCompressed  = uint32(CompressedBlockMessageType)  // 1002
 )
+
+// AdvertiseBlocksByBlockIDVersion is the graphene core_protocol_version at
+// which inventory identifies blocks by BLOCK ID rather than by the legacy
+// block_message hash (hived config.hpp:
+// GRAPHENE_NET_PROTOCOL_ADVERTISE_BLOCKS_BY_BLOCK_ID_VERSION, added in 107).
+//
+// We only speak the block-id form, so this is the floor for advertising to a
+// peer at all: a peer below it reads our ids as legacy hashes, cannot match
+// them, and requests something we do not have under that identity — which
+// hived answers with a disconnect.
+const AdvertiseBlocksByBlockIDVersion uint32 = 107
