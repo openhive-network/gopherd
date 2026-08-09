@@ -43,12 +43,24 @@ WORK_TIMING="${WORK_TIMING:-0}"
 # from the newest block-<N>/ in this dir and resume at head in ~25min.
 # Set to "" to disable.
 SNAP_DIR="${SNAP_DIR:-/home/martin/p2p-live-snaps}"
+# Block-production DRY RUN: set WITNESS_KEYS to a file of `account WIF` lines.
+# Blocks are built, signed, self-verified, timed and DISCARDED — never applied
+# (which would fork us off the chain we are following) and never broadcast.
+# PRODUCE_EVERY_SLOT=1 builds every slot instead of only when the schedule names
+# us; on mainnet we are never scheduled, so that is what yields timing data.
+WITNESS_KEYS="${WITNESS_KEYS:-}"
+PRODUCE_EVERY_SLOT="${PRODUCE_EVERY_SLOT:-0}"
 
 [ -x "$BIN" ] || { echo "no gopherd at $BIN" >&2; exit 1; }
 [ -d "$SNAPSHOT" ] || { echo "snapshot dir not found: $SNAPSHOT" >&2; exit 1; }
 
 SERVE_ARGS=()
 [ "$WORK_TIMING" = "1" ] && SERVE_ARGS+=(--log-work-timing)
+if [ -n "$WITNESS_KEYS" ]; then
+  [ -r "$WITNESS_KEYS" ] || { echo "WITNESS_KEYS not readable: $WITNESS_KEYS" >&2; exit 1; }
+  SERVE_ARGS+=(--produce-dry-run --witness-keys="$WITNESS_KEYS")
+  [ "$PRODUCE_EVERY_SLOT" = "1" ] && SERVE_ARGS+=(--produce-dry-run-every-slot)
+fi
 if [ -n "$SNAP_DIR" ]; then
   mkdir -p "$SNAP_DIR"
   SERVE_ARGS+=(--shutdown-snapshot-dir="$SNAP_DIR")
@@ -71,6 +83,7 @@ cat <<BANNER
  block_log  : OFF (--no-block-log; state+cold only)
  mem        : $MEM_MAX cgroup / ${MEM_LIMIT_GIB}GiB soft ; peers<=$MAX_PEERS
  head snap  : ${SNAP_DIR:-OFF (restart will re-sync the full delta)}
+ produce    : $([ -n "$WITNESS_KEYS" ] && echo "DRY RUN (build+sign+verify+discard; every-slot=$PRODUCE_EVERY_SLOT)" || echo "OFF")
  data=$DATA
  cold=$COLD
  log =$LOG

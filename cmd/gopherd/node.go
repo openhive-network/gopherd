@@ -49,7 +49,9 @@ import (
 	"hived-go/internal/api"
 	"hived-go/internal/blocklog"
 	"hived-go/internal/chain"
+	"hived-go/internal/crypto"
 	p2pnode "hived-go/internal/p2p/node"
+	"hived-go/internal/plugins/witness"
 	p2psync "hived-go/internal/p2p/sync"
 	"hived-go/internal/protocol/block"
 	"hived-go/internal/protocol/hardfork"
@@ -200,6 +202,22 @@ func cmdNode(args []string) int {
 		fmt.Fprintln(os.Stderr, "gopherd node: --recover-block-log requires --no-block-log (else the writer would target it)")
 		return 2
 	}
+	// Block production is DRY RUN ONLY from this command. Supplying keys
+	// without --produce-dry-run is refused rather than silently ignored, so
+	// nobody can believe they configured a witness and get neither a dry run
+	// nor an error. Real production is not wired up at all.
+	if cfg.witnessKeyFile != "" && !cfg.produceDryRun {
+		fmt.Fprintln(os.Stderr, "gopherd node: --witness-keys requires --produce-dry-run (real block production is not available from this command)")
+		return 2
+	}
+	if cfg.produceDryRun && cfg.witnessKeyFile == "" {
+		fmt.Fprintln(os.Stderr, "gopherd node: --produce-dry-run requires --witness-keys (there is nothing to sign with otherwise)")
+		return 2
+	}
+	if cfg.produceEverySlot && !cfg.produceDryRun {
+		fmt.Fprintln(os.Stderr, "gopherd node: --produce-dry-run-every-slot requires --produce-dry-run")
+		return 2
+	}
 
 	app, err := newApp(cfg)
 	if err != nil {
@@ -250,6 +268,14 @@ type flags struct {
 	// re-sync the delta over P2P — a month-old snapshot costs ~2h of catch-up.
 	// Mirrors replay's --shutdown-snapshot-dir.
 	shutdownSnapshotDir string
+	// witnessKeyFile / produceDryRun / produceEverySlot drive the block
+	// production DRY RUN. Real production is intentionally NOT reachable from
+	// this command: a produced block that got applied would fork this node off
+	// the chain it is following, and one that got broadcast would be a witness
+	// action taken by an unproven implementation.
+	witnessKeyFile   string
+	produceDryRun    bool
+	produceEverySlot bool
 	// loadSnapshot warm-starts the state from a directory snapshot
 	// (block-N/ produced by ghive-tools replay --snapshot-every /
 	// --save-dir-snapshot-at) BEFORE dialing peers. Use to skip the
@@ -343,6 +369,9 @@ func parseNodeFlags(args []string) flags {
 	fs.StringVar(&f.verifyAgainst, "verify-against", "", "path to a reference block_log; assert each applied block's bytes match")
 	fs.StringVar(&f.sourceBlockLog, "source-block-log", "", "self-replay mode: read blocks from this block_log instead of P2P")
 	fs.StringVar(&f.loadSnapshot, "load-snapshot", "", "warm-start from a directory snapshot (block-N/) before dialing peers; skips genesis catch-up")
+	fs.StringVar(&f.witnessKeyFile, "witness-keys", "", "file of `account WIF` lines (one per witness) enabling the block-production DRY RUN. Keys go in a file, not a flag, so they aren't exposed in ps output. Requires --produce-dry-run")
+	fs.BoolVar(&f.produceDryRun, "produce-dry-run", false, "exercise the full block-production pipeline (schedule -> assemble -> merkle -> sign -> self-verify -> timing) and DISCARD every block. Never applies, never broadcasts. This is the ONLY production mode the daemon offers: real production is deliberately not wired up")
+	fs.BoolVar(&f.produceEverySlot, "produce-dry-run-every-slot", false, "with --produce-dry-run, build a block EVERY slot instead of only when the schedule names one of our witnesses. On mainnet we are never scheduled, so this is what produces measurable data; such blocks are built for our own account and logged as SIMULATED")
 	fs.StringVar(&f.shutdownSnapshotDir, "shutdown-snapshot-dir", "", "on clean exit OR SIGINT/SIGTERM, save a dir snapshot here (block-<head>/) after flushing the cold tier — so a restart with --load-snapshot=<that> + the same --cold-dir resumes at head instead of re-syncing the delta over P2P")
 	fs.UintVar(&max, "max-blocks", 0, "in self-replay mode, stop after this many blocks (0 = the source's head)")
 	fs.BoolVar(&f.showSeeds, "show-seeds", false, "print the compiled-in mainnet seed list and exit")
@@ -432,6 +461,7 @@ type app struct {
 	// their votes spill to disk so a full-chain node's RAM stays bounded.
 	// EvictFrozen runs after each applied block. Nil when off.
 	cold             objects.ColdStore
+	witness          *witness.Plugin
 	commentStore     *objects.CommentStore
 	voteStore        *objects.CommentVoteStore
 	evictBudget      int
@@ -710,6 +740,20 @@ func (a *app) close() {
 			a.logger.printf("WARN create memprofile %s: %v", a.cfg.memProfile, err)
 		}
 	}
+	// Stop the dry-run producer before the rest: its loop reads chain state
+	// each slot, and it must not race the teardown below.
+	if a.witness != nil {
+		a.witness.Stop()
+		st := a.witness.DryRunSnapshot()
+		avg := 0.0
+		if st.Built > 0 {
+			avg = float64(st.TotalNs) / float64(st.Built) / 1e6
+		}
+		a.logger.printf("block production DRY RUN summary: slots=%d built=%d ours=%d verify_ok=%d verify_fail=%d errors=%d avg=%.2fms max=%.2fms (budget %ds)",
+			st.Slots, st.Built, st.Ours, st.VerifyOK, st.VerifyFail, st.Errors,
+			avg, float64(st.MaxNs)/1e6, int(witness.BlockInterval/time.Second))
+		a.witness = nil
+	}
 	if a.p2p != nil {
 		a.p2p.Stop()
 		a.p2p = nil
@@ -887,6 +931,26 @@ func (a *app) run() error {
 		seeds = append(seeds, a.cfg.extraSeeds)
 	}
 	a.logger.printf("starting (seeds=%d, listen=%q, target=%d)", len(seeds), a.cfg.listenEndpoint, a.cfg.targetBlock)
+
+	// Block-production DRY RUN. Builds, signs and self-verifies a block each
+	// slot, records timing, and discards it — never applied, never broadcast,
+	// so the node keeps following the canonical chain untouched.
+	if a.cfg.produceDryRun {
+		producers, perr := loadWitnessKeys(a.cfg.witnessKeyFile)
+		if perr != nil {
+			return perr
+		}
+		names := make([]string, 0, len(producers))
+		for _, pr := range producers {
+			names = append(names, pr.Account)
+		}
+		a.witness = witness.New(a.chain, a.state, producers)
+		a.witness.DryRun = true
+		a.witness.DryRunEverySlot = a.cfg.produceEverySlot
+		a.witness.Start()
+		a.logger.printf("block production DRY RUN active for %v (every-slot=%v) — blocks are built, signed, verified and DISCARDED; never applied, never broadcast",
+			names, a.cfg.produceEverySlot)
+	}
 
 	// Read-only JSON-RPC API (opt-in). Serves committed state; independent of
 	// the p2p layer. Bind loopback unless deliberately exposed.
@@ -1193,4 +1257,45 @@ func bytesEqual(a, b []byte) bool {
 		}
 	}
 	return true
+}
+
+// loadWitnessKeys reads a file of `account WIF` lines into witness Producers.
+//
+// Keys live in a file rather than a flag on purpose: command lines are visible
+// in ps to every user on the box, so a --witness-key flag would leak signing
+// keys to anyone with shell access.
+//
+// Blank lines and # comments are skipped. Each key is checked against nothing
+// on-chain here — a key that does not match the witness's registered signing
+// key still exercises the pipeline, and the dry run's self-verification will
+// report the mismatch rather than silently passing.
+func loadWitnessKeys(path string) ([]witness.Producer, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("witness-keys: %w", err)
+	}
+	var out []witness.Producer
+	for i, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			return nil, fmt.Errorf("witness-keys line %d: want `account WIF`, got %d fields", i+1, len(fields))
+		}
+		priv, derr := crypto.DecodeWIF(fields[1])
+		if derr != nil {
+			return nil, fmt.Errorf("witness-keys line %d (account %q): %w", i+1, fields[0], derr)
+		}
+		out = append(out, witness.Producer{
+			Account:     fields[0],
+			PrivateKey:  priv,
+			PublicKey33: priv.PublicKey(),
+		})
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("witness-keys %s: no entries", path)
+	}
+	return out, nil
 }

@@ -47,6 +47,21 @@ type Broadcaster interface {
 // BlockInterval — HIVE_BLOCK_INTERVAL = 3 seconds.
 const BlockInterval = 3 * time.Second
 
+// DryRunStats accumulates timing + outcome for --produce-dry-run. All fields
+// are guarded by Plugin.mu.
+type DryRunStats struct {
+	Slots      int   // slots evaluated
+	Ours       int   // slots where the schedule actually named one of our producers
+	Built      int   // blocks assembled + signed
+	VerifyOK   int   // blocks whose signature recovered the expected key
+	VerifyFail int   // blocks that failed self-verification
+	Errors     int   // build failures
+	TotalNs    int64 // cumulative build+sign+verify time
+	MaxNs      int64 // slowest single production
+	LastTxs    int   // transactions in the most recent block
+	LastBytes  int   // serialized size of the most recent block
+}
+
 // Producer is one (witness account, private key) pair we can sign for.
 type Producer struct {
 	Account     string
@@ -61,8 +76,29 @@ type Plugin struct {
 	Producers   []Producer
 	Broadcaster Broadcaster // optional; nil = no gossip
 
+	// DryRun exercises the whole production pipeline — schedule lookup,
+	// assembly, merkle, signing, self-verification, timing — and then THROWS
+	// THE BLOCK AWAY. It is never applied and never broadcast.
+	//
+	// Not applying is the important half. A locally produced block applied to
+	// our own state would move our head to a block no one else has, i.e. fork
+	// this node off the chain it is tracking. Dry run must leave state
+	// untouched, so it is safe to run against mainnet.
+	DryRun bool
+
+	// DryRunEverySlot makes the dry run build a block EVERY slot instead of
+	// only when the schedule names one of our producers. On mainnet we are
+	// never scheduled, so without this the pipeline would never execute and
+	// there would be nothing to measure. The simulated block is built for our
+	// OWN producer account (header witness = us, signed by our key) so it is
+	// internally consistent and self-verifiable; it is simply not the block
+	// the schedule called for. Slots where the schedule really did name us are
+	// counted separately (DryRunStats.Ours).
+	DryRunEverySlot bool
+
 	mu      sync.Mutex
 	pending []op.Op // mempool — ops to include in our next block
+	dry     DryRunStats
 
 	logMu       sync.Mutex
 	lastLogTime time.Time
@@ -184,9 +220,16 @@ func (p *Plugin) maybeProduceBlock() error {
 		return nil
 	}
 	prod := p.findProducer(scheduled)
+	scheduledOurs := prod != nil
 	if prod == nil {
-		p.logEvery(5*time.Second, "scheduled=%q (not owned by this node)", scheduled)
-		return nil // not our turn
+		// Not our turn. Under DryRunEverySlot we still exercise the pipeline,
+		// building for our own producer so the block is self-consistent (see
+		// the field comment). Otherwise there is nothing to do.
+		if !p.DryRun || !p.DryRunEverySlot {
+			p.logEvery(5*time.Second, "scheduled=%q (not owned by this node)", scheduled)
+			return nil
+		}
+		prod = &p.Producers[0]
 	}
 	// All DGPO reads go through chain.Database accessors so they
 	// serialize against in-flight ApplyBlock via the chain-level
@@ -214,6 +257,14 @@ func (p *Plugin) maybeProduceBlock() error {
 	}
 	if nextSlotTime > now {
 		return nil // not yet — wait for clock to catch up
+	}
+
+	// DRY RUN: build + sign + self-verify + time it, then discard. Returns
+	// BEFORE any apply or broadcast — the block never touches our state and
+	// never reaches the network. See Plugin.DryRun.
+	if p.DryRun {
+		p.dryRunProduce(prod, dgpo, nextSlotTime, scheduled, scheduledOurs)
+		return nil
 	}
 
 	rawBlock, err := p.buildBlock(prod, dgpo, nextSlotTime)
@@ -244,6 +295,109 @@ func (p *Plugin) maybeProduceBlock() error {
 	return nil
 }
 
+// dryRunProduce builds + signs a block and verifies it WITHOUT applying or
+// broadcasting, recording timing. `scheduledOurs` says whether the schedule
+// genuinely named this producer (vs a simulated slot under DryRunEverySlot).
+//
+// What this actually proves:
+//   - the schedule lookup runs and names a witness
+//   - a block assembles from current head + mempool, with a correct merkle root
+//   - signing works and the signature recovers the producer's own key
+//   - the whole thing fits inside the 3s slot budget, with the margin measured
+//
+// What it deliberately does NOT prove: that the block would APPLY. Validating
+// that needs a state mutation we must not perform here — see DryRun.
+func (p *Plugin) dryRunProduce(prod *Producer, dgpo objects.DynamicGlobalProperty, blockTime uint32, scheduled string, scheduledOurs bool) {
+	start := time.Now()
+	rawBlock, hdrLen, err := p.buildBlockParts(prod, dgpo, blockTime)
+	if err != nil {
+		p.mu.Lock()
+		p.dry.Slots++
+		p.dry.Errors++
+		p.mu.Unlock()
+		fmt.Fprintf(os.Stderr, "witness dry-run: BUILD FAILED for %s at slot %d: %v\n", prod.Account, blockTime, err)
+		return
+	}
+
+	// Self-verify: recover the signer from the block signature exactly the way
+	// a peer would, and confirm it is the key we signed with. A block whose
+	// signature does not recover our own key is one every peer would reject.
+	verifyOK := false
+	verifyErr := ""
+	if len(rawBlock) < hdrLen+block.SignatureSize {
+		verifyErr = "block shorter than header+signature"
+	} else {
+		var sig crypto.CompactSignature
+		copy(sig[:], rawBlock[hdrLen:hdrLen+block.SignatureSize])
+		digest := block.BlockSigningDigest(rawBlock[:hdrLen])
+		pub, rerr := crypto.RecoverPublicKey(digest, sig)
+		switch {
+		case rerr != nil:
+			verifyErr = "recover: " + rerr.Error()
+		case pub != prod.PublicKey33:
+			verifyErr = "recovered key != producer key"
+		default:
+			verifyOK = true
+		}
+	}
+
+	elapsed := time.Since(start)
+	// Margin against the slot budget: a block must be produced AND propagated
+	// within the 3s interval, so anything approaching that is a red flag.
+	margin := BlockInterval - elapsed
+
+	p.mu.Lock()
+	p.dry.Slots++
+	p.dry.Built++
+	if scheduledOurs {
+		p.dry.Ours++
+	}
+	if verifyOK {
+		p.dry.VerifyOK++
+	} else {
+		p.dry.VerifyFail++
+	}
+	ns := elapsed.Nanoseconds()
+	p.dry.TotalNs += ns
+	if ns > p.dry.MaxNs {
+		p.dry.MaxNs = ns
+	}
+	p.dry.LastBytes = len(rawBlock)
+	p.dry.LastTxs = len(p.pending)
+	st := p.dry
+	p.mu.Unlock()
+
+	kind := "SIMULATED"
+	if scheduledOurs {
+		kind = "OUR SLOT"
+	}
+	status := "verify=OK"
+	if !verifyOK {
+		status = "verify=FAIL (" + verifyErr + ")"
+	}
+	fmt.Fprintf(os.Stderr,
+		"witness dry-run: %s block %d for %s (scheduled=%s) built+signed in %.2fms (margin %.0fms of %ds) size=%dB txs=%d %s — DISCARDED [slots=%d built=%d ours=%d okay=%d fail=%d err=%d avg=%.2fms max=%.2fms]\n",
+		kind, dgpo.HeadBlockNumber+1, prod.Account, scheduled,
+		float64(elapsed.Microseconds())/1000, float64(margin.Milliseconds()), int(BlockInterval/time.Second),
+		len(rawBlock), st.LastTxs, status,
+		st.Slots, st.Built, st.Ours, st.VerifyOK, st.VerifyFail, st.Errors,
+		float64(st.TotalNs)/float64(max64(st.Built, 1))/1e6, float64(st.MaxNs)/1e6)
+}
+
+// DryRunSnapshot returns a copy of the dry-run counters.
+func (p *Plugin) DryRunSnapshot() DryRunStats {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.dry
+}
+
+func max64(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 // findProducer returns the producer entry for `name`, or nil.
 func (p *Plugin) findProducer(name string) *Producer {
 	for i := range p.Producers {
@@ -258,9 +412,20 @@ func (p *Plugin) findProducer(name string) *Producer {
 // implementation is a stub that writes 65 zero bytes (replay-mode
 // validity); a real signer would compute ripemd160(serialized header)
 // and call secp256k1 Sign with the producer's private key.
+// buildBlock assembles + signs a block. Thin wrapper over buildBlockParts for
+// callers that don't need the header boundary.
 func (p *Plugin) buildBlock(prod *Producer, dgpo objects.DynamicGlobalProperty, blockTime uint32) ([]byte, error) {
+	raw, _, err := p.buildBlockParts(prod, dgpo, blockTime)
+	return raw, err
+}
+
+// buildBlockParts is buildBlock plus the length of the UNSIGNED header, which
+// the dry-run verifier needs to recompute the signing digest. The header is
+// variable-length (witness name, extensions), so the boundary cannot be derived
+// from the serialized block after the fact — there is no header parser.
+func (p *Plugin) buildBlockParts(prod *Producer, dgpo objects.DynamicGlobalProperty, blockTime uint32) ([]byte, int, error) {
 	if blockTime == 0 || prod == nil {
-		return nil, errors.New("buildBlock: invalid args")
+		return nil, 0, errors.New("buildBlock: invalid args")
 	}
 	hdr := block.Header{
 		Previous:   dgpo.HeadBlockID,
@@ -294,7 +459,7 @@ func (p *Plugin) buildBlock(prod *Producer, dgpo objects.DynamicGlobalProperty, 
 	headerBytes := block.MarshalHeader(nil, &hdr)
 
 	if prod.PrivateKey == nil {
-		return nil, errors.New("buildBlock: producer has no private key")
+		return nil, 0, errors.New("buildBlock: producer has no private key")
 	}
 	// Hived's digest formula (libraries/chain/full_block.cpp:142-149) is
 	// SHA256 over the unsigned block-header bytes — NO chain_id prefix
@@ -304,7 +469,7 @@ func (p *Plugin) buildBlock(prod *Producer, dgpo objects.DynamicGlobalProperty, 
 	digest := block.BlockSigningDigest(headerBytes)
 	sig, err := crypto.SignCompact(prod.PrivateKey, digest)
 	if err != nil {
-		return nil, fmt.Errorf("buildBlock: sign: %w", err)
+		return nil, 0, fmt.Errorf("buildBlock: sign: %w", err)
 	}
 
 	signedHeader := make([]byte, 0, len(headerBytes)+block.SignatureSize)
@@ -315,7 +480,7 @@ func (p *Plugin) buildBlock(prod *Producer, dgpo objects.DynamicGlobalProperty, 
 	out = append(out, signedHeader...)
 	out = appendVarUint(out, uint32(len(digests)))
 	out = append(out, txBytes...)
-	return out, nil
+	return out, len(headerBytes), nil
 }
 
 // refBlockPrefix extracts the prefix from a block ID — the 32-bit
