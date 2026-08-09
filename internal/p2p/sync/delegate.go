@@ -412,6 +412,13 @@ type Delegate struct {
 	inflightMu sync.Mutex
 	inflight   map[block.ID]inflightEntry
 
+	// tipStallKicks counts how many times the kicker re-seeded because we were
+	// stalled AT THE TIP (head not advancing, nothing in flight) rather than
+	// because isCatchingUp() was true. Surfaced in Stats so a live node shows
+	// whether it is silently sawtoothing behind the head. Steady 0 at a healthy
+	// tip; climbing = blocks are being dropped at head+1.
+	tipStallKicks atomic.Int64
+
 	// traceLo/traceHi define an optional block-number window for verbose
 	// per-block ingestion tracing (GHIVE_TRACE_LO/HI). Zero = disabled.
 	traceLo uint32
@@ -866,6 +873,11 @@ type Stats struct {
 	// and climbing == we're behind and correctly ignoring tip INV; stops
 	// climbing once we reach the live tip.
 	InvIgnoredCatchup uint64
+
+	// TipStallKicks is the cumulative count of tip-stall re-seeds (head stuck
+	// with nothing in flight while at the tip). 0 on a healthy live node;
+	// climbing means blocks are being dropped at head+1 and we are sawtoothing.
+	TipStallKicks int64
 }
 
 func (d *Delegate) distinctOutstanding() (distinct, peers int) {
@@ -904,5 +916,6 @@ func (d *Delegate) Stats() Stats {
 		DistinctOutstanding:    distinct,
 		GlobalInflight:         inflight,
 		InvIgnoredCatchup:      d.invIgnoredCatchup.Load(),
+		TipStallKicks:          d.tipStallKicks.Load(),
 	}
 }

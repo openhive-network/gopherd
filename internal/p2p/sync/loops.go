@@ -257,16 +257,66 @@ func (d *Delegate) pruneLoop() {
 // the INV-advertise suppression landed, peer churn masked this: every
 // "invalid block" disconnect forced a reconnect, and OnPeerConnected
 // re-seeded the walk. With churn gone, the kicker is the only re-seeder.)
+// tipStallKickTicks is how many consecutive idle kicker ticks (head not
+// advancing, nothing in flight, nothing outstanding) mean we are STALLED at the
+// tip rather than just waiting for the next block.
+//
+// It must clear the normal inter-block gap or the kicker would re-seed every
+// peer every second while sitting healthily at the tip — which is the very
+// fetch storm the INV suppression exists to prevent. Blocks are 3s apart and a
+// missed witness slot doubles that, so 10 ticks (10s ≈ 3 missed slots) is
+// unambiguously abnormal while still recovering ~12x faster than the 120s
+// isCatchingUp() window did on its own.
+const tipStallKickTicks = 10
+
 func (d *Delegate) catchupKickerLoop() {
 	defer d.wg.Done()
 	t := time.NewTicker(d.cfg.CatchupKickInterval)
 	defer t.Stop()
+	var lastHead uint32
+	var idleTicks int
 	for {
 		select {
 		case <-d.stopCh:
 			return
 		case <-t.C:
-			if !d.isCatchingUp() {
+			// Tip-stall escape hatch. At the tip isCatchingUp() is false, so the
+			// gate below silences the kicker — and the kicker is the ONLY
+			// re-seeder (see the comment above). A block dropped at head+1 then
+			// has nothing to re-request it: future blocks pile into the reorder
+			// buffer while head sits still, until head_age finally exceeds
+			// liveAdvertiseWindowSec (120s) and isCatchingUp() flips back true.
+			// Observed live 2026-08-09 at head 108,858,700 as a ~120s sawtooth,
+			// 0..60 blocks behind, with 8 peers and ZERO apply errors
+			// (qdepth=0 outstanding=0 inflight=0 — we simply stopped asking).
+			// A serving node must not sit in that state, so treat a persistent
+			// no-progress-nothing-in-flight window as reason to re-seed.
+			head := d.headBlockHint.Load()
+			if head == 0 {
+				h, _ := d.chain.HeadBlock()
+				head = h
+			}
+			d.inflightMu.Lock()
+			nInflight := len(d.inflight)
+			d.inflightMu.Unlock()
+			if head != 0 && head == lastHead && nInflight == 0 && d.outstandingTotal.Load() == 0 {
+				idleTicks++
+			} else {
+				idleTicks = 0
+			}
+			lastHead = head
+			tipStalled := idleTicks >= tipStallKickTicks
+			if tipStalled {
+				// Reset so we re-seed at most once per tipStallKickTicks window
+				// rather than every tick for as long as the stall lasts.
+				idleTicks = 0
+				d.tipStallKicks.Add(1)
+				// NB: d.peers is guarded by d.mu and is read below under that
+				// lock — don't touch it here.
+				d.logf("tip stall: head=%d unchanged for %ds with nothing in flight — re-seeding peers",
+					head, tipStallKickTicks)
+			}
+			if !d.isCatchingUp() && !tipStalled {
 				continue
 			}
 			if d.inhibitFetching.Load() {
