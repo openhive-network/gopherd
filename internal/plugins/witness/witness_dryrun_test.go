@@ -189,3 +189,37 @@ func TestDryRunReportsImpersonation(t *testing.T) {
 		t.Fatalf("verifyOK=%d want 2 — self-verification is about OUR key, not the chain's", st.VerifyOK)
 	}
 }
+
+// TestDryRunOneBlockPerSlot pins the dedupe. The production loop ticks every
+// 500ms but a slot is 3s, so without per-slot dedupe a single slot would yield
+// ~6 identical blocks and every timing average would be computed over
+// duplicates.
+//
+// This matters because the dry run deliberately does NOT wait for the slot
+// boundary (against a live chain that window is unwinnable — see
+// maybeProduceBlock), so the tick rate alone no longer limits production.
+func TestDryRunOneBlockPerSlot(t *testing.T) {
+	p, _, _ := dryRunFixture(t)
+
+	// Several ticks inside the same slot.
+	for i := 0; i < 6; i++ {
+		if err := p.maybeProduceBlock(); err != nil {
+			t.Fatalf("maybeProduceBlock: %v", err)
+		}
+	}
+	st := p.DryRunSnapshot()
+	if st.Built != 1 {
+		t.Fatalf("built=%d across 6 ticks in one slot, want exactly 1 (dedupe is not working)", st.Built)
+	}
+
+	// A new slot must produce again.
+	p.mu.Lock()
+	p.lastDrySlot = 0
+	p.mu.Unlock()
+	if err := p.maybeProduceBlock(); err != nil {
+		t.Fatalf("maybeProduceBlock (next slot): %v", err)
+	}
+	if st = p.DryRunSnapshot(); st.Built != 2 {
+		t.Fatalf("built=%d after a new slot, want 2", st.Built)
+	}
+}
