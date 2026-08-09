@@ -1004,10 +1004,16 @@ func (a *app) run() error {
 	}
 	a.logger.printf("starting (seeds=%d, listen=%q, target=%d)", len(seeds), a.cfg.listenEndpoint, a.cfg.targetBlock)
 
-	// Block-production DRY RUN. Builds, signs and self-verifies a block each
-	// slot, records timing, and discards it — never applied, never broadcast,
-	// so the node keeps following the canonical chain untouched.
-	if a.cfg.produceDryRun {
+	// Block production, either mode. Dry run builds/signs/verifies and discards;
+	// real production applies + broadcasts, but only when the chain's registered
+	// signing key matches ours.
+	//
+	// This gate covers BOTH modes. It previously read `if produceDryRun`, so
+	// --produce silently did nothing at all: the plugin was never constructed,
+	// a.witness stayed nil, and the start below (correctly guarded on non-nil)
+	// never fired. Symptom was a node that looked healthy with zero witness log
+	// lines of any kind.
+	if a.cfg.produceDryRun || a.cfg.produceReal {
 		producers, perr := loadWitnessKeys(a.cfg.witnessKeyFile)
 		if perr != nil {
 			return perr
