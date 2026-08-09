@@ -33,7 +33,114 @@ const (
 	psHeadKey = "\x00head"
 	psMemKey  = "\x01mem"
 	psSubPfx  = "\x02" // + subsystem name
+	// psChunkPfx + <key> + "\x00" + <4-byte BE index> holds one bounded slice of
+	// a large value. See chunkWriter: values are written in pieces so a save
+	// never materialises the whole serialized state in RAM.
+	psChunkPfx = "\x03"
+	// psChunkCntPfx + <key> holds the 4-byte BE chunk count for a chunked value.
+	psChunkCntPfx = "\x04"
 )
+
+// psChunkSize bounds how much of a value is held in memory at once during a
+// save. The previous code buffered an ENTIRE value — all K/V rows in one
+// bytes.Buffer, then each subsystem in another — which is fine on a small chain
+// and fatal on a full one: at mainnet scale that is multiple GB on top of the
+// live heap, and it OOM-killed a node during shutdown (2026-08-10), losing both
+// the container and the shutdown snapshot that would have run after it.
+//
+// 64 MiB keeps peak save overhead flat regardless of chain size.
+const psChunkSize = 64 << 20
+
+// chunkWriter is an io.Writer that flushes into persiststore in psChunkSize
+// pieces under key/0, key/1, … and finally records the count, so a value of any
+// size can be written with bounded memory.
+type chunkWriter struct {
+	ps    *persiststore.Store
+	key   string
+	buf   []byte
+	count uint32
+	err   error
+}
+
+func newChunkWriter(ps *persiststore.Store, key string) *chunkWriter {
+	return &chunkWriter{ps: ps, key: key, buf: make([]byte, 0, psChunkSize)}
+}
+
+func chunkKey(key string, i uint32) string {
+	var ib [4]byte
+	binary.BigEndian.PutUint32(ib[:], i)
+	return psChunkPfx + key + "\x00" + string(ib[:])
+}
+
+func (w *chunkWriter) Write(p []byte) (int, error) {
+	if w.err != nil {
+		return 0, w.err
+	}
+	n := len(p)
+	for len(p) > 0 {
+		space := psChunkSize - len(w.buf)
+		take := len(p)
+		if take > space {
+			take = space
+		}
+		w.buf = append(w.buf, p[:take]...)
+		p = p[take:]
+		if len(w.buf) == psChunkSize {
+			if err := w.flush(); err != nil {
+				w.err = err
+				return 0, err
+			}
+		}
+	}
+	return n, nil
+}
+
+func (w *chunkWriter) flush() error {
+	if len(w.buf) == 0 {
+		return nil
+	}
+	if err := w.ps.Set(chunkKey(w.key, w.count), w.buf); err != nil {
+		return err
+	}
+	w.count++
+	w.buf = w.buf[:0]
+	return nil
+}
+
+// Close flushes the tail and records the chunk count, which is what marks the
+// value complete — a partially written value has no count and reads as absent.
+func (w *chunkWriter) Close() error {
+	if w.err != nil {
+		return w.err
+	}
+	if err := w.flush(); err != nil {
+		return err
+	}
+	var cb [4]byte
+	binary.BigEndian.PutUint32(cb[:], w.count)
+	return w.ps.Set(psChunkCntPfx+w.key, cb[:])
+}
+
+// chunkReader returns an io.Reader over a chunked value, fetching one chunk at
+// a time. persiststore.Get hands back a view into the mmap, so this does not
+// copy the whole value into the heap. Reports false when the key was not
+// written in chunked form (older container, or an interrupted save).
+func chunkReader(ps *persiststore.Store, key string) (io.Reader, bool) {
+	cb, ok := ps.Get(psChunkCntPfx + key)
+	if !ok || len(cb) < 4 {
+		return nil, false
+	}
+	n := binary.BigEndian.Uint32(cb)
+	readers := make([]io.Reader, 0, n)
+	for i := uint32(0); i < n; i++ {
+		blob, ok := ps.Get(chunkKey(key, i))
+		if !ok {
+			return nil, false
+		}
+		readers = append(readers, bytes.NewReader(blob))
+	}
+	return io.MultiReader(readers...), true
+}
 
 // SavePersist writes db's full non-cold state + the head block into a
 // persiststore container under dir. Call on clean shutdown (alongside flushing
@@ -74,21 +181,26 @@ func savePersistTo(db *state.Database, dir string, blockNum uint32) error {
 	}
 	defer ps.Close()
 
-	// K/V mem rows (same framing as snapshot.writeMem, minus the file).
-	var mem bytes.Buffer
-	mem.WriteString("GHIVEMEM")
+	// K/V mem rows (same framing as snapshot.writeMem, minus the file), streamed
+	// in bounded chunks rather than buffered whole — see psChunkSize.
+	memW := newChunkWriter(ps, psMemKey)
+	bw := bufio.NewWriter(memW)
+	if _, err := bw.WriteString("GHIVEMEM"); err != nil {
+		return err
+	}
 	var fhdr [4]byte
 	binary.LittleEndian.PutUint32(fhdr[:], uint32(Format))
-	mem.Write(fhdr[:])
-	bw := bufio.NewWriter(&mem)
+	if _, err := bw.Write(fhdr[:]); err != nil {
+		return err
+	}
 	if err := state.WriteAllRows(db, bw); err != nil {
 		return fmt.Errorf("persiststate: write mem rows: %w", err)
 	}
 	if err := bw.Flush(); err != nil {
 		return err
 	}
-	if err := ps.Set(psMemKey, mem.Bytes()); err != nil {
-		return err
+	if err := memW.Close(); err != nil {
+		return fmt.Errorf("persiststate: write mem chunks: %w", err)
 	}
 
 	// Each MarshalSnapshot subsystem.
@@ -97,12 +209,19 @@ func savePersistTo(db *state.Database, dir string, blockNum uint32) error {
 		if !ok {
 			continue
 		}
-		var buf bytes.Buffer
-		if err := m.MarshalSnapshot(&buf); err != nil {
+		// Chunked for the same reason as the mem rows: comment_store alone is
+		// multiple GB on a full chain, and buffering it whole is what killed the
+		// process.
+		subW := newChunkWriter(ps, psSubPfx+name)
+		sbw := bufio.NewWriter(subW)
+		if err := m.MarshalSnapshot(sbw); err != nil {
 			return fmt.Errorf("persiststate: marshal %s: %w", name, err)
 		}
-		if err := ps.Set(psSubPfx+name, buf.Bytes()); err != nil {
+		if err := sbw.Flush(); err != nil {
 			return err
+		}
+		if err := subW.Close(); err != nil {
+			return fmt.Errorf("persiststate: write %s chunks: %w", name, err)
 		}
 	}
 
@@ -153,11 +272,16 @@ func LoadPersist(db *state.Database, dir string) (uint32, error) {
 	}
 	head := binary.BigEndian.Uint32(hb)
 
-	memBytes, ok := ps.Get(psMemKey)
-	if !ok {
+	// Chunked form first; fall back to the original single-blob layout so a
+	// container written by an older build still loads.
+	var r io.Reader
+	if cr, ok := chunkReader(ps, psMemKey); ok {
+		r = cr
+	} else if memBytes, ok := ps.Get(psMemKey); ok {
+		r = bytes.NewReader(memBytes)
+	} else {
 		return 0, fmt.Errorf("persiststate: no mem rows")
 	}
-	r := bytes.NewReader(memBytes)
 	var magic [8]byte
 	if _, err := io.ReadFull(r, magic[:]); err != nil {
 		return 0, fmt.Errorf("persiststate: read mem magic: %w", err)
@@ -181,11 +305,15 @@ func LoadPersist(db *state.Database, dir string) (uint32, error) {
 		if !ok {
 			continue
 		}
-		blob, ok := ps.Get(psSubPfx + name)
-		if !ok {
+		var sr io.Reader
+		if cr, ok := chunkReader(ps, psSubPfx+name); ok {
+			sr = cr
+		} else if blob, ok := ps.Get(psSubPfx + name); ok {
+			sr = bytes.NewReader(blob) // pre-chunking container
+		} else {
 			continue // registered but absent from the container (never populated)
 		}
-		if err := m.UnmarshalSnapshot(bytes.NewReader(blob)); err != nil {
+		if err := m.UnmarshalSnapshot(sr); err != nil {
 			return 0, fmt.Errorf("persiststate: unmarshal %s: %w", name, err)
 		}
 	}

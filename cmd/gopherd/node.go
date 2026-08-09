@@ -384,7 +384,7 @@ func parseNodeFlags(args []string) flags {
 	fs.BoolVar(&f.produceReal, "produce", false, "REAL block production: when the schedule names one of our witnesses AND the chain's registered signing key for it matches the key we hold, build, sign, APPLY and BROADCAST the block. If the key does not match, log it and skip the slot (mirrors hived, which will not emit a block the network would reject). Requires --witness-keys; mutually exclusive with --produce-dry-run")
 	fs.BoolVar(&f.produceDryRun, "produce-dry-run", false, "exercise the full block-production pipeline (schedule -> assemble -> merkle -> sign -> self-verify -> timing) and DISCARD every block. Never applies, never broadcasts. This is the ONLY production mode the daemon offers: real production is deliberately not wired up")
 	fs.BoolVar(&f.produceEverySlot, "produce-dry-run-every-slot", false, "with --produce-dry-run, build a block EVERY slot instead of only when the schedule names one of our witnesses. On mainnet we are never scheduled, so this is what produces measurable data; such blocks are built for our own account and logged as SIMULATED")
-	fs.StringVar(&f.persistStateDir, "persist-state-dir", "", "ZERO-SNAPSHOT RESTART: keep all non-cold typed state (accounts, witnesses, singletons, …) in a persiststore container here — mmap-backed, like hived's chainbase shared_memory.bin. Saved on clean exit/SIGTERM; a restart with the SAME dir (and the same --cold-dir) resumes AT HEAD in seconds instead of rebuilding ~27GB of typed stores from a snapshot (~20min). Takes precedence over --load-snapshot")
+	fs.StringVar(&f.persistStateDir, "persist-state-dir", "", "ZERO-SNAPSHOT RESTART: keep all non-cold typed state in a persiststore container here — mmap-backed, like hived's chainbase shared_memory.bin. Saved on clean exit/SIGTERM; a restart with the SAME dir resumes AT HEAD in seconds instead of rebuilding the typed stores from a snapshot. ⚠️ NOT SAFE AT MAINNET SCALE YET: the save builds an in-RAM index over the whole typed state and OOM-killed a full-chain node during shutdown (2026-08-10), losing the container AND the shutdown snapshot with it. Fine for small chains/tests; needs a bounded save before full-chain use. Takes precedence over --load-snapshot")
 	fs.StringVar(&f.shutdownSnapshotDir, "shutdown-snapshot-dir", "", "on clean exit OR SIGINT/SIGTERM, save a dir snapshot here (block-<head>/) after flushing the cold tier — so a restart with --load-snapshot=<that> + the same --cold-dir resumes at head instead of re-syncing the delta over P2P")
 	fs.UintVar(&max, "max-blocks", 0, "in self-replay mode, stop after this many blocks (0 = the source's head)")
 	fs.BoolVar(&f.showSeeds, "show-seeds", false, "print the compiled-in mainnet seed list and exit")
@@ -812,14 +812,20 @@ func (a *app) close() {
 			a.logger.printf("WARN final FlushBatch: %v", err)
 		}
 	}
-	// Persist the typed stores so the next start resumes at head instead of
-	// rebuilding them from a snapshot. Runs BEFORE the (much slower) shutdown
-	// snapshot and, when configured, makes it redundant.
-	a.savePersistState()
-	// Shutdown snapshot — must run while the cold tier is still OPEN, since a
-	// self-contained snapshot serializes cold-resident comments/votes by
+	// Shutdown snapshot FIRST — must run while the cold tier is still OPEN,
+	// since a self-contained snapshot serializes cold-resident comments/votes by
 	// reading them back out of it.
+	//
+	// Ordered ahead of the persist-state save deliberately. The persist save
+	// once OOM-killed the process mid-shutdown, and because it ran first, the
+	// snapshot never got its turn either — one bug cost BOTH restart artifacts.
+	// The snapshot is the slower path but the proven one, so it goes first and
+	// a failure in the newer path can only cost the fast option, never the
+	// fallback.
 	a.saveShutdownSnapshot()
+	// Then the typed stores, so the next start resumes at head in seconds
+	// instead of rebuilding from that snapshot.
+	a.savePersistState()
 	if a.cold != nil {
 		_ = a.cold.Close()
 		a.cold = nil
