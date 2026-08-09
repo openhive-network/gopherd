@@ -1,6 +1,8 @@
 package snapshot
 
 import (
+	"bytes"
+	"fmt"
 	"os"
 	"testing"
 
@@ -129,4 +131,67 @@ func TestSavePersistTwiceFreshContainer(t *testing.T) {
 		t.Fatal("carol missing (second save incomplete)")
 	}
 	t.Log("save-twice ok: fresh container reflects only the latest save, no stale rows, no leftover tmp")
+}
+
+// TestSavePersistChunksLargeValues covers the case the original round-trip test
+// missed. SavePersist used to buffer each value WHOLE — all K/V rows in one
+// bytes.Buffer, then every subsystem in another — which is invisible on a small
+// fixture and fatal on a real chain: at mainnet scale that is multiple GB on top
+// of the live heap, and it OOM-killed a node during shutdown, taking the
+// container and the pending shutdown snapshot with it.
+//
+// This writes enough data to span several psChunkSize chunks and asserts the
+// value round-trips exactly, so the chunk boundaries are actually exercised
+// rather than assumed.
+func TestSavePersistChunksLargeValues(t *testing.T) {
+	src := state.OpenMem()
+	t.Cleanup(func() { _ = src.Close() })
+
+	s := state.NewSession(src)
+	// ~3 chunks' worth of K/V rows, in pieces big enough to straddle boundaries
+	// (value size is not a divisor of psChunkSize).
+	const rowSize = 7919 // prime, so rows land across chunk edges
+	rows := (psChunkSize * 3) / rowSize
+	val := bytes.Repeat([]byte("x"), rowSize)
+	for i := 0; i < rows; i++ {
+		k := []byte(fmt.Sprintf("k%08d", i))
+		s.Put(state.TableID(0x0001), state.PrimaryIndex, k, val)
+	}
+	objects.EnsureAccountStore(s).Put(&objects.Account{Name: "alice", Balance: 100})
+	if err := s.Commit(false); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	dir := t.TempDir()
+	if err := SavePersist(src, dir, 99); err != nil {
+		t.Fatalf("SavePersist: %v", err)
+	}
+
+	dst := state.OpenMem()
+	t.Cleanup(func() { _ = dst.Close() })
+	ds := state.NewSession(dst)
+	objects.EnsureAccountStore(ds)
+	if err := ds.Commit(false); err != nil {
+		t.Fatalf("pre-register commit: %v", err)
+	}
+	h, err := LoadPersist(dst, dir)
+	if err != nil {
+		t.Fatalf("LoadPersist: %v", err)
+	}
+	if h != 99 {
+		t.Fatalf("head: got %d want 99", h)
+	}
+
+	// Every row must survive the chunk boundaries intact.
+	check := state.NewSession(dst)
+	for _, i := range []int{0, 1, rows / 2, rows - 2, rows - 1} {
+		k := []byte(fmt.Sprintf("k%08d", i))
+		got, err := check.Get(state.TableID(0x0001), state.PrimaryIndex, k)
+		if err != nil {
+			t.Fatalf("row %d missing after chunked round-trip: %v", i, err)
+		}
+		if !bytes.Equal(got, val) {
+			t.Fatalf("row %d corrupted across a chunk boundary: got %d bytes want %d", i, len(got), len(val))
+		}
+	}
 }

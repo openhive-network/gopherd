@@ -59,7 +59,19 @@ PRODUCE_REAL="${PRODUCE_REAL:-0}"
 # a restart with the SAME dir resumes AT HEAD in seconds instead of rebuilding
 # ~27GB of typed stores from the snapshot (~20min). Empty on first run, so it
 # simply starts working after the first clean shutdown. Set to "" to disable.
-PERSIST_STATE_DIR="${PERSIST_STATE_DIR:-$WORK/pstate}"
+#
+# ⚠️ DEFAULT OFF. On a full-chain node this OOM-KILLED the process during
+# shutdown (2026-08-10): SavePersist builds an in-RAM index over the whole typed
+# state and blew past the 28G cgroup cap, so NEITHER the persist container NOR
+# the shutdown snapshot got written. The round-trip test that validated it used
+# a 3000-block chain, where that index is trivial. Needs a streaming/bounded
+# save before it can be used at mainnet scale.
+PERSIST_STATE_DIR="${PERSIST_STATE_DIR:-}"
+# Route inbound blocks through the fork-choice engine (depth-1 tip reorg)
+# instead of strictly-linear apply. Relevant when producing: a block we publish
+# that the network rejects leaves us on a one-block fork, and without this the
+# node cannot apply the next block and wedges.
+FORK_SWITCHING="${FORK_SWITCHING:-0}"
 
 [ -x "$BIN" ] || { echo "no gopherd at $BIN" >&2; exit 1; }
 [ -d "$SNAPSHOT" ] || { echo "snapshot dir not found: $SNAPSHOT" >&2; exit 1; }
@@ -84,6 +96,7 @@ if [ -n "$PERSIST_STATE_DIR" ]; then
   mkdir -p "$PERSIST_STATE_DIR"
   SERVE_ARGS+=(--persist-state-dir="$PERSIST_STATE_DIR")
 fi
+[ "$FORK_SWITCHING" = "1" ] && SERVE_ARGS+=(--fork-switching)
 if [ "$SERVE" = "1" ]; then
   SERVE_ARGS+=(--p2p-serve)
   echo "!! SERVE=1 — this node will ADVERTISE INVENTORY AND SERVE BLOCKS to mainnet peers."
