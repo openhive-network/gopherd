@@ -134,3 +134,39 @@ func TestAdvertiseGoesSilentWhenBehind(t *testing.T) {
 		t.Fatalf("advertised %d blocks while ~20 blocks behind, want 0 (silence) — this forks pre-1.28.7 peers", len(got))
 	}
 }
+
+// TestAdvertiseNeverOffersBelowPeerLIB pins the bound to hived's definition of
+// "too old" rather than to a number we picked.
+//
+// Under ONE-BLOCK IRREVERSIBILITY a peer's last irreversible block is head-1.
+// So a block TWO intervals old (6s) is already at or below a synced peer's LIB,
+// and hived treats that as irreversibly-on-the-wrong-fork — a block it can
+// never accept. Offering one is what triggered the 2026-08 forking incident.
+//
+// The damage is not bounded by "we get disconnected": peers relay the offered
+// block onward before they determine it is bad, so the kick cascades. Hence
+// this must hold even for a single block.
+func TestAdvertiseNeverOffersBelowPeerLIB(t *testing.T) {
+	const blockInterval = 3
+	now := time.Now().Unix()
+	c := newStubChain()
+	base := uint32(108_000_000)
+
+	// Head is exactly 2 block intervals old: we are 2 behind, so our head sits
+	// at/below a synced peer's LIB.
+	c.seed(base, liveBlockBytes(uint32(now-3*blockInterval)))
+	c.seed(base+1, liveBlockBytes(uint32(now-2*blockInterval)))
+
+	d := newWithChain(Config{Serve: true}, c)
+	if got := d.selectAdvertIDs(c.RecentBlockNums(), now); len(got) != 0 {
+		t.Fatalf("advertised %d blocks at/below a synced peer's LIB (head %ds old); "+
+			"hived deems these 'too old' and forks/kicks on them", len(got), 2*blockInterval)
+	}
+
+	// Sanity: a block within one interval is still advertised, so the gate has
+	// not simply silenced us permanently.
+	c.seed(base+2, liveBlockBytes(uint32(now)))
+	if got := d.selectAdvertIDs(c.RecentBlockNums(), now); len(got) != 1 {
+		t.Fatalf("fresh block: advertised %d, want exactly 1", len(got))
+	}
+}

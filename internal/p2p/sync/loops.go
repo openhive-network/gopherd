@@ -332,8 +332,30 @@ func (d *Delegate) pruneLoop() {
 // unambiguously abnormal while still recovering ~12x faster than the 120s
 // isCatchingUp() window did on its own.
 // advertiseMaxAgeSec is the hard ceiling on how old a block may be for us to
-// advertise it. Blocks are 3s apart, so 8s ≈ 2-3 blocks: enough slack for the
-// 5s INVInterval tick and normal jitter, and nothing more.
+// advertise it: ONE block interval. Anything we offer must effectively be the
+// block we just applied.
+//
+// This bound is set by hived's definition of "too old", not by our own comfort.
+// Under ONE-BLOCK IRREVERSIBILITY the last irreversible block is head-1, so a
+// node just TWO blocks behind (6s) is already offering something below its
+// peers' LIB — which hived treats as irreversibly-on-the-wrong-fork, i.e. a
+// block it can never accept. The hived team confirmed this was the trigger for
+// the 2026-08 forking incident caused by this node.
+//
+// Emitting even ONE stale advert is far more costly than "we get disconnected
+// and reconnect": peers relay the offered block onward BEFORE they work out it
+// is bad, so they get kicked too, and the kick cascades outward. Observed
+// consequences included widespread forking, witness participation drops, and a
+// latent HAF forking bug that poisoned HAF databases and needed recovery
+// scripts. Treat the advert path as the highest-blast-radius code here.
+//
+// Earlier attempts, both too loose: 30s (~10 blocks behind) and 8s (~2-3
+// blocks, still inside the sub-LIB window above).
+//
+// 3s costs nothing in normal operation: invLoop is poked on apply
+// (activityCh), so a freshly applied block is advertised while ~1s old. When we
+// cannot keep up the block ages out, nothing qualifies, and we go SILENT —
+// which is the correct behaviour and the safe direction to fail.
 //
 // This bound is deliberately tight because it is also the ONLY thing that stops
 // a CPU-starved node from gossiping staleness. isCatchingUp() — the gate that
@@ -352,7 +374,7 @@ func (d *Delegate) pruneLoop() {
 //
 // 30s was the first attempt and was too loose: it still permitted advertising
 // while ~10 blocks behind.
-const advertiseMaxAgeSec = 8
+const advertiseMaxAgeSec = 3
 
 const tipStallKickTicks = 10
 
