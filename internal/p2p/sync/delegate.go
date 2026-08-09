@@ -108,6 +108,15 @@ const (
 	DefaultCatchupKickInterval = 1 * time.Second
 )
 
+// advertEntry is one block queued for advertisement: its id plus the block
+// timestamp we saw at apply time. Carrying the timestamp means the advert path
+// never has to go back to the chain to judge freshness.
+type advertEntry struct {
+	id  block.ID
+	num uint32
+	ts  uint32 // block timestamp (unix seconds)
+}
+
 // Chain is the slice of *chain.Database the sync layer needs. Allows
 // tests to plug in a stub.
 type Chain interface {
@@ -434,6 +443,18 @@ type Delegate struct {
 	// at the tip. Paired with invReceived: handshakes climbing while invRx
 	// stays 0 means the handshake is not convincing peers we are in sync.
 	tipSyncHandshakes atomic.Int64
+
+	// pendingAdvertMu guards pendingAdvert.
+	//
+	// pendingAdvert is the direct analogue of hived's _new_block_inventory
+	// (node.cpp): blocks we have APPLIED since the last advert round, pushed in
+	// at apply time and drained wholesale each round. Being event-driven is the
+	// point — the set can only ever contain blocks we just accepted, so
+	// staleness is structural rather than something we filter for afterwards.
+	// The previous design derived the advert set by scanning the recent-block
+	// ring, which is what let ~10 minutes of history reach new peers.
+	pendingAdvertMu sync.Mutex
+	pendingAdvert   []advertEntry
 
 	// lastAdvertisedNum is the highest block number we have offered via
 	// item_ids_inventory. broadcastInv only advertises blocks ABOVE it, so a
@@ -800,6 +821,11 @@ func (d *Delegate) Stop() {
 // NotifyHeadAdvanced should be called by the witness/gossip layer
 // whenever a new local block is applied. Wakes the INV loop if it is
 // in idle-sleep mode.
+// NotifyHeadAdvanced wakes the loops. It deliberately does NOT queue anything
+// for advertisement: blocks enter the advert set only from the apply path via
+// queueAdvert, so the set stays a record of what we actually accepted. Adding a
+// chain read here would also make this a lock-ordering hazard for any future
+// caller that holds a chain lock.
 func (d *Delegate) NotifyHeadAdvanced() {
 	d.poke()
 }

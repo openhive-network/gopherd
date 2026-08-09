@@ -76,15 +76,6 @@ func (d *Delegate) broadcastInv() {
 	if !d.cfg.Serve {
 		return
 	}
-	nums := d.chain.RecentBlockNums()
-	if len(nums) == 0 {
-		// Nothing to advertise. Bump the idle counter.
-		d.idleMu.Lock()
-		d.idleRounds++
-		d.idleMu.Unlock()
-		return
-	}
-
 	// Only advertise while our HEAD is live. NOTE this is necessary but NOT
 	// sufficient: it says nothing about the age of the other blocks in the
 	// batch, and its 120s window tolerates being ~40 blocks behind. The
@@ -110,27 +101,12 @@ func (d *Delegate) broadcastInv() {
 		d.idleMu.Unlock()
 		return
 	}
-	// Advertise ONLY blocks we have newly applied, and only while they are
-	// still fresh. This mirrors hived's _new_block_inventory, which holds just
-	// the blocks accepted since the last advertise_inventory_loop iteration.
-	//
-	// ⛔ INCIDENT: this previously advertised the last MaxBlocksPerInv (200)
-	// entries of the recent ring on every round, filtered only by the per-peer
-	// `known` set. For a NEWLY CONNECTED peer that set is empty, so we dumped
-	// 200 block ids spanning ~10 MINUTES of history at it. The isCatchingUp()
-	// gate above does not catch this: it tests only the HEAD block's timestamp
-	// and says nothing about the other 199 entries. Nodes older than hived
-	// 1.28.7 lack the "ignore item_ids_inventory while syncing" fix, so they
-	// act on those stale adverts and fork away. Reported live on mainnet.
-	//
-	// Two independent guards, because either alone is insufficient:
-	//   1. watermark — never re-offer a block we've already advertised, so a
-	//      new peer gets the same (small) new-block stream as everyone else
-	//      rather than a backlog.
-	//   2. per-block age — a block older than advertiseMaxAgeSec is never
-	//      offered by ANY path, including the first round after startup when
-	//      the watermark is still unset and the ring is full of older blocks.
-	allIDs := d.selectAdvertIDs(nums, time.Now().Unix())
+	// Drain the event-driven advert set (queueAdvert, fed from the apply path)
+	// — hived's _new_block_inventory swap. Blocks in it were applied by us since
+	// the last round, so the set is fresh by construction rather than by
+	// filtering; the age gate inside is a backstop for when a starved advert
+	// loop lets an entry go stale before it ships.
+	allIDs := d.selectAdvertIDs(time.Now().Unix())
 	if len(allIDs) == 0 {
 		d.idleMu.Lock()
 		d.idleRounds++
@@ -157,6 +133,18 @@ func (d *Delegate) broadcastInv() {
 	advertisedAny := false
 	for i, p := range peers {
 		st := states[i]
+		// Only advertise to peers that identify blocks the same way we do.
+		// hived picks per peer: block ids at core_protocol_version >= 107,
+		// legacy block_message hashes below that
+		// (peer_connection.cpp::advertise_blocks_by_block_id). We only speak
+		// block ids, so offering one to an older peer gives it an identity it
+		// cannot match — and a fetch we cannot satisfy, which hived answers by
+		// disconnecting. Older nodes are precisely the population that forked
+		// away in the 2026-08 incident. Version 0 = hello not parsed yet, also
+		// withheld: unknown is not permission.
+		if p.CoreProtocolVersion() < proto.AdvertiseBlocksByBlockIDVersion {
+			continue
+		}
 		// Filter to entries the peer hasn't been told about yet.
 		hashes := make([]proto.ItemHash, 0, len(allIDs))
 		st.mu.Lock()
@@ -196,6 +184,44 @@ func (d *Delegate) broadcastInv() {
 	d.idleMu.Unlock()
 }
 
+// queueAdvert records a freshly-applied block for advertisement and wakes the
+// advert loop. Mirrors hived's broadcast(): _new_block_inventory.insert(block)
+// followed by trigger_advertise_inventory_loop() (node.cpp:5766).
+//
+// Called from the apply path, so the set only ever holds blocks we just
+// accepted. Cheap and lock-brief — the apply loop is the single writer and must
+// not be held up.
+func (d *Delegate) queueAdvert(rawBlock []byte, blockNum uint32) {
+	if !d.cfg.Serve {
+		return // passive: never advertise, so never accumulate
+	}
+	id, ok := d.chain.RecentBlockIDForNum(blockNum)
+	if !ok {
+		return
+	}
+	e := advertEntry{id: id, num: blockNum, ts: blockTimestamp(rawBlock)}
+	d.pendingAdvertMu.Lock()
+	// Bound the queue. If the advert loop is starved we would rather drop the
+	// oldest entries than grow without limit — and anything we drop here would
+	// have failed the age gate on the way out regardless.
+	if len(d.pendingAdvert) >= d.cfg.MaxBlocksPerInv {
+		d.pendingAdvert = d.pendingAdvert[1:]
+	}
+	d.pendingAdvert = append(d.pendingAdvert, e)
+	d.pendingAdvertMu.Unlock()
+	d.poke()
+}
+
+// drainAdvertQueue takes the whole pending set, mirroring hived's
+// `block_inventory_to_advertise.swap(_new_block_inventory)` (node.cpp:1400).
+func (d *Delegate) drainAdvertQueue() []advertEntry {
+	d.pendingAdvertMu.Lock()
+	out := d.pendingAdvert
+	d.pendingAdvert = nil
+	d.pendingAdvertMu.Unlock()
+	return out
+}
+
 // selectAdvertIDs picks the blocks broadcastInv may offer this round, and
 // advances the advertise watermark. Split out from broadcastInv so the
 // selection rules are directly testable — this is the logic whose earlier
@@ -205,38 +231,22 @@ func (d *Delegate) broadcastInv() {
 // so a new peer gets the new-block stream rather than a backlog) AND younger
 // than advertiseMaxAgeSec (so history is never gossiped, including on the first
 // round after a warm start when the watermark is still unset).
-func (d *Delegate) selectAdvertIDs(nums []uint32, nowUnix int64) []block.ID {
+func (d *Delegate) selectAdvertIDs(nowUnix int64) []block.ID {
+	entries := d.drainAdvertQueue()
 	lastAdv := d.lastAdvertisedNum.Load()
-	out := make([]block.ID, 0, 8)
+	out := make([]block.ID, 0, len(entries))
 	maxNum := lastAdv
-	for _, n := range nums {
-		if lastAdv != 0 && n <= lastAdv {
-			continue
+	for _, e := range entries {
+		if e.num <= lastAdv {
+			continue // already offered
 		}
-		raw := d.chain.RecentBlockBytes(n)
-		if raw == nil {
-			continue
+		if e.ts == 0 || nowUnix-int64(e.ts) > advertiseMaxAgeSec {
+			continue // aged out while we were starved — never gossip staleness
 		}
-		ts := blockTimestamp(raw)
-		if ts == 0 || nowUnix-int64(ts) > advertiseMaxAgeSec {
-			continue // too old to offer — never gossip history
+		out = append(out, e.id)
+		if e.num > maxNum {
+			maxNum = e.num
 		}
-		id, ok := d.chain.RecentBlockIDForNum(n)
-		if !ok {
-			continue
-		}
-		out = append(out, id)
-		if n > maxNum {
-			maxNum = n
-		}
-		if len(out) >= d.cfg.MaxBlocksPerInv {
-			break
-		}
-	}
-	// Advance the watermark even when nothing passed the age gate (e.g. the
-	// first round after a warm start), so we never later "discover" a backlog.
-	if h := d.headBlockHint.Load(); h > maxNum {
-		maxNum = h
 	}
 	if maxNum > lastAdv {
 		d.lastAdvertisedNum.Store(maxNum)
@@ -636,6 +646,9 @@ func (d *Delegate) applyLoop() {
 			if d.cfg.OnBlockApplied != nil {
 				d.cfg.OnBlockApplied(job.rawBlock, job.blockNum, job.srcPeer)
 			}
+			// Event source for the advert set — hived calls broadcast() at
+			// exactly this point (block accepted). No-op when passive.
+			d.queueAdvert(job.rawBlock, job.blockNum)
 			d.poke()
 		}
 	}
@@ -683,6 +696,14 @@ func (d *Delegate) applyLoop() {
 		d.headBlockHint.Store(h)
 		if outcome == chain.PushReorged {
 			d.logf("fork: reorged to head %d", h)
+		}
+		// Same event source as the linear path. Only advertise a block that
+		// actually became our head: PushBuffered means it is parked awaiting a
+		// parent and is not ours to offer, and after a reorg the head may be a
+		// different block than the one we just pushed — queue by head number,
+		// not by job.blockNum.
+		if outcome != chain.PushBuffered && h == job.blockNum {
+			d.queueAdvert(job.rawBlock, h)
 		}
 		d.poke()
 	}

@@ -167,6 +167,19 @@ type Peer struct {
 	buildHello         func(c *transport.Conn) ([]byte, error) // optional override (testing)
 	buildLegacyHello   func(c *transport.Conn) ([]byte, error) // optional legacy_hello builder
 
+	// coreProtocolVersion is the peer's advertised graphene protocol version,
+	// captured from its hello. 0 = not yet known.
+	//
+	// hived uses it to decide how to IDENTIFY blocks in inventory: >= 107 gets
+	// block ids, below that gets the legacy block_message hash
+	// (peer_connection.cpp::advertise_blocks_by_block_id). Offering a block id
+	// to a peer that expects a legacy hash means it cannot match what we
+	// offered, and asking us for it yields something we do not have under that
+	// identity — which hived answers with a disconnect. Older nodes are exactly
+	// the population that forked away in the 2026-08 incident, so we record the
+	// version and only advertise to peers that speak the same identity scheme.
+	coreProtocolVersion atomic.Uint32
+
 	mu              sync.Mutex
 	lastHeartbeatRX time.Time
 
@@ -210,6 +223,12 @@ func (p *Peer) Direction() Direction { return p.direction }
 // Conn exposes the underlying transport for callers that need to inspect
 // the remote pubkey or addr.
 func (p *Peer) Conn() *transport.Conn { return p.conn }
+
+// CoreProtocolVersion returns the peer's advertised graphene protocol version,
+// or 0 if its hello has not been parsed yet. Callers deciding whether it is
+// safe to advertise must treat 0 as "unknown" and withhold — an unparsed hello
+// is not evidence the peer understands block-id inventory.
+func (p *Peer) CoreProtocolVersion() uint32 { return p.coreProtocolVersion.Load() }
 
 // Send forwards to the underlying transport. Safe for concurrent use.
 func (p *Peer) Send(typeTag proto.MessageType, body []byte) error {
@@ -327,6 +346,21 @@ func (p *Peer) run(ctx context.Context, delegate Delegate) {
 		p.tracef("<-- RECV %s len=%d state=%s", typeTag, len(body), p.State())
 		switch typeTag {
 		case proto.HelloMessageType, proto.LegacyHelloMessageType:
+			// Record the peer's protocol version before anything else — the
+			// advert path needs it to decide whether this peer understands
+			// block-id inventory (see coreProtocolVersion). A hello we cannot
+			// parse leaves it 0, which callers treat as "withhold".
+			if typeTag == proto.HelloMessageType {
+				var hm proto.HelloMessage
+				if err := hm.Unmarshal(body); err == nil {
+					p.coreProtocolVersion.Store(hm.CoreProtocolVersion)
+				}
+			} else {
+				var lhm proto.LegacyHelloMessage
+				if err := lhm.Unmarshal(body); err == nil {
+					p.coreProtocolVersion.Store(lhm.CoreProtocolVersion)
+				}
+			}
 			// Inbound peer sent its hello after we sent ours. Accept it.
 			// Hived sends both 5018 and 5006 on every dial; the second
 			// one arrives slightly after the first. Treat them
