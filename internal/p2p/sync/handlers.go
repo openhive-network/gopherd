@@ -108,6 +108,9 @@ func (d *Delegate) BuildAddressReply(p *node.Peer) []proto.AddressInfo { return 
 // item hashes the peer has. We dedup against our local known set and
 // queue any unknowns onto a fetch_items request.
 func (d *Delegate) handleInv(p *node.Peer, body []byte) {
+	// Counted BEFORE any gate: this is the only signal that distinguishes
+	// "peers never advertise to us" from "adverts arrive but get discarded".
+	d.invReceived.Add(1)
 	// While catching up (initial sync / warm-start from an old snapshot),
 	// IGNORE regular tip-inventory advertisements entirely. This mirrors
 	// hived 1.28.7's _ignore_item_ids_inventory_message

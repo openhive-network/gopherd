@@ -419,6 +419,16 @@ type Delegate struct {
 	// tip; climbing = blocks are being dropped at head+1.
 	tipStallKicks atomic.Int64
 
+	// invReceived counts inbound item_ids_inventory messages (tip INV pushes
+	// from peers), incremented on ENTRY to handleInv before any gate. It exists
+	// to answer one question that nothing else could: at the tip, do peers
+	// advertise new blocks to us at all? A serving node observed 2026-08-09
+	// advanced ONLY via the catchup kicker's poll, and neither invIgnored (the
+	// catch-up gate) nor the "TRACE inv-offer" line could distinguish "no
+	// adverts arrive" from "adverts arrive and are discarded" — that trace is
+	// in handleBlockchainItemIDsInventory (the kicker path), despite its name.
+	invReceived atomic.Int64
+
 	// traceLo/traceHi define an optional block-number window for verbose
 	// per-block ingestion tracing (GHIVE_TRACE_LO/HI). Zero = disabled.
 	traceLo uint32
@@ -878,6 +888,12 @@ type Stats struct {
 	// with nothing in flight while at the tip). 0 on a healthy live node;
 	// climbing means blocks are being dropped at head+1 and we are sawtoothing.
 	TipStallKicks int64
+
+	// InvReceived is the cumulative count of inbound tip-inventory adverts.
+	// At the live tip this should climb steadily (peers announcing new blocks).
+	// Flat at 0 while the head advances only via tipStallKicks means we are
+	// polling for blocks, not being pushed them.
+	InvReceived int64
 }
 
 func (d *Delegate) distinctOutstanding() (distinct, peers int) {
@@ -917,5 +933,6 @@ func (d *Delegate) Stats() Stats {
 		GlobalInflight:         inflight,
 		InvIgnoredCatchup:      d.invIgnoredCatchup.Load(),
 		TipStallKicks:          d.tipStallKicks.Load(),
+		InvReceived:            d.invReceived.Load(),
 	}
 }
