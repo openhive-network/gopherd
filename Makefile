@@ -5,11 +5,12 @@ BIN_DIR := $(CURDIR)/bin
 
 all: build
 
+# The CLI was consolidated into a single `gopherd <subcommand>` binary; the old
+# ghive / ghive-tools / drift-hunter targets pointed at directories that no
+# longer exist, so `make build` failed outright.
 build:
 	mkdir -p $(BIN_DIR)
-	$(GO) build -o $(BIN_DIR)/ghive ./cmd/ghive
-	$(GO) build -o $(BIN_DIR)/ghive-tools ./cmd/ghive-tools
-	$(GO) build -o $(BIN_DIR)/drift-hunter ./cmd/drift-hunter
+	$(GO) build -o $(BIN_DIR)/gopherd ./cmd/gopherd
 
 test:
 	$(GO) test ./...
