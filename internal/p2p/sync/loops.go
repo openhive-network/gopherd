@@ -269,12 +269,36 @@ func (d *Delegate) pruneLoop() {
 // isCatchingUp() window did on its own.
 const tipStallKickTicks = 10
 
+// Tip in-sync handshake. hived advertises inventory ONLY to peers it considers
+// in sync: advertise_inventory_loop skips any peer with
+// `peer_needs_sync_items_from_us` set (libraries/net/node.cpp:~1412). That flag
+// is decided from OUR fetch_blockchain_item_ids (node.cpp:~2566): it clears to
+// false only when the reply is empty, or when our synopsis is non-empty AND the
+// reply is exactly ONE item contained in that synopsis — i.e. only when we are
+// EXACTLY LEVEL with the peer.
+//
+// The kicker alone can never satisfy that: it fires when STALLED, which means
+// behind, so the reply carries new items and the flag re-arms to true. We never
+// asked while level, so peers never started advertising — observed live as
+// invRx=0 with 8 peers while the head advanced solely by polling.
+//
+// So: while sitting level at the tip, periodically re-issue the request. The
+// peer answers with the single matching item, clears the flag, and starts
+// pushing inventory. Cheap (one small message per peer per interval) and it
+// must only fire when genuinely level — issuing it while even one block behind
+// yields a 2-item reply and re-arms the flag.
+const (
+	tipSyncHandshakeTicks     = 30 // ≥30 kicker ticks (~30s) between handshakes
+	tipSyncHandshakeMaxAgeSec = 4  // only when our head is this fresh (= level)
+)
+
 func (d *Delegate) catchupKickerLoop() {
 	defer d.wg.Done()
 	t := time.NewTicker(d.cfg.CatchupKickInterval)
 	defer t.Stop()
 	var lastHead uint32
 	var idleTicks int
+	var sinceHandshake int
 	for {
 		select {
 		case <-d.stopCh:
@@ -316,7 +340,19 @@ func (d *Delegate) catchupKickerLoop() {
 				d.logf("tip stall: head=%d unchanged for %ds with nothing in flight — re-seeding peers",
 					head, tipStallKickTicks)
 			}
+			// Tip in-sync handshake (see tipSyncHandshake* above): while level
+			// at the tip, re-issue the request so peers clear
+			// peer_needs_sync_items_from_us and start advertising to us.
+			handshake := false
 			if !d.isCatchingUp() && !tipStalled {
+				sinceHandshake++
+				if sinceHandshake >= tipSyncHandshakeTicks && d.headAgeSec() <= tipSyncHandshakeMaxAgeSec {
+					sinceHandshake = 0
+					handshake = true
+					d.tipSyncHandshakes.Add(1)
+				}
+			}
+			if !d.isCatchingUp() && !tipStalled && !handshake {
 				continue
 			}
 			if d.inhibitFetching.Load() {
@@ -651,6 +687,30 @@ const liveAdvertiseWindowSec = 120
 // On the rare path where the head bytes aren't cached (or are unparsable)
 // we err toward "catching up" so the kicker keeps us moving rather than
 // going silent.
+// headAgeSec returns how many seconds old our head block's timestamp is, or a
+// large sentinel when the head (or its cached bytes) can't be read. Used to
+// tell "exactly level with the tip" from merely "near the tip" —
+// isCatchingUp()'s 120s window is far too coarse for that distinction.
+func (d *Delegate) headAgeSec() int64 {
+	head := d.headBlockHint.Load()
+	if head == 0 {
+		h, _ := d.chain.HeadBlock()
+		head = h
+	}
+	if head == 0 {
+		return 1 << 40
+	}
+	raw := d.chain.RecentBlockBytes(head)
+	if raw == nil {
+		return 1 << 40
+	}
+	ts := blockTimestamp(raw)
+	if ts == 0 {
+		return 1 << 40
+	}
+	return time.Now().Unix() - int64(ts)
+}
+
 func (d *Delegate) isCatchingUp() bool {
 	head := d.headBlockHint.Load()
 	if head == 0 {

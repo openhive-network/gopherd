@@ -429,6 +429,12 @@ type Delegate struct {
 	// in handleBlockchainItemIDsInventory (the kicker path), despite its name.
 	invReceived atomic.Int64
 
+	// tipSyncHandshakes counts fetch_blockchain_item_ids rounds issued purely
+	// to clear the peers' peer_needs_sync_items_from_us flag while we sit level
+	// at the tip. Paired with invReceived: handshakes climbing while invRx
+	// stays 0 means the handshake is not convincing peers we are in sync.
+	tipSyncHandshakes atomic.Int64
+
 	// traceLo/traceHi define an optional block-number window for verbose
 	// per-block ingestion tracing (GHIVE_TRACE_LO/HI). Zero = disabled.
 	traceLo uint32
@@ -894,6 +900,10 @@ type Stats struct {
 	// Flat at 0 while the head advances only via tipStallKicks means we are
 	// polling for blocks, not being pushed them.
 	InvReceived int64
+
+	// TipSyncHandshakes is the cumulative count of level-at-tip
+	// fetch_blockchain_item_ids rounds sent to clear peers' out-of-sync flag.
+	TipSyncHandshakes int64
 }
 
 func (d *Delegate) distinctOutstanding() (distinct, peers int) {
@@ -934,5 +944,6 @@ func (d *Delegate) Stats() Stats {
 		InvIgnoredCatchup:      d.invIgnoredCatchup.Load(),
 		TipStallKicks:          d.tipStallKicks.Load(),
 		InvReceived:            d.invReceived.Load(),
+		TipSyncHandshakes:      d.tipSyncHandshakes.Load(),
 	}
 }
