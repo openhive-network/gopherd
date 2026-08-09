@@ -48,6 +48,12 @@ type Broadcaster interface {
 // BlockInterval — HIVE_BLOCK_INTERVAL = 3 seconds.
 const BlockInterval = 3 * time.Second
 
+// DryRunStaleHeadSec is how old the head block may be before the dry run stops
+// measuring. Beyond this we are catching up, not following the tip, and a block
+// built against a stale head measures the wrong thing. 60s ≈ 20 slots — enough
+// slack that ordinary lag still gets measured.
+const DryRunStaleHeadSec = 60
+
 // DryRunStats accumulates timing + outcome for --produce-dry-run. All fields
 // are guarded by Plugin.mu.
 type DryRunStats struct {
@@ -105,6 +111,11 @@ type Plugin struct {
 	// lastDrySlot dedupes dry-run production: the loop ticks every 500ms but a
 	// slot is 3s, so without this one slot would yield ~6 identical blocks.
 	lastDrySlot uint32
+
+	// DryRunMaxHeadAgeSec overrides DryRunStaleHeadSec. 0 = use the constant.
+	// Exists so tests can drive the pipeline against a genesis fixture, whose
+	// head is years old and would otherwise be (correctly) skipped as stale.
+	DryRunMaxHeadAgeSec int64
 
 	logMu       sync.Mutex
 	lastLogTime time.Time
@@ -273,6 +284,25 @@ func (p *Plugin) maybeProduceBlock() error {
 	// built. Building the moment the schedule names us measures exactly the
 	// same work; only the wall-clock trigger differs.
 	//
+	// Only measure at the TIP. Removing the boundary wait above also removed
+	// the only thing that had been keeping the dry run off a stale head, so a
+	// warm-started node built blocks during catch-up against a head minutes-to-
+	// hours old, on the schedule as it stood back then — not representative of
+	// live production, and it polluted the timing averages. Observed: the first
+	// two gtg "slots" of a run were catch-up artifacts.
+	//
+	// Staleness is judged from the head block's timestamp, the same signal the
+	// sync layer uses; DryRunStaleHeadSec is generous because being a few slots
+	// behind is normal and still worth measuring.
+	maxHeadAge := int64(DryRunStaleHeadSec)
+	if p.DryRunMaxHeadAgeSec > 0 {
+		maxHeadAge = p.DryRunMaxHeadAgeSec
+	}
+	if p.DryRun && int64(now)-int64(dgpo.Time) > maxHeadAge {
+		p.logEvery(30*time.Second, "dry run idle: head is %ds old (catching up) — not measuring until at the tip",
+			int64(now)-int64(dgpo.Time))
+		return nil
+	}
 	// Dedupe by slot so a 500ms tick produces ONE block per slot, not six.
 	if p.DryRun {
 		p.mu.Lock()
