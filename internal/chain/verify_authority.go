@@ -249,13 +249,19 @@ func VerifyAuthorityWithKeys(s *state.Session, signedTx *tx.SignedTransaction, k
 	// HIVE_HARDFORK_1_28_ALLOW_STRICT_AND_MIXED_AUTHORITIES lifts the
 	// restriction (database.cpp:2646 passes the flag into
 	// verify_authority), so the guard is pre-HF28 only.
+	// HF28 gates TWO independent relaxations, and C++ passes both at the same
+	// call site (database.cpp:2646-2647):
+	//   HIVE_HARDFORK_1_28_ALLOW_STRICT_AND_MIXED_AUTHORITIES -> mixing posting
+	//     with active/owner in one tx
+	//   HIVE_HARDFORK_1_28_ALLOW_REDUNDANT_SIGNATURES          -> the
+	//     remove_unused_signatures / tx_irrelevant_sig assert below
+	hf28 := false
+	if dgpoRef, ok := objects.GetDGPORef(s); ok {
+		hf28 = hardfork.SetForBlock(dgpoRef.HeadBlockNumber).Has(hardfork.HF28)
+	}
 	if len(required[AuthorityPosting]) > 0 &&
 		(len(required[AuthorityActive]) > 0 || len(required[AuthorityOwner]) > 0) {
-		mixedAllowed := false
-		if dgpoRef, ok := objects.GetDGPORef(s); ok {
-			mixedAllowed = hardfork.SetForBlock(dgpoRef.HeadBlockNumber).Has(hardfork.HF28)
-		}
-		if !mixedAllowed {
+		if !hf28 {
 			return fmt.Errorf("verify_authority: tx mixes posting-required ops with active/owner-required ops")
 		}
 	}
@@ -290,12 +296,22 @@ func VerifyAuthorityWithKeys(s *state.Session, signedTx *tx.SignedTransaction, k
 		}
 	}
 	// Mirrors hived's `!s.remove_unused_signatures()` final assert in
-	// libraries/protocol/transaction_util.cpp:102 — every signature
+	// libraries/protocol/transaction_util.cpp:111/185 — every signature
 	// supplied must have been consumed by at least one satisfied
 	// authority. Extras are surfaced as tx_irrelevant_sig.
-	for _, k := range keys {
-		if !state.usedKeys[k] {
-			return ErrIrrelevantSig
+	//
+	// HF28 lifts this: C++ guards BOTH asserts with `if( !allow_redundant_
+	// signatures )`, and database.cpp:2647 passes
+	// has_hardfork( HIVE_HARDFORK_1_28_ALLOW_REDUNDANT_SIGNATURES ). Enforcing
+	// it post-HF28 rejects valid mainnet blocks — hit live at block
+	// 108,860,724 tx 2, which wedged the node at the tip. Catch-up never sees
+	// this because historical blocks skip signature verification entirely, so
+	// it only manifests once strict verify engages near the head.
+	if !hf28 {
+		for _, k := range keys {
+			if !state.usedKeys[k] {
+				return ErrIrrelevantSig
+			}
 		}
 	}
 	return nil
