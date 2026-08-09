@@ -147,3 +147,45 @@ func TestDryRunDetectsWrongKey(t *testing.T) {
 type recordingBroadcaster struct{ calls int }
 
 func (r *recordingBroadcaster) BroadcastBlock(raw []byte, num uint32) { r.calls++ }
+
+// TestDryRunReportsImpersonation covers the technique of pointing the dry run
+// at a REAL witness (e.g. a top-20 account) to exercise its genuine schedule
+// slots. We do not hold that witness's signing key, so the block we build would
+// be REJECTED by consensus even though it verifies against our own key.
+//
+// The dry run must say so. A cheerful verify=OK on a block the network would
+// throw out is exactly the kind of result that gets mistaken for "production
+// works".
+func TestDryRunReportsImpersonation(t *testing.T) {
+	p, db, prod := dryRunFixture(t)
+	dgpo, err := objects.GetDGPO(state.NewSession(db))
+	if err != nil {
+		t.Fatalf("GetDGPO: %v", err)
+	}
+
+	// Our fixture set initminer's on-chain signing key to prod's key, so this
+	// one is the genuine article.
+	p.dryRunProduce(&prod, dgpo, dgpo.Time+3, prod.Account, true)
+	if st := p.DryRunSnapshot(); st.ChainKeyOK != 1 || st.Imperson != 0 {
+		t.Fatalf("owned key: chainKeyOK=%d impersonated=%d, want 1/0", st.ChainKeyOK, st.Imperson)
+	}
+
+	// Now sign for the same witness with a key the chain does not know.
+	other := sha256.Sum256([]byte("not-the-witness-key"))
+	wrong, err := crypto.PrivateKeyFromBytes(other[:])
+	if err != nil {
+		t.Fatalf("PrivateKeyFromBytes: %v", err)
+	}
+	imp := Producer{Account: prod.Account, PrivateKey: wrong, PublicKey33: wrong.PublicKey()}
+	p.dryRunProduce(&imp, dgpo, dgpo.Time+3, prod.Account, true)
+
+	st := p.DryRunSnapshot()
+	if st.Imperson != 1 {
+		t.Fatalf("impersonated=%d want 1 — a key the chain does not have for this witness must be reported", st.Imperson)
+	}
+	// Self-verification still passes (we signed with the key we declared); the
+	// two checks answer different questions and must not be conflated.
+	if st.VerifyOK != 2 {
+		t.Fatalf("verifyOK=%d want 2 — self-verification is about OUR key, not the chain's", st.VerifyOK)
+	}
+}
