@@ -332,11 +332,10 @@ type flags struct {
 	// heap (allocation) profile to at shutdown. Captures alloc_space and
 	// inuse_space samples.
 	memProfile string
-	// noVerifyMerkle disables the per-block merkle-root recomputation
-	// inside validateBlock. Saves ~5% CPU on the apply path; only safe
-	// if you trust the canonical block_log reference (which already
-	// validated the merkle root upstream).
-	noVerifyMerkle bool
+	// (--no-verify-merkle removed: the field was parsed but never read, and no
+	// skip-merkle path exists anywhere in internal/chain, so the flag could not
+	// have worked. It advertised "skip the per-block merkle-root
+	// recomputation" while changing nothing.)
 	// cacheMB sets the Pebble block cache in megabytes. Default 1024MB
 	// (was 256MB hard-coded).
 	cacheMB int
@@ -398,7 +397,6 @@ func parseNodeFlags(args []string) flags {
 	fs.StringVar(&f.backend, "backend", "", "state backend: pebble (persistent) or mem (volatile, ~3-5x faster); default = pebble unless --verify-against is set, in which case mem (since the run is throwaway anyway)")
 	fs.StringVar(&f.cpuProfile, "cpuprofile", "", "write runtime/pprof CPU profile to this path")
 	fs.StringVar(&f.memProfile, "memprofile", "", "write runtime/pprof heap profile to this path at shutdown")
-	fs.BoolVar(&f.noVerifyMerkle, "no-verify-merkle", false, "skip the per-block merkle-root recomputation (faster; only safe with --verify-against)")
 	fs.IntVar(&f.cacheMB, "cache-mb", 1024, "pebble block-cache size in MB (default 1024)")
 	fs.IntVar(&f.commitBatch, "commit-batch", 100, "blocks per pebble Apply (1 = legacy per-block; >1 batches)")
 	fs.BoolVar(&f.commitBatchFsync, "commit-batch-fsync", true, "fsync each batch boundary (default true)")
