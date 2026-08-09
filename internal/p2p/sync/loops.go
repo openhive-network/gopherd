@@ -106,19 +106,31 @@ func (d *Delegate) broadcastInv() {
 		d.idleMu.Unlock()
 		return
 	}
-	maxAdvertise := d.cfg.MaxBlocksPerInv
-	if len(nums) > maxAdvertise {
-		nums = nums[len(nums)-maxAdvertise:]
-	}
-
-	// Pre-resolve nums → IDs once per round.
-	allIDs := make([]block.ID, 0, len(nums))
-	for _, n := range nums {
-		if id, ok := d.chain.RecentBlockIDForNum(n); ok {
-			allIDs = append(allIDs, id)
-		}
-	}
+	// Advertise ONLY blocks we have newly applied, and only while they are
+	// still fresh. This mirrors hived's _new_block_inventory, which holds just
+	// the blocks accepted since the last advertise_inventory_loop iteration.
+	//
+	// ⛔ INCIDENT: this previously advertised the last MaxBlocksPerInv (200)
+	// entries of the recent ring on every round, filtered only by the per-peer
+	// `known` set. For a NEWLY CONNECTED peer that set is empty, so we dumped
+	// 200 block ids spanning ~10 MINUTES of history at it. The isCatchingUp()
+	// gate above does not catch this: it tests only the HEAD block's timestamp
+	// and says nothing about the other 199 entries. Nodes older than hived
+	// 1.28.7 lack the "ignore item_ids_inventory while syncing" fix, so they
+	// act on those stale adverts and fork away. Reported live on mainnet.
+	//
+	// Two independent guards, because either alone is insufficient:
+	//   1. watermark — never re-offer a block we've already advertised, so a
+	//      new peer gets the same (small) new-block stream as everyone else
+	//      rather than a backlog.
+	//   2. per-block age — a block older than advertiseMaxAgeSec is never
+	//      offered by ANY path, including the first round after startup when
+	//      the watermark is still unset and the ring is full of older blocks.
+	allIDs := d.selectAdvertIDs(nums, time.Now().Unix())
 	if len(allIDs) == 0 {
+		d.idleMu.Lock()
+		d.idleRounds++
+		d.idleMu.Unlock()
 		return
 	}
 
@@ -178,6 +190,54 @@ func (d *Delegate) broadcastInv() {
 		d.idleRounds++
 	}
 	d.idleMu.Unlock()
+}
+
+// selectAdvertIDs picks the blocks broadcastInv may offer this round, and
+// advances the advertise watermark. Split out from broadcastInv so the
+// selection rules are directly testable — this is the logic whose earlier
+// version caused a live mainnet incident (see broadcastInv).
+//
+// A block is offered only if it is BOTH above the watermark (never re-offered,
+// so a new peer gets the new-block stream rather than a backlog) AND younger
+// than advertiseMaxAgeSec (so history is never gossiped, including on the first
+// round after a warm start when the watermark is still unset).
+func (d *Delegate) selectAdvertIDs(nums []uint32, nowUnix int64) []block.ID {
+	lastAdv := d.lastAdvertisedNum.Load()
+	out := make([]block.ID, 0, 8)
+	maxNum := lastAdv
+	for _, n := range nums {
+		if lastAdv != 0 && n <= lastAdv {
+			continue
+		}
+		raw := d.chain.RecentBlockBytes(n)
+		if raw == nil {
+			continue
+		}
+		ts := blockTimestamp(raw)
+		if ts == 0 || nowUnix-int64(ts) > advertiseMaxAgeSec {
+			continue // too old to offer — never gossip history
+		}
+		id, ok := d.chain.RecentBlockIDForNum(n)
+		if !ok {
+			continue
+		}
+		out = append(out, id)
+		if n > maxNum {
+			maxNum = n
+		}
+		if len(out) >= d.cfg.MaxBlocksPerInv {
+			break
+		}
+	}
+	// Advance the watermark even when nothing passed the age gate (e.g. the
+	// first round after a warm start), so we never later "discover" a backlog.
+	if h := d.headBlockHint.Load(); h > maxNum {
+		maxNum = h
+	}
+	if maxNum > lastAdv {
+		d.lastAdvertisedNum.Store(maxNum)
+	}
+	return out
 }
 
 // pruneLoop periodically drops per-peer dedup state (known / outstanding)
@@ -267,6 +327,14 @@ func (d *Delegate) pruneLoop() {
 // missed witness slot doubles that, so 10 ticks (10s ≈ 3 missed slots) is
 // unambiguously abnormal while still recovering ~12x faster than the 120s
 // isCatchingUp() window did on its own.
+// advertiseMaxAgeSec is the hard ceiling on how old a block may be for us to
+// advertise it. Blocks are 3s apart, so 30s ≈ 10 blocks — comfortably more than
+// a healthy node is ever behind, and far short of the ~10 minutes of history the
+// old rolling-window advert could emit. Nodes older than hived 1.28.7 do not
+// ignore inventory while syncing, so offering them stale blocks forks them away;
+// this bound is what keeps our adverts to genuinely-new blocks.
+const advertiseMaxAgeSec = 30
+
 const tipStallKickTicks = 10
 
 // Tip in-sync handshake. hived advertises inventory ONLY to peers it considers

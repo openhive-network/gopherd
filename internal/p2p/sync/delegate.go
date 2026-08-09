@@ -435,6 +435,13 @@ type Delegate struct {
 	// stays 0 means the handshake is not convincing peers we are in sync.
 	tipSyncHandshakes atomic.Int64
 
+	// lastAdvertisedNum is the highest block number we have offered via
+	// item_ids_inventory. broadcastInv only advertises blocks ABOVE it, so a
+	// freshly-connected peer receives the same small new-block stream as
+	// everyone else instead of a backlog of the recent ring. See the incident
+	// note in broadcastInv.
+	lastAdvertisedNum atomic.Uint32
+
 	// traceLo/traceHi define an optional block-number window for verbose
 	// per-block ingestion tracing (GHIVE_TRACE_LO/HI). Zero = disabled.
 	traceLo uint32
