@@ -288,8 +288,15 @@ const tipStallKickTicks = 10
 // must only fire when genuinely level — issuing it while even one block behind
 // yields a 2-item reply and re-arms the flag.
 const (
-	tipSyncHandshakeTicks     = 30 // ≥30 kicker ticks (~30s) between handshakes
-	tipSyncHandshakeMaxAgeSec = 4  // only when our head is this fresh (= level)
+	tipSyncHandshakeTicks = 30 // ≥30 kicker ticks (~30s) between handshakes
+	// tipSyncHandshakeMaxAgeSec must be STRICTLY under the 3s block interval.
+	// At 4s the window still admitted a head one block behind (a block 3-6s
+	// old); a handshake sent while behind draws a multi-item reply, which
+	// RE-ARMS peer_needs_sync_items_from_us and suppresses adverts until the
+	// next handshake 30s later. Measured at 4s: tipStallKicks kept ticking
+	// ~1-2/min even with push working. 2s can only be satisfied by the newest
+	// block, so the reply is the single matching item and the flag clears.
+	tipSyncHandshakeMaxAgeSec = 2
 )
 
 func (d *Delegate) catchupKickerLoop() {
