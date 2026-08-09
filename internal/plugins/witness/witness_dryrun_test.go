@@ -25,6 +25,10 @@ func dryRunFixture(t *testing.T) (*Plugin, *state.Database, Producer) {
 	}
 	p := New(cdb, db, []Producer{prod})
 	p.DryRun = true
+	// The genesis fixture's head is years old; without this the stale-head gate
+	// (correctly) refuses to measure. Tests are exercising the pipeline, not the
+	// tip check, which TestDryRunSkipsStaleHead covers directly.
+	p.DryRunMaxHeadAgeSec = 1 << 40
 	return p, db, prod
 }
 
@@ -221,5 +225,27 @@ func TestDryRunOneBlockPerSlot(t *testing.T) {
 	}
 	if st = p.DryRunSnapshot(); st.Built != 2 {
 		t.Fatalf("built=%d after a new slot, want 2", st.Built)
+	}
+}
+
+// TestDryRunSkipsStaleHead pins the tip gate. Removing the slot-boundary wait
+// (so the dry run can measure at all against a live chain) also removed the
+// only thing keeping it off a stale head — a warm-started node then built
+// blocks during catch-up, against a head minutes-to-hours old and the schedule
+// as it stood back then. Those are not live production and they polluted the
+// timing averages; observed as the first two "gtg slots" of a run.
+func TestDryRunSkipsStaleHead(t *testing.T) {
+	p, _, _ := dryRunFixture(t)
+	// Use the real threshold: the genesis fixture's head is years old, so this
+	// is exactly the catch-up case.
+	p.DryRunMaxHeadAgeSec = 0
+
+	for i := 0; i < 4; i++ {
+		if err := p.maybeProduceBlock(); err != nil {
+			t.Fatalf("maybeProduceBlock: %v", err)
+		}
+	}
+	if st := p.DryRunSnapshot(); st.Built != 0 {
+		t.Fatalf("built=%d against a years-old head, want 0 — the dry run must only measure at the tip", st.Built)
 	}
 }
