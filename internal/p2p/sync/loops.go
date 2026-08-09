@@ -85,7 +85,11 @@ func (d *Delegate) broadcastInv() {
 		return
 	}
 
-	// Only advertise LIVE blocks. During initial catch-up every block we
+	// Only advertise while our HEAD is live. NOTE this is necessary but NOT
+	// sufficient: it says nothing about the age of the other blocks in the
+	// batch, and its 120s window tolerates being ~40 blocks behind. The
+	// per-block advertiseMaxAgeSec gate in selectAdvertIDs is what actually
+	// keeps stale blocks off the wire. During initial catch-up every block we
 	// hold is historical (timestamps hours-to-years old); a peer at the
 	// live head rejects a node offering such an ancient block ("you
 	// offered me a block that I have deemed to be invalid") and drops the
@@ -328,12 +332,27 @@ func (d *Delegate) pruneLoop() {
 // unambiguously abnormal while still recovering ~12x faster than the 120s
 // isCatchingUp() window did on its own.
 // advertiseMaxAgeSec is the hard ceiling on how old a block may be for us to
-// advertise it. Blocks are 3s apart, so 30s ≈ 10 blocks — comfortably more than
-// a healthy node is ever behind, and far short of the ~10 minutes of history the
-// old rolling-window advert could emit. Nodes older than hived 1.28.7 do not
-// ignore inventory while syncing, so offering them stale blocks forks them away;
-// this bound is what keeps our adverts to genuinely-new blocks.
-const advertiseMaxAgeSec = 30
+// advertise it. Blocks are 3s apart, so 8s ≈ 2-3 blocks: enough slack for the
+// 5s INVInterval tick and normal jitter, and nothing more.
+//
+// This bound is deliberately tight because it is also the ONLY thing that stops
+// a CPU-starved node from gossiping staleness. isCatchingUp() — the gate that
+// decides whether we advertise at all — allows a head up to
+// liveAdvertiseWindowSec (120s) old, i.e. we can be ~40 BLOCKS BEHIND and still
+// believe we are "live" enough to advertise. On a contended box (other
+// workloads taking most of the CPU) that is exactly what happens: we fall
+// behind, keep advertising a head that is now a minute old, and peers older
+// than hived 1.28.7 act on those stale offers and fork away.
+//
+// With this bound the failure mode becomes self-correcting and safe: when we
+// cannot keep up, our newest block ages past 8s, NOTHING passes the gate, and
+// we simply go silent until we are back at the tip. That is precisely the
+// "only advertise what you can serve promptly" contract — enforced by
+// measurement rather than by assuming the node is keeping up.
+//
+// 30s was the first attempt and was too loose: it still permitted advertising
+// while ~10 blocks behind.
+const advertiseMaxAgeSec = 8
 
 const tipStallKickTicks = 10
 
