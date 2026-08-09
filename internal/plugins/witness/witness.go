@@ -102,6 +102,9 @@ type Plugin struct {
 	mu      sync.Mutex
 	pending []op.Op // mempool — ops to include in our next block
 	dry     DryRunStats
+	// lastDrySlot dedupes dry-run production: the loop ticks every 500ms but a
+	// slot is 3s, so without this one slot would yield ~6 identical blocks.
+	lastDrySlot uint32
 
 	logMu       sync.Mutex
 	lastLogTime time.Time
@@ -258,8 +261,29 @@ func (p *Plugin) maybeProduceBlock() error {
 		// witness immediately produces instead of waiting for the future.
 		nextSlotTime = (now / 3) * 3
 	}
-	if nextSlotTime > now {
+	if nextSlotTime > now && !p.DryRun {
 		return nil // not yet — wait for clock to catch up
+	}
+	// DRY RUN does not wait for the slot boundary. Against a live chain the
+	// window where now >= nextSlotTime is only the sliver between the slot
+	// instant and us RECEIVING the real block for it (~0.5s), after which
+	// dgpo.Time advances and the target moves. With a 500ms tick we lose that
+	// race every time, so the pipeline would never execute and there would be
+	// nothing to measure — observed as 198 detected gtg slots and 0 blocks
+	// built. Building the moment the schedule names us measures exactly the
+	// same work; only the wall-clock trigger differs.
+	//
+	// Dedupe by slot so a 500ms tick produces ONE block per slot, not six.
+	if p.DryRun {
+		p.mu.Lock()
+		already := p.lastDrySlot == nextSlotTime
+		if !already {
+			p.lastDrySlot = nextSlotTime
+		}
+		p.mu.Unlock()
+		if already {
+			return nil
+		}
 	}
 
 	// DRY RUN: build + sign + self-verify + time it, then discard. Returns
