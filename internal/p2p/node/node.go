@@ -98,6 +98,12 @@ type Node struct {
 
 	mu    sync.Mutex
 	peers map[*Peer]*peerInfo
+
+	// stopped is set by Stop() under mu, in the same critical section that
+	// closes the live peers. handleNewConn consults it before registering, so
+	// a dial still in flight at shutdown cannot install a peer that would then
+	// block Stop's wg.Wait() forever. Guarded by mu.
+	stopped bool
 	// activeEndpoints maps connected-peer endpoint string → *Peer so the
 	// dialer can fast-skip duplicates. Updated under mu.
 	activeEndpoints map[string]*Peer
@@ -597,6 +603,25 @@ func (n *Node) handleNewConn(c *transport.Conn, dir Direction, dialEndpoint stri
 	peer := newPeer(c, dir, n.buildHelloPayload, n.buildLegacyHelloPayload)
 	info := &peerInfo{endpoint: dialEndpoint, dir: dir}
 	n.mu.Lock()
+	// Shutdown race: Stop() closes the peers it can SEE, then waits on the
+	// WaitGroup. A dial already in flight (dialOnce holds a wg slot) can land
+	// here AFTER that closing loop, register a peer nobody will ever close, and
+	// then block in peer.run -> Conn.Receive forever — so Stop() never returns.
+	// Observed as a 10-minute hang in TestDiscoveryPropagatesEndpoints.
+	//
+	// Registration and the stopped-check share n.mu with Stop's closing loop,
+	// so the two orders are the only possibilities: either we register first
+	// and Stop closes us, or Stop wins and we bail out here.
+	if n.stopped {
+		n.mu.Unlock()
+		c.Close()
+		if dialEndpoint != "" {
+			n.mu.Lock()
+			delete(n.pendingDials, dialEndpoint)
+			n.mu.Unlock()
+		}
+		return
+	}
 	n.peers[peer] = info
 	if dialEndpoint != "" {
 		n.activeEndpoints[dialEndpoint] = peer
@@ -739,8 +764,15 @@ func (n *Node) Stop() {
 	n.cancel()
 	n.cancel = nil
 
-	// Close every active peer to break their read loops.
+	// Mark stopped and close every active peer in ONE critical section.
+	// handleNewConn checks n.stopped under this same lock, so a dial that is
+	// still in flight cannot slip a fresh peer in behind us — that peer would
+	// block in Conn.Receive with nobody left to close it, and wg.Wait() below
+	// would never return. Cancelling the context alone does not cover this:
+	// peer.run blocks in a read, not on ctx, and is unblocked by the conn
+	// close, not by cancellation.
 	n.mu.Lock()
+	n.stopped = true
 	for p := range n.peers {
 		p.close(nil)
 	}
