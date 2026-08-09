@@ -26,6 +26,7 @@ import (
 	"hived-go/internal/chain"
 	"hived-go/internal/crypto"
 	"hived-go/internal/fcraw"
+	"hived-go/internal/protocol/auth"
 	"hived-go/internal/protocol/block"
 	"hived-go/internal/protocol/op"
 	"hived-go/internal/protocol/tx"
@@ -60,6 +61,8 @@ type DryRunStats struct {
 	MaxNs      int64 // slowest single production
 	LastTxs    int   // transactions in the most recent block
 	LastBytes  int   // serialized size of the most recent block
+	ChainKeyOK int   // blocks signed with the witness's REGISTERED key (network would accept)
+	Imperson   int   // blocks signed with a key the chain does not have for that witness
 }
 
 // Producer is one (witness account, private key) pair we can sign for.
@@ -341,6 +344,21 @@ func (p *Plugin) dryRunProduce(prod *Producer, dgpo objects.DynamicGlobalPropert
 		}
 	}
 
+	// Would the NETWORK accept this block? Self-verification above only proves
+	// the signature matches the key we hold. Consensus checks it against the
+	// witness's registered signing key (validate_block_header), so a key we do
+	// not actually own produces a block every peer rejects.
+	//
+	// This is the difference between "the pipeline works" and "this is a valid
+	// block", and it must be reported explicitly — impersonating a real witness
+	// to exercise its schedule slots is a legitimate dry-run technique, but it
+	// must never look like a successful production.
+	chainKeyOK, chainKeyKnown := false, false
+	if w, werr := objects.GetWitness(state.NewSession(p.State), auth.AccountName(prod.Account)); werr == nil {
+		chainKeyKnown = true
+		chainKeyOK = w.BlockSigningKey == prod.PublicKey33
+	}
+
 	elapsed := time.Since(start)
 	// Margin against the slot budget: a block must be produced AND propagated
 	// within the 3s interval, so anything approaching that is a red flag.
@@ -356,6 +374,11 @@ func (p *Plugin) dryRunProduce(prod *Producer, dgpo objects.DynamicGlobalPropert
 		p.dry.VerifyOK++
 	} else {
 		p.dry.VerifyFail++
+	}
+	if chainKeyOK {
+		p.dry.ChainKeyOK++
+	} else {
+		p.dry.Imperson++
 	}
 	ns := elapsed.Nanoseconds()
 	p.dry.TotalNs += ns
@@ -375,12 +398,21 @@ func (p *Plugin) dryRunProduce(prod *Producer, dgpo objects.DynamicGlobalPropert
 	if !verifyOK {
 		status = "verify=FAIL (" + verifyErr + ")"
 	}
+	// Consensus verdict, kept separate from self-verification on purpose.
+	switch {
+	case chainKeyOK:
+		status += " chain-key=OK(network would accept)"
+	case chainKeyKnown:
+		status += " chain-key=IMPERSONATED(network would REJECT: not this witness's signing key)"
+	default:
+		status += " chain-key=UNKNOWN(no witness object)"
+	}
 	fmt.Fprintf(os.Stderr,
-		"witness dry-run: %s block %d for %s (scheduled=%s) built+signed in %.2fms (margin %.0fms of %ds) size=%dB txs=%d %s — DISCARDED [slots=%d built=%d ours=%d okay=%d fail=%d err=%d avg=%.2fms max=%.2fms]\n",
+		"witness dry-run: %s block %d for %s (scheduled=%s) built+signed in %.2fms (margin %.0fms of %ds) size=%dB txs=%d %s — DISCARDED [slots=%d built=%d ours=%d okay=%d fail=%d err=%d chainkey_ok=%d impersonated=%d avg=%.2fms max=%.2fms]\n",
 		kind, dgpo.HeadBlockNumber+1, prod.Account, scheduled,
 		float64(elapsed.Microseconds())/1000, float64(margin.Milliseconds()), int(BlockInterval/time.Second),
 		len(rawBlock), st.LastTxs, status,
-		st.Slots, st.Built, st.Ours, st.VerifyOK, st.VerifyFail, st.Errors,
+		st.Slots, st.Built, st.Ours, st.VerifyOK, st.VerifyFail, st.Errors, st.ChainKeyOK, st.Imperson,
 		float64(st.TotalNs)/float64(max64(st.Built, 1))/1e6, float64(st.MaxNs)/1e6)
 }
 
