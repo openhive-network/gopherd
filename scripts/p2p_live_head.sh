@@ -55,6 +55,11 @@ PRODUCE_EVERY_SLOT="${PRODUCE_EVERY_SLOT:-0}"
 # key we hold, the block is applied and BROADCAST. A key mismatch is logged and
 # the slot skipped (what hived does), so this is inert without the right key.
 PRODUCE_REAL="${PRODUCE_REAL:-0}"
+# Mmap-backed typed state (hived's chainbase equivalent). Saved on clean exit;
+# a restart with the SAME dir resumes AT HEAD in seconds instead of rebuilding
+# ~27GB of typed stores from the snapshot (~20min). Empty on first run, so it
+# simply starts working after the first clean shutdown. Set to "" to disable.
+PERSIST_STATE_DIR="${PERSIST_STATE_DIR:-$WORK/pstate}"
 
 [ -x "$BIN" ] || { echo "no gopherd at $BIN" >&2; exit 1; }
 [ -d "$SNAPSHOT" ] || { echo "snapshot dir not found: $SNAPSHOT" >&2; exit 1; }
@@ -75,6 +80,10 @@ if [ -n "$SNAP_DIR" ]; then
   mkdir -p "$SNAP_DIR"
   SERVE_ARGS+=(--shutdown-snapshot-dir="$SNAP_DIR")
 fi
+if [ -n "$PERSIST_STATE_DIR" ]; then
+  mkdir -p "$PERSIST_STATE_DIR"
+  SERVE_ARGS+=(--persist-state-dir="$PERSIST_STATE_DIR")
+fi
 if [ "$SERVE" = "1" ]; then
   SERVE_ARGS+=(--p2p-serve)
   echo "!! SERVE=1 — this node will ADVERTISE INVENTORY AND SERVE BLOCKS to mainnet peers."
@@ -93,6 +102,7 @@ cat <<BANNER
  block_log  : OFF (--no-block-log; state+cold only)
  mem        : $MEM_MAX cgroup / ${MEM_LIMIT_GIB}GiB soft ; peers<=$MAX_PEERS
  head snap  : ${SNAP_DIR:-OFF (restart will re-sync the full delta)}
+ persist    : ${PERSIST_STATE_DIR:-OFF (every restart reloads the snapshot, ~20min)}
  produce    : $([ -n "$WITNESS_KEYS" ] && { [ "$PRODUCE_REAL" = "1" ] && echo "REAL (apply+broadcast IF key matches)" || echo "DRY RUN (build+sign+verify+discard; every-slot=$PRODUCE_EVERY_SLOT)"; } || echo "OFF")
  data=$DATA
  cold=$COLD
