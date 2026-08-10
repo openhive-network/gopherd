@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
 	"hived-go/internal/state"
 	"hived-go/internal/state/persiststore"
@@ -313,8 +314,18 @@ func LoadPersist(db *state.Database, dir string) (uint32, error) {
 		} else {
 			continue // registered but absent from the container (never populated)
 		}
+		// Per-subsystem timing, mirroring the snapshot loader's output. Without
+		// it a slow resume is unattributable: on 2026-08-10 a 22-minute
+		// persist-state load was silent the whole way, and the cause (one
+		// subsystem re-spilling its cold rows because the cold backend was not
+		// durable) was only found by inference from the SNAPSHOT loader's
+		// per-subsystem rates. Cheap — one line per subsystem, once per start.
+		start := time.Now()
 		if err := m.UnmarshalSnapshot(sr); err != nil {
 			return 0, fmt.Errorf("persiststate: unmarshal %s: %w", name, err)
+		}
+		if el := time.Since(start); el > 200*time.Millisecond {
+			fmt.Fprintf(os.Stderr, "persist-state: loaded %s in %.1fs\n", name, el.Seconds())
 		}
 	}
 	return head, nil
