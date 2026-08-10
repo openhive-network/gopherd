@@ -307,18 +307,20 @@ func (d *Database) ValidateIncomingTx(raw []byte) error {
 	if err := validateTxPreFlight(session, &res.SignedTx, blockNum, dgpo.Time, txID, true); err != nil {
 		return fmt.Errorf("preflight: %w", err)
 	}
-	// RC affordability, the check hived applies at admission while
-	// is_in_control(). Read-only here: HasSufficientRC computes the cost and
-	// compares against the payer's regenerated mana WITHOUT charging, since
-	// admission must not mutate state (and the real charge happens at block
-	// build). Rejecting here keeps transactions no witness will mine out of the
-	// queue entirely — they were roughly half of everything we admitted.
-	if hardfork.SetForBlock(blockNum).Has(hardfork.HF20) && len(res.SignedTx.Operations) > 0 {
-		if err := HasSufficientRC(session, &res.SignedTx, blockNum, dgpo.Time,
-			int64(res.SignedEnd-res.UnsignedStart)); err != nil {
-			return fmt.Errorf("rc: %w", err)
-		}
-	}
+	// NO RC check at admission, deliberately.
+	//
+	// hived enforces RC inside push_transaction, which runs when a node accepts
+	// a gossiped transaction — so an RC-insufficient transaction is refused by
+	// the FIRST node that sees it and never propagates. Anything reaching us has
+	// already cleared RC somewhere upstream.
+	//
+	// Our RC cost model is approximate. Re-deciding a question hived has already
+	// answered can therefore only lose valid transactions when our numbers
+	// differ slightly from theirs — thinning our blocks for no protection.
+	// Affordability is re-checked at BUILD time (SelectPendingTransactions),
+	// where a transaction may genuinely have become unaffordable because the
+	// payer's mana was consumed after admission, and where a wrong answer costs
+	// one transaction rather than poisoning the queue.
 	return nil
 }
 
