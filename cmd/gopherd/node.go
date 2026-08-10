@@ -562,7 +562,26 @@ func newApp(cfg flags) (*app, error) {
 	// when the container is absent (first ever run), so the flag can be set
 	// permanently and simply starts working after the first clean shutdown.
 	if cfg.persistStateDir != "" {
-		if _, ok := snap.PersistStateHead(cfg.persistStateDir); ok {
+		psHead, psOK := snap.PersistStateHead(cfg.persistStateDir)
+		// A persist-state resume restores the non-cold typed state from the
+		// container but keeps using the EXISTING cold dir for comments/votes.
+		// Those two must come from the same clean shutdown. Verify it: an
+		// unverifiable pair is refused and we fall back to the (self-contained)
+		// snapshot path rather than loading state we cannot vouch for. Hive
+		// blocks carry no state root, so a mismatch here would never surface as
+		// an error — the node would simply be wrong.
+		if psOK {
+			if coldHead, cOK := readColdHeadStamp(cfg.coldDir); !cOK || coldHead != psHead {
+				got := "absent"
+				if cOK {
+					got = fmt.Sprintf("%d", coldHead)
+				}
+				fmt.Fprintf(os.Stderr, "gopherd node: REFUSING persist-state resume — container is at block %d but the cold tier stamp is %s. "+
+					"The two must come from the same clean shutdown; falling back to the snapshot path.\n", psHead, got)
+				psOK = false
+			}
+		}
+		if psOK {
 			boot := state.NewSession(stateDB)
 			registerTypedSubsystems(boot)
 			var cerr error
@@ -834,10 +853,22 @@ func (a *app) close() {
 	a.saveShutdownSnapshot()
 	// Then the typed stores, so the next start resumes at head in seconds
 	// instead of rebuilding from that snapshot.
-	a.savePersistState()
+	persistHead := a.savePersistState()
 	if a.cold != nil {
 		_ = a.cold.Close()
 		a.cold = nil
+		// Stamp the cold tier with the head persist-state was written at, but
+		// only AFTER Close() has flushed it. A persist-state resume is a PAIR —
+		// the container holds the non-cold typed state, the cold dir holds
+		// comments/votes — and nothing else ties them together. Without this
+		// stamp a mismatched pair loads silently, and Hive blocks carry no
+		// state root, so the divergence would never surface as an error: the
+		// node would just be quietly wrong while signing blocks.
+		if persistHead != 0 {
+			if werr := writeColdHeadStamp(a.cfg.coldDir, persistHead); werr != nil {
+				a.logger.printf("WARN cold head stamp at %d: %v (next start will refuse the fast resume)", persistHead, werr)
+			}
+		}
 	}
 	if a.writer != nil {
 		_ = a.writer.Close()
@@ -865,22 +896,23 @@ func (a *app) close() {
 // Must be called with the cold tier still open (see close()). Failures are
 // logged, never fatal: losing this costs time on the next start, whereas
 // aborting shutdown over it risks losing more.
-func (a *app) savePersistState() {
+func (a *app) savePersistState() uint32 {
 	if a.cfg.persistStateDir == "" || a.state == nil || a.chain == nil {
-		return
+		return 0
 	}
 	head, err := a.chain.HeadBlock()
 	if err != nil || head == 0 {
 		a.logger.printf("WARN persist-state: no head to save (err=%v head=%d)", err, head)
-		return
+		return 0
 	}
 	start := time.Now()
 	if serr := snap.SavePersist(a.state, a.cfg.persistStateDir, head); serr != nil {
 		a.logger.printf("WARN persist-state save at %d failed: %v", head, serr)
-		return
+		return 0
 	}
 	a.logger.printf("persist-state saved at block %d in %.1fs — restart with the same --persist-state-dir resumes here without a snapshot load",
 		head, time.Since(start).Seconds())
+	return head
 }
 
 // saveShutdownSnapshot writes a directory snapshot of the current head so the
@@ -1449,6 +1481,42 @@ func registerTypedSubsystems(boot *state.Session) {
 // Must run BEFORE any bulk load so the multi-GB comment corpus spills to disk
 // during the load instead of piling up resident — a full-chain load with the
 // tier unattached OOMs.
+// coldHeadStampName is written into the cold-tier dir on clean shutdown,
+// recording the head block the persist-state container was saved at.
+const coldHeadStampName = "head.stamp"
+
+// writeColdHeadStamp records `head` in the cold-tier dir. Call only AFTER the
+// cold tier has been closed/flushed, so the stamp cannot claim more than the
+// data on disk.
+func writeColdHeadStamp(coldDir string, head uint32) error {
+	if coldDir == "" {
+		return nil
+	}
+	tmp := filepath.Join(coldDir, coldHeadStampName+".tmp")
+	if err := os.WriteFile(tmp, []byte(strconv.FormatUint(uint64(head), 10)), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, filepath.Join(coldDir, coldHeadStampName))
+}
+
+// readColdHeadStamp returns the head the cold tier was last cleanly closed at.
+// Reports false when absent (never cleanly closed, or written by an older
+// build), which callers must treat as "cannot verify" — not as "fine".
+func readColdHeadStamp(coldDir string) (uint32, bool) {
+	if coldDir == "" {
+		return 0, false
+	}
+	b, err := os.ReadFile(filepath.Join(coldDir, coldHeadStampName))
+	if err != nil {
+		return 0, false
+	}
+	v, err := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 32)
+	if err != nil {
+		return 0, false
+	}
+	return uint32(v), true
+}
+
 func attachColdTier(stateDB *state.Database, boot *state.Session, cfg flags) (objects.ColdStore, *objects.CommentStore, *objects.CommentVoteStore, error) {
 	if cfg.residentCap <= 0 {
 		return nil, nil, nil, nil
