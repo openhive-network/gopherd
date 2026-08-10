@@ -1206,10 +1206,11 @@ func (a *app) run() error {
 				return
 			case <-t.C:
 				s := syncDel.Stats()
-				a.logger.printf("STATS peers=%d qdepth=%d/%d inhibit=%v outstanding=%d distinct=%d inflight=%d throttled=%d qfull=%d reorderDrop=%d invIgnored=%d invRx=%d tipStallKicks=%d tipSync=%d comp(rx=%d zstd=%d hit=%d err=%d)",
+				a.logger.printf("STATS peers=%d qdepth=%d/%d inhibit=%v outstanding=%d distinct=%d inflight=%d throttled=%d qfull=%d reorderDrop=%d invIgnored=%d invRx=%d tipStallKicks=%d tipSync=%d comp(rx=%d zstd=%d hit=%d err=%d) mempool(depth=%d acc=%d rej=%d)",
 					s.PeerCount, s.QueueDepth, s.QueueCapacity, s.FetchInhibited, s.OutstandingTotal, s.DistinctOutstanding, s.GlobalInflight,
 					s.OutstandingThrottled, s.DroppedQueueFull, s.DroppedReorder, s.InvIgnoredCatchup, s.InvReceived, s.TipStallKicks, s.TipSyncHandshakes,
-					s.CompressedReceived, s.CompressedDecompressed, s.CompressedCacheHits, s.CompressedDecodeErrors)
+					s.CompressedReceived, s.CompressedDecompressed, s.CompressedCacheHits, s.CompressedDecodeErrors,
+					s.MempoolDepth, s.TxAccepted, s.TxRejected)
 			}
 		}
 	}()
