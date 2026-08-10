@@ -62,7 +62,12 @@ WORK_TIMING="${WORK_TIMING:-0}"
 # and re-syncs the whole delta over P2P — ~900K blocks, ~2h. With it, restart
 # from the newest block-<N>/ in this dir and resume at head in ~25min.
 # Set to "" to disable.
-SNAP_DIR="${SNAP_DIR:-/home/martin/p2p-live-snaps}"
+# NOTE the `-` (not `:-`): `:-` substitutes the default when the variable is
+# unset OR EMPTY, so `SNAP_DIR=` would silently get the default back and the
+# documented "set SNAP_DIR= to skip the shutdown snapshot" would do nothing.
+# With `-`, an explicitly-empty value is respected and only an UNSET variable
+# takes the default.
+SNAP_DIR="${SNAP_DIR-/home/martin/p2p-live-snaps}"
 # Block-production DRY RUN: set WITNESS_KEYS to a file of `account WIF` lines.
 # Blocks are built, signed, self-verified, timed and DISCARDED — never applied
 # (which would fork us off the chain we are following) and never broadcast.
