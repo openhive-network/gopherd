@@ -153,6 +153,13 @@ type Plugin struct {
 	// the PRODUCED line so an empty block explains itself on the spot.
 	lastSelect string
 
+	// evicted counts transactions dropped because the chain mined them. Lives
+	// HERE rather than in the p2p layer: eviction moved into chain.ApplyBlock,
+	// and leaving the counter behind in the retired p2p hook silently reported
+	// evict=0 while the mechanism itself was untested — measurement must move
+	// with the thing it measures.
+	evicted int
+
 	// produced counts blocks we built and successfully handed to the Publisher.
 	// This is "submitted for publication", NOT "accepted by the network" — the
 	// two diverged silently on 2026-08-10, when a produced block was applied
@@ -285,6 +292,7 @@ func (p *Plugin) RemoveIncludedTxID(id [20]byte) {
 		p.mu.Unlock()
 		return
 	}
+	p.evicted++
 	delete(p.pendingIDs, id)
 	kept := p.pending[:0]
 	for _, t := range p.pending {
@@ -295,6 +303,14 @@ func (p *Plugin) RemoveIncludedTxID(id [20]byte) {
 	}
 	p.pending = kept
 	p.mu.Unlock()
+}
+
+// EvictedCount reports how many queued transactions the chain has mined out
+// from under us.
+func (p *Plugin) EvictedCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.evicted
 }
 
 // PendingCount reports the current mempool depth.
