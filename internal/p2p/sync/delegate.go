@@ -373,6 +373,7 @@ type Delegate struct {
 	txInvOffered atomic.Uint64
 	txFetched    atomic.Uint64
 	txEvicted    atomic.Uint64
+	txDuplicate  atomic.Uint64
 	// inhibitFetching is set when applyQLen >= high-water and cleared
 	// when it drops below low-water. While set, sendFetchItems is a
 	// no-op. Toggle is performed by the applyLoop on each dequeue and
@@ -1056,6 +1057,7 @@ type Stats struct {
 	TxInvOffered uint64
 	TxFetched    uint64
 	TxEvicted    uint64
+	TxDuplicate  uint64
 	// InvIgnoredCatchup is the cumulative count of tip-inventory adverts
 	// dropped by handleInv's catch-up gate (hived-1.28.7 storm fix). Nonzero
 	// and climbing == we're behind and correctly ignoring tip INV; stops
@@ -1126,6 +1128,7 @@ func (d *Delegate) Stats() Stats {
 		TxInvOffered:           d.txInvOffered.Load(),
 		TxFetched:              d.txFetched.Load(),
 		TxEvicted:              d.txEvicted.Load(),
+		TxDuplicate:            d.txDuplicate.Load(),
 		MempoolDepth:           mempoolDepth,
 	}
 }

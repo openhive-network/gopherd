@@ -129,7 +129,13 @@ type Plugin struct {
 	// rejected outright. (That is why every block we produced was empty: nothing
 	// ever reached this field, which masked the defect.)
 	pending []pendingTx
-	dry     DryRunStats
+	// pendingIDs mirrors pending's ids for O(1) dedup. Kept in lockstep with
+	// pending on every add/remove. The linear scan it replaces ran under the
+	// mempool mutex on EVERY offered transaction — with 12 peers advertising the
+	// same transactions, that was ~68k scans over a queue of ~6k entries, all
+	// contending with the production path.
+	pendingIDs map[[20]byte]struct{}
+	dry        DryRunStats
 	// lastDrySlot dedupes dry-run production: the loop ticks every 500ms but a
 	// slot is 3s, so without this one slot would yield ~6 identical blocks.
 	lastDrySlot uint32
@@ -209,17 +215,19 @@ const MaxMempoolTx = 8000
 func (p *Plugin) AddPendingTx(raw []byte, id [20]byte, expiration uint32) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.pendingIDs == nil {
+		p.pendingIDs = make(map[[20]byte]struct{}, 1024)
+	}
 	if len(p.pending) >= MaxMempoolTx {
 		return false
 	}
-	for i := range p.pending {
-		if p.pending[i].id == id {
-			return false
-		}
+	if _, dup := p.pendingIDs[id]; dup {
+		return false
 	}
 	cp := make([]byte, len(raw))
 	copy(cp, raw)
 	p.pending = append(p.pending, pendingTx{raw: cp, id: id, expiration: expiration})
+	p.pendingIDs[id] = struct{}{}
 	return true
 }
 
@@ -249,6 +257,7 @@ func (p *Plugin) RemoveIncludedTxIDs(ids [][20]byte) int {
 	kept := p.pending[:0]
 	for _, t := range p.pending {
 		if _, gone := dead[t.id]; gone {
+			delete(p.pendingIDs, t.id)
 			continue
 		}
 		kept = append(kept, t)
@@ -274,6 +283,7 @@ func (p *Plugin) dropExpired(now uint32) int {
 	dropped := 0
 	for _, t := range p.pending {
 		if t.expiration <= now {
+			delete(p.pendingIDs, t.id)
 			dropped++
 			continue
 		}
@@ -296,6 +306,7 @@ func (p *Plugin) removeIncluded(dead map[[20]byte]struct{}) {
 	kept := p.pending[:0]
 	for _, t := range p.pending {
 		if _, gone := dead[t.id]; gone {
+			delete(p.pendingIDs, t.id)
 			continue
 		}
 		kept = append(kept, t)
@@ -335,10 +346,28 @@ func (p *Plugin) AddPendingRaw(body []byte) error {
 	}
 	txID := tx.IDFromDigest(tx.DigestFromBytes(body[res.UnsignedStart:res.UnsignedEnd]))
 	if !p.AddPendingTx(body, txID, res.SignedTx.Expiration) {
-		return nil // duplicate or mempool full — not an error worth logging per tx
+		// Duplicate, or the queue is full. Reported distinctly so the accepted
+		// counter means UNIQUE admissions: with 12 peers advertising the same
+		// transactions, counting duplicates as accepted showed acc=68767 beside
+		// depth=6266 and made the queue look far healthier than it was.
+		return ErrDuplicateTx
 	}
 	return nil
 }
+
+// duplicateTxError marks "already queued (or queue full)" — ordinary traffic,
+// not a fault, since every transaction is offered by several peers.
+//
+// It reports itself through a METHOD rather than a sentinel so the generic p2p
+// layer can recognise it without importing this plugin: p2p/sync is transport
+// and must not depend on a consensus plugin.
+type duplicateTxError struct{}
+
+func (duplicateTxError) Error() string      { return "witness: transaction already pending" }
+func (duplicateTxError) IsDuplicateTx() bool { return true }
+
+// ErrDuplicateTx is the value AddPendingRaw returns for a duplicate.
+var ErrDuplicateTx error = duplicateTxError{}
 
 // Start launches the production loop in a goroutine. Returns immediately.
 func (p *Plugin) Start() {

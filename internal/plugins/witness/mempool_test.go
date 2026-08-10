@@ -2,6 +2,7 @@ package witness
 
 import (
 	"bytes"
+	"errors"
 	"crypto/sha256"
 	"testing"
 
@@ -39,6 +40,8 @@ func rawTx(t *testing.T, memo string, expiration uint32) ([]byte, [20]byte) {
 	id := tx.IDFromDigest(tx.DigestFromBytes(raw[res.UnsignedStart:res.UnsignedEnd]))
 	return raw, id
 }
+
+func errorsAs(err error, target any) bool { return errors.As(err, target) }
 
 func newMempoolPlugin(t *testing.T) *Plugin {
 	t.Helper()
@@ -195,5 +198,76 @@ func TestRemoveIncludedTxIDs(t *testing.T) {
 	// Empty input is a no-op, not a wipe: an empty block must not clear the queue.
 	if n := p.RemoveIncludedTxIDs(nil); n != 0 || p.PendingCount() != 1 {
 		t.Fatalf("empty eviction changed the mempool (n=%d depth=%d) — an empty block must leave it intact", n, p.PendingCount())
+	}
+}
+
+// TestMempoolIndexStaysInLockstep guards the O(1) dedup index against the
+// classic parallel-structure bug: an id left in the index after its transaction
+// leaves the queue would permanently REJECT that transaction if it were offered
+// again — silently shrinking what we can include, and doing so more the longer
+// the node runs.
+//
+// Exercises every removal path (expiry, our-block inclusion, another witness's
+// block) and then re-offers the removed transactions, which must be accepted.
+func TestMempoolIndexStaysInLockstep(t *testing.T) {
+	p := newMempoolPlugin(t)
+	a, aid := rawTx(t, "expire-me", 1000)
+	b, bid := rawTx(t, "mined-elsewhere", 1<<30)
+	c, cid := rawTx(t, "included-by-us", 1<<30)
+
+	for _, x := range []struct {
+		raw []byte
+		id  [20]byte
+		exp uint32
+	}{{a, aid, 1000}, {b, bid, 1 << 30}, {c, cid, 1 << 30}} {
+		if !p.AddPendingTx(x.raw, x.id, x.exp) {
+			t.Fatal("insert refused")
+		}
+	}
+	if p.AddPendingTx(a, aid, 1000) {
+		t.Fatal("index failed to dedup")
+	}
+
+	p.dropExpired(1500)                                    // removes a
+	p.RemoveIncludedTxIDs([][20]byte{bid})                 // removes b
+	p.removeIncluded(map[[20]byte]struct{}{cid: {}})       // removes c
+
+	if n := p.PendingCount(); n != 0 {
+		t.Fatalf("PendingCount=%d want 0", n)
+	}
+	// The index must be empty too: re-offering any of them must now succeed.
+	for i, x := range []struct {
+		raw []byte
+		id  [20]byte
+	}{{a, aid}, {b, bid}, {c, cid}} {
+		if !p.AddPendingTx(x.raw, x.id, 1<<30) {
+			t.Fatalf("re-offer %d REJECTED — a stale id survived in the dedup index; over time this silently starves the mempool", i)
+		}
+	}
+	if n := p.PendingCount(); n != 3 {
+		t.Fatalf("PendingCount=%d want 3", n)
+	}
+}
+
+// TestAddPendingRawReportsDuplicates pins that a duplicate is distinguishable
+// from a genuine admission. Counting duplicates as accepted showed acc=68767
+// beside depth=6266 and made a queue that never drained look healthy.
+func TestAddPendingRawReportsDuplicates(t *testing.T) {
+	p := newMempoolPlugin(t)
+	// AddPendingRaw validates authority BEFORE dedup, and the fixture
+	// transactions are unsigned. Drop the chain reference so admission skips
+	// validation and we exercise the duplicate path this test is about.
+	p.Chain = nil
+	raw, id := rawTx(t, "dup-report", 1<<30)
+	if !p.AddPendingTx(raw, id, 1<<30) {
+		t.Fatal("seed insert refused")
+	}
+	err := p.AddPendingRaw(raw)
+	if err == nil {
+		t.Fatal("duplicate reported as accepted")
+	}
+	var dup interface{ IsDuplicateTx() bool }
+	if !errorsAs(err, &dup) || !dup.IsDuplicateTx() {
+		t.Fatalf("duplicate error not recognisable by the p2p layer: %v", err)
 	}
 }
