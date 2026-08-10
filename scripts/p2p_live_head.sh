@@ -18,20 +18,22 @@
 #     trap; a restart just reloads the snapshot.
 #
 # ---------------------------------------------------------------------------
-# FAST DEV CYCLE (~4 min, vs ~30 min for the snapshot path)
+# DEV CYCLE (measured 2026-08-10 — no fast path exists yet)
 #
 #   go build -o bin/gopherd ./cmd/gopherd     # NOT `go build ./...` — that
 #                                             # does not update bin/
-#   kill -TERM $(pgrep -x gopherd)            # persist-state write, ~3.5 min
-#   SNAP_DIR= PERSIST_STATE_DIR=... <this>    # resumes at head in SECONDS
+#   kill -TERM $(pgrep -x gopherd)            # ~3 min shutdown snapshot
+#   <this script>                             # ~24 min snapshot load
 #
-# A rebuild does NOT invalidate persist-state: the container holds serialized
-# state, and a new binary reads it fine. Only a change to the state
-# serialization format invalidates it — and that invalidates snapshots too.
+# ⚠️ There is NO fast restart today. persist-state was supposed to provide one
+# and does not: on the pebble cold tier it re-spills the entire comment corpus
+# on load (a resume was still running at 22 minutes, i.e. slower than the
+# snapshot it replaces), and the durable backend that would avoid that has ~10x
+# write amplification (see COLD_BACKEND). Making restarts fast is open work, not
+# a flag you can turn on.
 #
-# Set SNAP_DIR= (empty) on dev runs. Once persist-state works the shutdown
-# snapshot is redundant and costs ~3 min of every shutdown; keep it only for
-# runs you may need to warm-start elsewhere or roll back to.
+# Set SNAP_DIR= (empty) to skip the shutdown snapshot on throwaway runs — but
+# then a restart re-syncs from whatever older snapshot you point at.
 #
 # DO NOT wipe DATA/COLD when resuming from persist-state — the cold tier holds
 # comments/votes and is half of the pair. Wipe both ONLY for a snapshot load.
@@ -67,24 +69,28 @@ WORK_TIMING="${WORK_TIMING:-0}"
 # documented "set SNAP_DIR= to skip the shutdown snapshot" would do nothing.
 # With `-`, an explicitly-empty value is respected and only an UNSET variable
 # takes the default.
-# COLD_BACKEND selects the cold tier implementation, and it decides whether a
-# persist-state restart is FAST or pointless.
+# COLD_BACKEND selects the cold tier implementation.
 #
-#   persist : PersistCold — mmap append-only, and the ONLY backend implementing
-#             durableColdTier. Because it is durable, the persist-state save
-#             writes ONLY the resident (unpaid) set and the load SKIPS the cold
-#             re-spill, rebuilding accounting from the cold index without
-#             faulting a single cold value.
-#   pebble  : durable on disk but does NOT implement durableColdTier, so the
-#             stores fall back to "serialize every cold row on save, re-spill
-#             every cold row on load".
+#   pebble  : DEFAULT. Proven at mainnet scale, zstd-compressed (~18GB for the
+#             comment corpus), ~24min to load a full snapshot.
+#   persist : PersistCold — the only backend implementing durableColdTier, which
+#             in principle makes a persist-state restart fast (the container
+#             stores only the resident set; the load rebuilds cold accounting
+#             from the index instead of re-spilling ~25GB).
 #
-# Measured with pebble (2026-08-10): a 27GB persist-state container, 199s to
-# save, and a resume that was still going at 22 MINUTES with RSS climbing to
-# 25.6GiB — i.e. slower than the ~24min snapshot load it was meant to replace,
-# because it re-spilled all 25GB of comment_store. The fast-restart design only
-# works on the durable backend.
-COLD_BACKEND="${COLD_BACKEND:-persist}"
+# ⚠️ persist is NOT usable here yet. Measured 2026-08-10 building the cold tier
+# from a full snapshot: >40min (vs pebble's 24min), 38GB+ allocated and still
+# growing (vs 18GB), and — the tell — 260GB WRITTEN for a 25.6GB corpus, i.e.
+# ~10x write amplification, with RSS sawtoothing to 24-26GiB against a 28GiB
+# cap. Killed before it finished. Suspected cause: eviction thrash at
+# RESIDENT_CAP=500000; a prior run recorded 92% of time in EvictFrozen with a
+# 1M cap and needed 4M. Untested.
+#
+# Consequence: the persist-state fast-restart path does NOT work at mainnet
+# scale today. On pebble, persist-state re-spills the whole cold tier on load
+# and is SLOWER than a snapshot (a resume was still running at 22min). Leave
+# --persist-state-dir OFF unless you are working on exactly this.
+COLD_BACKEND="${COLD_BACKEND:-pebble}"
 
 SNAP_DIR="${SNAP_DIR-/home/martin/p2p-live-snaps}"
 # Block-production DRY RUN: set WITNESS_KEYS to a file of `account WIF` lines.
