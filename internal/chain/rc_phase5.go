@@ -247,3 +247,42 @@ func ResetRCDifferentialForTxForTest(s *state.Session, blockNum uint32) {
 func ApplyRCDifferentialForOpForTest(s *state.Session, o op.Op, blockNum uint32) {
 	applyRCDifferentialForOp(s, o, blockNum)
 }
+
+// HasSufficientRC reports whether the transaction's payer can currently afford
+// it, WITHOUT charging or mutating any state.
+//
+// This is the admission-time half of hived's RC behaviour: it enforces while
+// is_in_control() (admission and block production) and not when applying
+// someone else's block, since an RC-based block rejection would fork the chain.
+//
+// Read-only matters here — admission runs on peer receive goroutines under a
+// read lock and must not write. The real charge happens once, at block build,
+// in applyRCForTx; charging at admission as well would double-bill the payer.
+//
+// Without this check, roughly half of everything gossiped on mainnet enters the
+// queue and stays: RC-insufficient transactions that every hived witness
+// declines and nobody ever mines.
+func HasSufficientRC(s *state.Session, stx *tx.SignedTransaction, blockNum, blockTime uint32, txSize int64) error {
+	if !hardfork.SetForBlock(blockNum).Has(hardfork.HF20) || len(stx.Operations) == 0 {
+		return nil
+	}
+	cost := ComputeRCCost(stx, blockNum)
+	if cost <= 0 {
+		return nil
+	}
+	payer := PayerOf(stx.Operations[0])
+	if payer == "" {
+		return nil
+	}
+	a, err := objects.GetAccount(s, payer)
+	if err != nil {
+		return nil // unknown payer: let the apply path produce the canonical error
+	}
+	// Regenerate on a COPY: this must not persist.
+	objects.RegenerateRCMana(&a, blockTime)
+	if a.RCManaCurrent < cost {
+		return fmt.Errorf("%w: account %q has %d RC, needs %d RC",
+			ErrInsufficientRC, payer, a.RCManaCurrent, cost)
+	}
+	return nil
+}

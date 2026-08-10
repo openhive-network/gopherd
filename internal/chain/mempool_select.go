@@ -39,6 +39,7 @@ const (
 	PendingApplyFailed                  // an operation failed against head state
 	PendingTooLarge                     // would exceed the block size budget
 	PendingMalformed                    // undecodable / no operations
+	PendingInsufficientRC               // payer cannot afford it (what hived refuses at admission)
 )
 
 func (o PendingTxOutcome) String() string {
@@ -51,6 +52,8 @@ func (o PendingTxOutcome) String() string {
 		return "preflight-failed"
 	case PendingApplyFailed:
 		return "apply-failed"
+	case PendingInsufficientRC:
+		return "insufficient-rc"
 	case PendingTooLarge:
 		return "too-large"
 	default:
@@ -215,6 +218,29 @@ func (d *Database) SelectPendingTransactions(
 			sel.Rejected[i] = PendingApplyFailed
 			continue
 		}
+		// CHARGE AND ENFORCE RC, exactly as a producing hived node does.
+		//
+		// hived enforces RC while is_in_control() — i.e. at admission and block
+		// production — and NOT when applying someone else's block (an RC-based
+		// block rejection would fork the chain). Omitting it here does not make
+		// our block invalid, but it makes us include transactions every other
+		// witness deliberately refuses.
+		//
+		// This is why roughly half the transactions we admit are never mined by
+		// anyone: they are RC-insufficient, hived declines them at admission,
+		// and only we were willing to carry them. Enforcing here keeps us from
+		// becoming the spam path onto the chain, and charging is also required
+		// for correctness — without it, several transactions from the same payer
+		// could each pass on the payer's full mana and collectively overdraw it.
+		if hf.Has(hardfork.HF20) {
+			rcErr := applyRCForTx(session, &res.SignedTx, blockNum, blockTime,
+				int64(res.SignedEnd-res.UnsignedStart), true /* enforce */)
+			if rcErr != nil {
+				session.Restore(txSnap)
+				sel.Rejected[i] = PendingInsufficientRC
+				continue
+			}
+		}
 		session.DiscardSavepoint(txSnap)
 
 		sel.Accepted = append(sel.Accepted, raw)
@@ -280,6 +306,18 @@ func (d *Database) ValidateIncomingTx(raw []byte) error {
 	}
 	if err := validateTxPreFlight(session, &res.SignedTx, blockNum, dgpo.Time, txID, true); err != nil {
 		return fmt.Errorf("preflight: %w", err)
+	}
+	// RC affordability, the check hived applies at admission while
+	// is_in_control(). Read-only here: HasSufficientRC computes the cost and
+	// compares against the payer's regenerated mana WITHOUT charging, since
+	// admission must not mutate state (and the real charge happens at block
+	// build). Rejecting here keeps transactions no witness will mine out of the
+	// queue entirely — they were roughly half of everything we admitted.
+	if hardfork.SetForBlock(blockNum).Has(hardfork.HF20) && len(res.SignedTx.Operations) > 0 {
+		if err := HasSufficientRC(session, &res.SignedTx, blockNum, dgpo.Time,
+			int64(res.SignedEnd-res.UnsignedStart)); err != nil {
+			return fmt.Errorf("rc: %w", err)
+		}
 	}
 	return nil
 }
