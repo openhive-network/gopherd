@@ -60,12 +60,13 @@ PRODUCE_REAL="${PRODUCE_REAL:-0}"
 # ~27GB of typed stores from the snapshot (~20min). Empty on first run, so it
 # simply starts working after the first clean shutdown. Set to "" to disable.
 #
-# ⚠️ DEFAULT OFF. On a full-chain node this OOM-KILLED the process during
-# shutdown (2026-08-10): SavePersist builds an in-RAM index over the whole typed
-# state and blew past the 28G cgroup cap, so NEITHER the persist container NOR
-# the shutdown snapshot got written. The round-trip test that validated it used
-# a 3000-block chain, where that index is trivial. Needs a streaming/bounded
-# save before it can be used at mainnet scale.
+# Default off, but SAFE TO USE at mainnet scale as of 2026-08-10. An earlier
+# SavePersist buffered each value whole and OOM-killed the process during
+# shutdown, losing BOTH the persist container and the shutdown snapshot; the
+# round-trip test that "validated" it used a 3000-block chain, where that buffer
+# is trivial. The save now streams in bounded chunks and was measured on a full
+# chain: 27GB in 139s, flat memory. Worth enabling on any run you may restart —
+# it turns a ~24min snapshot load into seconds.
 PERSIST_STATE_DIR="${PERSIST_STATE_DIR:-}"
 # Route inbound blocks through the fork-choice engine (depth-1 tip reorg)
 # instead of strictly-linear apply. Relevant when producing: a block we publish
