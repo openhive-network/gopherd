@@ -50,7 +50,6 @@ import (
 	"hived-go/internal/blocklog"
 	"hived-go/internal/chain"
 	"hived-go/internal/crypto"
-	"hived-go/internal/p2p/gossip"
 	p2pnode "hived-go/internal/p2p/node"
 	"hived-go/internal/plugins/witness"
 	p2psync "hived-go/internal/p2p/sync"
@@ -203,10 +202,20 @@ func cmdNode(args []string) int {
 		fmt.Fprintln(os.Stderr, "gopherd node: --recover-block-log requires --no-block-log (else the writer would target it)")
 		return 2
 	}
-	// Block production is DRY RUN ONLY from this command. Supplying keys
-	// without --produce-dry-run is refused rather than silently ignored, so
-	// nobody can believe they configured a witness and get neither a dry run
-	// nor an error. Real production is not wired up at all.
+	// Supplying keys without a produce mode is refused rather than silently
+	// ignored, so nobody can believe they configured a witness and get neither
+	// production nor an error.
+	if cfg.produceReal && !cfg.forkSwitching {
+		// Producing without fork-choice is how the node wedged on 2026-08-10.
+		// The linear apply path commits a block immediately, so our own block
+		// becomes irreversible the moment we make it; when the network picks a
+		// different block for that height, the competing block is filed stale,
+		// its child buffers forever, and the node stops advancing at its own
+		// orphan. Any block we produce may lose its slot race, so reversibility
+		// is not optional for a producing node.
+		fmt.Fprintln(os.Stderr, "gopherd node: --produce requires --fork-switching (a produced block must stay reversible so the node can reorg off it if the network chooses another block for that slot)")
+		return 2
+	}
 	if cfg.produceReal && cfg.produceDryRun {
 		fmt.Fprintln(os.Stderr, "gopherd node: --produce and --produce-dry-run are mutually exclusive")
 		return 2
@@ -1120,18 +1129,22 @@ func (a *app) run() error {
 	defer syncDel.Stop()
 	defer a.p2p.Stop()
 
-	// REAL block production starts here, not earlier: it needs the p2p node to
-	// broadcast through. gossip.Service supplies BroadcastBlock and its own
-	// seen-set dedup, so a block we publish is not re-broadcast when it comes
-	// back to us from a peer.
+	// REAL block production starts here, not earlier: it publishes through the
+	// sync delegate, which must exist first.
+	//
+	// The witness hands each produced block to syncDel.PublishBlock, which
+	// enqueues it on the SAME single-writer apply path inbound blocks use. That
+	// path applies it reversibly through the fork-choice engine and advertises
+	// it by block ID. The witness never applies or broadcasts a block itself —
+	// doing either directly is what lost howo block 108887429 on 2026-08-10.
 	//
 	// The witness plugin still refuses to produce unless the chain's registered
 	// signing key for the scheduled witness matches the key we hold, so arming
 	// this does not by itself mean blocks will be published.
 	if a.witness != nil && a.cfg.produceReal {
-		a.witness.Broadcaster = gossip.New(gossip.Config{Node: a.p2p})
+		a.witness.Publisher = syncDel
 		a.witness.Start()
-		a.logger.printf("REAL block production STARTED — blocks will be applied and BROADCAST when the key matches")
+		a.logger.printf("REAL block production STARTED — blocks will be applied (reversibly, fork-aware) and ADVERTISED to peers when the key matches")
 	}
 
 	// Diagnostic: periodically dump the sync delegate's load-shedding

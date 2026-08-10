@@ -69,8 +69,8 @@ func TestDryRunLeavesStateUntouched(t *testing.T) {
 // network. A recording Broadcaster is installed and must stay untouched.
 func TestDryRunNeverBroadcasts(t *testing.T) {
 	p, db, prod := dryRunFixture(t)
-	rec := &recordingBroadcaster{}
-	p.Broadcaster = rec
+	rec := &recordingPublisher{}
+	p.Publisher = rec
 
 	dgpo, err := objects.GetDGPO(state.NewSession(db))
 	if err != nil {
@@ -79,7 +79,7 @@ func TestDryRunNeverBroadcasts(t *testing.T) {
 	p.dryRunProduce(&prod, dgpo, dgpo.Time+3, prod.Account, true)
 
 	if rec.calls != 0 {
-		t.Fatalf("dry run broadcast %d block(s); it must never reach the network", rec.calls)
+		t.Fatalf("dry run published %d block(s); it must never reach the network", rec.calls)
 	}
 }
 
@@ -148,9 +148,13 @@ func TestDryRunDetectsWrongKey(t *testing.T) {
 	}
 }
 
-type recordingBroadcaster struct{ calls int }
+// recordingPublisher stands in for the sync delegate. Counting calls is how we
+// pin "this block never left the process": publication is the single point
+// where a produced block becomes visible to the network AND becomes our head,
+// since the witness no longer applies or broadcasts anything itself.
+type recordingPublisher struct{ calls int }
 
-func (r *recordingBroadcaster) BroadcastBlock(raw []byte, num uint32) { r.calls++ }
+func (r *recordingPublisher) PublishBlock(raw []byte, num uint32) error { r.calls++; return nil }
 
 // TestDryRunReportsImpersonation covers the technique of pointing the dry run
 // at a REAL witness (e.g. a top-20 account) to exercise its genuine schedule
@@ -275,9 +279,9 @@ func TestRealProductionRefusesWrongKey(t *testing.T) {
 	}
 	prod := Producer{Account: genesis.MainnetInitminer, PrivateKey: wrong, PublicKey33: wrong.PublicKey()}
 
-	rec := &recordingBroadcaster{}
+	rec := &recordingPublisher{}
 	p := New(cdb, db, []Producer{prod})
-	p.Broadcaster = rec // REAL production mode: DryRun stays false
+	p.Publisher = rec // REAL production mode: DryRun stays false
 
 	before, err := objects.GetDGPO(state.NewSession(db))
 	if err != nil {
@@ -293,7 +297,7 @@ func TestRealProductionRefusesWrongKey(t *testing.T) {
 		t.Fatal("wrong key: no slots recorded as skipped — the key gate did not fire")
 	}
 	if rec.calls != 0 {
-		t.Fatalf("wrong key: broadcast %d block(s) — a block the network would reject must never be published", rec.calls)
+		t.Fatalf("wrong key: published %d block(s) — a block the network would reject must never be published", rec.calls)
 	}
 	after, err := objects.GetDGPO(state.NewSession(db))
 	if err != nil {
@@ -302,5 +306,106 @@ func TestRealProductionRefusesWrongKey(t *testing.T) {
 	if after.HeadBlockNumber != before.HeadBlockNumber {
 		t.Fatalf("wrong key: head advanced %d -> %d; nothing should have been produced",
 			before.HeadBlockNumber, after.HeadBlockNumber)
+	}
+}
+
+// TestProductionDoesNotApplyLocally pins the fix for the 2026-08-10 mainnet
+// wedge (howo, block 108887429).
+//
+// The witness used to call chain.ApplyBlock on its own block, with no
+// Reversible flag. That made a block we produced the COMMITTED head the instant
+// we built it — and nothing can reorg away a committed block. When the network
+// chose a different block for that height, chain.PushLiveBlock saw
+// num <= committedNum() and filed the real block PushStale; its child then
+// buffered forever waiting for a parent we would never apply. The node sat on
+// its own orphan indefinitely with --fork-switching ON and unable to help.
+//
+// The invariant that prevents a rerun: producing must mutate NO chain state
+// here. Publication is the single hand-off, and the apply happens on the sync
+// delegate's single-writer goroutine via PushLiveBlock, which keeps our tip
+// reversible and therefore reorg-able.
+func TestProductionDoesNotApplyLocally(t *testing.T) {
+	seed := sha256.Sum256([]byte("real-prod-applies-nothing"))
+	chainKey, err := crypto.PrivateKeyFromBytes(seed[:])
+	if err != nil {
+		t.Fatalf("PrivateKeyFromBytes: %v", err)
+	}
+	// Fixture registers chainKey on chain AND we hold it, so the key gate opens
+	// and the producing path runs for real.
+	cdb, db := newSigningFixture(t, chainKey)
+	prod := Producer{
+		Account:     genesis.MainnetInitminer,
+		PrivateKey:  chainKey,
+		PublicKey33: chainKey.PublicKey(),
+	}
+	rec := &recordingPublisher{}
+	p := New(cdb, db, []Producer{prod})
+	p.Publisher = rec // DryRun stays false: this is the REAL production path
+
+	before, err := objects.GetDGPO(state.NewSession(db))
+	if err != nil {
+		t.Fatalf("GetDGPO: %v", err)
+	}
+	if err := p.maybeProduceBlock(); err != nil {
+		t.Fatalf("maybeProduceBlock: %v", err)
+	}
+
+	if rec.calls != 1 {
+		t.Fatalf("published %d block(s), want 1 — the key matched, so the block should have been handed to the publisher", rec.calls)
+	}
+	if n := p.Produced(); n != 1 {
+		t.Fatalf("produced counter = %d, want 1", n)
+	}
+
+	after, err := objects.GetDGPO(state.NewSession(db))
+	if err != nil {
+		t.Fatalf("GetDGPO after: %v", err)
+	}
+	if after.HeadBlockNumber != before.HeadBlockNumber {
+		t.Fatalf("witness applied its own block locally: head %d -> %d. "+
+			"That commits the block irreversibly and is exactly what wedged the node at 108887429; "+
+			"the block must be applied by the sync delegate via PushLiveBlock instead",
+			before.HeadBlockNumber, after.HeadBlockNumber)
+	}
+	if after.HeadBlockID != before.HeadBlockID {
+		t.Fatal("witness changed head_block_id; production must not mutate chain state directly")
+	}
+}
+
+// TestProductionRefusesWithoutPublisher pins the other silent-failure mode. A
+// witness with no publisher wired must not build blocks into the void: on
+// 2026-08-10 a --produce run spent 47 minutes doing nothing at all because the
+// plugin was never constructed, and every health metric stayed green. Absence
+// of work must be reported, not inferred.
+func TestProductionRefusesWithoutPublisher(t *testing.T) {
+	seed := sha256.Sum256([]byte("real-prod-no-publisher"))
+	chainKey, err := crypto.PrivateKeyFromBytes(seed[:])
+	if err != nil {
+		t.Fatalf("PrivateKeyFromBytes: %v", err)
+	}
+	cdb, db := newSigningFixture(t, chainKey)
+	prod := Producer{
+		Account:     genesis.MainnetInitminer,
+		PrivateKey:  chainKey,
+		PublicKey33: chainKey.PublicKey(),
+	}
+	p := New(cdb, db, []Producer{prod}) // Publisher deliberately nil
+
+	before, err := objects.GetDGPO(state.NewSession(db))
+	if err != nil {
+		t.Fatalf("GetDGPO: %v", err)
+	}
+	if err := p.maybeProduceBlock(); err != nil {
+		t.Fatalf("maybeProduceBlock: %v", err)
+	}
+	if n := p.Produced(); n != 0 {
+		t.Fatalf("produced=%d with no publisher wired; a block that cannot be published must not be built", n)
+	}
+	after, err := objects.GetDGPO(state.NewSession(db))
+	if err != nil {
+		t.Fatalf("GetDGPO after: %v", err)
+	}
+	if after.HeadBlockNumber != before.HeadBlockNumber {
+		t.Fatalf("head advanced %d -> %d with no publisher", before.HeadBlockNumber, after.HeadBlockNumber)
 	}
 }

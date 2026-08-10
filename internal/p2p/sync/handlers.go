@@ -104,6 +104,34 @@ func (d *Delegate) OnAddressesReceived(p *node.Peer, addrs []proto.AddressInfo) 
 // answer a peer's address_request; let the Node assemble its own reply.
 func (d *Delegate) BuildAddressReply(p *node.Peer) []proto.AddressInfo { return nil }
 
+// skipByHeight decides whether an offered block can be dismissed on its
+// embedded height alone, without knowing its ID.
+//
+// The strictly-linear node skips anything at or below its head: it can only
+// ever apply head+1, so a block at head height is useless to it.
+//
+// A FORK-AWARE node must not do that. A block at our own head height is
+// precisely the interesting case — it is a COMPETING block for that slot, and
+// fetching it is the only way fork choice can ever learn the rival branch
+// exists and reorg onto it. Skipping it by height is what kept the node wedged
+// at block 108887429 on 2026-08-10 even after its own tip was made reversible:
+// we refused to fetch the network's real 108887429, so its child 108887430
+// buffered forever awaiting a parent we would not ask for.
+//
+// Blocks strictly BELOW our head are still skipped in both modes — that gate is
+// what stops a catch-up from re-fetching millions of historical blocks that
+// peers keep advertising. Callers pair this with an ID-based check
+// (RecentBlockBytesByID), which is what filters out our own head block.
+func (d *Delegate) skipByHeight(num, head uint32) bool {
+	if num == 0 {
+		return false
+	}
+	if d.cfg.ForkAware {
+		return num < head
+	}
+	return num <= head
+}
+
 // handleInv is the inbound side of item_ids_inventory_message: list of
 // item hashes the peer has. We dedup against our local known set and
 // queue any unknowns onto a fetch_items request.
@@ -159,7 +187,8 @@ func (d *Delegate) handleInv(p *node.Peer, body []byte) {
 				st.known[bid] = struct{}{}
 				continue
 			}
-			// Skip if its embedded block_num is at or below our head.
+			// Skip on height alone where that is safe (see skipByHeight —
+			// fork-aware keeps same-height rivals fetchable).
 			if bid.Num() != 0 {
 				// headBlockHint is a lock-free atomic mirror; calling
 				// d.chain.HeadBlock() here would take applyMu.RLock per
@@ -168,7 +197,7 @@ func (d *Delegate) handleInv(p *node.Peer, body []byte) {
 				if head == 0 {
 					head, _ = d.chain.HeadBlock()
 				}
-				if bid.Num() <= head {
+				if d.skipByHeight(bid.Num(), head) {
 					st.known[bid] = struct{}{}
 					continue
 				}
@@ -328,8 +357,11 @@ func (d *Delegate) handleBlockchainItemIDsInventory(p *node.Peer, body []byte) {
 		if n := bid.Num(); n > st.peerHeadNum {
 			st.peerHeadNum = n
 		}
-		// Skip already-applied + already-outstanding.
-		if bid.Num() != 0 && bid.Num() <= myHead {
+		// Skip already-applied + already-outstanding. The height gate is
+		// fork-aware: a rival block at our own head height must stay fetchable
+		// or fork choice can never see the competing branch (see skipByHeight).
+		// The ID check immediately below is what excludes our own head block.
+		if d.skipByHeight(bid.Num(), myHead) {
 			continue
 		}
 		if d.chain.RecentBlockBytesByID(bid) != nil {
