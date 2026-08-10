@@ -940,22 +940,6 @@ func (d *Delegate) PublishBlock(rawBlock []byte, blockNum uint32) error {
 	}
 }
 
-// evictMempool drops transactions carried by a block we just applied. Cheap:
-// one parse of a ~40-tx block per 3s slot.
-func (d *Delegate) evictMempool(rawBlock []byte) {
-	ev, ok := d.cfg.Mempool.(MempoolEvictor)
-	if !ok || ev == nil {
-		return
-	}
-	ids := chain.BlockTransactionIDs(rawBlock)
-	if len(ids) == 0 {
-		return
-	}
-	if n := ev.RemoveIncludedTxIDs(ids); n > 0 {
-		d.txEvicted.Add(uint64(n))
-	}
-}
-
 func (d *Delegate) poke() {
 	d.idleMu.Lock()
 	d.idleRounds = 0

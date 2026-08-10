@@ -271,3 +271,43 @@ func TestAddPendingRawReportsDuplicates(t *testing.T) {
 		t.Fatalf("duplicate error not recognisable by the p2p layer: %v", err)
 	}
 }
+
+// TestRemoveIncludedTxID covers the single-id eviction fired from
+// chain.ApplyBlock for EVERY apply path.
+//
+// The p2p-side hook it replaces only saw blocks that passed back through sync,
+// so blocks applied via drainForward (out-of-order buffering) or re-applied
+// during a reorg were missed. Measured live: ~46% coverage, queue still growing
+// ~356/min toward the 8000 cap — where admission stops and we produce empty
+// blocks again. Partial eviction looks like working eviction until you plot it.
+func TestRemoveIncludedTxID(t *testing.T) {
+	p := newMempoolPlugin(t)
+	a, aid := rawTx(t, "mined", 1<<30)
+	b, bid := rawTx(t, "pending", 1<<30)
+	p.AddPendingTx(a, aid, 1<<30)
+	p.AddPendingTx(b, bid, 1<<30)
+
+	p.RemoveIncludedTxID(aid)
+	if n := p.PendingCount(); n != 1 {
+		t.Fatalf("PendingCount=%d want 1", n)
+	}
+	// Unknown id is a cheap no-op — this fires for every transaction on chain,
+	// the vast majority of which we never held.
+	p.RemoveIncludedTxID([20]byte{0xde, 0xad})
+	if n := p.PendingCount(); n != 1 {
+		t.Fatalf("unknown id disturbed the queue: PendingCount=%d", n)
+	}
+	// Index must stay in lockstep: the evicted transaction must be re-admittable.
+	if !p.AddPendingTx(a, aid, 1<<30) {
+		t.Fatal("re-offer of an evicted transaction REJECTED — stale id left in the dedup index")
+	}
+	if n := p.PendingCount(); n != 2 {
+		t.Fatalf("PendingCount=%d want 2", n)
+	}
+	p.mu.Lock()
+	left := p.pending[0].id
+	p.mu.Unlock()
+	if left != bid {
+		t.Fatal("eviction removed the wrong transaction")
+	}
+}

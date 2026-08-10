@@ -649,11 +649,6 @@ func (d *Delegate) applyLoop() {
 			// Event source for the advert set — hived calls broadcast() at
 			// exactly this point (block accepted). No-op when passive.
 			d.queueAdvert(job.rawBlock, job.blockNum)
-			// Drop mempool entries this block just mined. Must happen for EVERY
-			// applied block, not only ours: otherwise the queue accumulates
-			// transactions other witnesses already included, and by our slot
-			// every candidate is a duplicate and we produce an empty block.
-			d.evictMempool(job.rawBlock)
 			d.poke()
 		}
 	}
@@ -712,9 +707,6 @@ func (d *Delegate) applyLoop() {
 		// not by job.blockNum.
 		if outcome != chain.PushBuffered && h == job.blockNum {
 			d.queueAdvert(job.rawBlock, h)
-		}
-		if outcome != chain.PushBuffered {
-			d.evictMempool(job.rawBlock)
 		}
 		d.poke()
 	}
