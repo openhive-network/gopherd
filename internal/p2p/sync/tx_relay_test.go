@@ -14,6 +14,7 @@ import (
 // transaction propagation would stop.
 func TestTxRelayQueue(t *testing.T) {
 	_, d := advertHarness(t) // Serve: true
+	d.cfg.RelayTransactions = true // OFF by default until the advert identity is right
 	d.cfg.MaxTxPerInv = 4
 
 	for i := 0; i < 10; i++ {
@@ -43,12 +44,27 @@ func TestTxRelayQueue(t *testing.T) {
 	}
 }
 
+// TestRelayOffByDefault pins that relay does not fire unless explicitly enabled.
+// It shipped advertising transactions by the WRONG identity (transaction id
+// instead of hived's legacy message hash) and got us dropped by every peer 234
+// times, so the default must be off until the identity is verified live.
+func TestRelayOffByDefault(t *testing.T) {
+	c := newStubChain()
+	d := newWithChain(Config{Serve: true}, c) // RelayTransactions unset
+	for i := 0; i < 5; i++ {
+		d.queueTxAdvert(block.ID{byte(i)})
+	}
+	if got := d.drainTxAdvert(); len(got) != 0 {
+		t.Fatalf("relay queued %d transactions with RelayTransactions unset", len(got))
+	}
+}
+
 // TestPassiveNodeNeverRelays pins that a fetch-only node advertises nothing.
 // A passive node cannot serve, and advertising what you cannot serve is what
 // gets a node dropped by its peers.
 func TestPassiveNodeNeverRelays(t *testing.T) {
 	c := newStubChain()
-	d := newWithChain(Config{Serve: false}, c)
+	d := newWithChain(Config{Serve: false, RelayTransactions: true}, c)
 	for i := 0; i < 5; i++ {
 		d.queueTxAdvert(block.ID{byte(i)})
 	}

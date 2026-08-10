@@ -191,6 +191,20 @@ type Config struct {
 	// Logger receives one-line status messages. nil → os.Stderr.
 	Logger io.Writer
 
+	// RelayTransactions enables advertising transactions to peers. DEFAULT OFF.
+	//
+	// The first implementation advertised transactions by TRANSACTION ID; hived
+	// advertises them by the LEGACY MESSAGE HASH
+	// (node.cpp:1436, get_legacy_transaction_message_hash). A peer therefore
+	// fetched what we advertised, received the body, hashed it its own way, got
+	// an id it had never asked for, and dropped us: "You sent me a message that
+	// I didn't request" — 234 times in one run, with peers oscillating 0..12.
+	//
+	// Same class as the unsolicited block push (108887429): the payload was
+	// fine, the IDENTITY was wrong. Off until the identity is implemented and
+	// verified against a real peer.
+	RelayTransactions bool
+
 	// Mempool, when non-nil, receives inbound transaction bodies. Supplying it
 	// also switches ON transaction fetching: with no mempool we record tx
 	// inventory as known and never request the bodies, since there would be
@@ -957,8 +971,8 @@ func (d *Delegate) PublishBlock(rawBlock []byte, blockNum uint32) error {
 
 // queueTxAdvert records a newly admitted transaction for relay.
 func (d *Delegate) queueTxAdvert(id block.ID) {
-	if !d.cfg.Serve {
-		return // passive: never advertise anything
+	if !d.cfg.Serve || !d.cfg.RelayTransactions {
+		return // passive, or relay disabled
 	}
 	d.pendingTxAdvertMu.Lock()
 	// Bounded: a burst must not grow this without limit. Dropping the oldest is
