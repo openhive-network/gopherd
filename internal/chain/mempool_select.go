@@ -7,6 +7,7 @@ import (
 	"hived-go/internal/chain/evaluator"
 	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/network"
+	"hived-go/internal/protocol/op"
 	"hived-go/internal/fcraw"
 	"hived-go/internal/protocol/tx"
 	"hived-go/internal/state"
@@ -307,6 +308,29 @@ func (d *Database) ValidateIncomingTx(raw []byte) error {
 	if err := validateTxPreFlight(session, &res.SignedTx, blockNum, dgpo.Time, txID, true); err != nil {
 		return fmt.Errorf("preflight: %w", err)
 	}
+	// Per-operation structural validation, which hived runs on every
+	// transaction it accepts (database.cpp:2627, full_transaction->validate()).
+	// We had the validators and never called them on this path.
+	//
+	// That is the likeliest reason our mempool filled with transactions nobody
+	// mines (~20/block accumulating) and why block 108912883 was rejected: we
+	// admitted structurally invalid transactions the rest of the network had
+	// already refused, then put 579 of them in a block.
+	//
+	// Only ops implementing Validator are checked — 10 of 51 today — so this
+	// filters what it can prove invalid and passes the rest. Deliberately
+	// applied at ADMISSION only, never when applying someone else's block: if
+	// our validators were ever stricter than hived's, rejecting a network block
+	// would fork us off the chain, whereas rejecting a transaction only costs
+	// that transaction.
+	for i := range res.SignedTx.Operations {
+		if v, ok := res.SignedTx.Operations[i].Operation().(op.Validator); ok {
+			if verr := v.Validate(); verr != nil {
+				return fmt.Errorf("op %d invalid: %w", i, verr)
+			}
+		}
+	}
+
 	// NO RC check at admission, deliberately.
 	//
 	// hived enforces RC inside push_transaction, which runs when a node accepts
