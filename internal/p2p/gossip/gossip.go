@@ -137,6 +137,26 @@ func (s *Service) Stop() {}
 //
 // rawBlock is JUST the signed_block bytes (no trailing block_id);
 // the gossip layer derives the block_id from the header itself.
+// BroadcastBlock pushes a raw block_message body at every peer.
+//
+// ⛔ DO NOT WIRE THIS TO BLOCK PUBLICATION. hived accepts a block_message ONLY
+// if it explicitly requested it; anything else is misbehaviour and the peer
+// disconnects on the spot — libraries/net/node.cpp:
+//
+//	"received a block ${block_id} I didn't ask for from peer ${endpoint},
+//	 disconnecting from peer"
+//
+// This function was the witness plugin's publication path until 2026-08-10,
+// when howo's block 108887429 was pushed this way and ALL EIGHT peers dropped
+// us in the same instant with that exact reason. The block never propagated,
+// the slot was missed, and the node then wedged on its own orphan.
+//
+// The correct way to publish a block is sync.Delegate.PublishBlock: apply it on
+// the single-writer path, then advertise its ID via the inventory loop and let
+// peers fetch the body — which is what hived's node_impl::broadcast does.
+//
+// Kept only because the tx-relay half of this package is still the intended
+// home for a future mempool. No production caller remains.
 func (s *Service) BroadcastBlock(rawBlock []byte, blockNum uint32) {
 	id, ok := blockIDFromHeader(rawBlock, blockNum)
 	if !ok {
@@ -151,12 +171,14 @@ func (s *Service) BroadcastBlock(rawBlock []byte, blockNum uint32) {
 	s.cfg.Node.Broadcast(proto.BlockMessageType, body, nil)
 }
 
-// BroadcastAppliedBlock is wired into sync.Config.OnBlockApplied. It
-// fires from sync's applyLoop AFTER a successful ApplyBlock; we fan
-// the block out to every peer other than `source`. `source == nil`
-// indicates a locally-produced block (in which case BroadcastBlock has
-// usually already broadcast it; this call short-circuits via the
-// seenBlk dedup).
+// BroadcastAppliedBlock re-fans an applied block out to peers other than
+// `source`.
+//
+// ⛔ Same protocol violation as BroadcastBlock above — it pushes a raw
+// block_message body, which peers disconnect over. NOT wired to
+// sync.Config.OnBlockApplied in the daemon, and it must not be: relaying blocks
+// is done by advertising IDs from the apply path (sync's queueAdvert), not by
+// pushing bodies. Left in place for the tx-relay half of this package.
 func (s *Service) BroadcastAppliedBlock(rawBlock []byte, blockNum uint32, source *p2pnode.Peer) {
 	id, ok := blockIDFromHeader(rawBlock, blockNum)
 	if !ok {
