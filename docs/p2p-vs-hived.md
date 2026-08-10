@@ -149,3 +149,53 @@ Regression tests: `internal/p2p/sync/advertise_age_test.go` (7 cases). Three wer
 verified to fail against the pre-incident code, with its own signature
 (`advertised 200 blocks, want <= 11`). They drive the event path — `queueAdvert`
 then drain — so they exercise how blocks actually enter the advert set.
+
+---
+
+## Publishing a block we produced (2026-08-10, block 108887429)
+
+The advert work above covers blocks we *received*. Blocks we *produce* took a
+completely different path, and it was wrong in three ways at once. howo's first
+real block was built correctly — right slot, on time, signed with the key
+registered on chain — and still lost.
+
+### What hived does
+
+`node_impl::broadcast(const std::shared_ptr<full_block_type>&)` — node.cpp:5758:
+
+```cpp
+_most_recent_blocks_accepted.push_back(block_id);   // don't re-request our own
+_block_message_cache.cache_message(full_block, ..); // so we can SERVE it
+_new_block_inventory.insert(full_block);            // advertise the ID
+trigger_advertise_inventory_loop();
+```
+
+It never pushes a block body. Publication is: cache it, advertise the **ID**,
+serve it when a peer asks. Which is the same advert path a received block takes
+— hived has exactly one publication mechanism, not two.
+
+### What we did
+
+| # | Defect | Consequence |
+|---|---|---|
+| 1 | `gossip.BroadcastBlock` pushed an unsolicited `block_message` body | hived accepts a `block_message` **only** if it requested it; otherwise "received a block I didn't ask for from peer, disconnecting from peer" (node.cpp:4039). All 8 peers dropped us in the same instant. Block never propagated; slot missed. |
+| 2 | Witness called `chain.ApplyBlock` directly, no `Reversible` | Our own block became the **committed** head immediately. `PushLiveBlock` then filed the network's real block for that height as `PushStale` (`num <= committedNum()`), and its child buffered forever. `--fork-switching` was ON and structurally unable to help. |
+| 3 | Both inventory paths skipped offered blocks with `height <= head` | We never fetched the competing block, so fork choice could not see the rival branch even once defect 2 was fixed. |
+
+### Rules this fixes
+
+1. **The witness applies nothing and broadcasts nothing.** It hands the block to
+   `sync.Delegate.PublishBlock` and the normal apply path does both — one
+   publication mechanism, like hived.
+2. **A block we produce must stay reversible.** Any produced block may lose its
+   slot race; if it is committed on creation, losing it wedges the node
+   permanently. `--produce` therefore requires `--fork-switching`.
+3. **A rival at our own head height must stay fetchable** (`skipByHeight`).
+   Fork choice cannot switch to a branch it was never allowed to download.
+4. **Local apply is not network acceptance.** `witness: APPLIED block N` was
+   printed while every peer was rejecting it. The on-chain verdict is
+   `get_block(N).witness` and the witness's `last_confirmed_block_num`.
+
+Regression tests: `TestProductionDoesNotApplyLocally`,
+`TestProductionRefusesWithoutPublisher` (`internal/plugins/witness/`),
+`TestSkipByHeightForkAware` (`internal/p2p/sync/`). Fix: `31cb0f7`.
