@@ -230,6 +230,7 @@ func (d *Delegate) handleInv(p *node.Peer, body []byte) {
 			d.outstandingTotal.Add(1)
 			missing = append(missing, h)
 		case proto.ItemTypeTrx:
+			d.txInvOffered.Add(1)
 			// Without a mempool there is nowhere to put a transaction, so
 			// record it as known and never ask for the body.
 			if d.cfg.Mempool == nil {
@@ -251,6 +252,7 @@ func (d *Delegate) handleInv(p *node.Peer, body []byte) {
 				continue
 			}
 			st.known[bid] = struct{}{}
+			d.txFetched.Add(1)
 			missing = append(missing, h)
 		}
 	}
