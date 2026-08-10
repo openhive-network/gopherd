@@ -149,6 +149,10 @@ type Plugin struct {
 	// shows up as a number rather than only as a log line.
 	skippedNoKey int
 
+	// lastSelect describes the most recent transaction selection, reported with
+	// the PRODUCED line so an empty block explains itself on the spot.
+	lastSelect string
+
 	// produced counts blocks we built and successfully handed to the Publisher.
 	// This is "submitted for publication", NOT "accepted by the network" — the
 	// two diverged silently on 2026-08-10, when a produced block was applied
@@ -624,8 +628,14 @@ func (p *Plugin) maybeProduceBlock() error {
 	if err := p.Publisher.PublishBlock(rawBlock, blockNum); err != nil {
 		return fmt.Errorf("witness publish_block %d: %w", blockNum, err)
 	}
-	fmt.Fprintf(os.Stderr, "witness: PRODUCED block %d for %s (slot time=%d, %d bytes) — submitted for apply + inventory advertisement\n",
-		blockNum, prod.Account, nextSlotTime, len(rawBlock))
+	p.mu.Lock()
+	selInfo := p.lastSelect
+	p.mu.Unlock()
+	if selInfo == "" {
+		selInfo = "mempool empty"
+	}
+	fmt.Fprintf(os.Stderr, "witness: PRODUCED block %d for %s (slot time=%d, %d bytes) [select: %s] — submitted for apply + inventory advertisement\n",
+		blockNum, prod.Account, nextSlotTime, len(rawBlock), selInfo)
 	p.mu.Lock()
 	p.produced++
 	p.pending = p.pending[:0] // drain the mempool
@@ -860,11 +870,27 @@ func (p *Plugin) buildBlockParts(prod *Producer, dgpo objects.DynamicGlobalPrope
 		// block containing a transaction that fails to apply is an invalid
 		// block — the network drops it and we miss the slot — so nothing goes
 		// in on the strength of admission checks alone.
+		selStart := time.Now()
 		sel, serr := p.Chain.SelectPendingTransactions(
 			candidates, dgpo.HeadBlockNumber+1, blockTime, prod.Account, p.maxTxBytes(dgpo))
 		if serr != nil {
 			return nil, 0, fmt.Errorf("buildBlock: select pending: %w", serr)
 		}
+		// Report what selection actually did. Selection trial-APPLIES every
+		// candidate while holding the apply lock, inside a 3s slot budget, so
+		// both the outcome mix and the cost belong in the log: "0 included out
+		// of N" is the empty-block signature, and a slow selection would eat the
+		// slot itself.
+		byReason := map[string]int{}
+		for _, why := range sel.Rejected {
+			byReason[why.String()]++
+		}
+		info := fmt.Sprintf("candidates=%d included=%d bytes=%d in %.1fms rejected=%v",
+			len(candidates), len(sel.Accepted), sel.Bytes,
+			float64(time.Since(selStart).Microseconds())/1000.0, byReason)
+		p.mu.Lock()
+		p.lastSelect = info
+		p.mu.Unlock()
 		for _, raw := range sel.Accepted {
 			txBytes = append(txBytes, raw...)
 		}
