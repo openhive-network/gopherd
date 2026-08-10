@@ -86,6 +86,7 @@ func (d *Database) SelectPendingTransactions(
 	candidates [][]byte,
 	blockNum uint32,
 	blockTime uint32,
+	producer string,
 	maxBytes int,
 ) (PendingSelection, error) {
 	sel := PendingSelection{Rejected: make(map[int]PendingTxOutcome)}
@@ -130,7 +131,14 @@ func (d *Database) SelectPendingTransactions(
 		BlockNum:      blockNum,
 		BlockTime:     blockTime,
 		HeadBlockTime: headBlockTime,
-		Witness:       dgpo.CurrentWitness,
+		// The PRODUCER of the block being built — not dgpo.CurrentWitness, which
+		// is the PREVIOUS block's producer. ApplyBlock uses hdr.Witness here, and
+		// a trial apply that does not model the real apply can approve a
+		// transaction that then fails, which invalidates the whole block. Only
+		// pow.go reads this today (dead on mainnet), so the divergence is
+		// currently harmless — but "currently harmless" is not a property worth
+		// depending on in block assembly.
+		Witness:       producer,
 		// Virtual ops emitted during selection are discarded: this is a trial
 		// run, and the real ones are produced when the block is actually
 		// applied. Feeding them to the live buffer would duplicate every vop.

@@ -410,16 +410,40 @@ func (p *Plugin) run() {
 	defer close(p.doneCh)
 	timer := time.NewTimer(nextWake(time.Now()))
 	defer timer.Stop()
+	// Sweep expired transactions on a cadence, not only when we build. A backup
+	// witness builds every 20-40 minutes, so expiry-at-build alone leaves dead
+	// transactions occupying the queue (and being re-validated) for the whole
+	// gap — and the queue is capped, so dead entries crowd out live ones.
+	sweep := time.NewTicker(30 * time.Second)
+	defer sweep.Stop()
 	for {
 		select {
 		case <-p.stopCh:
 			return
+		case <-sweep.C:
+			p.sweepExpired()
 		case <-timer.C:
 			if err := p.maybeProduceBlock(); err != nil {
 				fmt.Fprintf(os.Stderr, "witness: %v\n", err)
 			}
 			timer.Reset(nextWake(time.Now()))
 		}
+	}
+}
+
+// sweepExpired drops transactions the chain can no longer accept, using the
+// head block's timestamp as "now" (the same clock validateTxPreFlight judges
+// expiration against — wall-clock would disagree with consensus).
+func (p *Plugin) sweepExpired() {
+	if p.Chain == nil {
+		return
+	}
+	dgpo, err := p.Chain.GetDGPO()
+	if err != nil {
+		return
+	}
+	if n := p.dropExpired(dgpo.Time); n > 0 {
+		p.logEvery(time.Minute, "mempool: swept %d expired transaction(s), depth=%d", n, p.PendingCount())
 	}
 }
 
@@ -837,7 +861,7 @@ func (p *Plugin) buildBlockParts(prod *Producer, dgpo objects.DynamicGlobalPrope
 		// block — the network drops it and we miss the slot — so nothing goes
 		// in on the strength of admission checks alone.
 		sel, serr := p.Chain.SelectPendingTransactions(
-			candidates, dgpo.HeadBlockNumber+1, blockTime, p.maxTxBytes(dgpo))
+			candidates, dgpo.HeadBlockNumber+1, blockTime, prod.Account, p.maxTxBytes(dgpo))
 		if serr != nil {
 			return nil, 0, fmt.Errorf("buildBlock: select pending: %w", serr)
 		}
