@@ -134,6 +134,10 @@ type Plugin struct {
 	// slot is 3s, so without this one slot would yield ~6 identical blocks.
 	lastDrySlot uint32
 
+	// lastSlotAnnounced dedupes the "our slot" line to once per head, since the
+	// production loop re-enters several times within a single 3s slot.
+	lastSlotAnnounced uint32
+
 	// skippedNoKey counts slots we declined because the chain's signing key for
 	// that witness is not the key we hold. Surfaced so a misconfigured witness
 	// shows up as a number rather than only as a log line.
@@ -391,7 +395,20 @@ func (p *Plugin) maybeProduceBlock() error {
 	// races the cross-Session Aux cache that ApplyBlock mutates on
 	// commit.
 	headBN, _ := p.Chain.HeadBlock()
-	fmt.Fprintf(os.Stderr, "witness: producing for %s (head=%d)\n", scheduled, headBN)
+	// Announce the slot ONCE, and truthfully.
+	//
+	// This used to be an unconditional "producing for X" printed right here —
+	// before the key gate, before the publisher check, and before the
+	// slot-boundary wait, any of which can decline. So it announced production
+	// that frequently never happened (e.g. every slot where the chain's
+	// registered key is not ours), and because the loop re-enters every 250ms
+	// against a 3s slot it printed the same false claim about a dozen times per
+	// slot. Report what is actually known at this point — the schedule named us
+	// — and let the outcome lines below report what was decided.
+	if p.lastSlotAnnounced != headBN {
+		p.lastSlotAnnounced = headBN
+		fmt.Fprintf(os.Stderr, "witness: our slot at head %d (schedule names %s) — evaluating\n", headBN, scheduled)
+	}
 
 	// KEY GATE — the only thing standing between "log and skip" and publishing a
 	// real consensus block. Compare the key we hold against the witness's
