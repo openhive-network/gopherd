@@ -1040,6 +1040,7 @@ type Stats struct {
 	TxInvOffered uint64
 	TxFetched    uint64
 	TxEvicted    uint64
+	TxOverflowed uint64
 	TxDuplicate  uint64
 	// InvIgnoredCatchup is the cumulative count of tip-inventory adverts
 	// dropped by handleInv's catch-up gate (hived-1.28.7 storm fix). Nonzero
@@ -1089,6 +1090,10 @@ func (d *Delegate) Stats() Stats {
 	if mp, ok := d.cfg.Mempool.(interface{ EvictedCount() int }); ok && mp != nil {
 		mempoolEvicted = mp.EvictedCount()
 	}
+	mempoolOverflow := 0
+	if mp, ok := d.cfg.Mempool.(interface{ OverflowedCount() int }); ok && mp != nil {
+		mempoolOverflow = mp.OverflowedCount()
+	}
 	return Stats{
 		QueueDepth:             d.QueueDepth(),
 		QueueCapacity:          d.QueueCapacity(),
@@ -1114,6 +1119,7 @@ func (d *Delegate) Stats() Stats {
 		TxInvOffered:           d.txInvOffered.Load(),
 		TxFetched:              d.txFetched.Load(),
 		TxEvicted:              uint64(mempoolEvicted),
+		TxOverflowed:           uint64(mempoolOverflow),
 		TxDuplicate:            d.txDuplicate.Load(),
 		MempoolDepth:           mempoolDepth,
 	}
