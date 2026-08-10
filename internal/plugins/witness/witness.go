@@ -341,6 +341,24 @@ func (p *Plugin) OverflowedCount() int {
 	return p.overflowed
 }
 
+// PendingRaw returns the verbatim wire bytes of a queued transaction, or nil.
+// Used to answer a peer's fetch_items for a transaction we advertised: having
+// advertised it, we must be able to serve it, or the peer drops us for
+// offering what we cannot provide.
+func (p *Plugin) PendingRaw(id [20]byte) []byte {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if _, ok := p.pendingIDs[id]; !ok {
+		return nil
+	}
+	for i := range p.pending {
+		if p.pending[i].id == id {
+			return p.pending[i].raw
+		}
+	}
+	return nil
+}
+
 // PendingCount reports the current mempool depth.
 func (p *Plugin) PendingCount() int {
 	p.mu.Lock()
