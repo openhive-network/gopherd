@@ -1010,6 +1010,15 @@ type Stats struct {
 	// GlobalInflight is the size of the global in-flight reservation set.
 	// With dedup working it tracks DistinctOutstanding closely.
 	GlobalInflight int
+	// TxAccepted / TxRejected count mempool admissions, and MempoolDepth is
+	// the current queue. All three exist because a producing node's mempool is
+	// otherwise INVISIBLE: gopherd produced empty blocks for its whole life
+	// without a single metric saying so. Read them together — TxAccepted=0 with
+	// TxRejected>0 means transactions arrive and validation rejects them all,
+	// which looks exactly like a quiet network if you only track one.
+	TxAccepted   uint64
+	TxRejected   uint64
+	MempoolDepth int
 	// InvIgnoredCatchup is the cumulative count of tip-inventory adverts
 	// dropped by handleInv's catch-up gate (hived-1.28.7 storm fix). Nonzero
 	// and climbing == we're behind and correctly ignoring tip INV; stops
@@ -1051,6 +1060,10 @@ func (d *Delegate) Stats() Stats {
 	d.inflightMu.Lock()
 	inflight := len(d.inflight)
 	d.inflightMu.Unlock()
+	mempoolDepth := 0
+	if mp, ok := d.cfg.Mempool.(interface{ PendingCount() int }); ok && mp != nil {
+		mempoolDepth = mp.PendingCount()
+	}
 	return Stats{
 		QueueDepth:             d.QueueDepth(),
 		QueueCapacity:          d.QueueCapacity(),
@@ -1071,5 +1084,8 @@ func (d *Delegate) Stats() Stats {
 		TipStallKicks:          d.tipStallKicks.Load(),
 		InvReceived:            d.invReceived.Load(),
 		TipSyncHandshakes:      d.tipSyncHandshakes.Load(),
+		TxAccepted:             d.txAccepted.Load(),
+		TxRejected:             d.txRejected.Load(),
+		MempoolDepth:           mempoolDepth,
 	}
 }
