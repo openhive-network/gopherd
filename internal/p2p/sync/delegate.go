@@ -373,6 +373,8 @@ type Delegate struct {
 	txInvOffered atomic.Uint64
 	txFetched    atomic.Uint64
 	txDuplicate  atomic.Uint64
+	txServed     atomic.Uint64
+	txRelayed    atomic.Uint64
 	// inhibitFetching is set when applyQLen >= high-water and cleared
 	// when it drops below low-water. While set, sendFetchItems is a
 	// no-op. Toggle is performed by the applyLoop on each dequeue and
@@ -469,6 +471,13 @@ type Delegate struct {
 	// at the tip. Paired with invReceived: handshakes climbing while invRx
 	// stays 0 means the handshake is not convincing peers we are in sync.
 	tipSyncHandshakes atomic.Int64
+
+	// pendingTxAdvert holds transaction ids admitted since the last advertise
+	// round. hived relays every transaction it accepts; a node that only
+	// fetches is a pure sink, and if every node behaved that way transaction
+	// propagation would stop.
+	pendingTxAdvert   []block.ID
+	pendingTxAdvertMu sync.Mutex
 
 	// pendingAdvertMu guards pendingAdvert.
 	//
@@ -757,6 +766,13 @@ type MempoolEvictor interface {
 	RemoveIncludedTxIDs(ids [][20]byte) int
 }
 
+// MempoolReader lets the serve path answer a peer's fetch_items for a
+// transaction we advertised. Advertising something we then cannot provide is
+// what gets a node dropped, so relay REQUIRES this.
+type MempoolReader interface {
+	PendingRaw(id [20]byte) []byte
+}
+
 type applyJob struct {
 	blockNum uint32
 	rawBlock []byte
@@ -939,6 +955,38 @@ func (d *Delegate) PublishBlock(rawBlock []byte, blockNum uint32) error {
 	}
 }
 
+// queueTxAdvert records a newly admitted transaction for relay.
+func (d *Delegate) queueTxAdvert(id block.ID) {
+	if !d.cfg.Serve {
+		return // passive: never advertise anything
+	}
+	d.pendingTxAdvertMu.Lock()
+	// Bounded: a burst must not grow this without limit. Dropping the oldest is
+	// harmless — peers get that transaction from someone else.
+	if len(d.pendingTxAdvert) >= d.cfg.MaxTxPerInv*4 {
+		d.pendingTxAdvert = d.pendingTxAdvert[1:]
+	}
+	d.pendingTxAdvert = append(d.pendingTxAdvert, id)
+	d.pendingTxAdvertMu.Unlock()
+}
+
+// drainTxAdvert takes the pending transaction ids, capped per round.
+func (d *Delegate) drainTxAdvert() []block.ID {
+	d.pendingTxAdvertMu.Lock()
+	defer d.pendingTxAdvertMu.Unlock()
+	if len(d.pendingTxAdvert) == 0 {
+		return nil
+	}
+	n := len(d.pendingTxAdvert)
+	if n > d.cfg.MaxTxPerInv {
+		n = d.cfg.MaxTxPerInv
+	}
+	out := make([]block.ID, n)
+	copy(out, d.pendingTxAdvert[:n])
+	d.pendingTxAdvert = d.pendingTxAdvert[n:]
+	return out
+}
+
 func (d *Delegate) poke() {
 	d.idleMu.Lock()
 	d.idleRounds = 0
@@ -1041,6 +1089,8 @@ type Stats struct {
 	TxFetched    uint64
 	TxEvicted    uint64
 	TxOverflowed uint64
+	TxServed     uint64
+	TxRelayed    uint64
 	TxDuplicate  uint64
 	// InvIgnoredCatchup is the cumulative count of tip-inventory adverts
 	// dropped by handleInv's catch-up gate (hived-1.28.7 storm fix). Nonzero
@@ -1121,6 +1171,8 @@ func (d *Delegate) Stats() Stats {
 		TxEvicted:              uint64(mempoolEvicted),
 		TxOverflowed:           uint64(mempoolOverflow),
 		TxDuplicate:            d.txDuplicate.Load(),
+		TxServed:               d.txServed.Load(),
+		TxRelayed:              d.txRelayed.Load(),
 		MempoolDepth:           mempoolDepth,
 	}
 }

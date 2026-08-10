@@ -107,7 +107,8 @@ func (d *Delegate) broadcastInv() {
 	// filtering; the age gate inside is a backstop for when a starved advert
 	// loop lets an entry go stale before it ships.
 	allIDs := d.selectAdvertIDs(time.Now().Unix())
-	if len(allIDs) == 0 {
+	txIDs := d.drainTxAdvert()
+	if len(allIDs) == 0 && len(txIDs) == 0 {
 		d.idleMu.Lock()
 		d.idleRounds++
 		d.idleMu.Unlock()
@@ -156,6 +157,35 @@ func (d *Delegate) broadcastInv() {
 			hashes = append(hashes, proto.ItemHash(id))
 		}
 		st.mu.Unlock()
+		// Transactions go in their own inventory message: one message carries a
+		// single item type. Unlike blocks these are NOT withheld from older
+		// peers — transaction ids are identified the same way at every protocol
+		// version, so the >=107 gate that applies to block ids does not apply
+		// here.
+		if len(txIDs) > 0 {
+			txHashes := make([]proto.ItemHash, 0, len(txIDs))
+			st.mu.Lock()
+			for _, id := range txIDs {
+				if _, ok := st.known[id]; ok {
+					continue // this peer already told us about it, or we it
+				}
+				st.known[id] = struct{}{}
+				txHashes = append(txHashes, proto.ItemHash(id))
+			}
+			st.mu.Unlock()
+			if len(txHashes) > 0 {
+				tmsg := proto.ItemIDsInventoryMessage{
+					ItemType:            proto.ItemTypeTrx,
+					ItemHashesAvailable: txHashes,
+				}
+				if tenc, terr := tmsg.Marshal(); terr == nil {
+					if serr := p.Send(proto.ItemIDsInventoryMessageType, tenc); serr == nil {
+						d.txRelayed.Add(uint64(len(txHashes)))
+						advertisedAny = true
+					}
+				}
+			}
+		}
 		if len(hashes) == 0 {
 			continue
 		}
