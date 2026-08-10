@@ -1,6 +1,7 @@
 package sync
 
 import (
+	"errors"
 	"time"
 
 	"hived-go/internal/crypto"
@@ -93,6 +94,14 @@ func (d *Delegate) OnTransactionReceived(p *node.Peer, body []byte) {
 		return
 	}
 	if err := d.cfg.Mempool.AddPendingRaw(body); err != nil {
+		// A duplicate is normal traffic (every transaction is advertised by
+		// several peers) and must not inflate the accepted count — that is what
+		// made a queue of 6266 look like 68767 admissions.
+		var dup interface{ IsDuplicateTx() bool }
+		if errors.As(err, &dup) && dup.IsDuplicateTx() {
+			d.txDuplicate.Add(1)
+			return
+		}
 		d.txRejected.Add(1)
 		return
 	}
