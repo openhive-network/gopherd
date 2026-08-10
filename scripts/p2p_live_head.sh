@@ -67,6 +67,25 @@ WORK_TIMING="${WORK_TIMING:-0}"
 # documented "set SNAP_DIR= to skip the shutdown snapshot" would do nothing.
 # With `-`, an explicitly-empty value is respected and only an UNSET variable
 # takes the default.
+# COLD_BACKEND selects the cold tier implementation, and it decides whether a
+# persist-state restart is FAST or pointless.
+#
+#   persist : PersistCold — mmap append-only, and the ONLY backend implementing
+#             durableColdTier. Because it is durable, the persist-state save
+#             writes ONLY the resident (unpaid) set and the load SKIPS the cold
+#             re-spill, rebuilding accounting from the cold index without
+#             faulting a single cold value.
+#   pebble  : durable on disk but does NOT implement durableColdTier, so the
+#             stores fall back to "serialize every cold row on save, re-spill
+#             every cold row on load".
+#
+# Measured with pebble (2026-08-10): a 27GB persist-state container, 199s to
+# save, and a resume that was still going at 22 MINUTES with RSS climbing to
+# 25.6GiB — i.e. slower than the ~24min snapshot load it was meant to replace,
+# because it re-spilled all 25GB of comment_store. The fast-restart design only
+# works on the durable backend.
+COLD_BACKEND="${COLD_BACKEND:-persist}"
+
 SNAP_DIR="${SNAP_DIR-/home/martin/p2p-live-snaps}"
 # Block-production DRY RUN: set WITNESS_KEYS to a file of `account WIF` lines.
 # Blocks are built, signed, self-verified, timed and DISCARDED — never applied
@@ -141,6 +160,7 @@ cat <<BANNER
  block_log  : OFF (--no-block-log; state+cold only)
  mem        : $MEM_MAX cgroup / ${MEM_LIMIT_GIB}GiB soft ; peers<=$MAX_PEERS
  head snap  : ${SNAP_DIR:-OFF (restart will re-sync the full delta)}
+ cold be.   : $COLD_BACKEND
  persist    : ${PERSIST_STATE_DIR:-OFF (every restart reloads the snapshot, ~20min)}
  produce    : $([ -n "$WITNESS_KEYS" ] && { [ "$PRODUCE_REAL" = "1" ] && echo "REAL (apply+broadcast IF key matches)" || echo "DRY RUN (build+sign+verify+discard; every-slot=$PRODUCE_EVERY_SLOT)"; } || echo "OFF")
  data=$DATA
@@ -158,7 +178,7 @@ exec systemd-run --user --scope --collect \
     --no-block-log \
     --load-snapshot="$SNAPSHOT" \
     --comment-resident-cap="$RESIDENT_CAP" \
-    --cold-backend=pebble --cold-dir="$COLD" \
+    --cold-backend="$COLD_BACKEND" --cold-dir="$COLD" \
     --mem-limit-gib="$MEM_LIMIT_GIB" \
     --cache-mb=1024 \
     --max-outbound-peers="$MAX_PEERS" \
