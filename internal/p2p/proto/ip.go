@@ -29,6 +29,32 @@ const (
 	ipFamilyV6 byte = 0x06
 )
 
+// IPv4 addresses go on the wire as a LITTLE-ENDIAN uint32 whose MOST
+// significant byte is the FIRST octet — so the octets appear REVERSED in the
+// byte stream. Both fc paths do this:
+//
+//	pack(ip::ipv4_address)  -> fc::raw::pack(s, v.addr)          // uint32 LE
+//	pack(ip::address)       -> 0x04, then the same uint32 LE
+//	address(const string&)  -> ipv4_address(boost .to_v4().to_uint())
+//
+// and boost's to_uint() returns the address with octet[0] in the HIGH byte
+// (1.2.3.4 -> 0x01020304). Serialized little-endian that emits <4,3,2,1>.
+//
+// We used to read the four wire bytes straight as octets in both directions,
+// which is invisible to a round-trip test (the error cancels itself) and was
+// caught only in production: peers advertise their NAT/private addresses, we
+// decoded 192.168.18.2 as 2.18.168.192, and then dialled that — 769 failed
+// dials in 40 minutes, aimed at unrelated public hosts. The encode side was
+// wrong symmetrically, so every peer we handshook with recorded OUR address
+// reversed and could never dial us back.
+func appendIPv4LE(dst []byte, b [4]byte) []byte {
+	return append(dst, b[3], b[2], b[1], b[0])
+}
+
+func ipv4FromLE(b [4]byte) netip.Addr {
+	return netip.AddrFrom4([4]byte{b[3], b[2], b[1], b[0]})
+}
+
 // Endpoint is a transport-level address: an IP plus a port. Wraps a
 // netip.AddrPort so callers get standard-library address handling.
 //
@@ -52,13 +78,8 @@ func MakeEndpoint(a netip.Addr, port uint16) Endpoint {
 func AppendAddress(dst []byte, a netip.Addr) []byte {
 	if a.Is4() {
 		dst = append(dst, ipFamilyV4)
-		// fc::ipv4_address::addr is a uint32 in host byte order; on little-
-		// endian hosts that places the low octet first. The C++ code
-		// constructs the uint32 from a string like "127.0.0.1" by shifting
-		// octets so that octet[0] occupies the low byte; on the wire that
-		// emerges as <oct0,oct1,oct2,oct3>. We honour that here directly.
 		b := a.As4()
-		dst = append(dst, b[0], b[1], b[2], b[3])
+		dst = appendIPv4LE(dst, b)
 		return dst
 	}
 	dst = append(dst, ipFamilyV6)
@@ -78,7 +99,7 @@ func ReadAddress(r *fcraw.Reader) (netip.Addr, error) {
 		if err := r.ReadInto(b[:]); err != nil {
 			return netip.Addr{}, fmt.Errorf("ip.address v4 body: %w", err)
 		}
-		return netip.AddrFrom4(b), nil
+		return ipv4FromLE(b), nil
 	case ipFamilyV6:
 		var b [16]byte
 		if err := r.ReadInto(b[:]); err != nil {
@@ -120,7 +141,7 @@ func AppendLegacyAddress(dst []byte, a netip.Addr) ([]byte, error) {
 		return dst, ErrNotIPv4
 	}
 	b := a.As4()
-	return append(dst, b[0], b[1], b[2], b[3]), nil
+	return appendIPv4LE(dst, b), nil
 }
 
 // ReadLegacyAddress decodes an fc::ip::legacy_address.
@@ -129,7 +150,7 @@ func ReadLegacyAddress(r *fcraw.Reader) (netip.Addr, error) {
 	if err := r.ReadInto(b[:]); err != nil {
 		return netip.Addr{}, fmt.Errorf("legacy_address: %w", err)
 	}
-	return netip.AddrFrom4(b), nil
+	return ipv4FromLE(b), nil
 }
 
 // AppendLegacyEndpoint encodes an fc::ip::legacy_endpoint (uint32 LE + uint16 LE).

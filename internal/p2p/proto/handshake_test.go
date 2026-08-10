@@ -69,7 +69,8 @@ func TestHelloMessageHexFixture(t *testing.T) {
 	// Constructed from the FC_REFLECT order in core_messages.hpp:
 	//   user_agent              = "ua"
 	//   core_protocol_version   = 106 (CoreProtocolVersion)
-	//   inbound_address         = 127.0.0.1 (v4)
+	//   inbound_address         = 127.0.0.1 (v4; on the wire as uint32 LE,
+	//                             i.e. octets reversed — see TestIPv4WireByteOrder)
 	//   inbound_port            = 0x1234
 	//   outbound_port           = 0x5678
 	//   node_public_key         = 33 bytes 00..20
@@ -78,7 +79,7 @@ func TestHelloMessageHexFixture(t *testing.T) {
 	hexFixture := "" +
 		"02" + "7561" + // user_agent: varuint(2) + "ua"
 		"6a000000" + // core_protocol_version = 106 LE
-		"04" + "7f000001" + // address: v4 family + 127.0.0.1
+		"04" + "0100007f" + // address: v4 family + 127.0.0.1 (uint32 LE -> octets reversed)
 		"3412" + // inbound_port LE
 		"7856" + // outbound_port LE
 		"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20" + // 33-byte pubkey

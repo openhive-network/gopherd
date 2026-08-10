@@ -111,7 +111,10 @@ func TestEncodeMessageRejectsTooLarge(t *testing.T) {
 func TestAddressRoundtripV4(t *testing.T) {
 	addr := netip.MustParseAddr("203.0.113.42")
 	enc := AppendAddress(nil, addr)
-	want := []byte{0x04, 203, 0, 113, 42}
+	// Octets REVERSED on the wire: fc packs ipv4_address.addr as a uint32
+	// little-endian, and boost's to_uint() puts octet[0] in the high byte.
+	// See TestIPv4WireByteOrder.
+	want := []byte{0x04, 42, 113, 0, 203}
 	if !bytes.Equal(enc, want) {
 		t.Fatalf("v4 wire: got %x, want %x", enc, want)
 	}
@@ -160,7 +163,7 @@ func TestLegacyAddressRoundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AppendLegacyAddress: %v", err)
 	}
-	want := []byte{10, 20, 30, 40}
+	want := []byte{40, 30, 20, 10} // reversed — see TestIPv4WireByteOrder
 	if !bytes.Equal(enc, want) {
 		t.Fatalf("legacy v4 wire: got %x, want %x", enc, want)
 	}
