@@ -153,6 +153,14 @@ type Plugin struct {
 	// the PRODUCED line so an empty block explains itself on the spot.
 	lastSelect string
 
+	// dryBlocks records what a DRY RUN built for a height, so it can be
+	// compared against the block the real witness produced for the same slot
+	// once it arrives. This is the only way to check block ASSEMBLY without
+	// publishing anything: in normal (non-congested) conditions every witness
+	// includes all pending transactions, so our set should match theirs. A
+	// difference is a defect in what we choose to include.
+	dryBlocks map[uint32]*dryBlock
+
 	// overflowed counts transactions dropped to make room at the cap. Non-zero
 	// is normal on a busy chain; a HIGH rate means the cap is too small for the
 	// unmineable-transaction backlog and fresh arrivals are being churned.
@@ -164,6 +172,12 @@ type Plugin struct {
 	// evict=0 while the mechanism itself was untested — measurement must move
 	// with the thing it measures.
 	evicted int
+
+	// dryCompared / dryMatched track how often a dry-run block matched the real
+	// witness's block for the same slot — the headline number for whether block
+	// assembly is correct.
+	dryCompared int
+	dryMatched  int
 
 	// produced counts blocks we built and successfully handed to the Publisher.
 	// This is "submitted for publication", NOT "accepted by the network" — the
@@ -210,6 +224,14 @@ func New(c *chain.Database, s *state.Database, producers []Producer) *Plugin {
 		stopCh:    make(chan struct{}),
 		doneCh:    make(chan struct{}),
 	}
+}
+
+// dryBlock is a block a dry run assembled, kept until the real block for that
+// height arrives.
+type dryBlock struct {
+	txIDs [][20]byte
+	bytes int
+	built time.Time
 }
 
 // pendingTx is one mempool entry: the transaction exactly as it arrived, plus
@@ -339,6 +361,78 @@ func (p *Plugin) OverflowedCount() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.overflowed
+}
+
+// CompareProducedBlock diffs a block we assembled in DRY RUN against the block
+// the real witness produced for the same height.
+//
+// This is the whole point of the dry run: block ASSEMBLY can be checked without
+// publishing anything. In normal (non-congested) conditions every witness
+// includes all pending transactions, so the two sets should be the SAME
+// transactions. Differences localise the defect:
+//
+//	only-ours   we included transactions the real witness did not — we are
+//	            accepting things the network refuses (this is what put 579
+//	            transactions in block 108912883 and got it rejected)
+//	only-theirs we MISSED transactions everyone else had — our mempool is not
+//	            seeing or is wrongly rejecting real traffic
+//
+// Called from the apply path once the real block lands; cheap set arithmetic.
+func (p *Plugin) CompareProducedBlock(blockNum uint32, actual [][20]byte) {
+	p.mu.Lock()
+	mine := p.dryBlocks[blockNum]
+	if mine != nil {
+		delete(p.dryBlocks, blockNum)
+	}
+	p.mu.Unlock()
+	if mine == nil {
+		return // we did not build for this height
+	}
+
+	ours := make(map[[20]byte]struct{}, len(mine.txIDs))
+	for _, id := range mine.txIDs {
+		ours[id] = struct{}{}
+	}
+	theirs := make(map[[20]byte]struct{}, len(actual))
+	for _, id := range actual {
+		theirs[id] = struct{}{}
+	}
+	both := 0
+	for id := range ours {
+		if _, ok := theirs[id]; ok {
+			both++
+		}
+	}
+	onlyOurs := len(ours) - both
+	onlyTheirs := len(theirs) - both
+
+	verdict := "MATCH"
+	switch {
+	case onlyOurs > 0 && onlyTheirs > 0:
+		verdict = "DIVERGED"
+	case onlyOurs > 0:
+		verdict = "WE-OVER-INCLUDE"
+	case onlyTheirs > 0:
+		verdict = "WE-MISS"
+	}
+	p.mu.Lock()
+	p.dryCompared++
+	if verdict == "MATCH" {
+		p.dryMatched++
+	}
+	matched, compared := p.dryMatched, p.dryCompared
+	p.mu.Unlock()
+
+	fmt.Fprintf(os.Stderr,
+		"witness dry-run DIFF block %d: %s — ours=%d theirs=%d shared=%d only-ours=%d only-theirs=%d (our bytes=%d) [%d/%d slots matched]\n",
+		blockNum, verdict, len(ours), len(theirs), both, onlyOurs, onlyTheirs, mine.bytes, matched, compared)
+}
+
+// DryRunMatchRate reports how many compared slots matched the real block.
+func (p *Plugin) DryRunMatchRate() (matched, compared int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.dryMatched, p.dryCompared
 }
 
 // PendingRaw returns the verbatim wire bytes of a queued transaction, or nil.
@@ -746,6 +840,7 @@ func (p *Plugin) maybeProduceBlock() error {
 // that needs a state mutation we must not perform here — see DryRun.
 func (p *Plugin) dryRunProduce(prod *Producer, dgpo objects.DynamicGlobalProperty, blockTime uint32, scheduled string, scheduledOurs bool) {
 	start := time.Now()
+	blockNum := dgpo.HeadBlockNumber + 1
 	rawBlock, hdrLen, err := p.buildBlockParts(prod, dgpo, blockTime)
 	if err != nil {
 		p.mu.Lock()
@@ -754,6 +849,23 @@ func (p *Plugin) dryRunProduce(prod *Producer, dgpo objects.DynamicGlobalPropert
 		p.mu.Unlock()
 		fmt.Fprintf(os.Stderr, "witness dry-run: BUILD FAILED for %s at slot %d: %v\n", prod.Account, blockTime, err)
 		return
+	}
+
+	// Remember what we assembled so the real block for this height can be
+	// diffed against it when it arrives.
+	if ids := chain.BlockTransactionIDs(rawBlock); true {
+		p.mu.Lock()
+		if p.dryBlocks == nil {
+			p.dryBlocks = make(map[uint32]*dryBlock, 8)
+		}
+		p.dryBlocks[blockNum] = &dryBlock{txIDs: ids, bytes: len(rawBlock), built: time.Now()}
+		// Bounded: only the next few heights can ever be compared.
+		for n := range p.dryBlocks {
+			if n+8 < blockNum {
+				delete(p.dryBlocks, n)
+			}
+		}
+		p.mu.Unlock()
 	}
 
 	// Self-verify: recover the signer from the block signature exactly the way

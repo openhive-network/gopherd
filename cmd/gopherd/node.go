@@ -1175,6 +1175,16 @@ func (a *app) run() error {
 		w := a.witness
 		a.chain.SetOnTxApplied(func(txID [20]byte) { w.RemoveIncludedTxID(txID) })
 	}
+	// DRY RUN comparison: when the real block for a height we assembled arrives,
+	// diff the transaction sets. Block assembly is otherwise unverifiable
+	// without publishing — and publishing a wrong block costs a slot and gets us
+	// dropped by peers.
+	if a.witness != nil && a.cfg.produceDryRun {
+		w := a.witness
+		syncCfg.OnBlockApplied = func(raw []byte, num uint32, _ *p2pnode.Peer) {
+			w.CompareProducedBlock(num, chain.BlockTransactionIDs(raw))
+		}
+	}
 	syncDel := p2psync.New(syncCfg, a.chain)
 	a.p2p.SetDelegate(syncDel)
 	if err := a.p2p.Start(); err != nil {
