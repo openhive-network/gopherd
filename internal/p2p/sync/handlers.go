@@ -311,13 +311,26 @@ func (d *Delegate) handleFetchBlockchainItemIDs(p *node.Peer, body []byte) {
 		d.logf("fetch_blockchain_item_ids decode: %v", err)
 		return
 	}
-	// Synopsis: the LAST hash in the list is the peer's head_block_id.
-	// Older entries are exponentially-older history (hived's chain
-	// synopsis structure) — for now we only need the head, since both
-	// nodes are on the same fork.
+	// Synopsis: oldest-first, the LAST entry is the peer's head. The older
+	// entries exist so we can find a FORK POINT when the peer's tip is not on
+	// our chain — the previous code used only the head and noted "both nodes are
+	// on the same fork", which is exactly the assumption that fails when it
+	// matters. A peer stuck on an orphan (as gopherd was at 108912883) is asking
+	// this question *because* its tip is unknown to us; answering from its tip
+	// alone hands it blocks that connect to nothing it has.
+	//
+	// Walk NEWEST to OLDEST and take the first id we actually hold: that is the
+	// deepest point we agree on, and the right place to answer from.
 	var peerHeadID block.ID
 	if n := len(msg.BlockchainSynopsis); n > 0 {
 		peerHeadID = block.ID(msg.BlockchainSynopsis[n-1])
+		for i := n - 1; i >= 0; i-- {
+			cand := block.ID(msg.BlockchainSynopsis[i])
+			if d.chain.RecentBlockBytesByID(cand) != nil {
+				peerHeadID = cand // common ancestor: answer from here
+				break
+			}
+		}
 	}
 
 	// Map peer's head_id → block_num (peer head_id has block_num in its
@@ -799,10 +812,7 @@ func (d *Delegate) peerStateFor(p *node.Peer) *peerState {
 
 // sendFetchBlockchainItemIDs encodes and sends the catch-up handshake.
 func (d *Delegate) sendFetchBlockchainItemIDs(p *node.Peer, headID block.ID) {
-	var synopsis []proto.ItemHash
-	if headID != (block.ID{}) {
-		synopsis = []proto.ItemHash{proto.ItemHash(headID)}
-	}
+	synopsis := d.buildSynopsis(headID)
 	msg := proto.FetchBlockchainItemIDsMessage{
 		ItemType:           proto.ItemTypeBlock,
 		BlockchainSynopsis: synopsis,
@@ -816,6 +826,65 @@ func (d *Delegate) sendFetchBlockchainItemIDs(p *node.Peer, headID block.ID) {
 		d.logf("fetch_blockchain_item_ids send: %v", err)
 	}
 }
+
+// buildSynopsis returns block ids walking BACK from our head with exponentially
+// increasing gaps, oldest first (the receiver treats the last entry as our
+// head). This is the graphene synopsis, and it exists for exactly one reason:
+// so a peer can find a common ancestor when our tip is NOT on their chain.
+//
+// We used to send a single id — our head. That works only while our head is on
+// the canonical chain. The moment it is not, no peer recognises it, none can
+// compute a fork point, and none can tell us anything: the node goes mute
+// precisely when it needs help. That is how gopherd wedged after producing an
+// orphan at 108912883 — stuck on its own block, 76 behind and falling, with
+// peers connected and nothing to say to them.
+//
+// Including our recent ancestors means a peer recognises head-1 (or head-2, …),
+// computes the fork point, and sends us the branch from there — which is what
+// lets fork choice see a longer competing branch and reorg onto it.
+func (d *Delegate) buildSynopsis(headID block.ID) []proto.ItemHash {
+	head, err := d.chain.HeadBlock()
+	if err != nil || head == 0 {
+		if headID != (block.ID{}) {
+			return []proto.ItemHash{proto.ItemHash(headID)}
+		}
+		return nil
+	}
+	// Collect newest -> oldest with doubling gaps, then reverse.
+	var ids []block.ID
+	n := head
+	step := uint32(1)
+	for len(ids) < maxSynopsisEntries {
+		id, ok := d.chain.RecentBlockIDForNum(n)
+		if ok {
+			ids = append(ids, id)
+		}
+		if n <= 1 {
+			break
+		}
+		if step >= n {
+			n = 1
+		} else {
+			n -= step
+		}
+		step *= 2
+	}
+	if len(ids) == 0 {
+		if headID != (block.ID{}) {
+			return []proto.ItemHash{proto.ItemHash(headID)}
+		}
+		return nil
+	}
+	out := make([]proto.ItemHash, 0, len(ids))
+	for i := len(ids) - 1; i >= 0; i-- { // oldest first; last entry is our head
+		out = append(out, proto.ItemHash(ids[i]))
+	}
+	return out
+}
+
+// maxSynopsisEntries bounds the synopsis. Doubling gaps reach back ~2^32 blocks
+// well inside this, so it is a safety bound rather than a real limit.
+const maxSynopsisEntries = 40
 
 // sendFetchItems encodes and sends one fetch_items batch.
 //
