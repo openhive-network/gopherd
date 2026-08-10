@@ -34,15 +34,25 @@ import (
 	"hived-go/internal/state/objects"
 )
 
-// Broadcaster is the slice of the gossip layer the witness plugin uses
-// to push freshly-produced blocks at the network. The daemon hands in a
-// *gossip.Service (whose BroadcastBlock method satisfies this interface).
+// Publisher hands a freshly produced block to the node's single-writer apply
+// path, which applies it (reversibly, through the fork-choice engine) and then
+// advertises it to peers by block ID. The daemon hands in the p2p sync
+// delegate; *sync.Delegate.PublishBlock satisfies this.
 //
-// Kept as a small interface here so the witness package never imports
-// the gossip / p2p packages directly — production-only callers (e.g.
-// the unit-test that just exercises buildBlock) can leave it nil.
-type Broadcaster interface {
-	BroadcastBlock(rawBlock []byte, blockNum uint32)
+// The witness deliberately does NOT apply or broadcast the block itself. Both
+// shortcuts were mainnet bugs, diagnosed at block 108887429 (howo's slot,
+// 2026-08-10) — see sync.Delegate.PublishBlock for the full write-up:
+//
+//   - Applying directly (chain.ApplyBlock, non-reversible) made our own block
+//     the COMMITTED head, so fork choice could never undo it. When the network
+//     chose a different block for that height we wedged on our own orphan.
+//   - Broadcasting directly pushed an unsolicited block_message body, which
+//     hived rejects and disconnects over, so the block never propagated.
+//
+// Kept as a small interface here so the witness package never imports the p2p
+// packages directly; unit tests that only exercise buildBlock leave it nil.
+type Publisher interface {
+	PublishBlock(rawBlock []byte, blockNum uint32) error
 }
 
 // BlockInterval — HIVE_BLOCK_INTERVAL = 3 seconds.
@@ -80,10 +90,13 @@ type Producer struct {
 
 // Plugin holds the witness daemon state.
 type Plugin struct {
-	Chain       *chain.Database
-	State       *state.Database
-	Producers   []Producer
-	Broadcaster Broadcaster // optional; nil = no gossip
+	Chain     *chain.Database
+	State     *state.Database
+	Producers []Producer
+	// Publisher applies + advertises produced blocks. REQUIRED for real
+	// production: maybeProduceBlock refuses to build a block it has no way to
+	// publish, rather than producing one that never leaves this process.
+	Publisher Publisher
 
 	// DryRun exercises the whole production pipeline — schedule lookup,
 	// assembly, merkle, signing, self-verification, timing — and then THROWS
@@ -116,6 +129,12 @@ type Plugin struct {
 	// that witness is not the key we hold. Surfaced so a misconfigured witness
 	// shows up as a number rather than only as a log line.
 	skippedNoKey int
+
+	// produced counts blocks we built and successfully handed to the Publisher.
+	// This is "submitted for publication", NOT "accepted by the network" — the
+	// two diverged silently on 2026-08-10, when a produced block was applied
+	// locally, rejected by every peer, and still looked like a success here.
+	produced int
 
 	// DryRunMaxHeadAgeSec overrides DryRunStaleHeadSec. 0 = use the constant.
 	// Exists so tests can drive the pipeline against a genesis fixture, whose
@@ -360,31 +379,40 @@ func (p *Plugin) maybeProduceBlock() error {
 		return nil
 	}
 
+	// Refuse to build a block we cannot publish. Producing into the void would
+	// still consume the slot and — worse, before this was routed through the
+	// apply path — would move our head to a block no peer has. An unwired
+	// publisher is a configuration error, so say so loudly instead of looking
+	// like a working witness.
+	if p.Publisher == nil {
+		p.logEvery(10*time.Second,
+			"our turn (%s) but NO PUBLISHER wired — refusing to produce a block that could not be published",
+			prod.Account)
+		return nil
+	}
+
 	rawBlock, err := p.buildBlock(prod, dgpo, nextSlotTime)
 	if err != nil {
 		return fmt.Errorf("witness build_block: %w", err)
 	}
-	stats := chain.Stats{}
-	postDgpo, err := p.Chain.ApplyBlock(rawBlock, dgpo.HeadBlockNumber+1, chain.ApplyOptions{
-		Sync:                      true,
-		SkipTransactionSignatures: true, // we just produced; no need to verify
-		SkipBlockSignature:        true,
-	}, &stats)
-	if err != nil {
-		return fmt.Errorf("witness apply_block: %w", err)
+	blockNum := dgpo.HeadBlockNumber + 1
+
+	// Hand off to the node's single-writer apply path. It applies the block
+	// REVERSIBLY via the fork-choice engine (so the network can still out-vote
+	// us at this height and we can reorg off it) and advertises it to peers by
+	// block ID, which is the only publication mechanism hived accepts.
+	//
+	// We do NOT apply it here. See the Publisher doc comment: doing either half
+	// of this locally is what cost howo block 108887429.
+	if err := p.Publisher.PublishBlock(rawBlock, blockNum); err != nil {
+		return fmt.Errorf("witness publish_block %d: %w", blockNum, err)
 	}
-	fmt.Fprintf(os.Stderr, "witness: APPLIED block %d (head=%d, time=%d)\n",
-		dgpo.HeadBlockNumber+1, postDgpo.HeadBlockNumber, postDgpo.Time)
-	// Drain the mempool.
+	fmt.Fprintf(os.Stderr, "witness: PRODUCED block %d for %s (slot time=%d, %d bytes) — submitted for apply + inventory advertisement\n",
+		blockNum, prod.Account, nextSlotTime, len(rawBlock))
 	p.mu.Lock()
-	p.pending = p.pending[:0]
+	p.produced++
+	p.pending = p.pending[:0] // drain the mempool
 	p.mu.Unlock()
-	// Broadcast to peers. The gossip layer marks the block ID as seen
-	// before fanning out so peers' echo of OUR block doesn't trigger a
-	// re-apply on this node.
-	if p.Broadcaster != nil {
-		p.Broadcaster.BroadcastBlock(rawBlock, dgpo.HeadBlockNumber+1)
-	}
 	return nil
 }
 
@@ -511,6 +539,15 @@ func (p *Plugin) SkippedNoKey() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.skippedNoKey
+}
+
+// Produced returns how many blocks were built and handed to the Publisher.
+// Whether the network kept them is a separate question — check the witness's
+// last_confirmed_block_num on chain.
+func (p *Plugin) Produced() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.produced
 }
 
 // DryRunSnapshot returns a copy of the dry-run counters.

@@ -830,6 +830,66 @@ func (d *Delegate) NotifyHeadAdvanced() {
 	d.poke()
 }
 
+// PublishBlock injects a block WE just produced into the SAME apply queue that
+// inbound blocks use, so the single applyLoop goroutine applies it via
+// chain.PushLiveBlock and then advertises it via queueAdvert. The witness
+// plugin calls this INSTEAD of applying and broadcasting the block itself.
+//
+// Both halves of that matter, and both were mainnet bugs on 2026-08-10 (block
+// 108887429, howo's slot):
+//
+//  1. PUBLICATION. The witness used to hand the raw block to
+//     gossip.BroadcastBlock, which pushed an unsolicited block_message body to
+//     every peer. hived only accepts a block_message it explicitly requested —
+//     libraries/net/node.cpp: "received a block I didn't ask for from peer,
+//     disconnecting from peer". All 8 peers dropped us in the same instant, the
+//     block never propagated, and howo missed the slot. hived's own
+//     node_impl::broadcast(full_block) never pushes a body: it caches the block
+//     for serving, inserts it into _new_block_inventory and triggers the
+//     advertise loop, so peers learn the block ID and fetch the body. Routing
+//     through the apply path puts us on exactly that mechanism, since
+//     queueAdvert is our advertise-by-ID equivalent and the applied block is
+//     then serve-able from the chain's recent-block cache.
+//
+//  2. REVERSIBILITY. The witness used to call chain.ApplyBlock directly, with
+//     no Reversible flag, so a block we produced became the COMMITTED head the
+//     instant we made it. Nothing can reorg away a committed block: when the
+//     network's competing block for the same height arrived, PushLiveBlock saw
+//     num <= committedNum() and filed it PushStale, and its child buffered
+//     forever awaiting a parent we would never apply. The node wedged at its own
+//     orphan for as long as it was left running, with --fork-switching ON and
+//     powerless. Going through PushLiveBlock keeps our own tip REVERSIBLE, which
+//     is the whole precondition for fork choice to be able to undo it.
+//
+// Returns an error rather than blocking if the queue is full — the caller is on
+// a 3-second slot budget and a produced block that cannot be enqueued promptly
+// is better reported than silently delayed.
+func (d *Delegate) PublishBlock(rawBlock []byte, blockNum uint32) error {
+	_, hdrLen, err := block.UnmarshalSignedHeader(rawBlock)
+	if err != nil {
+		return fmt.Errorf("publish block %d: header: %w", blockNum, err)
+	}
+	bid := block.ConstructID(rawBlock[:hdrLen], blockNum)
+	// srcPeer nil marks this as locally produced: the applyLoop then has no
+	// peer to exclude from the advertisement, which is correct — we want every
+	// peer to learn our block ID.
+	job := applyJob{
+		blockNum: blockNum,
+		rawBlock: rawBlock,
+		id:       bid,
+		srcPeer:  nil,
+	}
+	select {
+	case d.applyQ <- job:
+		d.onEnqueue()
+		d.poke()
+		return nil
+	default:
+		return fmt.Errorf("publish block %d: apply queue full (%d/%d)",
+			blockNum, d.applyQLen.Load(), cap(d.applyQ))
+	}
+}
+
 func (d *Delegate) poke() {
 	d.idleMu.Lock()
 	d.idleRounds = 0
