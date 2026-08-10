@@ -191,6 +191,17 @@ type Config struct {
 	// Logger receives one-line status messages. nil → os.Stderr.
 	Logger io.Writer
 
+	// Mempool, when non-nil, receives inbound transaction bodies. Supplying it
+	// also switches ON transaction fetching: with no mempool we record tx
+	// inventory as known and never request the bodies, since there would be
+	// nowhere to put them.
+	//
+	// *witness.Plugin satisfies this. Without it a producing node builds empty
+	// blocks — which is exactly what gopherd did until 2026-08-10: it took its
+	// slot and contributed zero transactions, dumping the backlog on the next
+	// witness.
+	Mempool Mempool
+
 	// OnBlockApplied, when non-nil, is invoked from the applyLoop AFTER
 	// each successful chain.ApplyBlock. The gossip layer wires its
 	// BroadcastAppliedBlock here so that sync remains the single owner
@@ -347,6 +358,13 @@ type Delegate struct {
 	// is much cheaper than racing on the channel; it's used by the
 	// back-pressure check in sendFetchItems / handleInv.
 	applyQLen atomic.Int32
+
+	// txAccepted / txRejected count mempool admissions. Both matter: all-zero
+	// accepted with non-zero rejected means we are fetching transactions but
+	// validating them wrongly, which looks identical to a quiet network if only
+	// one is tracked.
+	txAccepted atomic.Uint64
+	txRejected atomic.Uint64
 	// inhibitFetching is set when applyQLen >= high-water and cleared
 	// when it drops below low-water. While set, sendFetchItems is a
 	// no-op. Toggle is performed by the applyLoop on each dequeue and
@@ -716,6 +734,13 @@ func (d *Delegate) removeInflightPeer(p *node.Peer) {
 }
 
 // applyJob is one inbound block waiting for the applier goroutine.
+// Mempool is the transaction sink. Implementations validate and store; a
+// returned error means "not usable", which is ordinary traffic rather than a
+// fault.
+type Mempool interface {
+	AddPendingRaw(body []byte) error
+}
+
 type applyJob struct {
 	blockNum uint32
 	rawBlock []byte
