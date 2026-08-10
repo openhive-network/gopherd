@@ -672,7 +672,10 @@ func (d *Delegate) applyLoop() {
 		outcome, err := d.chain.PushLiveBlock(job.rawBlock, job.blockNum, chain.ApplyOptions{
 			Sync:                      false,
 			SkipTransactionSignatures: historical,
-			SkipBlockSignature:        historical,
+			// A block we just produced carries our own signature, made
+			// microseconds ago; recovering it again buys nothing and spends
+			// slot budget we are racing. Tx signatures are still checked.
+			SkipBlockSignature: historical || job.local,
 			TolerateFailingOps:        historical,
 			PreVerifiedBlockSigner:    job.preVerifiedSigner,
 			PreRecoveredTxKeys:        job.preRecoveredTxKeys,

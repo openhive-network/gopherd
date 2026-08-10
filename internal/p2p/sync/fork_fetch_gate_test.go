@@ -1,6 +1,9 @@
 package sync
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // TestSkipByHeightForkAware pins the fetch gate that kept the node wedged at
 // block 108887429 on 2026-08-10.
@@ -51,5 +54,30 @@ func TestSkipByHeightForkAware(t *testing.T) {
 					tc.num, head, tc.forkAware, got, tc.wantSkip, tc.why)
 			}
 		})
+	}
+}
+
+// TestPublishBlockRejectsMalformed pins that a block which cannot be parsed
+// never enters the apply queue. PublishBlock derives the block ID from the
+// signed header, and the ID is what peers are told to fetch — enqueueing a
+// block we could not parse would advertise an ID we cannot serve, which is the
+// "advertised then didn't provide" behaviour peers drop us for.
+//
+// (The job's `local` flag, set only here, lets the apply path skip re-verifying
+// a signature we made microseconds earlier. It is set on this one path and
+// nowhere else, so an inbound block can never inherit it and skip verification.)
+func TestPublishBlockRejectsMalformed(t *testing.T) {
+	_, d := advertHarness(t)
+
+	// 24 bytes with a live timestamp: enough for the ring helpers, nowhere near
+	// a parseable signed block header.
+	if err := d.PublishBlock(liveBlockBytes(uint32(time.Now().Unix())), 4242); err == nil {
+		t.Fatal("PublishBlock accepted an unparseable block; a block whose ID we cannot derive must never be queued or advertised")
+	}
+	if n := len(d.applyQ); n != 0 {
+		t.Fatalf("applyQ holds %d job(s) after a rejected publish; nothing should have been enqueued", n)
+	}
+	if got := d.QueueDepth(); got != 0 {
+		t.Fatalf("QueueDepth = %d after a rejected publish, want 0 (the counter would drift from the channel)", got)
 	}
 }

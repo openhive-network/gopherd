@@ -736,6 +736,13 @@ type applyJob struct {
 	// per-block fan-out inside RecoverBlockTxSignerKeys, this lifts the
 	// dominant secp256k1 CPU cost out of the single-writer applyLoop.
 	preRecoveredTxKeys [][]crypto.PublicKey
+	// local marks a block WE produced (via PublishBlock). We signed it
+	// microseconds ago, so re-recovering the witness signature is pure waste —
+	// and it lands in the worst possible place: inside the 3-second slot budget,
+	// between building the block and advertising it. Only the BLOCK signature is
+	// skipped; transaction signatures are still verified, since txs come from
+	// the mempool rather than from us.
+	local bool
 }
 
 // New builds a Delegate against a real *chain.Database.
@@ -878,6 +885,7 @@ func (d *Delegate) PublishBlock(rawBlock []byte, blockNum uint32) error {
 		rawBlock: rawBlock,
 		id:       bid,
 		srcPeer:  nil,
+		local:    true,
 	}
 	select {
 	case d.applyQ <- job:
