@@ -17,9 +17,29 @@
 #     log from its block 1 against empty typed-stores. No local log = no such
 #     trap; a restart just reloads the snapshot.
 #
-# Restarting: wipe DATA first (stale pebble K/V from the previous run is only
-# partially overwritten by a snapshot load). Cheapest correct restart is a
-# fresh DATA + fresh COLD.
+# ---------------------------------------------------------------------------
+# FAST DEV CYCLE (~4 min, vs ~30 min for the snapshot path)
+#
+#   go build -o bin/gopherd ./cmd/gopherd     # NOT `go build ./...` — that
+#                                             # does not update bin/
+#   kill -TERM $(pgrep -x gopherd)            # persist-state write, ~3.5 min
+#   SNAP_DIR= PERSIST_STATE_DIR=... <this>    # resumes at head in SECONDS
+#
+# A rebuild does NOT invalidate persist-state: the container holds serialized
+# state, and a new binary reads it fine. Only a change to the state
+# serialization format invalidates it — and that invalidates snapshots too.
+#
+# Set SNAP_DIR= (empty) on dev runs. Once persist-state works the shutdown
+# snapshot is redundant and costs ~3 min of every shutdown; keep it only for
+# runs you may need to warm-start elsewhere or roll back to.
+#
+# DO NOT wipe DATA/COLD when resuming from persist-state — the cold tier holds
+# comments/votes and is half of the pair. Wipe both ONLY for a snapshot load.
+# ---------------------------------------------------------------------------
+#
+# Restarting from a SNAPSHOT: wipe DATA first (stale pebble K/V from the
+# previous run is only partially overwritten by a snapshot load). Cheapest
+# correct snapshot restart is a fresh DATA + fresh COLD.
 set -euo pipefail
 
 BIN="${BIN:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/gopherd}"
