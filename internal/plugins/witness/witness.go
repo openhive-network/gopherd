@@ -227,18 +227,45 @@ func (p *Plugin) Stop() {
 	<-p.doneCh
 }
 
+// maxProducePoll bounds how long the production loop sleeps when the next slot
+// boundary is further away than this. The boundary itself is always hit exactly
+// (see nextWake), but we must keep checking in between: the boundary check can
+// find us not yet ready — most often because the PREVIOUS block has not landed,
+// so dgpo still trails — and a loop that only woke on boundaries would then
+// have to wait a further full slot. Retrying costs nothing; missing a slot
+// costs a block.
+const maxProducePoll = 250 * time.Millisecond
+
+// nextWake returns how long to sleep before the next production check: the time
+// remaining to the next block-interval boundary, capped at maxProducePoll.
+//
+// hived arms a timer for the exact slot boundary. The old loop here polled on a
+// fixed 500ms ticker, which could start work up to 500ms late — ~17% of the 3s
+// slot budget burned before assembling anything. Capping the sleep preserves
+// frequent retries while the final sleep of each slot lands us ON the boundary.
+func nextWake(now time.Time) time.Duration {
+	slot := int64(BlockInterval)
+	ns := now.UnixNano()
+	untilBoundary := time.Duration(((ns/slot)+1)*slot - ns)
+	if untilBoundary < maxProducePoll {
+		return untilBoundary
+	}
+	return maxProducePoll
+}
+
 func (p *Plugin) run() {
 	defer close(p.doneCh)
-	tick := time.NewTicker(500 * time.Millisecond)
-	defer tick.Stop()
+	timer := time.NewTimer(nextWake(time.Now()))
+	defer timer.Stop()
 	for {
 		select {
 		case <-p.stopCh:
 			return
-		case <-tick.C:
+		case <-timer.C:
 			if err := p.maybeProduceBlock(); err != nil {
 				fmt.Fprintf(os.Stderr, "witness: %v\n", err)
 			}
+			timer.Reset(nextWake(time.Now()))
 		}
 	}
 }

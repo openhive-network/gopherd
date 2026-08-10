@@ -3,6 +3,7 @@ package witness
 import (
 	"crypto/sha256"
 	"testing"
+	"time"
 
 	"hived-go/internal/crypto"
 	"hived-go/internal/state"
@@ -407,5 +408,41 @@ func TestProductionRefusesWithoutPublisher(t *testing.T) {
 	}
 	if after.HeadBlockNumber != before.HeadBlockNumber {
 		t.Fatalf("head advanced %d -> %d with no publisher", before.HeadBlockNumber, after.HeadBlockNumber)
+	}
+}
+
+// TestNextWakeAlignsToSlotBoundary pins the production loop's timing.
+//
+// The loop used to poll on a fixed 500ms ticker, so work could begin up to
+// 500ms after the slot instant — ~17% of the 3s budget gone before assembling
+// anything, while hived arms a timer for the exact boundary. nextWake sleeps to
+// the boundary when it is near, and otherwise caps the sleep so we keep
+// retrying: a boundary check that finds the previous block hasn't landed yet
+// must not then wait a whole further slot.
+func TestNextWakeAlignsToSlotBoundary(t *testing.T) {
+	slot := int64(BlockInterval)
+
+	// Exactly ON a boundary: the next one is a full slot away, so the cap applies.
+	onBoundary := time.Unix(0, (time.Now().UnixNano()/slot)*slot)
+	if got := nextWake(onBoundary); got != maxProducePoll {
+		t.Fatalf("nextWake(on boundary) = %v, want the %v poll cap", got, maxProducePoll)
+	}
+
+	// Just before a boundary: sleep exactly the remainder, so we wake ON it.
+	for _, remain := range []time.Duration{1 * time.Millisecond, 100 * time.Millisecond, maxProducePoll - time.Nanosecond} {
+		base := time.Unix(0, (time.Now().UnixNano()/slot+1)*slot).Add(-remain)
+		if got := nextWake(base); got != remain {
+			t.Fatalf("nextWake(%v before boundary) = %v, want %v — we must land ON the slot instant",
+				remain, got, remain)
+		}
+	}
+
+	// Never sleeps past the cap, and never returns a non-positive delay (which
+	// would spin the loop).
+	for off := time.Duration(0); off < BlockInterval; off += 37 * time.Millisecond {
+		got := nextWake(time.Unix(0, (time.Now().UnixNano()/slot)*slot).Add(off))
+		if got <= 0 || got > maxProducePoll {
+			t.Fatalf("nextWake(offset %v) = %v, want 0 < d <= %v", off, got, maxProducePoll)
+		}
 	}
 }
