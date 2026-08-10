@@ -372,7 +372,6 @@ type Delegate struct {
 	// identical from outside.
 	txInvOffered atomic.Uint64
 	txFetched    atomic.Uint64
-	txEvicted    atomic.Uint64
 	txDuplicate  atomic.Uint64
 	// inhibitFetching is set when applyQLen >= high-water and cleared
 	// when it drops below low-water. While set, sendFetchItems is a
@@ -1083,9 +1082,12 @@ func (d *Delegate) Stats() Stats {
 	d.inflightMu.Lock()
 	inflight := len(d.inflight)
 	d.inflightMu.Unlock()
-	mempoolDepth := 0
+	mempoolDepth, mempoolEvicted := 0, 0
 	if mp, ok := d.cfg.Mempool.(interface{ PendingCount() int }); ok && mp != nil {
 		mempoolDepth = mp.PendingCount()
+	}
+	if mp, ok := d.cfg.Mempool.(interface{ EvictedCount() int }); ok && mp != nil {
+		mempoolEvicted = mp.EvictedCount()
 	}
 	return Stats{
 		QueueDepth:             d.QueueDepth(),
@@ -1111,7 +1113,7 @@ func (d *Delegate) Stats() Stats {
 		TxRejected:             d.txRejected.Load(),
 		TxInvOffered:           d.txInvOffered.Load(),
 		TxFetched:              d.txFetched.Load(),
-		TxEvicted:              d.txEvicted.Load(),
+		TxEvicted:              uint64(mempoolEvicted),
 		TxDuplicate:            d.txDuplicate.Load(),
 		MempoolDepth:           mempoolDepth,
 	}

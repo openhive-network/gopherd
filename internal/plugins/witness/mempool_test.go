@@ -311,3 +311,36 @@ func TestRemoveIncludedTxID(t *testing.T) {
 		t.Fatal("eviction removed the wrong transaction")
 	}
 }
+
+// TestEvictedCountTracksMechanism pins the counter to the mechanism.
+//
+// When eviction moved from the p2p layer into chain.ApplyBlock, the counter was
+// left behind in the retired p2p hook — so STATS reported evict=0 while the new
+// mechanism ran untested, and "is it working?" became unanswerable. A metric
+// that does not move with the code it measures is worse than no metric: it
+// reads as a confident zero.
+func TestEvictedCountTracksMechanism(t *testing.T) {
+	p := newMempoolPlugin(t)
+	a, aid := rawTx(t, "e1", 1<<30)
+	b, bid := rawTx(t, "e2", 1<<30)
+	p.AddPendingTx(a, aid, 1<<30)
+	p.AddPendingTx(b, bid, 1<<30)
+
+	if got := p.EvictedCount(); got != 0 {
+		t.Fatalf("EvictedCount=%d before any eviction", got)
+	}
+	p.RemoveIncludedTxID(aid)
+	if got := p.EvictedCount(); got != 1 {
+		t.Fatalf("EvictedCount=%d after evicting 1", got)
+	}
+	// An id we never held must NOT count — otherwise the counter tracks chain
+	// throughput rather than our own eviction and always looks healthy.
+	p.RemoveIncludedTxID([20]byte{0x99})
+	if got := p.EvictedCount(); got != 1 {
+		t.Fatalf("EvictedCount=%d after an unknown id — it must count OUR evictions, not every mined transaction", got)
+	}
+	p.RemoveIncludedTxID(bid)
+	if got := p.EvictedCount(); got != 2 || p.PendingCount() != 0 {
+		t.Fatalf("EvictedCount=%d depth=%d want 2/0", got, p.PendingCount())
+	}
+}
