@@ -270,6 +270,33 @@ func (p *Plugin) RemoveIncludedTxIDs(ids [][20]byte) int {
 	return before - len(p.pending)
 }
 
+// RemoveIncludedTxID drops one transaction that just entered the chain's dedup
+// window. Fired from chain.ApplyBlock for EVERY apply path — direct, drained
+// from the reorder buffer, or re-applied during a reorg — which is what makes
+// eviction complete. The p2p-side hook it replaces only saw blocks that passed
+// back through sync and covered ~46% of mined transactions, leaving the queue
+// growing ~356/min toward the cap.
+//
+// Runs under the chain's apply lock: keep it O(1) and never call back into the
+// chain.
+func (p *Plugin) RemoveIncludedTxID(id [20]byte) {
+	p.mu.Lock()
+	if _, present := p.pendingIDs[id]; !present {
+		p.mu.Unlock()
+		return
+	}
+	delete(p.pendingIDs, id)
+	kept := p.pending[:0]
+	for _, t := range p.pending {
+		if t.id == id {
+			continue
+		}
+		kept = append(kept, t)
+	}
+	p.pending = kept
+	p.mu.Unlock()
+}
+
 // PendingCount reports the current mempool depth.
 func (p *Plugin) PendingCount() int {
 	p.mu.Lock()

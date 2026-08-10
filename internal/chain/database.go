@@ -123,6 +123,11 @@ type Database struct {
 	// instead, once they commit.
 	onBlockApplied func(blockNum uint32, id block.ID)
 
+	// onTxApplied fires for every transaction entering the dedup window, on
+	// EVERY apply path (direct, drained-from-buffer, reorg re-apply). The
+	// mempool uses it to drop transactions another witness has mined.
+	onTxApplied func(txID [20]byte)
+
 	// onBlockFinalized is fired when a reversible block COMMITS (via
 	// FinalizeReversible), i.e. once it is confirmed to extend the chain.
 	// The fork-aware node wires block_log-append + cold-tier eviction here
@@ -233,6 +238,15 @@ func (d *Database) EnableRecentBlockCache(capacity int) {
 // ApplyBlock. Pass nil to disable. Single-slot — last writer wins.
 // The callback runs synchronously on the goroutine that called
 // ApplyBlock, so it should return quickly (just notify a channel).
+// SetOnTxApplied registers a callback fired for each transaction recorded in
+// the dedup window. Called under the apply lock, so it must be cheap and must
+// not re-enter the chain.
+func (d *Database) SetOnTxApplied(cb func(txID [20]byte)) {
+	d.applyMu.Lock()
+	defer d.applyMu.Unlock()
+	d.onTxApplied = cb
+}
+
 func (d *Database) SetOnBlockApplied(cb func(blockNum uint32, id block.ID)) {
 	d.onBlockApplied = cb
 }
@@ -920,6 +934,18 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 					TrxID:      txID,
 					Expiration: txRes.SignedTx.Expiration,
 				})
+				// Same moment, same id: tell the mempool this transaction is
+				// now on chain. Doing it HERE rather than in the p2p layer is
+				// what makes it complete — blocks applied via drainForward
+				// (out-of-order buffering) or re-applied during a reorg never
+				// pass back through sync, so a p2p-side hook silently misses
+				// them. Measured live: p2p-side eviction covered only ~46% of
+				// mined transactions, so the queue still grew ~356/min toward
+				// the cap, where it would stop admitting fresh transactions and
+				// go back to producing empty blocks.
+				if d.onTxApplied != nil {
+					d.onTxApplied(txID)
+				}
 			}
 			// Release the tx savepoint so subsystem stores can stop logging
 			// undo entries we'll never use. Flips db.UndoEnabled to false

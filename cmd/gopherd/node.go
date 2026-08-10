@@ -1166,6 +1166,14 @@ func (a *app) run() error {
 	// avoid.
 	if a.witness != nil && (a.cfg.produceReal || a.cfg.produceDryRun) {
 		syncCfg.Mempool = a.witness
+		// Evict from the CHAIN's apply path, not the p2p layer. Blocks applied
+		// via drainForward (out-of-order buffering) or re-applied during a
+		// reorg never pass back through sync, so a p2p-side hook misses them —
+		// measured live at only ~46% coverage, with the queue still growing
+		// ~356/min toward the cap where it would stop admitting fresh
+		// transactions and produce empty blocks again.
+		w := a.witness
+		a.chain.SetOnTxApplied(func(txID [20]byte) { w.RemoveIncludedTxID(txID) })
 	}
 	syncDel := p2psync.New(syncCfg, a.chain)
 	a.p2p.SetDelegate(syncDel)
