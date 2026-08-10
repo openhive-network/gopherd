@@ -706,6 +706,10 @@ func (d *Delegate) applyLoop() {
 			// microseconds ago; recovering it again buys nothing and spends
 			// slot budget we are racing. Tx signatures are still checked.
 			SkipBlockSignature: historical || job.local,
+			// Our own block skips only the signature recovery; every other
+			// block-level check still runs, so an invalid block fails HERE with
+			// a specific reason instead of being rejected by peers.
+			ValidateOwnBlock: job.local,
 			TolerateFailingOps:        historical,
 			PreVerifiedBlockSigner:    job.preVerifiedSigner,
 			PreRecoveredTxKeys:        job.preRecoveredTxKeys,

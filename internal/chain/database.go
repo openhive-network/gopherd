@@ -434,6 +434,12 @@ type ApplyOptions struct {
 	// the cheap account-authority lookup against state.Session in the
 	// per-tx critical section.
 	PreRecoveredTxKeys [][]crypto.PublicKey
+	// ValidateOwnBlock forces the block-level checks (continuity, size, merkle,
+	// version) even when SkipBlockSignature is set. Used for blocks WE produce:
+	// we skip re-recovering our own signature, but everything else must still
+	// be checked before the block goes to the network.
+	ValidateOwnBlock bool
+
 	// EnforceRC, when true, rejects any tx whose payer has insufficient
 	// RC mana (HF20+). Mirrors hived's `rc-skip-reject-not-enough-rc=0`
 	// path. Replay leaves it false — historical blocks always validated
@@ -632,7 +638,16 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	// skipped on the replay path where the canonical block_log is
 	// already validated; live sync sets opts.SkipBlockSignature=false
 	// to engage them. Mirrors database.cpp:2335-2403.
-	if !opts.SkipBlockSignature {
+	// validateBlock covers chain continuity, block SIZE, MERKLE ROOT and
+	// running_version. SkipBlockSignature must NOT disable it for a block we
+	// produced ourselves: skipping the signature check on our own block is a
+	// sensible optimisation (we made the signature microseconds ago), but it
+	// silently disabled every OTHER block-level check too — so a block of ours
+	// that was oversized or had a bad merkle root applied locally without
+	// complaint and was only rejected out on the network, by peers, with a
+	// generic "I have deemed it invalid" and no detail. That is precisely
+	// backwards: the producer is the one node that can still fix the block.
+	if !opts.SkipBlockSignature || opts.ValidateOwnBlock {
 		if err := validateBlock(session, &hdr, rawBlock, hdrLen, blockNum, hf); err != nil {
 			return objects.DynamicGlobalProperty{}, err
 		}
