@@ -1153,11 +1153,18 @@ func (a *app) run() error {
 		LogWorkTiming:    a.cfg.logWorkTiming,
 		ForkAware:        a.cfg.forkSwitching,
 	}
-	// Feed inbound transactions to the witness mempool when we are actually
-	// producing. Supplying this also turns ON transaction fetching in the sync
-	// layer; without it we record tx inventory as known, never request the
-	// bodies, and every block we produce is empty.
-	if a.witness != nil && a.cfg.produceReal {
+	// Feed inbound transactions to the witness mempool. Supplying this also
+	// turns ON transaction fetching in the sync layer; without it we record tx
+	// inventory as known, never request the bodies, and every block we produce
+	// is empty.
+	//
+	// Wired for the DRY RUN too, deliberately. Dry run is the safe way to
+	// exercise this whole path against real mainnet traffic — fetch, admit,
+	// select, size-budget — while never publishing a block. Gating it on real
+	// production would mean the only way to test the mempool is to test it in
+	// production, which is precisely the trade this dry-run mode exists to
+	// avoid.
+	if a.witness != nil && (a.cfg.produceReal || a.cfg.produceDryRun) {
 		syncCfg.Mempool = a.witness
 	}
 	syncDel := p2psync.New(syncCfg, a.chain)
