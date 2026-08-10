@@ -153,6 +153,11 @@ type Plugin struct {
 	// the PRODUCED line so an empty block explains itself on the spot.
 	lastSelect string
 
+	// overflowed counts transactions dropped to make room at the cap. Non-zero
+	// is normal on a busy chain; a HIGH rate means the cap is too small for the
+	// unmineable-transaction backlog and fresh arrivals are being churned.
+	overflowed int
+
 	// evicted counts transactions dropped because the chain mined them. Lives
 	// HERE rather than in the p2p layer: eviction moved into chain.ApplyBlock,
 	// and leaving the counter behind in the retired p2p hook silently reported
@@ -229,11 +234,27 @@ func (p *Plugin) AddPendingTx(raw []byte, id [20]byte, expiration uint32) bool {
 	if p.pendingIDs == nil {
 		p.pendingIDs = make(map[[20]byte]struct{}, 1024)
 	}
-	if len(p.pending) >= MaxMempoolTx {
-		return false
-	}
 	if _, dup := p.pendingIDs[id]; dup {
 		return false
+	}
+	// FULL: drop the OLDEST entry rather than refusing the newest.
+	//
+	// Refusing was the wrong end. Roughly half the transactions the network
+	// gossips are never mined by anyone (failed RC, superseded intent, spam);
+	// they are valid at admission, so they sit until expiry, and Hive
+	// transactions commonly carry long expirations. Measured live: ~164/min
+	// accumulating, which at a 1h expiry settles near 9800 — above this cap.
+	//
+	// A queue that refuses new arrivals when full holds only STALE transactions,
+	// and stale transactions are exactly the ones already mined or unmineable.
+	// We would fill up and then produce empty blocks forever. Dropping the
+	// oldest keeps the window that actually matters: the most recent arrivals,
+	// which are the ones still includable.
+	for len(p.pending) >= MaxMempoolTx {
+		oldest := p.pending[0]
+		p.pending = p.pending[1:]
+		delete(p.pendingIDs, oldest.id)
+		p.overflowed++
 	}
 	cp := make([]byte, len(raw))
 	copy(cp, raw)
@@ -311,6 +332,13 @@ func (p *Plugin) EvictedCount() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.evicted
+}
+
+// OverflowedCount reports how many transactions were dropped at the cap.
+func (p *Plugin) OverflowedCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.overflowed
 }
 
 // PendingCount reports the current mempool depth.

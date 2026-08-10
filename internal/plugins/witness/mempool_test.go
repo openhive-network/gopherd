@@ -104,13 +104,40 @@ func TestMempoolDedupesAndCaps(t *testing.T) {
 		t.Fatalf("PendingCount=%d want 1", n)
 	}
 
-	// Cap: mempool contents are attacker-controlled, so growth must be bounded.
+	// At the cap the queue must stay BOUNDED (contents are attacker-controlled)
+	// while still admitting the newest arrival — the oldest is dropped instead.
+	//
+	// Refusing new arrivals was the wrong end: ~half the transactions the network
+	// gossips are never mined by anyone, so a full-and-refusing queue holds only
+	// stale entries and produces empty blocks forever. The newest transactions
+	// are the includable ones.
 	p.mu.Lock()
 	p.pending = make([]pendingTx, MaxMempoolTx)
+	for i := range p.pending {
+		p.pending[i].id = [20]byte{byte(i), byte(i >> 8)}
+		p.pendingIDs[p.pending[i].id] = struct{}{}
+	}
 	p.mu.Unlock()
 	other, oid := rawTx(t, "overflow", 1<<30)
-	if p.AddPendingTx(other, oid, 1<<30) {
-		t.Fatalf("accepted a transaction past the %d cap — unbounded mempool growth is a trivial memory exhaustion of a witness", MaxMempoolTx)
+	if !p.AddPendingTx(other, oid, 1<<30) {
+		t.Fatal("refused a FRESH transaction at the cap — a full queue holds stale entries, so refusing new arrivals guarantees empty blocks")
+	}
+	if got := p.PendingCount(); got > MaxMempoolTx {
+		t.Fatalf("depth=%d exceeds cap %d — memory must stay bounded", got, MaxMempoolTx)
+	}
+	if p.OverflowedCount() == 0 {
+		t.Fatal("overflow not counted; a high overflow rate is the signal the cap is too small")
+	}
+	// The newest must be present, the oldest gone.
+	p.mu.Lock()
+	_, newestPresent := p.pendingIDs[oid]
+	_, oldestGone := p.pendingIDs[[20]byte{0, 0}]
+	p.mu.Unlock()
+	if !newestPresent {
+		t.Fatal("newest transaction not retained")
+	}
+	if oldestGone {
+		t.Fatal("oldest transaction not dropped — index out of lockstep with the queue")
 	}
 }
 
