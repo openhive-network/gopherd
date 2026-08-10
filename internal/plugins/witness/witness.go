@@ -28,7 +28,6 @@ import (
 	"hived-go/internal/fcraw"
 	"hived-go/internal/protocol/auth"
 	"hived-go/internal/protocol/block"
-	"hived-go/internal/protocol/op"
 	"hived-go/internal/protocol/tx"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
@@ -119,7 +118,17 @@ type Plugin struct {
 	DryRunEverySlot bool
 
 	mu      sync.Mutex
-	pending []op.Op // mempool — ops to include in our next block
+	// pending is the mempool: whole signed transactions, held as their VERBATIM
+	// wire bytes.
+	//
+	// It used to be a flat []op.Op — inbound transactions were torn apart and
+	// their operations re-packed into one new transaction at build time, which
+	// DISCARDED THE SIGNATURES. A transaction's signatures cover its own
+	// serialized bytes, so the repacked transaction carried other accounts'
+	// operations with no authority at all; any block containing one would be
+	// rejected outright. (That is why every block we produced was empty: nothing
+	// ever reached this field, which masked the defect.)
+	pending []pendingTx
 	dry     DryRunStats
 	// lastDrySlot dedupes dry-run production: the loop ticks every 500ms but a
 	// slot is 3s, so without this one slot would yield ~6 identical blocks.
@@ -177,27 +186,98 @@ func New(c *chain.Database, s *state.Database, producers []Producer) *Plugin {
 	}
 }
 
-// AddPending queues a tx for inclusion in our next produced block.
-// The mempool is shared across all configured producers.
-func (p *Plugin) AddPending(o op.Operation) {
-	p.mu.Lock()
-	p.pending = append(p.pending, op.FromOperation(o))
-	p.mu.Unlock()
+// pendingTx is one mempool entry: the transaction exactly as it arrived, plus
+// the fields we need to age it out and de-duplicate it.
+type pendingTx struct {
+	raw        []byte   // VERBATIM wire bytes — never re-encode these
+	id         [20]byte // transaction id, for dedup
+	expiration uint32
 }
 
-// AddPendingRaw decodes a raw signed_transaction body and queues each of
-// its operations into the mempool. This is the entry point used by the
-// gossip layer for inbound TrxMessage bodies.
+// MaxMempoolTx bounds how many transactions we hold. Mempool contents are
+// attacker-controlled and unbounded growth is a trivial memory exhaustion of a
+// witness node. A full block is ~65 KB, so this is far more than any block can
+// consume while staying cheap to hold.
+const MaxMempoolTx = 8000
+
+// AddPendingTx queues an already-validated raw signed transaction.
+// Returns false if it was a duplicate or the mempool is full.
+func (p *Plugin) AddPendingTx(raw []byte, id [20]byte, expiration uint32) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.pending) >= MaxMempoolTx {
+		return false
+	}
+	for i := range p.pending {
+		if p.pending[i].id == id {
+			return false
+		}
+	}
+	cp := make([]byte, len(raw))
+	copy(cp, raw)
+	p.pending = append(p.pending, pendingTx{raw: cp, id: id, expiration: expiration})
+	return true
+}
+
+// PendingCount reports the current mempool depth.
+func (p *Plugin) PendingCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.pending)
+}
+
+// dropExpired removes transactions whose expiration has passed relative to
+// `now` (the chain head's timestamp). Without this, transactions the network
+// will never accept again accumulate forever and are re-offered every slot.
+func (p *Plugin) dropExpired(now uint32) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	kept := p.pending[:0]
+	dropped := 0
+	for _, t := range p.pending {
+		if t.expiration <= now {
+			dropped++
+			continue
+		}
+		kept = append(kept, t)
+	}
+	p.pending = kept
+	return dropped
+}
+
+// removeIncluded drops transactions we just put in a block, plus any the
+// selector rejected for a permanent reason (bad signature, failed pre-flight,
+// malformed) — retrying those every slot would be pure waste. Transactions
+// rejected only for space are kept for the next block.
+func (p *Plugin) removeIncluded(dead map[[20]byte]struct{}) {
+	if len(dead) == 0 {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	kept := p.pending[:0]
+	for _, t := range p.pending {
+		if _, gone := dead[t.id]; gone {
+			continue
+		}
+		kept = append(kept, t)
+	}
+	p.pending = kept
+}
+
+// AddPendingRaw admits a raw signed_transaction from the network into the
+// mempool. This is the entry point the p2p layer uses for inbound TrxMessage
+// bodies.
 //
-// LIMITATION (2.2 milestone scope): the mempool is currently a flat
-// []op.Operation, not a []SignedTransaction. We re-pack the inbound ops
-// into a single tx at block-build time (see buildBlock). Multi-op txs
-// arriving from the network DO survive this round-trip but lose their
-// original (ref_block_*, expiration, signatures) — they're re-signed
-// under the producer's key. This is fine for testnet smoke flows where
-// the wallet signs locally and broadcasts only to the producer's own
-// daemon; it WILL need a proper mempool refactor before mainnet sync
-// can run.
+// The transaction is stored VERBATIM. Its signatures cover its own serialized
+// bytes, so it must reach the block byte-for-byte as it arrived — the previous
+// implementation unpacked the operations and re-signed them under the
+// producer's key, which silently stripped the real authorities.
+//
+// Admission runs the cheap checks (decode, authority, expiration/dedup/TaPOS).
+// It deliberately does NOT apply the transaction: state moves between admission
+// and our slot, so the decisive check is the trial apply in
+// chain.SelectPendingTransactions at build time.
 func (p *Plugin) AddPendingRaw(body []byte) error {
 	r := fcraw.NewReader(body)
 	res, err := tx.ReadSignedTransaction(r)
@@ -210,9 +290,15 @@ func (p *Plugin) AddPendingRaw(body []byte) error {
 	if len(res.SignedTx.Operations) == 0 {
 		return errors.New("witness.AddPendingRaw: tx has no operations")
 	}
-	p.mu.Lock()
-	p.pending = append(p.pending, res.SignedTx.Operations...)
-	p.mu.Unlock()
+	if p.Chain != nil {
+		if verr := p.Chain.ValidateIncomingTx(body); verr != nil {
+			return fmt.Errorf("witness.AddPendingRaw: rejected: %w", verr)
+		}
+	}
+	txID := tx.IDFromDigest(tx.DigestFromBytes(body[res.UnsignedStart:res.UnsignedEnd]))
+	if !p.AddPendingTx(body, txID, res.SignedTx.Expiration) {
+		return nil // duplicate or mempool full — not an error worth logging per tx
+	}
 	return nil
 }
 
@@ -616,6 +702,29 @@ func (p *Plugin) buildBlock(prod *Producer, dgpo objects.DynamicGlobalProperty, 
 // the dry-run verifier needs to recompute the signing digest. The header is
 // variable-length (witness name, extensions), so the boundary cannot be derived
 // from the serialized block after the fact — there is no header parser.
+// maxTxBytes is the byte budget for transactions in a block: the chain's
+// current maximum_block_size less headroom for the signed header, the
+// transaction-count varint and the header extensions. Overshooting the limit
+// produces a block the network rejects, so the headroom is deliberately
+// generous — losing a few hundred bytes of capacity is free, losing the slot is
+// not.
+const blockOverheadBytes = 512
+
+func (p *Plugin) maxTxBytes(_ objects.DynamicGlobalProperty) int {
+	max := 0
+	if p.State != nil {
+		if ws, err := objects.GetWitnessSchedule(state.NewSession(p.State)); err == nil {
+			max = int(ws.MedianMaximumBlockSize)
+		}
+	}
+	if max <= blockOverheadBytes {
+		// Chain params not populated (fresh fixture) — fall back to the protocol
+		// minimum rather than producing a zero-capacity block.
+		max = 65536
+	}
+	return max - blockOverheadBytes
+}
+
 func (p *Plugin) buildBlockParts(prod *Producer, dgpo objects.DynamicGlobalProperty, blockTime uint32) ([]byte, int, error) {
 	if blockTime == 0 || prod == nil {
 		return nil, 0, errors.New("buildBlock: invalid args")
@@ -627,25 +736,53 @@ func (p *Plugin) buildBlockParts(prod *Producer, dgpo objects.DynamicGlobalPrope
 		Extensions: []byte{0},
 	}
 
+	// Age out transactions the chain can no longer accept before selecting, so
+	// they neither occupy the mempool nor get re-offered every slot.
+	p.dropExpired(dgpo.Time)
+
 	p.mu.Lock()
-	pending := append([]op.Op(nil), p.pending...)
+	candidates := make([][]byte, len(p.pending))
+	ids := make([][20]byte, len(p.pending))
+	for i := range p.pending {
+		candidates[i] = p.pending[i].raw
+		ids[i] = p.pending[i].id
+	}
 	p.mu.Unlock()
 
 	var txBytes []byte
 	var digests []tx.Digest
-	if len(pending) > 0 {
-		signedTx := tx.SignedTransaction{
-			Transaction: tx.Transaction{
-				RefBlockNum:    uint16(dgpo.HeadBlockNumber & 0xFFFF),
-				RefBlockPrefix: refBlockPrefix(dgpo.HeadBlockID),
-				Expiration:     blockTime + 60,
-				Operations:     pending,
-				Extensions:     nil,
-			},
+	if len(candidates) > 0 && p.Chain != nil {
+		// Ask the chain which of these actually APPLY against head state. A
+		// block containing a transaction that fails to apply is an invalid
+		// block — the network drops it and we miss the slot — so nothing goes
+		// in on the strength of admission checks alone.
+		sel, serr := p.Chain.SelectPendingTransactions(
+			candidates, dgpo.HeadBlockNumber+1, blockTime, p.maxTxBytes(dgpo))
+		if serr != nil {
+			return nil, 0, fmt.Errorf("buildBlock: select pending: %w", serr)
 		}
-		signed := tx.AppendSignedTransaction(nil, &signedTx)
-		txBytes = signed
-		digests = []tx.Digest{tx.MerkleDigestFromBytes(signed)}
+		for _, raw := range sel.Accepted {
+			txBytes = append(txBytes, raw...)
+		}
+		digests = sel.Digests
+
+		// Evict what we included, plus anything rejected for a PERMANENT
+		// reason. Transactions skipped only for space stay for the next block.
+		dead := make(map[[20]byte]struct{}, len(sel.Accepted)+len(sel.Rejected))
+		accepted := make(map[string]struct{}, len(sel.Accepted))
+		for _, raw := range sel.Accepted {
+			accepted[string(raw)] = struct{}{}
+		}
+		for i := range candidates {
+			if _, ok := accepted[string(candidates[i])]; ok {
+				dead[ids[i]] = struct{}{}
+				continue
+			}
+			if why, rejected := sel.Rejected[i]; rejected && why != chain.PendingTooLarge {
+				dead[ids[i]] = struct{}{}
+			}
+		}
+		p.removeIncluded(dead)
 	}
 	hdr.TransactionMerkleRoot = tx.MerkleRoot(digests)
 

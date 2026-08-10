@@ -81,20 +81,23 @@ func (d *Delegate) OnBlockReceived(p *node.Peer, body []byte) {
 	d.handleBlock(p, body)
 }
 
-// OnTransactionReceived satisfies the node.Delegate typed hook for txs.
-// We currently run no mempool, so a peer-pushed transaction body has
-// nowhere to go — silently consume it.
+// OnTransactionReceived takes an inbound transaction body — either the answer
+// to a fetch_items we issued off a tx inventory, or an unsolicited push from a
+// legacy peer — and offers it to the mempool.
 //
-// Tx INV gossip (item_ids_inventory_message with ItemTypeTrx) is already
-// short-circuited in handleInv: the hashes are remembered in st.known
-// so we never queue them onto a fetch_items request, and we never receive
-// the bodies in the first place. This handler runs only when a peer
-// pushes the body unsolicited (rare on legacy hived's broadcast path).
-//
-// When a real mempool lands, this is the entry point: parse the tx,
-// validate against current head state, and either store + relay-broadcast
-// or drop with a reason.
-func (d *Delegate) OnTransactionReceived(p *node.Peer, body []byte) {}
+// The mempool does the validating (decode, authority, expiration/dedup/TaPOS)
+// and rejects what it cannot use; a rejection here is ordinary traffic, not an
+// error, so it is counted rather than logged per transaction.
+func (d *Delegate) OnTransactionReceived(p *node.Peer, body []byte) {
+	if d.cfg.Mempool == nil || len(body) == 0 {
+		return
+	}
+	if err := d.cfg.Mempool.AddPendingRaw(body); err != nil {
+		d.txRejected.Add(1)
+		return
+	}
+	d.txAccepted.Add(1)
+}
 
 // OnAddressesReceived satisfies the node.Delegate typed hook for the
 // discovery layer's address_message; the peerdb owns this path.
@@ -227,9 +230,28 @@ func (d *Delegate) handleInv(p *node.Peer, body []byte) {
 			d.outstandingTotal.Add(1)
 			missing = append(missing, h)
 		case proto.ItemTypeTrx:
-			// We don't run a tx mempool yet; ignore tx INV until that
-			// lands. Recording it in known prevents repeated re-asks.
+			// Without a mempool there is nowhere to put a transaction, so
+			// record it as known and never ask for the body.
+			if d.cfg.Mempool == nil {
+				st.known[bid] = struct{}{}
+				continue
+			}
+			// With one, FETCH it. This is how transactions reach a producing
+			// node at all: hived advertises transaction ids by inventory and
+			// serves the bodies on request. While this branch merely recorded
+			// them as known, our mempool could never fill and every block we
+			// produced was empty.
+			//
+			// Deliberately NOT routed through the block outstanding/in-flight
+			// budget: those are keyed by block id and sized for a block
+			// backlog, and mixing transaction ids into them would corrupt the
+			// catch-up accounting. Per-peer `known` is dedup enough — a
+			// transaction body is small and arrives once.
+			if _, seen := st.known[bid]; seen {
+				continue
+			}
 			st.known[bid] = struct{}{}
+			missing = append(missing, h)
 		}
 	}
 	st.mu.Unlock()

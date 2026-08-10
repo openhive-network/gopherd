@@ -1147,12 +1147,20 @@ func (a *app) run() error {
 		MaxOutboundPeers:   a.cfg.maxOutboundPeers,
 		MaxConcurrentDials: a.cfg.maxConcurrentDials,
 	}, a.chain, nil)
-	syncDel := p2psync.New(p2psync.Config{
+	syncCfg := p2psync.Config{
 		LogAdaptiveBatch: a.cfg.logAdaptiveBatch,
 		Serve:            a.cfg.p2pServe,
 		LogWorkTiming:    a.cfg.logWorkTiming,
 		ForkAware:        a.cfg.forkSwitching,
-	}, a.chain)
+	}
+	// Feed inbound transactions to the witness mempool when we are actually
+	// producing. Supplying this also turns ON transaction fetching in the sync
+	// layer; without it we record tx inventory as known, never request the
+	// bodies, and every block we produce is empty.
+	if a.witness != nil && a.cfg.produceReal {
+		syncCfg.Mempool = a.witness
+	}
+	syncDel := p2psync.New(syncCfg, a.chain)
 	a.p2p.SetDelegate(syncDel)
 	if err := a.p2p.Start(); err != nil {
 		return fmt.Errorf("p2p start: %w", err)
