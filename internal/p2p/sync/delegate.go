@@ -365,6 +365,13 @@ type Delegate struct {
 	// one is tracked.
 	txAccepted atomic.Uint64
 	txRejected atomic.Uint64
+	// txInvOffered / txFetched bracket the step BEFORE admission. Without them,
+	// "accepted=0, rejected=0" is ambiguous between three different faults:
+	// peers never advertise transactions to us, we never ask for the bodies, or
+	// the bodies never arrive. Each needs a different fix, and they look
+	// identical from outside.
+	txInvOffered atomic.Uint64
+	txFetched    atomic.Uint64
 	// inhibitFetching is set when applyQLen >= high-water and cleared
 	// when it drops below low-water. While set, sendFetchItems is a
 	// no-op. Toggle is performed by the applyLoop on each dequeue and
@@ -1019,6 +1026,10 @@ type Stats struct {
 	TxAccepted   uint64
 	TxRejected   uint64
 	MempoolDepth int
+	// TxInvOffered / TxFetched bracket the step before admission — see the
+	// delegate fields for why all four are needed to localise a fault.
+	TxInvOffered uint64
+	TxFetched    uint64
 	// InvIgnoredCatchup is the cumulative count of tip-inventory adverts
 	// dropped by handleInv's catch-up gate (hived-1.28.7 storm fix). Nonzero
 	// and climbing == we're behind and correctly ignoring tip INV; stops
@@ -1086,6 +1097,8 @@ func (d *Delegate) Stats() Stats {
 		TipSyncHandshakes:      d.tipSyncHandshakes.Load(),
 		TxAccepted:             d.txAccepted.Load(),
 		TxRejected:             d.txRejected.Load(),
+		TxInvOffered:           d.txInvOffered.Load(),
+		TxFetched:              d.txFetched.Load(),
 		MempoolDepth:           mempoolDepth,
 	}
 }
