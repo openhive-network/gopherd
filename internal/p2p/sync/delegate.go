@@ -372,6 +372,7 @@ type Delegate struct {
 	// identical from outside.
 	txInvOffered atomic.Uint64
 	txFetched    atomic.Uint64
+	txEvicted    atomic.Uint64
 	// inhibitFetching is set when applyQLen >= high-water and cleared
 	// when it drops below low-water. While set, sendFetchItems is a
 	// no-op. Toggle is performed by the applyLoop on each dequeue and
@@ -748,6 +749,14 @@ type Mempool interface {
 	AddPendingRaw(body []byte) error
 }
 
+// MempoolEvictor is implemented by mempools that can drop transactions another
+// witness has already included. Optional so test stubs need not implement it,
+// but a producing node MUST have it: without eviction the queue only grows and
+// every block we produce is empty (see witness.RemoveIncludedTxIDs).
+type MempoolEvictor interface {
+	RemoveIncludedTxIDs(ids [][20]byte) int
+}
+
 type applyJob struct {
 	blockNum uint32
 	rawBlock []byte
@@ -930,6 +939,22 @@ func (d *Delegate) PublishBlock(rawBlock []byte, blockNum uint32) error {
 	}
 }
 
+// evictMempool drops transactions carried by a block we just applied. Cheap:
+// one parse of a ~40-tx block per 3s slot.
+func (d *Delegate) evictMempool(rawBlock []byte) {
+	ev, ok := d.cfg.Mempool.(MempoolEvictor)
+	if !ok || ev == nil {
+		return
+	}
+	ids := chain.BlockTransactionIDs(rawBlock)
+	if len(ids) == 0 {
+		return
+	}
+	if n := ev.RemoveIncludedTxIDs(ids); n > 0 {
+		d.txEvicted.Add(uint64(n))
+	}
+}
+
 func (d *Delegate) poke() {
 	d.idleMu.Lock()
 	d.idleRounds = 0
@@ -1030,6 +1055,7 @@ type Stats struct {
 	// delegate fields for why all four are needed to localise a fault.
 	TxInvOffered uint64
 	TxFetched    uint64
+	TxEvicted    uint64
 	// InvIgnoredCatchup is the cumulative count of tip-inventory adverts
 	// dropped by handleInv's catch-up gate (hived-1.28.7 storm fix). Nonzero
 	// and climbing == we're behind and correctly ignoring tip INV; stops
@@ -1099,6 +1125,7 @@ func (d *Delegate) Stats() Stats {
 		TxRejected:             d.txRejected.Load(),
 		TxInvOffered:           d.txInvOffered.Load(),
 		TxFetched:              d.txFetched.Load(),
+		TxEvicted:              d.txEvicted.Load(),
 		MempoolDepth:           mempoolDepth,
 	}
 }

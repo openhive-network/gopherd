@@ -157,3 +157,43 @@ func TestMempoolRemoveIncluded(t *testing.T) {
 		t.Fatal("removeIncluded dropped the wrong transaction")
 	}
 }
+
+// TestRemoveIncludedTxIDs pins the eviction that turns the mempool from
+// write-only into a working queue.
+//
+// Without it, every transaction we admit is mined by another witness within
+// seconds and NOTHING removes it. By our slot the whole queue is duplicates,
+// pre-flight rejects all of them, and we produce an EMPTY block while the
+// network is busy — observed on mainnet 2026-08-10 as depth climbing
+// 598→1082 monotonically, with blocks 108891828 and 108907971 both empty
+// beside neighbours carrying 13-41 transactions.
+func TestRemoveIncludedTxIDs(t *testing.T) {
+	p := newMempoolPlugin(t)
+	a, aid := rawTx(t, "mined-by-someone-else", 1<<30)
+	b, bid := rawTx(t, "still-pending", 1<<30)
+	c, cid := rawTx(t, "also-mined", 1<<30)
+	p.AddPendingTx(a, aid, 1<<30)
+	p.AddPendingTx(b, bid, 1<<30)
+	p.AddPendingTx(c, cid, 1<<30)
+
+	// A block from another witness carrying two of ours, plus one we never saw.
+	_, other := rawTx(t, "never-in-our-mempool", 1<<30)
+	n := p.RemoveIncludedTxIDs([][20]byte{aid, cid, other})
+	if n != 2 {
+		t.Fatalf("evicted %d, want 2 (unknown ids must be ignored, not counted)", n)
+	}
+	if got := p.PendingCount(); got != 1 {
+		t.Fatalf("PendingCount=%d want 1", got)
+	}
+	p.mu.Lock()
+	left := p.pending[0].id
+	p.mu.Unlock()
+	if left != bid {
+		t.Fatal("eviction removed the wrong transaction — the still-pending one must survive")
+	}
+
+	// Empty input is a no-op, not a wipe: an empty block must not clear the queue.
+	if n := p.RemoveIncludedTxIDs(nil); n != 0 || p.PendingCount() != 1 {
+		t.Fatalf("empty eviction changed the mempool (n=%d depth=%d) — an empty block must leave it intact", n, p.PendingCount())
+	}
+}

@@ -223,6 +223,40 @@ func (p *Plugin) AddPendingTx(raw []byte, id [20]byte, expiration uint32) bool {
 	return true
 }
 
+// RemoveIncludedTxIDs evicts transactions that some other witness has already
+// put in a block. Called for every block we apply.
+//
+// Without this the mempool is write-only: every transaction we admit is mined
+// by another witness within seconds, nothing removes it, and by our slot the
+// entire queue is duplicates that pre-flight rejects — so we produce an EMPTY
+// block while the network is busy. That is exactly what happened on mainnet
+// 2026-08-10 (blocks 108891828 and 108907971, both empty beside neighbours
+// carrying 13-41 transactions, with depth climbing 598->1082 monotonically).
+//
+// It also stops the queue reaching MaxMempoolTx, where it would refuse fresh
+// transactions and make the emptiness permanent.
+func (p *Plugin) RemoveIncludedTxIDs(ids [][20]byte) int {
+	if len(ids) == 0 {
+		return 0
+	}
+	dead := make(map[[20]byte]struct{}, len(ids))
+	for _, id := range ids {
+		dead[id] = struct{}{}
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	before := len(p.pending)
+	kept := p.pending[:0]
+	for _, t := range p.pending {
+		if _, gone := dead[t.id]; gone {
+			continue
+		}
+		kept = append(kept, t)
+	}
+	p.pending = kept
+	return before - len(p.pending)
+}
+
 // PendingCount reports the current mempool depth.
 func (p *Plugin) PendingCount() int {
 	p.mu.Lock()
