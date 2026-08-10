@@ -2,6 +2,7 @@ package chain
 
 import (
 	"fmt"
+	"time"
 
 	"hived-go/internal/chain/evaluator"
 	"hived-go/internal/protocol/hardfork"
@@ -11,6 +12,22 @@ import (
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
 )
+
+// maxSelectDuration caps how long transaction selection may run. The slot
+// budget is 3s and selection holds the apply lock throughout; overrunning it
+// costs the block entirely, which is strictly worse than shipping a partial
+// one.
+const maxSelectDuration = 750 * time.Millisecond
+
+// minTxBytes is a floor on a serialized transaction, used to stop looking once
+// no further candidate could possibly fit.
+const minTxBytes = 64
+
+// maxSelectCandidates caps how many candidates one selection may evaluate.
+const maxSelectCandidates = 1500
+
+// maxSelectEvaluated exposes the cap for tests.
+func maxSelectEvaluated() int { return maxSelectCandidates }
 
 // PendingTxOutcome says what happened to one candidate transaction.
 type PendingTxOutcome int
@@ -145,7 +162,25 @@ func (d *Database) SelectPendingTransactions(
 		EmitVOp: func(any) {},
 	}
 
+	// Bound the work. Selection runs under the apply lock inside a 3s slot, and
+	// each candidate costs a signature recovery plus a trial apply (~100µs+).
+	// With the mempool at its cap that is thousands of candidates — enough to
+	// eat the slot we are trying to fill. Roughly half the queue is transactions
+	// nobody will ever mine, so evaluating all of it is wasted work as well as
+	// slow. Callers pass candidates NEWEST-FIRST, so the useful ones are seen
+	// before the budget runs out.
+	evaluated := 0
+	deadline := time.Now().Add(maxSelectDuration)
+
 	for i, raw := range candidates {
+		// Stop when the block is full, when we have looked at enough, or when
+		// we are out of time — a partial block beats a missed slot.
+		if sel.Bytes >= maxBytes-minTxBytes || evaluated >= maxSelectCandidates {
+			break
+		}
+		if evaluated&0x3f == 0 && time.Now().After(deadline) {
+			break
+		}
 		if len(raw) == 0 {
 			sel.Rejected[i] = PendingMalformed
 			continue
@@ -154,6 +189,7 @@ func (d *Database) SelectPendingTransactions(
 			sel.Rejected[i] = PendingTooLarge
 			continue
 		}
+		evaluated++
 		res, derr := readSignedTxBytes(raw)
 		if derr != nil || len(res.SignedTx.Operations) == 0 {
 			sel.Rejected[i] = PendingMalformed

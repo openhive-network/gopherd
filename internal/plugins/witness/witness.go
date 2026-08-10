@@ -925,12 +925,17 @@ func (p *Plugin) buildBlockParts(prod *Producer, dgpo objects.DynamicGlobalPrope
 	// they neither occupy the mempool nor get re-offered every slot.
 	p.dropExpired(dgpo.Time)
 
+	// NEWEST FIRST. The queue is FIFO, and ~half of it is transactions nobody
+	// will ever mine, which pile up at the OLD end. Evaluating oldest-first
+	// spends the bounded selection budget on the least includable candidates
+	// and can fill the slot without filling the block.
 	p.mu.Lock()
-	candidates := make([][]byte, len(p.pending))
-	ids := make([][20]byte, len(p.pending))
+	n := len(p.pending)
+	candidates := make([][]byte, n)
+	ids := make([][20]byte, n)
 	for i := range p.pending {
-		candidates[i] = p.pending[i].raw
-		ids[i] = p.pending[i].id
+		candidates[n-1-i] = p.pending[i].raw
+		ids[n-1-i] = p.pending[i].id
 	}
 	p.mu.Unlock()
 
