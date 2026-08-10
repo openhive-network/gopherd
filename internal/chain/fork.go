@@ -1,6 +1,7 @@
 package chain
 
 import (
+	"hived-go/internal/crypto"
 	"fmt"
 
 	"hived-go/internal/protocol/block"
@@ -75,7 +76,7 @@ func (d *Database) PushLiveBlock(raw []byte, num uint32, opts ApplyOptions) (Pus
 	moved := false
 
 	// 1) Extend the head forward as far as buffered blocks allow.
-	ext, err := d.drainForward(opts)
+	ext, err := d.drainForward(opts, id)
 	if err != nil {
 		return 0, err
 	}
@@ -88,7 +89,7 @@ func (d *Database) PushLiveBlock(raw []byte, num uint32, opts ApplyOptions) (Pus
 		return 0, err
 	}
 	if reorged {
-		if _, err := d.drainForward(opts); err != nil {
+		if _, err := d.drainForward(opts, id); err != nil {
 			return 0, err
 		}
 		return PushReorged, nil
@@ -146,7 +147,7 @@ func (d *Database) committedNum() uint32 {
 // drainForward applies buffered blocks that extend the current head, one at a
 // time (finalizing the prior tip so only the newest stays reversible), until no
 // buffered child of the head exists. Returns whether it advanced the head.
-func (d *Database) drainForward(opts ApplyOptions) (bool, error) {
+func (d *Database) drainForward(opts ApplyOptions, pushed block.ID) (bool, error) {
 	moved := false
 	for {
 		head := d.effHeadID()
@@ -154,7 +155,13 @@ func (d *Database) drainForward(opts ApplyOptions) (bool, error) {
 		if child == nil {
 			return moved, nil
 		}
-		if err := d.applyReversibleExtend(child, opts); err != nil {
+		// The verification hints belong to `pushed` alone; any other block must
+		// be verified from its own bytes.
+		use := opts
+		if child.id != pushed {
+			use = optsForOther(opts)
+		}
+		if err := d.applyReversibleExtend(child, use); err != nil {
 			return moved, err
 		}
 		moved = true
@@ -174,6 +181,27 @@ func (d *Database) childOf(head block.ID) *forkNode {
 		}
 	}
 	return nil
+}
+
+// optsForOther returns opts with the PER-BLOCK verification hints removed.
+//
+// PreVerifiedBlockSigner and PreRecoveredTxKeys are computed for ONE specific
+// block on the receive path. Applying a DIFFERENT block with them verifies that
+// block's signature against another block's recovered key, which fails at
+// random and blamed the wrong witness:
+//
+//	push_live_block 108915165 failed: apply 108915156:
+//	  signing key mismatch for "ocd-witness"
+//	  (recovered=<changed on every attempt>)
+//
+// The recovered key differed each time precisely because a different pushing
+// block supplied it. Every buffered (out-of-order) block and every block
+// re-applied during a reorg went through this path, so valid blocks were
+// rejected at the tip whenever arrival order slipped.
+func optsForOther(opts ApplyOptions) ApplyOptions {
+	opts.PreVerifiedBlockSigner = crypto.PublicKey{}
+	opts.PreRecoveredTxKeys = nil
+	return opts
 }
 
 // applyReversibleExtend finalizes the current uncommitted tip (if any) and
@@ -221,7 +249,7 @@ func (d *Database) tryReorg(opts ApplyOptions) (bool, error) {
 		if bn.raw == nil {
 			return false, fmt.Errorf("push_live_block: reorg branch %d missing raw", bn.num)
 		}
-		if _, err := d.ApplyBlock(bn.raw, bn.num, opts, nil); err != nil {
+		if _, err := d.ApplyBlock(bn.raw, bn.num, optsForOther(opts), nil); err != nil {
 			d.UndoReversible()
 			return false, fmt.Errorf("push_live_block: reorg apply %d: %w", bn.num, err)
 		}
