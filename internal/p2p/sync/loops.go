@@ -742,6 +742,12 @@ func (d *Delegate) applyLoop() {
 		if outcome != chain.PushBuffered && h == job.blockNum {
 			d.queueAdvert(job.rawBlock, h)
 		}
+		// Same hook the linear path fires. It was wired ONLY there, so with
+		// --fork-switching (the production configuration) it never ran at all —
+		// silently disabling anything built on it.
+		if d.cfg.OnBlockApplied != nil && outcome != chain.PushBuffered {
+			d.cfg.OnBlockApplied(job.rawBlock, job.blockNum, job.srcPeer)
+		}
 		d.poke()
 	}
 
