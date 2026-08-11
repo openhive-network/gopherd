@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -202,6 +203,7 @@ type Plugin struct {
 	// admission check, txid -> rejection reason ("" if admitted). Used to
 	// classify the transactions we MISSED. See noteSeen.
 	seenTx    map[[20]byte]string
+	seenAt    map[[20]byte]int64 // txid -> first-seen unix millis
 	seenOrder [][20]byte
 
 	// produced counts blocks we built and successfully handed to the Publisher.
@@ -539,6 +541,8 @@ func (p *Plugin) CompareProducedBlock(blockNum uint32, actual [][20]byte) {
 	// Without this split "only-theirs=34" is unactionable, and the natural
 	// reading (propagation lag) is only one of the three.
 	missRefused, missNeverSeen, missLate := 0, 0, 0
+	missHadItButDropped := 0
+	var lateMs []int64
 	missReasons := map[string]int{}
 	for id := range theirs {
 		if _, inOurs := ours[id]; inOurs {
@@ -553,6 +557,21 @@ func (p *Plugin) CompareProducedBlock(blockNum uint32, actual [][20]byte) {
 			missReasons[shortReason(reason)]++
 		default:
 			missLate++
+			// HOW late? "admitted but not in our block" has two very different
+			// causes and the label alone hides which:
+			//   arrived AFTER we built  -> genuine propagation lateness, and the
+			//                              magnitude says whether it is advert
+			//                              cadence (~seconds) or a near miss.
+			//   seen BEFORE we built    -> we HAD it and selection dropped it,
+			//                              which would be our bug, not the
+			//                              network's.
+			if at := p.seenAtMillis(id); at > 0 && !mine.built.IsZero() {
+				d := at - mine.built.UnixMilli()
+				lateMs = append(lateMs, d)
+				if d < 0 {
+					missHadItButDropped++
+				}
+			}
 		}
 	}
 
@@ -585,6 +604,14 @@ func (p *Plugin) CompareProducedBlock(blockNum uint32, actual [][20]byte) {
 			missRefused, missNeverSeen, missLate)
 		if len(missReasons) > 0 {
 			fmt.Fprintf(os.Stderr, " | refusals: %v", missReasons)
+		}
+		if len(lateMs) > 0 {
+			sort.Slice(lateMs, func(i, j int) bool { return lateMs[i] < lateMs[j] })
+			fmt.Fprintf(os.Stderr, " | late-by-ms min=%d p50=%d max=%d",
+				lateMs[0], lateMs[len(lateMs)/2], lateMs[len(lateMs)-1])
+		}
+		if missHadItButDropped > 0 {
+			fmt.Fprintf(os.Stderr, " | WE-HAD-IT-AND-DROPPED=%d (selection bug, not lateness)", missHadItButDropped)
 		}
 		fmt.Fprintln(os.Stderr)
 	}
@@ -747,17 +774,20 @@ func (p *Plugin) noteSeen(txID [20]byte, reason string) {
 	defer p.mu.Unlock()
 	if p.seenTx == nil {
 		p.seenTx = make(map[[20]byte]string, seenTxCap+1024)
+		p.seenAt = make(map[[20]byte]int64, seenTxCap+1024)
 		p.seenOrder = make([][20]byte, 0, seenTxCap+1024)
 	}
 	if _, dup := p.seenTx[txID]; dup {
 		return
 	}
 	p.seenTx[txID] = reason
+	p.seenAt[txID] = time.Now().UnixMilli()
 	p.seenOrder = append(p.seenOrder, txID)
 	if len(p.seenOrder) > seenTxCap {
 		drop := len(p.seenOrder) - seenTxCap
 		for _, old := range p.seenOrder[:drop] {
 			delete(p.seenTx, old)
+			delete(p.seenAt, old)
 		}
 		p.seenOrder = append(p.seenOrder[:0], p.seenOrder[drop:]...)
 	}
@@ -769,6 +799,13 @@ func (p *Plugin) seenVerdict(txID [20]byte) (reason string, seen bool) {
 	defer p.mu.Unlock()
 	reason, seen = p.seenTx[txID]
 	return reason, seen
+}
+
+// seenAtMillis reports when we FIRST saw a transaction, 0 if never.
+func (p *Plugin) seenAtMillis(txID [20]byte) int64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.seenAt[txID]
 }
 
 // seenTxCap bounds the seen-transaction ring. ~40k transactions is over an hour
