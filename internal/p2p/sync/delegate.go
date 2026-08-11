@@ -982,6 +982,17 @@ func (d *Delegate) queueTxAdvert(id block.ID) {
 	}
 	d.pendingTxAdvert = append(d.pendingTxAdvert, id)
 	d.pendingTxAdvertMu.Unlock()
+	// Advertise NOW, not on the next tick. hived's advertise_inventory_loop is
+	// event-driven — it waits on a promise retriggered the moment a transaction
+	// is accepted (node.cpp trigger_advertise_inventory_loop), so a hived node
+	// relays within milliseconds.
+	//
+	// Ours sat on a 5s ticker, which made this node a five-second-slow hop for
+	// every peer downstream of it. That does not delay OUR receipt — measured
+	// inbound lateness is p50 ~450ms, set by peer advert plus one round trip —
+	// but it degrades propagation for everyone who fetches from us, and a
+	// witness that slows the network it is trying to serve is a bad citizen.
+	d.poke()
 }
 
 // drainTxAdvert takes the pending transaction ids, capped per round.
