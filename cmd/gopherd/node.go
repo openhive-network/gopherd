@@ -297,6 +297,9 @@ type flags struct {
 	produceReal      bool
 	produceDryRun    bool
 	produceEverySlot bool
+	// relayTransactions turns on transaction relay. Off by default: the first
+	// implementation advertised the wrong identity and got us dropped 234 times.
+	relayTransactions bool
 	// loadSnapshot warm-starts the state from a directory snapshot
 	// (block-N/ produced by ghive-tools replay --snapshot-every /
 	// --save-dir-snapshot-at) BEFORE dialing peers. Use to skip the
@@ -389,6 +392,7 @@ func parseNodeFlags(args []string) flags {
 	fs.StringVar(&f.verifyAgainst, "verify-against", "", "path to a reference block_log; assert each applied block's bytes match")
 	fs.StringVar(&f.sourceBlockLog, "source-block-log", "", "self-replay mode: read blocks from this block_log instead of P2P")
 	fs.StringVar(&f.loadSnapshot, "load-snapshot", "", "warm-start from a directory snapshot (block-N/) before dialing peers; skips genesis catch-up")
+	fs.BoolVar(&f.relayTransactions, "relay-transactions", false, "Relay transactions to peers (advertise by hived's legacy message hash + serve bodies on request). Without it the node only CONSUMES transactions, arriving at the end of every propagation chain — measured as holding 2 pending at build time where the producing witness held 28-33. Default off because the first implementation advertised the wrong identity and got us dropped 234 times; re-enable deliberately and watch for \"You sent me a message that I didn't request\".")
 	fs.StringVar(&f.witnessKeyFile, "witness-keys", "", "file of `account WIF` lines (one per witness). Keys go in a file, not a flag, so they aren't exposed in ps output. Requires --produce or --produce-dry-run")
 	fs.BoolVar(&f.produceReal, "produce", false, "REAL block production: when the schedule names one of our witnesses AND the chain's registered signing key for it matches the key we hold, build, sign, APPLY and BROADCAST the block. If the key does not match, log it and skip the slot (mirrors hived, which will not emit a block the network would reject). Requires --witness-keys; mutually exclusive with --produce-dry-run")
 	fs.BoolVar(&f.produceDryRun, "produce-dry-run", false, "exercise the full block-production pipeline (schedule -> assemble -> merkle -> sign -> self-verify -> timing) and DISCARD every block. Never applies, never broadcasts. This is the ONLY production mode the daemon offers: real production is deliberately not wired up")
@@ -1166,6 +1170,13 @@ func (a *app) run() error {
 	// avoid.
 	if a.witness != nil && (a.cfg.produceReal || a.cfg.produceDryRun) {
 		syncCfg.Mempool = a.witness
+		// Relay transactions onward. Without it we are a pure SINK: we only ever
+		// learn of a transaction when a peer volunteers it, which puts us at the
+		// end of every propagation chain. Measured effect: we hold 2 pending
+		// transactions at the instant we build while the real witness holds
+		// 28-33 — we receive the right transactions, just too late to include
+		// them.
+		syncCfg.RelayTransactions = a.cfg.relayTransactions
 		// Evict from the CHAIN's apply path, not the p2p layer. Blocks applied
 		// via drainForward (out-of-order buffering) or re-applied during a
 		// reorg never pass back through sync, so a p2p-side hook misses them —
