@@ -132,6 +132,15 @@ type Database struct {
 	// head state is still its parent. Diagnostic hook for the admission audit.
 	auditAdmission func(rawBlock []byte, blockNum uint32)
 
+	// admitWait* measure how long mempool admission blocks on applyMu, i.e.
+	// how much of a transaction's arrival latency is our own lock contention
+	// with ApplyBlock rather than the network.
+	admitWaitMu      sync.Mutex
+	admitWaitN       int64
+	admitWaitTotalMs int64
+	admitWaitMaxMs   int64
+	admitWaitOver100 int64
+
 	// onBlockFinalized is fired when a reversible block COMMITS (via
 	// FinalizeReversible), i.e. once it is confirmed to extend the chain.
 	// The fork-aware node wires block_log-append + cold-tier eviction here

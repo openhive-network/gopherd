@@ -305,9 +305,43 @@ func applyOpsTrial(ctx *evaluator.Context, signed *tx.SignedTransaction, blockNu
 // Runs under a read lock, so it can be called from peer receive goroutines
 // without serialising against block application.
 func (d *Database) ValidateIncomingTx(raw []byte) error {
+	// Measure how long admission WAITS for the read lock.
+	//
+	// Hypothesis under test: our blocks are short because transactions reach
+	// the mempool late, and the lateness is uniform across the 3s slot rather
+	// than a constant network offset — the signature of contention, not of a
+	// gossip hop. Every transaction arriving while ApplyBlock holds the WRITE
+	// lock queues here. Doubling peers changed nothing, which fits.
+	start := time.Now()
 	d.applyMu.RLock()
+	d.recordAdmitLockWait(time.Since(start))
 	defer d.applyMu.RUnlock()
 	return d.validateIncomingTxLocked(raw)
+}
+
+// recordAdmitLockWait accumulates the admission lock-wait distribution.
+func (d *Database) recordAdmitLockWait(w time.Duration) {
+	ms := w.Milliseconds()
+	d.admitWaitMu.Lock()
+	d.admitWaitN++
+	d.admitWaitTotalMs += ms
+	if ms > d.admitWaitMaxMs {
+		d.admitWaitMaxMs = ms
+	}
+	if ms >= 100 {
+		d.admitWaitOver100++
+	}
+	d.admitWaitMu.Unlock()
+}
+
+// AdmitLockWaitStats reports (samples, meanMs, maxMs, countOver100ms).
+func (d *Database) AdmitLockWaitStats() (int64, int64, int64, int64) {
+	d.admitWaitMu.Lock()
+	defer d.admitWaitMu.Unlock()
+	if d.admitWaitN == 0 {
+		return 0, 0, 0, 0
+	}
+	return d.admitWaitN, d.admitWaitTotalMs / d.admitWaitN, d.admitWaitMaxMs, d.admitWaitOver100
 }
 
 // validateIncomingTxLocked is ValidateIncomingTx's body, with the caller owning
