@@ -1198,6 +1198,21 @@ func (a *app) run() error {
 		auditReasons := map[string]int{}
 		var auditMu gosync.Mutex
 		a.chain.SetAuditAdmission(func(raw []byte, num uint32) {
+			// ONLY audit at the tip. This re-runs full authority verification
+			// (secp256k1 recovery) for every transaction in every block, inside
+			// ApplyBlock under the write lock — it roughly doubles signature
+			// work on the hot path. Ungated, it cost us tip-following: the node
+			// fell ~290s behind, which silenced the dry run (its freshness gate
+			// fired) and stopped the very measurement the audit was serving.
+			//
+			// A diagnostic that changes the behaviour it measures is worse than
+			// no diagnostic. At the tip there is a 3s slot of slack per block,
+			// which is ample; during catch-up there is none.
+			if hdr, _, err := block.UnmarshalSignedHeader(raw); err == nil {
+				if int64(time.Now().Unix())-int64(hdr.Timestamp) > 30 {
+					return
+				}
+			}
 			total, refusals := a.chain.AuditBlockAdmission(raw)
 			if total == 0 {
 				return
