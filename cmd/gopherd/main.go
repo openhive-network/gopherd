@@ -51,6 +51,8 @@ Commands:
   scan-producers <block_log> <from> <to>           block producers per block
   govexp-scan <block_log> <to> <out.json>          last governance action per account
   snapshot-repair-vst / snapshot-repair-govexp     snapshot state surgeons
+  snapshot-repair-rcadj <snap> <adj.json>          write hived's rc_adjustment
+                                         into a snapshot (see rcadjrepair.go)
   version                                print version
   help                                   show this message
 `
@@ -79,6 +81,8 @@ func main() {
 		os.Exit(cmdBlocklogTS(os.Args[2:]))
 	case "snapshot-repair-vst":
 		os.Exit(cmdSnapshotRepairVST(os.Args[2:]))
+	case "snapshot-repair-rcadj":
+		os.Exit(cmdSnapshotRepairRCAdj(os.Args[2:]))
 	case "snapshot-repair-govexp":
 		os.Exit(cmdSnapshotRepairGovexp(os.Args[2:]))
 	case "govexp-scan":
