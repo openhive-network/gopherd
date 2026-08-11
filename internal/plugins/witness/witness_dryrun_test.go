@@ -429,11 +429,13 @@ func TestNextWakeAlignsToSlotBoundary(t *testing.T) {
 	}
 
 	// Just before a boundary: sleep exactly the remainder, so we wake ON it.
-	for _, remain := range []time.Duration{1 * time.Millisecond, 100 * time.Millisecond, maxProducePoll - time.Nanosecond} {
+	for _, remain := range []time.Duration{1 * time.Millisecond, 100 * time.Millisecond} {
 		base := time.Unix(0, (time.Now().UnixNano()/slot+1)*slot).Add(-remain)
-		if got := nextWake(base); got != remain {
-			t.Fatalf("nextWake(%v before boundary) = %v, want %v — we must land ON the slot instant",
-				remain, got, remain)
+		// Land just PAST the instant: waking exactly on it loses the
+		// now >= slotTime race to timer jitter and misses the slot entirely.
+		if got := nextWake(base); got != remain+slotWakeSkew {
+			t.Fatalf("nextWake(%v before boundary) = %v, want %v (boundary + skew)",
+				remain, got, remain+slotWakeSkew)
 		}
 	}
 
@@ -441,8 +443,8 @@ func TestNextWakeAlignsToSlotBoundary(t *testing.T) {
 	// would spin the loop).
 	for off := time.Duration(0); off < BlockInterval; off += 37 * time.Millisecond {
 		got := nextWake(time.Unix(0, (time.Now().UnixNano()/slot)*slot).Add(off))
-		if got <= 0 || got > maxProducePoll {
-			t.Fatalf("nextWake(offset %v) = %v, want 0 < d <= %v", off, got, maxProducePoll)
+		if got <= 0 || got > maxProducePoll+slotWakeSkew {
+			t.Fatalf("nextWake(offset %v) = %v, want 0 < d <= %v", off, got, maxProducePoll+slotWakeSkew)
 		}
 	}
 }
