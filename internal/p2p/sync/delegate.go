@@ -24,6 +24,11 @@ const (
 	// cadence (~5 seconds).
 	DefaultINVInterval = 5 * time.Second
 
+	// txAdvertCoalesce is the minimum gap between transaction-advert wakeups.
+	// Batches bursts into one inventory message per peer instead of one per
+	// transaction, without reintroducing multi-second relay latency.
+	txAdvertCoalesce = 150 * time.Millisecond
+
 	// DefaultFetchBatch is the maximum number of item IDs we put on a
 	// single fetch_items_message. Hived's GRAPHENE_NET_MAX_ITEMS_PER_BATCH
 	// is 10000; we used to cap at 100 to keep individual responses bounded
@@ -136,11 +141,11 @@ type chainAdapter struct {
 	db *chain.Database
 }
 
-func (c *chainAdapter) HeadBlock() (uint32, error)                   { return c.db.HeadBlock() }
-func (c *chainAdapter) HeadBlockID() (block.ID, error)               { return c.db.HeadBlockID() }
-func (c *chainAdapter) RecentBlockBytes(n uint32) []byte             { return c.db.RecentBlockBytes(n) }
-func (c *chainAdapter) RecentBlockBytesByID(id block.ID) []byte      { return c.db.RecentBlockBytesByID(id) }
-func (c *chainAdapter) RecentBlockNums() []uint32                    { return c.db.RecentBlockNums() }
+func (c *chainAdapter) HeadBlock() (uint32, error)              { return c.db.HeadBlock() }
+func (c *chainAdapter) HeadBlockID() (block.ID, error)          { return c.db.HeadBlockID() }
+func (c *chainAdapter) RecentBlockBytes(n uint32) []byte        { return c.db.RecentBlockBytes(n) }
+func (c *chainAdapter) RecentBlockBytesByID(id block.ID) []byte { return c.db.RecentBlockBytesByID(id) }
+func (c *chainAdapter) RecentBlockNums() []uint32               { return c.db.RecentBlockNums() }
 func (c *chainAdapter) RecentBlockIDForNum(n uint32) (block.ID, bool) {
 	return c.db.RecentBlockIDForNum(n)
 }
@@ -403,15 +408,15 @@ type Delegate struct {
 	// outgoing items and got no fresh items from peers. Resets on any
 	// activity. Once it crosses cfg.IdleINVRounds we stop the periodic
 	// broadcast until activityCh fires.
-	idleMu       sync.Mutex
-	idleRounds   int
-	activityCh   chan struct{}
+	idleMu     sync.Mutex
+	idleRounds int
+	activityCh chan struct{}
 
 	// dropCounters track soft load-shedding events; exposed for
 	// observability + tests.
-	droppedQueueFull   atomic.Uint64
-	droppedReorder     atomic.Uint64
-	inhibitedFetches   atomic.Uint64
+	droppedQueueFull     atomic.Uint64
+	droppedReorder       atomic.Uint64
+	inhibitedFetches     atomic.Uint64
 	outstandingThrottled atomic.Uint64
 	// invIgnoredCatchup counts item_ids_inventory_message adverts dropped by
 	// handleInv's catch-up gate (the hived-1.28.7 storm fix). It climbs while
@@ -426,10 +431,10 @@ type Delegate struct {
 	// miss), and compressedCacheHits counts the pre-apply duplicate path
 	// where the same blockID arrived again before applyLoop caught up and
 	// we were able to skip the zstd work entirely.
-	compressedReceived      atomic.Uint64
-	compressedDecompressed  atomic.Uint64
-	compressedCacheHits     atomic.Uint64
-	compressedDecodeErrors  atomic.Uint64
+	compressedReceived     atomic.Uint64
+	compressedDecompressed atomic.Uint64
+	compressedCacheHits    atomic.Uint64
+	compressedDecodeErrors atomic.Uint64
 
 	// decompressor + recentCompressed cache for the inbound
 	// compressed_block_message path. The decompressor is shared across all
@@ -491,6 +496,8 @@ type Delegate struct {
 	// fetches is a pure sink, and if every node behaved that way transaction
 	// propagation would stop.
 	pendingTxAdvert   []block.ID
+	txPokeMu          sync.Mutex
+	lastTxPoke        time.Time
 	pendingTxAdvertMu sync.Mutex
 
 	// pendingAdvertMu guards pendingAdvert.
@@ -563,8 +570,8 @@ type peerState struct {
 	// adaptiveBatchSize() reads it and rolls a new window every
 	// rateWindow ns; the resulting blocks/second feeds the per-peer
 	// FetchBatch sizing in handleBlockchainItemIDsInventory.
-	rateWindowStart   atomic.Int64
-	rateWindowBlocks  atomic.Uint64
+	rateWindowStart  atomic.Int64
+	rateWindowBlocks atomic.Uint64
 	// lastRate is the most-recent blocks/second sample (rounded down to
 	// uint32). Recomputed once per rateWindow; FetchBatch sizing reads
 	// it lock-free. Initialized to 0; the adaptive sizer treats 0 as
@@ -992,7 +999,24 @@ func (d *Delegate) queueTxAdvert(id block.ID) {
 	// inbound lateness is p50 ~450ms, set by peer advert plus one round trip —
 	// but it degrades propagation for everyone who fetches from us, and a
 	// witness that slows the network it is trying to serve is a bad citizen.
-	d.poke()
+	//
+	// COALESCED. Poking on literally every accept means one broadcast round per
+	// transaction across every peer — at mainnet rates (~76k relays/hour, 24
+	// peers) that is a storm of tiny inventory messages, and the node has only
+	// ~8% headroom over the chain's block rate to begin with. hived batches
+	// naturally: its loop drains the WHOLE pending set per wake. The floor
+	// below reproduces that batching while keeping worst-case latency far under
+	// the old 5s tick.
+	now := time.Now()
+	d.txPokeMu.Lock()
+	due := now.Sub(d.lastTxPoke) >= txAdvertCoalesce
+	if due {
+		d.lastTxPoke = now
+	}
+	d.txPokeMu.Unlock()
+	if due {
+		d.poke()
+	}
 }
 
 // drainTxAdvert takes the pending transaction ids, capped per round.
