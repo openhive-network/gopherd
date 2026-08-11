@@ -153,6 +153,12 @@ type Plugin struct {
 	// the PRODUCED line so an empty block explains itself on the spot.
 	lastSelect string
 
+	// lastIncluded is how many transactions actually went INTO the last block
+	// built. The dry run used to report len(p.pending) as "txs=", i.e. the
+	// mempool depth AFTER the build — which is a different number entirely and
+	// read as if it were the block's contents.
+	lastIncluded int
+
 	// dryBlocks records what a DRY RUN built for a height, so it can be
 	// compared against the block the real witness produced for the same slot
 	// once it arrives. This is the only way to check block ASSEMBLY without
@@ -932,8 +938,10 @@ func (p *Plugin) dryRunProduce(prod *Producer, dgpo objects.DynamicGlobalPropert
 		p.dry.MaxNs = ns
 	}
 	p.dry.LastBytes = len(rawBlock)
-	p.dry.LastTxs = len(p.pending)
+	p.dry.LastTxs = p.lastIncluded
 	st := p.dry
+	sel := p.lastSelect
+	pend := len(p.pending)
 	p.mu.Unlock()
 
 	kind := "SIMULATED"
@@ -954,10 +962,10 @@ func (p *Plugin) dryRunProduce(prod *Producer, dgpo objects.DynamicGlobalPropert
 		status += " chain-key=UNKNOWN(no witness object)"
 	}
 	fmt.Fprintf(os.Stderr,
-		"witness dry-run: %s block %d for %s (scheduled=%s) built+signed in %.2fms (margin %.0fms of %ds) size=%dB txs=%d %s — DISCARDED [slots=%d built=%d ours=%d okay=%d fail=%d err=%d chainkey_ok=%d impersonated=%d avg=%.2fms max=%.2fms]\n",
+		"witness dry-run: %s block %d for %s (scheduled=%s) built+signed in %.2fms (margin %.0fms of %ds) size=%dB txs=%d mempool=%d [select: %s] %s — DISCARDED [slots=%d built=%d ours=%d okay=%d fail=%d err=%d chainkey_ok=%d impersonated=%d avg=%.2fms max=%.2fms]\n",
 		kind, dgpo.HeadBlockNumber+1, prod.Account, scheduled,
 		float64(elapsed.Microseconds())/1000, float64(margin.Milliseconds()), int(BlockInterval/time.Second),
-		len(rawBlock), st.LastTxs, status,
+		len(rawBlock), st.LastTxs, pend, sel, status,
 		st.Slots, st.Built, st.Ours, st.VerifyOK, st.VerifyFail, st.Errors, st.ChainKeyOK, st.Imperson,
 		float64(st.TotalNs)/float64(max64(st.Built, 1))/1e6, float64(st.MaxNs)/1e6)
 }
@@ -1096,6 +1104,7 @@ func (p *Plugin) buildBlockParts(prod *Producer, dgpo objects.DynamicGlobalPrope
 			float64(time.Since(selStart).Microseconds())/1000.0, byReason)
 		p.mu.Lock()
 		p.lastSelect = info
+		p.lastIncluded = len(sel.Accepted)
 		p.mu.Unlock()
 		for _, raw := range sel.Accepted {
 			txBytes = append(txBytes, raw...)
