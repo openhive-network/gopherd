@@ -497,10 +497,22 @@ func TestVoteValidate(t *testing.T) {
 		t.Fatal("expected invalid voter to fail")
 	}
 
+	// C++ vote_operation::validate -> validate_permlink (validation.hpp:111)
+	// checks ONLY size < HIVE_MAX_PERMLINK_LENGTH and is_utf8. There is no
+	// non-empty check — that exists solely on the DHF ops, which call
+	// validate_string_is_not_empty explicitly (dhf_operations.cpp:21).
+	// hived's own vote_validate test asserts nothing, so this expectation was
+	// never checked against C++; it was an assumption, and it cost us traffic.
+	empty := good
+	empty.Permlink = ""
+	if err := empty.Validate(); err != nil {
+		t.Fatalf("C++ accepts an empty permlink, we rejected: %v", err)
+	}
+
 	bad = good
-	bad.Permlink = ""
+	bad.Permlink = strings.Repeat("a", 256) // C++ requires < 256, so 256 fails
 	if err := bad.Validate(); err == nil {
-		t.Fatal("expected empty permlink to fail")
+		t.Fatal("expected permlink at the limit to fail")
 	}
 
 	bad = good
