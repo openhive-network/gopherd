@@ -58,6 +58,7 @@ import (
 	"hived-go/internal/protocol/block"
 	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/network"
+	"hived-go/internal/protocol/op"
 	"hived-go/internal/state"
 	"hived-go/internal/state/genesis"
 	"hived-go/internal/state/objects"
@@ -1187,6 +1188,20 @@ func (a *app) run() error {
 		// transactions and produce empty blocks again.
 		w := a.witness
 		a.chain.SetOnTxApplied(func(txID [20]byte) { w.RemoveIncludedTxID(txID) })
+	}
+	// RC-REJECTION DIAGNOSTIC: our RC accounting is measurably STRICTER than
+	// hived's — the block comparison caught us refusing a transaction the real
+	// block included. Log the payer and the error so the discrepancy can be
+	// compared against hived's rc_api for that exact account and block, instead
+	// of being re-derived from scratch later.
+	if a.cfg.produceDryRun {
+		chain.SetRCRejectLog(func(ops []op.Op, err error) {
+			payer := ""
+			if len(ops) > 0 {
+				payer = ops[0].Tag.Name()
+			}
+			fmt.Fprintf(os.Stderr, "RC-REJECT: first-op=%s err=%v\n", payer, err)
+		})
 	}
 	// ADMISSION AUDIT: run our mempool filter over the transactions of every
 	// real block, before applying it. Every one of them is valid by definition,
