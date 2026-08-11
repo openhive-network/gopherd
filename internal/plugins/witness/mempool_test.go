@@ -371,3 +371,64 @@ func TestEvictedCountTracksMechanism(t *testing.T) {
 		t.Fatalf("EvictedCount=%d depth=%d want 2/0", got, p.PendingCount())
 	}
 }
+
+// TestAdvertIDIsTheLegacyMessageHash pins the p2p inventory identity of a
+// transaction.
+//
+// hived identifies transactions in inventory by ripemd160 over the WHOLE signed
+// transaction (full_transaction.cpp:86, get_legacy_transaction_message_hash),
+// NOT by transaction id (which is a prefix of sha256 over the UNSIGNED bytes).
+// Advertising the transaction id got us dropped 234 times in one run with
+// "You sent me a message that I didn't request": peers fetched what we
+// advertised, hashed the body their way, and concluded they had never asked.
+//
+// The two must be DIFFERENT values — if this test ever finds them equal, the
+// implementation has collapsed onto the wrong one.
+func TestAdvertIDIsTheLegacyMessageHash(t *testing.T) {
+	raw, txid := rawTx(t, "advert-identity", 1<<30)
+
+	advert := AdvertIDOf(raw)
+	if advert == ([20]byte{}) {
+		t.Fatal("advert id is zero")
+	}
+	if advert == txid {
+		t.Fatal("advert id equals the transaction id — they are computed over different bytes with different hashes; equality means we reverted to the identity that got us dropped")
+	}
+	// Deterministic, and over the FULL body: any byte change moves it.
+	if AdvertIDOf(raw) != advert {
+		t.Fatal("advert id is not deterministic")
+	}
+	mutated := append([]byte(nil), raw...)
+	mutated[len(mutated)-1] ^= 0xff // last byte is inside the signature area
+	if AdvertIDOf(mutated) == advert {
+		t.Fatal("advert id ignores trailing bytes; it must cover the whole signed transaction, signatures included")
+	}
+}
+
+// TestPendingRawServesByAdvertID pins that we can serve what we advertise.
+// Advertising something we cannot then provide is precisely what gets a node
+// dropped by its peers.
+func TestPendingRawServesByAdvertID(t *testing.T) {
+	p := newMempoolPlugin(t)
+	raw, id := rawTx(t, "serve-me", 1<<30)
+	if !p.AddPendingTx(raw, id, 1<<30) {
+		t.Fatal("insert refused")
+	}
+	advert := AdvertIDOf(raw)
+	got := p.PendingRaw(advert)
+	if got == nil {
+		t.Fatal("cannot serve a transaction we would have advertised — the peer that asks gets nothing and drops us")
+	}
+	if string(got) != string(raw) {
+		t.Fatal("served bytes differ from what was queued")
+	}
+	// Looking up by the TRANSACTION ID must not work: that is the wrong identity.
+	if p.PendingRaw(id) != nil {
+		t.Fatal("served by transaction id; the serve index must key on the advert identity")
+	}
+	// Once evicted, we must no longer claim to have it.
+	p.RemoveIncludedTxID(id)
+	if p.PendingRaw(advert) != nil {
+		t.Fatal("still serving an evicted transaction — the advert index is out of lockstep")
+	}
+}

@@ -135,6 +135,10 @@ type Plugin struct {
 	// same transactions, that was ~68k scans over a queue of ~6k entries, all
 	// contending with the production path.
 	pendingIDs map[[20]byte]struct{}
+	// pendingByAdvert maps the p2p inventory identity to the body, so a peer
+	// that fetches what we advertised gets served. Advertising something we
+	// cannot then provide is what gets a node dropped.
+	pendingByAdvert map[[20]byte][]byte
 	dry        DryRunStats
 	// lastDrySlot dedupes dry-run production: the loop ticks every 500ms but a
 	// slot is 3s, so without this one slot would yield ~6 identical blocks.
@@ -250,10 +254,20 @@ type dryBlock struct {
 // pendingTx is one mempool entry: the transaction exactly as it arrived, plus
 // the fields we need to age it out and de-duplicate it.
 type pendingTx struct {
-	raw        []byte   // VERBATIM wire bytes — never re-encode these
-	id         [20]byte // transaction id, for dedup
+	raw []byte   // VERBATIM wire bytes — never re-encode these
+	id  [20]byte // transaction id, for dedup and for eviction on apply
+	// advertID is how hived identifies a transaction in p2p inventory:
+	// ripemd160 over the WHOLE signed transaction
+	// (full_transaction.cpp:86, get_legacy_transaction_message_hash) — NOT the
+	// transaction id. Advertising the transaction id got us dropped 234 times
+	// with "You sent me a message that I didn't request": peers fetched what we
+	// advertised, hashed the body their way, and concluded they never asked.
+	advertID   [20]byte
 	expiration uint32
 }
+
+// AdvertIDOf returns the p2p inventory identity of a raw signed transaction.
+func AdvertIDOf(raw []byte) [20]byte { return crypto.RIPEMD160(raw) }
 
 // MaxMempoolTx bounds how many transactions we hold. Mempool contents are
 // attacker-controlled and unbounded growth is a trivial memory exhaustion of a
@@ -264,6 +278,7 @@ const MaxMempoolTx = 8000
 // AddPendingTx queues an already-validated raw signed transaction.
 // Returns false if it was a duplicate or the mempool is full.
 func (p *Plugin) AddPendingTx(raw []byte, id [20]byte, expiration uint32) bool {
+	advert := AdvertIDOf(raw)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.pendingIDs == nil {
@@ -289,12 +304,17 @@ func (p *Plugin) AddPendingTx(raw []byte, id [20]byte, expiration uint32) bool {
 		oldest := p.pending[0]
 		p.pending = p.pending[1:]
 		delete(p.pendingIDs, oldest.id)
+		delete(p.pendingByAdvert, oldest.advertID)
 		p.overflowed++
 	}
 	cp := make([]byte, len(raw))
 	copy(cp, raw)
-	p.pending = append(p.pending, pendingTx{raw: cp, id: id, expiration: expiration})
+	p.pending = append(p.pending, pendingTx{raw: cp, id: id, advertID: advert, expiration: expiration})
 	p.pendingIDs[id] = struct{}{}
+	if p.pendingByAdvert == nil {
+		p.pendingByAdvert = make(map[[20]byte][]byte, 1024)
+	}
+	p.pendingByAdvert[advert] = cp
 	return true
 }
 
@@ -325,6 +345,7 @@ func (p *Plugin) RemoveIncludedTxIDs(ids [][20]byte) int {
 	for _, t := range p.pending {
 		if _, gone := dead[t.id]; gone {
 			delete(p.pendingIDs, t.id)
+			delete(p.pendingByAdvert, t.advertID)
 			continue
 		}
 		kept = append(kept, t)
@@ -353,6 +374,7 @@ func (p *Plugin) RemoveIncludedTxID(id [20]byte) {
 	kept := p.pending[:0]
 	for _, t := range p.pending {
 		if t.id == id {
+			delete(p.pendingByAdvert, t.advertID)
 			continue
 		}
 		kept = append(kept, t)
@@ -488,18 +510,10 @@ func (p *Plugin) DryRunMatchRate() (matched, compared int) {
 // Used to answer a peer's fetch_items for a transaction we advertised: having
 // advertised it, we must be able to serve it, or the peer drops us for
 // offering what we cannot provide.
-func (p *Plugin) PendingRaw(id [20]byte) []byte {
+func (p *Plugin) PendingRaw(advertID [20]byte) []byte {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if _, ok := p.pendingIDs[id]; !ok {
-		return nil
-	}
-	for i := range p.pending {
-		if p.pending[i].id == id {
-			return p.pending[i].raw
-		}
-	}
-	return nil
+	return p.pendingByAdvert[advertID]
 }
 
 // PendingCount reports the current mempool depth.
@@ -520,6 +534,7 @@ func (p *Plugin) dropExpired(now uint32) int {
 	for _, t := range p.pending {
 		if t.expiration <= now {
 			delete(p.pendingIDs, t.id)
+			delete(p.pendingByAdvert, t.advertID)
 			dropped++
 			continue
 		}
@@ -543,6 +558,7 @@ func (p *Plugin) removeIncluded(dead map[[20]byte]struct{}) {
 	for _, t := range p.pending {
 		if _, gone := dead[t.id]; gone {
 			delete(p.pendingIDs, t.id)
+			delete(p.pendingByAdvert, t.advertID)
 			continue
 		}
 		kept = append(kept, t)
