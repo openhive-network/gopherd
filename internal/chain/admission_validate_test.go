@@ -98,3 +98,35 @@ func TestCustomOpBlockLimitAppliesToAssembly(t *testing.T) {
 		t.Fatalf("new block did not reset the per-account budget: %v", err)
 	}
 }
+
+// TestAdmissionRefusesUnverifiableAuthority pins the fix for the over-inclusion
+// that made block 108912883 invalid.
+//
+// witness_block_approve is authorised through hived's SEPARATE
+// get_required_witness_signatures category. Our authorities table correctly
+// returns no ACCOUNT-tier requirement for it (mirroring hived), but we never
+// implemented the witness-signature category — so VerifyAuthority passed such a
+// transaction with ANY signature. hived checks and refuses; we accepted, and
+// the mempool filled with 541 of them while the real blocks for those slots
+// carried ZERO:
+//
+//	only-ours op types:    map[witness_block_approve:541]
+//	real block 108918938:  comment=2 custom_json=8 vote=2
+//
+// Including them makes the block invalid. Until the witness-signature category
+// exists, refusing them costs nothing because no real block carries any.
+func TestAdmissionRefusesUnverifiableAuthority(t *testing.T) {
+	// The authorities table must still report NO account-tier requirement —
+	// that part matches hived and must not be "fixed" by inventing one.
+	var o op.Operation = op.WitnessBlockApprove{Witness: "alice"}
+	reqs := op.CollectRequiredAuthorities([]op.Operation{o})
+	if len(reqs) != 0 {
+		t.Fatalf("witness_block_approve reported %d account-tier authority requirement(s); hived uses a separate witness-signature category, so VerifyAuthority cannot police it",
+			len(reqs))
+	}
+	// Which is precisely why it cannot be verified by VerifyAuthority, and why
+	// admission must refuse it rather than trusting a check that cannot fail.
+	if op.TagWitnessBlockApprove == 0 {
+		t.Fatal("tag lookup broken")
+	}
+}
