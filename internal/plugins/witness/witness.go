@@ -796,15 +796,24 @@ func (p *Plugin) maybeProduceBlock() error {
 		// witness immediately produces instead of waiting for the future.
 		nextSlotTime = (now / 3) * 3
 	}
-	if nextSlotTime > now && !p.DryRun {
-		return nil // not yet — wait for clock to catch up
+	if nextSlotTime > now {
+		return nil // not yet — wait for the slot instant
 	}
-	// DRY RUN does not wait for the slot boundary. Against a live chain the
-	// window where now >= nextSlotTime is only the sliver between the slot
-	// instant and us RECEIVING the real block for it (~0.5s), after which
-	// dgpo.Time advances and the target moves. With a 500ms tick we lose that
-	// race every time, so the pipeline would never execute and there would be
-	// nothing to measure — observed as 198 detected gtg slots and 0 blocks
+	// The DRY RUN now waits for the slot instant too, exactly like real
+	// production.
+	//
+	// It used to build immediately, because with the old 500ms tick the window
+	// where now >= nextSlotTime was unwinnable — it is only the sliver between
+	// the slot instant and RECEIVING the real block for that slot, after which
+	// dgpo.Time advances and the target moves. That was the right call for
+	// measuring build COST, but it makes the block-content comparison
+	// meaningless: we assembled ~2.9s BEFORE the slot while the real witness
+	// assembles AT it, so we were missing three seconds of arrivals and the
+	// diff showed near-disjoint sets (ours=38 theirs=10 shared=1) purely from
+	// timing.
+	//
+	// nextWake now lands the loop ON the boundary (fdd5d83), so the window is
+	// winnable and the comparison is finally like-for-like.
 	// built. Building the moment the schedule names us measures exactly the
 	// same work; only the wall-clock trigger differs.
 	//
