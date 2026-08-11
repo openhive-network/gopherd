@@ -70,7 +70,7 @@ func TestCreateProposalStartAfterEnd(t *testing.T) {
 		Creator:   "alice",
 		Receiver:  "bob",
 		StartDate: now + 60*60*24*7, // 7 days from now
-		EndDate:   now + 60*60*24,    // 1 day from now (< start)
+		EndDate:   now + 60*60*24,   // 1 day from now (< start)
 		DailyPay:  hbdAsset(100),
 		Subject:   "test",
 		Permlink:  "p",

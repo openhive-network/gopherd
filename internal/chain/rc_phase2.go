@@ -118,10 +118,10 @@ func processRCExpiredDelegations(s *state.Session, now uint32) {
 // block timestamps cross a bucket boundary (every 3600 seconds).
 //
 // On each rotation:
-//   1. The oldest bucket (max_seqno - 23) is removed.
-//   2. A new bucket with seqno = max_seqno + 1 is created with Used=0.
-//   3. RCPool.UsageInWindow is recomputed by summing all surviving
-//      buckets' Used arrays.
+//  1. The oldest bucket (max_seqno - 23) is removed.
+//  2. A new bucket with seqno = max_seqno + 1 is created with Used=0.
+//  3. RCPool.UsageInWindow is recomputed by summing all surviving
+//     buckets' Used arrays.
 //
 // At genesis (no buckets exist yet) we seed RCWindowBucketCount empty
 // buckets so the math is well-formed.

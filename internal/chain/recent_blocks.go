@@ -43,12 +43,12 @@ type recentEntry struct {
 //
 // Thread-safe: Apply writes under a goroutine separate from the readers.
 type RecentBlocks struct {
-	mu        sync.RWMutex
-	cap       int
-	entries   map[uint32]*recentEntry
-	byID      map[block.ID]*recentEntry
-	idForNum  map[uint32]block.ID
-	numOrder  []uint32 // FIFO of block_nums for eviction
+	mu       sync.RWMutex
+	cap      int
+	entries  map[uint32]*recentEntry
+	byID     map[block.ID]*recentEntry
+	idForNum map[uint32]block.ID
+	numOrder []uint32 // FIFO of block_nums for eviction
 
 	// decompressor is lazily allocated on the first compressed Put. nil
 	// means no compressed entry has ever been stored (so Get paths can

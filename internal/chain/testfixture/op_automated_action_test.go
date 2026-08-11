@@ -44,7 +44,7 @@ const missingAutomatedActions = "MISSING: automated-actions framework (SMT-only 
 //   - example_required_action with empty `account` fails validate()
 //     and push_required_action with assert_exception
 //   - pushing a valid req_action with execution_time = head_block_time
-//     + HIVE_BLOCK_INTERVAL inserts a row into
+//   - HIVE_BLOCK_INTERVAL inserts a row into
 //     pending_required_action_index sorted by execution_time, with the
 //     same payload and execution_time
 //   - pushing with execution_time < head_block_time throws

@@ -56,14 +56,14 @@ func TestDelayedVotingProcessor03Parity(t *testing.T) {
 // Port of delayed_voting_tests.cpp::decline_voting_rights_02.
 //
 // Scenario:
-//   1. alice + bob both vest. After 30 days alice votes a witness;
-//      witness gets alice.vests.
-//   2. bob requests decline_voting_rights. Half-way through the recovery
-//      period, bob can still vote — and his vote also lands on the
-//      witness (because his vest already matured during step 1's 30d skip).
-//   3. After the recovery period fully elapses, bob's voting rights are
-//      revoked; his prior witness vote is cleared and any further
-//      witness_vote op from bob must fail.
+//  1. alice + bob both vest. After 30 days alice votes a witness;
+//     witness gets alice.vests.
+//  2. bob requests decline_voting_rights. Half-way through the recovery
+//     period, bob can still vote — and his vote also lands on the
+//     witness (because his vest already matured during step 1's 30d skip).
+//  3. After the recovery period fully elapses, bob's voting rights are
+//     revoked; his prior witness vote is cleared and any further
+//     witness_vote op from bob must fail.
 func TestDeclineVotingRights02(t *testing.T) {
 	f := setupDelayedVotingFixture(t, []string{"witness"}, []string{"alice", "bob"})
 
@@ -141,13 +141,13 @@ func TestDeclineVotingRights02(t *testing.T) {
 // Port of delayed_voting_tests.cpp::decline_voting_rights_03.
 //
 // Like _02 but bob CANCELS the decline before it fires:
-//   1. alice votes witness after maturation — witness += alice.vests.
-//   2. bob declines, mid-window casts a witness vote → witness +=
-//      bob.vests.
-//   3. bob cancels the decline (Decline=false) — request must be gone,
-//      bob's voting rights and existing witness vote stay intact.
-//   4. bob votes for a SECOND witness — that witness total reflects
-//      bob.vests.
+//  1. alice votes witness after maturation — witness += alice.vests.
+//  2. bob declines, mid-window casts a witness vote → witness +=
+//     bob.vests.
+//  3. bob cancels the decline (Decline=false) — request must be gone,
+//     bob's voting rights and existing witness vote stay intact.
+//  4. bob votes for a SECOND witness — that witness total reflects
+//     bob.vests.
 func TestDeclineVotingRights03(t *testing.T) {
 	f := setupDelayedVotingFixture(t,
 		[]string{"witness", "witness2"},

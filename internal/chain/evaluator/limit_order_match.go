@@ -40,8 +40,8 @@ func applyOrder(ctx *Context, newOrder *objects.LimitOrder) bool {
 	// in-memory btrees with zero per-call alloc and breaks as soon as
 	// priceCovers() rejects.
 	store := objects.EnsureLimitOrderStore(ctx.DB)
-	base := newOrder.MinReceiveSym   // candidate's base = new's quote
-	quote := newOrder.ForSaleSymbol  // candidate's quote = new's base
+	base := newOrder.MinReceiveSym  // candidate's base = new's quote
+	quote := newOrder.ForSaleSymbol // candidate's quote = new's base
 	type candidate struct {
 		owner   auth.AccountName
 		orderID uint32
@@ -96,7 +96,8 @@ var candidateBuf []struct {
 // the candidate's price is still good enough for the new order.
 //
 // Cross-multiply form: old.sell_price >= ~new.sell_price
-//   ⇔ old.base.amount × new.base.amount >= old.quote.amount × new.quote.amount
+//
+//	⇔ old.base.amount × new.base.amount >= old.quote.amount × new.quote.amount
 //
 // (Because ~new.sell_price has base/quote swapped, the cross-mul of
 // `a >= b` becomes `a.base*b.quote_after_swap >= a.quote*b.base_after_swap`,
@@ -222,6 +223,7 @@ func adjustLiquidityRewardOnFill(ctx *Context, old, new *objects.LimitOrder, old
 //     PRODUCT.
 //   - new row create:      `update_weight(has_hardfork(HF9))` — HF9+
 //     uses MIN.
+//
 // HF10 then runs `retally_liquidity_weight()` to recompute every
 // pre-existing row with the MIN formula. Without this distinction
 // our Go fed adm's post-HF9 modifies through MIN immediately, while

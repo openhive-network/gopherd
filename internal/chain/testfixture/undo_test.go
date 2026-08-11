@@ -13,10 +13,10 @@ import (
 // Operates directly on the state.Session overlay (the Go equivalent
 // of chainbase's undo_session). Each scenario:
 //
-//	1. snapshot the committed state
-//	2. open a session, do mutations
-//	3. drop the overlay (Session.Undo)
-//	4. verify the committed state is unchanged
+//  1. snapshot the committed state
+//  2. open a session, do mutations
+//  3. drop the overlay (Session.Undo)
+//  4. verify the committed state is unchanged
 //
 // This is the unit-test counterpart of an apply_block being rolled
 // back due to evaluator failure or fork divergence.

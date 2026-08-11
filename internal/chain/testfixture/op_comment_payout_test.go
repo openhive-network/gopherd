@@ -84,8 +84,8 @@ func seedRewardFund(t *testing.T, f *Fixture, balance int64) {
 	if err != nil {
 		// Should exist post-HF17; bootstrap a basic one if not.
 		rf = objects.RewardFund{
-			Name:                  objects.PostRewardFundName,
-			ContentConstant:       2_000_000_000_000,
+			Name:                   objects.PostRewardFundName,
+			ContentConstant:        2_000_000_000_000,
 			PercentCurationRewards: 2500,
 			PercentContentRewards:  10000,
 			AuthorRewardCurve:      objects.CurveLinear,
@@ -141,11 +141,11 @@ func TestCommentPayoutEqualize(t *testing.T) {
 	}
 	// bob declines payout: max_accepted_payout = 0 HBD.
 	f.MustApplyOp(op.CommentOptions{
-		Author:           "bob",
-		Permlink:         "mypost",
-		MaxAcceptedPayout: asset.Asset{Amount: 0, Symbol: asset.Symbol{Num: asset.HbdSymbol}},
-		PercentHbd:        10000,
-		AllowVotes:        true,
+		Author:               "bob",
+		Permlink:             "mypost",
+		MaxAcceptedPayout:    asset.Asset{Amount: 0, Symbol: asset.Symbol{Num: asset.HbdSymbol}},
+		PercentHbd:           10000,
+		AllowVotes:           true,
 		AllowCurationRewards: true,
 	})
 

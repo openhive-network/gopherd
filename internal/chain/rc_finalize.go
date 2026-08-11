@@ -50,10 +50,10 @@ func rcSetPoolParams(s *state.Session, blockNum uint32, blockTime uint32) {
 
 // rcFinalizeBlock ports rc_plugin::on_finish_block. Per-block hooks:
 //
-//	1. Account for produced/consumed RC since the last block.
-//	2. Decay each pool's current_mana toward its max.
-//	3. Process expired RC delegations (refund to delegator).
-//	4. Update the rc_per_resource cost coefficients.
+//  1. Account for produced/consumed RC since the last block.
+//  2. Decay each pool's current_mana toward its max.
+//  3. Process expired RC delegations (refund to delegator).
+//  4. Update the rc_per_resource cost coefficients.
 //
 // Scaffolding pre-HF20: only #3 fires (it's safe to invoke even before
 // HF20 activates since the table is empty). The cost-recompute math is

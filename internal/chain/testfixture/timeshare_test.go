@@ -41,9 +41,9 @@ import (
 // vested), 2 mid-weight timesharevoters (10M / 10M / 100 sat),
 // 10 littlevoters (1 sat each). Mirrors C++ timeshare_test_fixture.
 type timeshareFixture struct {
-	f                  *Fixture
-	timeshareNames     []string
-	timeshareNameSet   map[string]bool
+	f                *Fixture
+	timeshareNames   []string
+	timeshareNameSet map[string]bool
 }
 
 func newTimeshareFixture(t *testing.T, hf hardfork.ID) *timeshareFixture {
@@ -85,14 +85,14 @@ func newTimeshareFixture(t *testing.T, hf hardfork.ID) *timeshareFixture {
 	// int64 vests product and mint ZERO (the old 100M/10M HIVE numbers
 	// silently gave every voter no stake). Scaled ÷10⁴ — the ratios are
 	// what the schedule assertions depend on.
-	f.FundVesting("staticvoter", 10_000_000)          // 10K HIVE
+	f.FundVesting("staticvoter", 10_000_000) // 10K HIVE
 	dgpo = f.DGPO()
 	t.Logf("POST staticvoter dgpo: total_vesting_shares=%d total_vesting_fund_hive=%d",
 		dgpo.TotalVestingShares, dgpo.TotalVestingFundHive)
 	t.Logf("staticvoter vest after FundVesting=%d", f.Vests("staticvoter"))
-	f.FundVesting("timesharevoter1", 1_000_000)       // 1K HIVE
-	f.FundVesting("timesharevoter2", 1_000_000)       // 1K HIVE
-	f.FundVesting("timesharevoter3", 100)             // 100 sat
+	f.FundVesting("timesharevoter1", 1_000_000) // 1K HIVE
+	f.FundVesting("timesharevoter2", 1_000_000) // 1K HIVE
+	f.FundVesting("timesharevoter3", 100)       // 100 sat
 	for _, lv := range littlevoters {
 		f.FundVesting(lv, 1) // 1 sat
 	}
@@ -194,7 +194,7 @@ func (tf *timeshareFixture) debugSchedule(t *testing.T) {
 //
 //   - expectCorrect=true  : every timeshare witness should have ~10 slots.
 //   - expectCorrect=false : timeshare1 should have strictly more slots
-//                           than each other timeshare.
+//     than each other timeshare.
 //
 // Go's port matches the HF27 (correct) behavior at every HF since it
 // has only one schedule object; we only call this with expectCorrect=true.
@@ -229,7 +229,7 @@ func (tf *timeshareFixture) runVoteToggleTest(t *testing.T, expectCorrect bool) 
 // correct (equal-slots) behavior.
 func TestTimeshareWitnessSchedulingHF25(t *testing.T) {
 	tf := newTimeshareFixture(t, hardfork.HF25)
-	runTimeshareScenario(t, tf, /*expectCorrect=*/ true)
+	runTimeshareScenario(t, tf /*expectCorrect=*/, true)
 }
 
 // TestTimeshareWitnessSchedulingHF26 ports test_hf26_behavior. The C++
@@ -266,7 +266,7 @@ func TestTimeshareWitnessSchedulingHF27(t *testing.T) {
 	t.Skip("known VST micro-drift under the ÷10⁴-scaled fixture (picks unaffected; " +
 		"node strict-clean through HF27 to 100M); see project_vst_zero_delta_root_cause")
 	tf := newTimeshareFixture(t, hardfork.HF27)
-	runTimeshareScenario(t, tf, /*expectCorrect=*/ true)
+	runTimeshareScenario(t, tf /*expectCorrect=*/, true)
 }
 
 // runTimeshareScenario is the shared body of HF25/HF27 tests. It

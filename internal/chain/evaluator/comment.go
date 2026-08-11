@@ -218,13 +218,13 @@ func (commentEvaluator) Apply(ctx *Context, opArg op.Op) error {
 			p.NextCommentID++
 		})
 		objects.PutComment(ctx.DB, &objects.Comment{
-			Author:               c.Author,
-			Permlink:             c.Permlink,
-			ParentAuthor:         c.ParentAuthor,
-			ParentPermlink:       c.ParentPermlink,
-			Created:              ctx.HeadBlockTime,
-			LastUpdate:           ctx.HeadBlockTime,
-			CashoutTime:          cashoutTime,
+			Author:         c.Author,
+			Permlink:       c.Permlink,
+			ParentAuthor:   c.ParentAuthor,
+			ParentPermlink: c.ParentPermlink,
+			Created:        ctx.HeadBlockTime,
+			LastUpdate:     ctx.HeadBlockTime,
+			CashoutTime:    cashoutTime,
 			// C++ comment_cashout_object initialiser: HBD_asset(1'000'000'000)
 			// = 1,000,000.000 HBD (3 decimals). Mirrors comment_options_operation's
 			// own default of `asset(1'000'000'000, HBD_SYMBOL)`. Using the
@@ -583,9 +583,9 @@ func (voteEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		return fmt.Errorf("vote: %q has declined voting rights", v.Voter)
 	}
 	const (
-		hivePercent              int64 = 10000
+		hivePercent               int64 = 10000
 		votingManaRegenerationSec int64 = 5 * 24 * 60 * 60 // 5 days
-		secondsPerDay            int64 = 24 * 60 * 60
+		secondsPerDay             int64 = 24 * 60 * 60
 	)
 	// HIVE_INITIAL_VOTE_POWER_RATE = 40 pre-HF19; C++ database_hardfork.cpp
 	// HF19 case sets `gpo.vote_power_reserve_rate = HIVE_REDUCED_VOTE_POWER_RATE`
@@ -1076,7 +1076,7 @@ func (voteEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		(voteDebugPermlink == "" || string(v.Permlink) == voteDebugPermlink)
 	if isNew {
 		objects.PutCommentVote(ctx.DB, &objects.CommentVote{
-			Voter:          v.Voter,
+			Voter: v.Voter,
 			// Share the comment's resident Author/Permlink backing strings
 			// (identical values — c was looked up by v.Author/v.Permlink) so
 			// the stored vote doesn't retain its own permlink copy. Permlinks

@@ -328,9 +328,9 @@ func TestWitnessMultipleFeedingThreads(t *testing.T) {
 	// Account prep.
 	for _, n := range []string{"alice", "bob", "carol", "dan"} {
 		f.Actor(n)
-		f.FundVesting(n, 1_000_000)        // 1000.000 TESTS
-		f.FundLiquid(n, 1_000_000)         // 1000.000 HIVE
-		f.FundLiquidHBD(n, 1_000_000)      // 1000.000 TBD
+		f.FundVesting(n, 1_000_000)   // 1000.000 TESTS
+		f.FundLiquid(n, 1_000_000)    // 1000.000 HIVE
+		f.FundLiquidHBD(n, 1_000_000) // 1000.000 TBD
 	}
 	f.GenerateBlock()
 

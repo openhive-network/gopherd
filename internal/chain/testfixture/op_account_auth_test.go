@@ -17,10 +17,11 @@ import (
 // TestAccountAuthTests ports operation_tests.cpp::account_auth_tests.
 //
 // Setup:
-//   alice.active gets bob added (account auth, weight 1)
-//   alice.posting gets charlie added (account auth, weight 1)
-//   bob.posting    = solo authority over bob_posting_key (distinct from active)
-//   charlie.posting = solo authority over charlie_posting_key
+//
+//	alice.active gets bob added (account auth, weight 1)
+//	alice.posting gets charlie added (account auth, weight 1)
+//	bob.posting    = solo authority over bob_posting_key (distinct from active)
+//	charlie.posting = solo authority over charlie_posting_key
 //
 // Then transfer alice → bob (needs alice's active):
 //   - signed with bob_active_key     → OK   (bob ∈ alice.active, bob.active satisfied)

@@ -21,9 +21,9 @@ import (
 //   - alice, bob, sam, corp all created
 //   - corp.active rebuilt as 2-of-3 multisig over (alice, bob, sam) keys
 //   - transfer corp → sam 1.000 TESTS, signed under various subsets:
-//       * alice only (1 sig)     → fails (tx_missing_active_auth)
-//       * alice+bob+sam (3 sigs) → fails ("irrelevant signature")
-//       * alice+bob (2 sigs)     → succeeds
+//   - alice only (1 sig)     → fails (tx_missing_active_auth)
+//   - alice+bob+sam (3 sigs) → fails ("irrelevant signature")
+//   - alice+bob (2 sigs)     → succeeds
 //
 // We exercise the signature path directly via chain.VerifyAuthority
 // because the fixture's ApplyBlock pipeline always passes

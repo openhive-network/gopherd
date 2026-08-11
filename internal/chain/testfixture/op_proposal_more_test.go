@@ -181,7 +181,8 @@ func TestRemoveProposalNonOwnerRejected(t *testing.T) {
 // proposal_object_apply_fee_increase. A 90-day proposal duration
 // triggers the HF24+ fee scaling: fee = HIVE_TREASURY_FEE +
 // (90 - 60) * HIVE_PROPOSAL_FEE_INCREASE_AMOUNT
-//        = 10_000 + 30 * 1_000 = 40_000 sat HBD.
+//
+//	= 10_000 + 30 * 1_000 = 40_000 sat HBD.
 //
 // Assertions: creator's HBD drops by `fee`, receiver unchanged,
 // treasury gains `fee`, the proposal_fee virtual op is emitted with

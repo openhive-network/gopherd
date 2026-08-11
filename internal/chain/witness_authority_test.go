@@ -73,3 +73,42 @@ func TestSignedByKeyMarksConsumed(t *testing.T) {
 		t.Fatal("satisfying the witness category must CONSUME the signature, else it trips tx_irrelevant_sig")
 	}
 }
+
+// TestWitnessBlockApproveNeverAdmitted pins the exclusion that keeps our blocks
+// matching the network's.
+//
+// hived's evaluator is a hard assert, not a validation rule
+// (hive_evaluator.cpp:615): "This operation may not be included in a block". It
+// is a FAST-CONFIRMATION message routed through
+// database::process_fast_confirm_transaction, never through push_transaction —
+// which is why it is ~92% of gossiped traffic and appears in ZERO real blocks.
+//
+// Being correctly signed is NOT a reason to admit it. I removed the exclusion
+// once on exactly that reasoning, after implementing the witness-signature
+// authority category, and block assembly regressed instantly from only-ours=0
+// to ours=379 against theirs=32.
+func TestWitnessBlockApproveNeverAdmitted(t *testing.T) {
+	signed := &tx.SignedTransaction{Transaction: tx.Transaction{
+		Operations: op.Ops(op.WitnessBlockApprove{Witness: "gtg"}),
+	}}
+	var found bool
+	for i := range signed.Operations {
+		if signed.Operations[i].Tag == op.TagWitnessBlockApprove {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("test fixture must carry a witness_block_approve operation")
+	}
+	// The admission path must refuse it by TAG, independently of whether its
+	// signature verifies — verification passing is precisely the trap.
+	if !OpExcludedFromBlocks(op.TagWitnessBlockApprove) {
+		t.Fatal("witness_block_approve must be excluded from block assembly")
+	}
+	// Ordinary operations must NOT be swept up by the exclusion.
+	for _, tag := range []op.Tag{op.TagVote, op.TagComment, op.TagTransfer, op.TagCustomJSON} {
+		if OpExcludedFromBlocks(tag) {
+			t.Fatalf("%s must remain admissible", tag.Name())
+		}
+	}
+}

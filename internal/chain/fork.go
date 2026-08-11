@@ -1,8 +1,8 @@
 package chain
 
 import (
-	"hived-go/internal/crypto"
 	"fmt"
+	"hived-go/internal/crypto"
 
 	"hived-go/internal/protocol/block"
 )
@@ -126,8 +126,8 @@ func (d *Database) ensureForkDB() {
 // effHeadID/effHeadNum are the CURRENT tip (the uncommitted reversible block if
 // one is pending, else the committed head) — HeadBlock*/ID read through the
 // session so they already reflect the pending block.
-func (d *Database) effHeadID() block.ID  { id, _ := d.HeadBlockID(); return id }
-func (d *Database) effHeadNum() uint32    { n, _ := d.HeadBlock(); return n }
+func (d *Database) effHeadID() block.ID { id, _ := d.HeadBlockID(); return id }
+func (d *Database) effHeadNum() uint32  { n, _ := d.HeadBlock(); return n }
 
 // committedID/committedNum are the last IRREVERSIBLE block — the pending block's
 // parent when a reversible block is pending, else the effective head.

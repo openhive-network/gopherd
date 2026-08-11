@@ -99,8 +99,8 @@ func updateVirtualSupply(s *state.Session, blockNum uint32) {
 		if start == 0 || stop == 0 || stop < start {
 			// Defensive fallback for old state rows that pre-date the
 			// genesis seeding of these fields.
-			start = 200  // 2 %
-			stop = 500   // 5 %
+			start = 200 // 2 %
+			stop = 500  // 5 %
 			dgpo.HBDStartPercent = uint16(start)
 			dgpo.HBDStopPercent = uint16(stop)
 		}
