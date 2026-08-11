@@ -7,9 +7,7 @@ import (
 	"hived-go/internal/crypto"
 	"hived-go/internal/p2p/node"
 	"hived-go/internal/p2p/proto"
-	"hived-go/internal/fcraw"
 	"hived-go/internal/protocol/block"
-	"hived-go/internal/protocol/tx"
 )
 
 // OnPeerConnected is invoked once per peer when it reaches StateActive.
@@ -108,23 +106,12 @@ func (d *Delegate) OnTransactionReceived(p *node.Peer, body []byte) {
 		return
 	}
 	d.txAccepted.Add(1)
-	// Relay it onward. hived advertises every transaction it accepts; we were a
-	// pure sink, which is both poor citizenship and leaves our own view of the
-	// transaction stream dependent entirely on others' generosity.
-	if id, ok := txIDOf(body); ok {
-		d.queueTxAdvert(id)
-	}
-}
-
-// txIDOf computes the transaction id from a raw signed_transaction body — the
-// same id peers use in inventory, so what we advertise is what they can ask for.
-func txIDOf(body []byte) (block.ID, bool) {
-	r := fcraw.NewReader(body)
-	res, err := tx.ReadSignedTransaction(r)
-	if err != nil || !r.AtEnd() {
-		return block.ID{}, false
-	}
-	return block.ID(tx.IDFromDigest(tx.DigestFromBytes(body[res.UnsignedStart:res.UnsignedEnd]))), true
+	// Relay it onward, using the identity hived puts in inventory: ripemd160
+	// over the WHOLE signed transaction (full_transaction.cpp:86), NOT the
+	// transaction id. Getting this wrong is not a cosmetic mismatch — peers
+	// fetch what we advertise, hash the body their own way, find an id they
+	// never asked for, and drop the connection.
+	d.queueTxAdvert(block.ID(crypto.RIPEMD160(body)))
 }
 
 // OnAddressesReceived satisfies the node.Delegate typed hook for the
