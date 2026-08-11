@@ -543,6 +543,24 @@ const customOpBlockLimit uint8 = 5
 // Mirrors libraries/chain/database.cpp::_push_transaction lines 631-640
 // — counts are committed to the block-wide map only on success.
 func (d *Database) enforceCustomOpBlockLimit(signed *tx.SignedTransaction) error {
+	return applyCustomOpBlockLimit(d.customOpCountByAccount, signed)
+}
+
+// applyCustomOpBlockLimit enforces hived's per-account custom-operation cap for
+// ONE block, against a caller-supplied counter. Split out so BLOCK ASSEMBLY can
+// apply the identical rule against its own counter without touching the chain's.
+//
+// Selection did not enforce this and it is very likely why block 108912883 was
+// rejected: we packed 579 transactions (65KB) where the real block held 90, and
+// a witness may only include customOpBlockLimit custom ops per account per
+// block. Everything past that makes the block INVALID, so the network refuses
+// it — while our own node, which enforces the limit only in ApplyBlock, had no
+// complaint about assembling it.
+//
+// It also explains the mempool divergence: hived refuses the excess at
+// admission, so its pool stays near one block's worth (~117 observed), while
+// ours grew to 2020 holding transactions nobody is able to include.
+func applyCustomOpBlockLimit(counts map[auth.AccountName]uint8, signed *tx.SignedTransaction) error {
 	// Per-tx delta map; merged into the block-wide map at end on success.
 	var delta map[auth.AccountName]uint8
 	for _, o := range signed.Operations {
@@ -574,7 +592,7 @@ func (d *Database) enforceCustomOpBlockLimit(signed *tx.SignedTransaction) error
 			}
 			seen[a] = struct{}{}
 			delta[a]++
-			total := d.customOpCountByAccount[a] + delta[a]
+			total := counts[a] + delta[a]
 			if total > customOpBlockLimit {
 				return fmt.Errorf("account %s already submitted %d custom json operation(s) this block.",
 					a, customOpBlockLimit)
@@ -582,7 +600,7 @@ func (d *Database) enforceCustomOpBlockLimit(signed *tx.SignedTransaction) error
 		}
 	}
 	for a, n := range delta {
-		d.customOpCountByAccount[a] += n
+		counts[a] += n
 	}
 	return nil
 }

@@ -4,7 +4,9 @@ import (
 	"testing"
 
 	"hived-go/internal/protocol/asset"
+	"hived-go/internal/protocol/auth"
 	"hived-go/internal/protocol/op"
+	"hived-go/internal/protocol/tx"
 )
 
 // TestAdmissionRunsOperationValidators pins that structurally invalid
@@ -47,5 +49,52 @@ func TestAdmissionRunsOperationValidators(t *testing.T) {
 	}
 	if err := v.Validate(); err == nil {
 		t.Fatal("validator reached through the tagged union accepted an invalid operation")
+	}
+}
+
+// TestCustomOpBlockLimitAppliesToAssembly pins that block ASSEMBLY enforces the
+// same per-account custom-operation cap that block APPLICATION does.
+//
+// It did not, and that is very likely why block 108912883 was rejected by the
+// network: we packed 579 transactions (65KB) where the real block for that slot
+// held 90. A witness may only include customOpBlockLimit custom operations per
+// account per block; everything past that makes the block INVALID. Our own node
+// never objected, because it enforces the rule only in ApplyBlock — so we
+// assembled a block we would have refused had someone else sent it to us.
+func TestCustomOpBlockLimitAppliesToAssembly(t *testing.T) {
+	counts := map[auth.AccountName]uint8{}
+	mk := func(who string) *tx.SignedTransaction {
+		return &tx.SignedTransaction{Transaction: tx.Transaction{
+			Operations: []op.Op{op.FromOperation(&op.CustomJSON{
+				RequiredPostingAuths: []auth.AccountName{auth.AccountName(who)},
+				ID:                   "test",
+				JSON:                 "{}",
+			})},
+		}}
+	}
+
+	// The same account may only get customOpBlockLimit into one block.
+	accepted := 0
+	for i := 0; i < int(customOpBlockLimit)+3; i++ {
+		if err := applyCustomOpBlockLimit(counts, mk("spammer")); err == nil {
+			accepted++
+		}
+	}
+	if accepted != int(customOpBlockLimit) {
+		t.Fatalf("accepted %d custom ops for one account, cap is %d — assembling past the cap produces a block the network rejects",
+			accepted, customOpBlockLimit)
+	}
+
+	// A DIFFERENT account is unaffected: the cap is per account, and treating it
+	// as per block would starve everyone else once one spammer hit the limit.
+	if err := applyCustomOpBlockLimit(counts, mk("someone-else")); err != nil {
+		t.Fatalf("a different account was refused: %v — the cap is per ACCOUNT, not per block", err)
+	}
+
+	// Fresh block, fresh budget: the counter is per block, so a new assembly
+	// must start from zero or we would under-fill every subsequent block.
+	fresh := map[auth.AccountName]uint8{}
+	if err := applyCustomOpBlockLimit(fresh, mk("spammer")); err != nil {
+		t.Fatalf("new block did not reset the per-account budget: %v", err)
 	}
 }
