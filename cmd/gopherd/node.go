@@ -1300,6 +1300,9 @@ func (a *app) run() error {
 				return
 			case <-t.C:
 				s := syncDel.Stats()
+				if w := syncDel.TxAdvertWinners(5); len(w) > 0 {
+					a.logger.printf("TX-FIRST (peers closest to where transactions enter): %v", w)
+				}
 				awN, awMean, awMax, awOver := a.chain.AdmitLockWaitStats()
 				a.logger.printf("STATS peers=%d qdepth=%d/%d inhibit=%v outstanding=%d distinct=%d inflight=%d throttled=%d qfull=%d reorderDrop=%d invIgnored=%d invRx=%d tipStallKicks=%d tipSync=%d comp(rx=%d zstd=%d hit=%d err=%d) mempool(inv=%d fetch=%d acc=%d dup=%d rej=%d evict=%d ovf=%d depth=%d relay=%d served=%d) admitWait(n=%d meanMs=%d maxMs=%d over100ms=%d)",
 					s.PeerCount, s.QueueDepth, s.QueueCapacity, s.FetchInhibited, s.OutstandingTotal, s.DistinctOutstanding, s.GlobalInflight,

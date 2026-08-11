@@ -202,9 +202,13 @@ type Plugin struct {
 	// seenTx/seenOrder are a bounded ring of every transaction that reached the
 	// admission check, txid -> rejection reason ("" if admitted). Used to
 	// classify the transactions we MISSED. See noteSeen.
-	seenTx    map[[20]byte]string
-	seenAt    map[[20]byte]int64 // txid -> first-seen unix millis
-	seenOrder [][20]byte
+	seenTx map[[20]byte]string
+	seenAt map[[20]byte]int64 // txid -> first-seen unix millis
+	// lastRejectByTxID maps txid -> selection outcome for candidates we held
+	// and did NOT include. Lets the diff name the exact reason a transaction
+	// the network mined was left out of our block.
+	lastRejectByTxID map[[20]byte]string
+	seenOrder        [][20]byte
 
 	// produced counts blocks we built and successfully handed to the Publisher.
 	// This is "submitted for publication", NOT "accepted by the network" — the
@@ -536,6 +540,7 @@ func (p *Plugin) CompareProducedBlock(blockNum uint32, actual [][20]byte) {
 	// reading (propagation lag) is only one of the three.
 	missRefused, missNeverSeen, missLate := 0, 0, 0
 	missHadItButDropped := 0
+	var droppedWhy []string
 	var lateMs []int64
 	missReasons := map[string]int{}
 	for id := range theirs {
@@ -564,6 +569,17 @@ func (p *Plugin) CompareProducedBlock(blockNum uint32, actual [][20]byte) {
 				lateMs = append(lateMs, d)
 				if d < 0 {
 					missHadItButDropped++
+					// We HELD it before building and still left it out. Name
+					// what selection did — this is the case that has been
+					// unexplained all session, and a bucket count could never
+					// tie a reason to a specific transaction.
+					p.mu.Lock()
+					why := p.lastRejectByTxID[id]
+					p.mu.Unlock()
+					if why == "" {
+						why = "NOT-IN-SELECTION-REJECT-MAP (never offered as a candidate?)"
+					}
+					droppedWhy = append(droppedWhy, fmt.Sprintf("%x…=%s", id[:6], why))
 				}
 			}
 		}
@@ -605,7 +621,7 @@ func (p *Plugin) CompareProducedBlock(blockNum uint32, actual [][20]byte) {
 				lateMs[0], lateMs[len(lateMs)/2], lateMs[len(lateMs)-1])
 		}
 		if missHadItButDropped > 0 {
-			fmt.Fprintf(os.Stderr, " | WE-HAD-IT-AND-DROPPED=%d (selection bug, not lateness)", missHadItButDropped)
+			fmt.Fprintf(os.Stderr, " | WE-HAD-IT-AND-DROPPED=%d %v", missHadItButDropped, droppedWhy)
 		}
 		fmt.Fprintln(os.Stderr)
 	}
@@ -1404,6 +1420,30 @@ func (p *Plugin) buildBlockParts(prod *Producer, dgpo objects.DynamicGlobalPrope
 		for _, why := range sel.Rejected {
 			byReason[why.String()]++
 		}
+		// Record WHY each candidate was excluded, keyed by txid, so the block
+		// diff can answer the question that has been open all session: when a
+		// transaction we HELD is absent from our block but present in the real
+		// one, what exactly did selection do with it? A count in `byReason`
+		// cannot be tied back to a specific transaction; this can.
+		p.mu.Lock()
+		if p.lastRejectByTxID == nil {
+			p.lastRejectByTxID = make(map[[20]byte]string, 256)
+		}
+		for idx, why := range sel.Rejected {
+			if idx >= 0 && idx < len(ids) {
+				p.lastRejectByTxID[ids[idx]] = why.String()
+			}
+		}
+		// Bounded: keep only what a few slots could possibly reference.
+		if len(p.lastRejectByTxID) > 4096 {
+			p.lastRejectByTxID = make(map[[20]byte]string, 256)
+			for idx, why := range sel.Rejected {
+				if idx >= 0 && idx < len(ids) {
+					p.lastRejectByTxID[ids[idx]] = why.String()
+				}
+			}
+		}
+		p.mu.Unlock()
 		info := fmt.Sprintf("candidates=%d included=%d bytes=%d in %.1fms rejected=%v",
 			len(candidates), len(sel.Accepted), sel.Bytes,
 			float64(time.Since(selStart).Microseconds())/1000.0, byReason)
