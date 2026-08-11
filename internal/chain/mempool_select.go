@@ -305,6 +305,16 @@ func applyOpsTrial(ctx *evaluator.Context, signed *tx.SignedTransaction, blockNu
 // Runs under a read lock, so it can be called from peer receive goroutines
 // without serialising against block application.
 func (d *Database) ValidateIncomingTx(raw []byte) error {
+	d.applyMu.RLock()
+	defer d.applyMu.RUnlock()
+	return d.validateIncomingTxLocked(raw)
+}
+
+// validateIncomingTxLocked is ValidateIncomingTx's body, with the caller owning
+// applyMu. Split out so the pre-apply admission audit — which runs inside
+// ApplyBlock under the WRITE lock — can reuse the exact same check rather than
+// a parallel copy that could drift from it.
+func (d *Database) validateIncomingTxLocked(raw []byte) error {
 	res, err := readSignedTxBytes(raw)
 	if err != nil {
 		return fmt.Errorf("decode: %w", err)
@@ -312,9 +322,6 @@ func (d *Database) ValidateIncomingTx(raw []byte) error {
 	if len(res.SignedTx.Operations) == 0 {
 		return fmt.Errorf("transaction has no operations")
 	}
-
-	d.applyMu.RLock()
-	defer d.applyMu.RUnlock()
 
 	session := state.NewSession(d.state)
 	dgpo, err := objects.GetDGPO(session)
