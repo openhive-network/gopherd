@@ -592,6 +592,9 @@ func (p *Plugin) CompareProducedBlock(blockNum uint32, actual [][20]byte) {
 
 // shortReason collapses a rejection error to a stable bucket so the histogram
 // groups by CAUSE rather than by whichever account or id appeared in the text.
+// ShortReason is exported for the admission audit in cmd/gopherd.
+func ShortReason(s string) string { return shortReason(s) }
+
 func shortReason(s string) string {
 	switch {
 	case strings.Contains(s, "witness_block_approve"):

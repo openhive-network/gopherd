@@ -128,6 +128,10 @@ type Database struct {
 	// mempool uses it to drop transactions another witness has mined.
 	onTxApplied func(txID [20]byte)
 
+	// auditAdmission runs against an incoming block BEFORE it is applied, while
+	// head state is still its parent. Diagnostic hook for the admission audit.
+	auditAdmission func(rawBlock []byte, blockNum uint32)
+
 	// onBlockFinalized is fired when a reversible block COMMITS (via
 	// FinalizeReversible), i.e. once it is confirmed to extend the chain.
 	// The fork-aware node wires block_log-append + cold-tier eviction here
@@ -238,6 +242,34 @@ func (d *Database) EnableRecentBlockCache(capacity int) {
 // ApplyBlock. Pass nil to disable. Single-slot — last writer wins.
 // The callback runs synchronously on the goroutine that called
 // ApplyBlock, so it should return quickly (just notify a channel).
+// SetAuditAdmission registers a hook run against each incoming block BEFORE it
+// is applied, while state is still the parent. Diagnostic only; nil disables.
+func (d *Database) SetAuditAdmission(cb func(rawBlock []byte, blockNum uint32)) {
+	d.applyMu.Lock()
+	defer d.applyMu.Unlock()
+	d.auditAdmission = cb
+}
+
+// AuditBlockAdmission runs ValidateIncomingTx over every transaction in a block
+// and returns one bucketed reason per refusal. The caller must hold no lock;
+// this takes the read lock itself.
+//
+// Intended to be called from the pre-apply hook, where head state is the
+// block's parent — the state its producer validated against.
+func (d *Database) AuditBlockAdmission(rawBlock []byte) (total int, refusals []string) {
+	txs, err := BlockTransactionBodies(rawBlock)
+	if err != nil {
+		return 0, nil
+	}
+	for _, raw := range txs {
+		total++
+		if err := d.validateIncomingTxLocked(raw); err != nil {
+			refusals = append(refusals, err.Error())
+		}
+	}
+	return total, refusals
+}
+
 // SetOnTxApplied registers a callback fired for each transaction recorded in
 // the dedup window. Called under the apply lock, so it must be cheap and must
 // not re-enter the chain.
@@ -619,6 +651,20 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	hdr, hdrLen, err := block.UnmarshalSignedHeader(rawBlock)
 	if err != nil {
 		return objects.DynamicGlobalProperty{}, fmt.Errorf("apply_block %d header: %w", blockNum, err)
+	}
+
+	// ADMISSION AUDIT — the ground truth for "is our mempool filter too strict".
+	//
+	// Every transaction in a block the network accepted is valid BY DEFINITION.
+	// So running our own admission check over them, here, against the PARENT
+	// state the real producer used, turns a guess into a proof: any refusal is
+	// an over-refusal, and it names itself.
+	//
+	// This has to happen before apply. Afterwards these transactions are in the
+	// dedup window and every one of them would be refused as a duplicate — the
+	// audit would report 100% failure and mean nothing.
+	if d.auditAdmission != nil {
+		d.auditAdmission(rawBlock, blockNum)
 	}
 
 	session := d.session

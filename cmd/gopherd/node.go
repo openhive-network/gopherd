@@ -52,6 +52,8 @@ import (
 	"hived-go/internal/crypto"
 	p2pnode "hived-go/internal/p2p/node"
 	"hived-go/internal/plugins/witness"
+	gosync "sync"
+
 	p2psync "hived-go/internal/p2p/sync"
 	"hived-go/internal/protocol/block"
 	"hived-go/internal/protocol/hardfork"
@@ -485,11 +487,11 @@ type app struct {
 	// Cold tier (only when --comment-resident-cap>0): frozen comments +
 	// their votes spill to disk so a full-chain node's RAM stays bounded.
 	// EvictFrozen runs after each applied block. Nil when off.
-	cold             objects.ColdStore
-	witness          *witness.Plugin
-	commentStore     *objects.CommentStore
-	voteStore        *objects.CommentVoteStore
-	evictBudget      int
+	cold         objects.ColdStore
+	witness      *witness.Plugin
+	commentStore *objects.CommentStore
+	voteStore    *objects.CommentVoteStore
+	evictBudget  int
 }
 
 func newApp(cfg flags) (*app, error) {
@@ -1185,6 +1187,39 @@ func (a *app) run() error {
 		// transactions and produce empty blocks again.
 		w := a.witness
 		a.chain.SetOnTxApplied(func(txID [20]byte) { w.RemoveIncludedTxID(txID) })
+	}
+	// ADMISSION AUDIT: run our mempool filter over the transactions of every
+	// real block, before applying it. Every one of them is valid by definition,
+	// so a refusal here is a proven over-refusal — the direct measurement of
+	// whether the filter is costing us real traffic, independent of what any
+	// peer happened to offer us.
+	if a.cfg.produceDryRun {
+		var auditTotal, auditRefused int
+		auditReasons := map[string]int{}
+		var auditMu gosync.Mutex
+		a.chain.SetAuditAdmission(func(raw []byte, num uint32) {
+			total, refusals := a.chain.AuditBlockAdmission(raw)
+			if total == 0 {
+				return
+			}
+			auditMu.Lock()
+			auditTotal += total
+			auditRefused += len(refusals)
+			for _, r := range refusals {
+				auditReasons[witness.ShortReason(r)]++
+			}
+			t, ref := auditTotal, auditRefused
+			snap := make(map[string]int, len(auditReasons))
+			for k, v := range auditReasons {
+				snap[k] = v
+			}
+			auditMu.Unlock()
+			if len(refusals) > 0 {
+				fmt.Fprintf(os.Stderr,
+					"ADMISSION AUDIT block %d: REFUSED %d/%d valid transactions (cumulative %d/%d = %.1f%%) %v\n",
+					num, len(refusals), total, ref, t, 100*float64(ref)/float64(t), snap)
+			}
+		})
 	}
 	// DRY RUN comparison: when the real block for a height we assembled arrives,
 	// diff the transaction sets. Block assembly is otherwise unverifiable
