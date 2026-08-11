@@ -13,7 +13,7 @@ import (
 // and a node that only fetches is a pure sink. If every node behaved that way
 // transaction propagation would stop.
 func TestTxRelayQueue(t *testing.T) {
-	_, d := advertHarness(t) // Serve: true
+	_, d := advertHarness(t)       // Serve: true
 	d.cfg.RelayTransactions = true // OFF by default until the advert identity is right
 	d.cfg.MaxTxPerInv = 4
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -495,9 +496,18 @@ type Delegate struct {
 	// round. hived relays every transaction it accepts; a node that only
 	// fetches is a pure sink, and if every node behaved that way transaction
 	// propagation would stop.
-	pendingTxAdvert   []block.ID
-	txPokeMu          sync.Mutex
-	lastTxPoke        time.Time
+	pendingTxAdvert []block.ID
+	txPokeMu        sync.Mutex
+	lastTxPoke      time.Time
+
+	// advertWin* track which peer offered each transaction FIRST — the peers
+	// closest to where transactions enter the network. Peer COUNT was
+	// falsified as the lever for inbound lateness; peer POSITION is the
+	// remaining candidate, and this identifies it per peer.
+	advertWinMu       sync.Mutex
+	advertSeen        map[block.ID]struct{}
+	advertSeenRing    []block.ID
+	advertWins        map[string]int
 	pendingTxAdvertMu sync.Mutex
 
 	// pendingAdvertMu guards pendingAdvert.
@@ -1224,4 +1234,70 @@ func (d *Delegate) Stats() Stats {
 		TxRelayed:              d.txRelayed.Load(),
 		MempoolDepth:           mempoolDepth,
 	}
+}
+
+// advertSeenCap bounds the first-advert dedup ring.
+const advertSeenCap = 60000
+
+// noteTxAdvertWinner credits the peer that offered a transaction before any
+// other peer did.
+//
+// Inbound lateness (p50 ~1.2s behind the producing witness) is what makes our
+// blocks a subset of the real one, and it did NOT improve when peer count
+// doubled. So the question is not how MANY peers we have but WHICH — the ones
+// adjacent to where users broadcast. This measures exactly that, per peer.
+func (d *Delegate) noteTxAdvertWinner(p *node.Peer, id block.ID) {
+	d.advertWinMu.Lock()
+	defer d.advertWinMu.Unlock()
+	if d.advertSeen == nil {
+		d.advertSeen = make(map[block.ID]struct{}, advertSeenCap+1024)
+		d.advertWins = make(map[string]int, 32)
+	}
+	if _, dup := d.advertSeen[id]; dup {
+		return // someone else already told us; not a win
+	}
+	d.advertSeen[id] = struct{}{}
+	d.advertSeenRing = append(d.advertSeenRing, id)
+	if len(d.advertSeenRing) > advertSeenCap {
+		drop := len(d.advertSeenRing) - advertSeenCap
+		for _, old := range d.advertSeenRing[:drop] {
+			delete(d.advertSeen, old)
+		}
+		d.advertSeenRing = append(d.advertSeenRing[:0], d.advertSeenRing[drop:]...)
+	}
+	addr := "unknown"
+	if c := p.Conn(); c != nil && c.RemoteAddr() != nil {
+		addr = c.RemoteAddr().String()
+	}
+	d.advertWins[addr]++
+}
+
+// TxAdvertWinners returns peers ranked by how often they were FIRST to offer a
+// transaction, best first. These are the peers worth pinning as seeds.
+func (d *Delegate) TxAdvertWinners(top int) []string {
+	d.advertWinMu.Lock()
+	defer d.advertWinMu.Unlock()
+	type kv struct {
+		addr string
+		n    int
+	}
+	all := make([]kv, 0, len(d.advertWins))
+	total := 0
+	for a, n := range d.advertWins {
+		all = append(all, kv{a, n})
+		total += n
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].n > all[j].n })
+	if len(all) > top {
+		all = all[:top]
+	}
+	out := make([]string, 0, len(all))
+	for _, e := range all {
+		pct := 0.0
+		if total > 0 {
+			pct = 100 * float64(e.n) / float64(total)
+		}
+		out = append(out, fmt.Sprintf("%s=%d(%.0f%%)", e.addr, e.n, pct))
+	}
+	return out
 }

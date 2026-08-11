@@ -709,10 +709,10 @@ func (d *Delegate) applyLoop() {
 			// Our own block skips only the signature recovery; every other
 			// block-level check still runs, so an invalid block fails HERE with
 			// a specific reason instead of being rejected by peers.
-			ValidateOwnBlock: job.local,
-			TolerateFailingOps:        historical,
-			PreVerifiedBlockSigner:    job.preVerifiedSigner,
-			PreRecoveredTxKeys:        job.preRecoveredTxKeys,
+			ValidateOwnBlock:       job.local,
+			TolerateFailingOps:     historical,
+			PreVerifiedBlockSigner: job.preVerifiedSigner,
+			PreRecoveredTxKeys:     job.preRecoveredTxKeys,
 		})
 		if err != nil {
 			d.logf("push_live_block %d failed: %v", job.blockNum, err)

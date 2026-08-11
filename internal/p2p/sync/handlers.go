@@ -267,6 +267,14 @@ func (d *Delegate) handleInv(p *node.Peer, body []byte) {
 				continue
 			}
 			st.known[bid] = struct{}{}
+			// Which peer told us about this transaction FIRST?
+			//
+			// Peer COUNT is not the lever — 12 -> 24 peers left inbound lateness
+			// unchanged (p50 ~1.2s either way). Peer POSITION should be: we hear
+			// each transaction from whoever is closest to where it entered the
+			// network. This counts the wins so the fast peers can be identified
+			// and pinned, instead of guessing which hosts are near the API nodes.
+			d.noteTxAdvertWinner(p, bid)
 			d.txFetched.Add(1)
 			missing = append(missing, h)
 		}
@@ -504,7 +512,6 @@ func (d *Delegate) handleBlockchainItemIDsInventory(p *node.Peer, body []byte) {
 		d.poke()
 	}
 }
-
 
 // handleFetchItems is the SERVER side: peer is asking for raw items by
 // hash. Reply with one block_message per known block, or
