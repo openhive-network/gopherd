@@ -464,6 +464,15 @@ func (p *Plugin) CompareProducedBlock(blockNum uint32, actual [][20]byte) {
 		delete(p.dryBlocks, blockNum)
 	}
 	p.mu.Unlock()
+	// Age the only-ours tracker on EVERY applied block, not just on slots we
+	// compared. It used to sit below the early return, so the counters only
+	// ticked when the dry run won its sampling window — and those windows are
+	// sporadic (the slot-instant gate). The result read
+	// `0 mined-later 0 never-mined` indefinitely, which looks exactly like
+	// "none of them were ever mined", i.e. like evidence we had held junk,
+	// when it only meant the tracker had not run.
+	p.ageOnlyOurs(blockNum, actual)
+
 	if mine == nil {
 		return // we did not build for this height
 	}
@@ -501,21 +510,6 @@ func (p *Plugin) CompareProducedBlock(blockNum uint32, actual [][20]byte) {
 	for id := range ours {
 		if _, inTheirs := theirs[id]; !inTheirs {
 			p.pendingOnlyOurs[id] = blockNum
-		}
-	}
-	// Anything the chain has now mined counts as "we were early".
-	for _, id := range actual {
-		if from, ok := p.pendingOnlyOurs[id]; ok {
-			delete(p.pendingOnlyOurs, id)
-			p.onlyOursLaterMined++
-			_ = from
-		}
-	}
-	// Age out: if it has not been mined within 20 blocks (~1 min) it is junk.
-	for id, from := range p.pendingOnlyOurs {
-		if blockNum > from+20 {
-			delete(p.pendingOnlyOurs, id)
-			p.onlyOursNeverMined++
 		}
 	}
 	early, junk := p.onlyOursLaterMined, p.onlyOursNeverMined
@@ -614,6 +608,32 @@ func (p *Plugin) CompareProducedBlock(blockNum uint32, actual [][20]byte) {
 			fmt.Fprintf(os.Stderr, " | WE-HAD-IT-AND-DROPPED=%d (selection bug, not lateness)", missHadItButDropped)
 		}
 		fmt.Fprintln(os.Stderr)
+	}
+}
+
+// ageOnlyOurs resolves pending only-ours transactions against a newly applied
+// block: mined now => we were simply EARLY; unmined after 20 blocks (~1 min)
+// => junk we should not have held.
+//
+// Called for EVERY applied block so the counters reflect the chain rather than
+// the dry run's sampling luck.
+func (p *Plugin) ageOnlyOurs(blockNum uint32, actual [][20]byte) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.pendingOnlyOurs) == 0 {
+		return
+	}
+	for _, id := range actual {
+		if _, ok := p.pendingOnlyOurs[id]; ok {
+			delete(p.pendingOnlyOurs, id)
+			p.onlyOursLaterMined++
+		}
+	}
+	for id, from := range p.pendingOnlyOurs {
+		if blockNum > from+20 {
+			delete(p.pendingOnlyOurs, id)
+			p.onlyOursNeverMined++
+		}
 	}
 }
 
