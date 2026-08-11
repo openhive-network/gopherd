@@ -50,7 +50,12 @@ SNAPSHOT="${SNAPSHOT:-/home/martin/snapfix-slim/block-107957387}"
 MEM_MAX="${MEM_MAX:-28G}"                 # cgroup hard cap (box has 31G)
 MEM_LIMIT_GIB="${MEM_LIMIT_GIB:-22}"      # Go soft limit; 14 GC-spiralled at the tip
 RESIDENT_CAP="${RESIDENT_CAP:-500000}"    # proven at the tip from this snapshot
-MAX_PEERS="${MAX_PEERS:-12}"
+# 24, not 12: we receive each transaction from whichever peer advertises it
+# FIRST, so expected inbound latency is the MINIMUM over peers. Measured
+# lateness at 12 peers was p50 ~450ms with a tail past 2.4s, and that lag is
+# what makes our blocks a strict subset of the real one (0 refused, 0 dropped
+# by selection — the transactions simply had not arrived yet).
+MAX_PEERS="${MAX_PEERS:-24}"
 API="${API:-127.0.0.1:8091}"
 SERVE="${SERVE:-0}"
 # WORK_TIMING=1 logs per-block apply avg/p50/p99/max. This is the evidence the
