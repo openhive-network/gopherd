@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"hived-go/internal/blocklog/zstd"
@@ -635,12 +636,34 @@ func (n *Node) handleNewConn(c *transport.Conn, dir Direction, dialEndpoint stri
 	}
 	n.mu.Unlock()
 
-	if dialEndpoint != "" {
-		n.peerdb.MarkConnected(dialEndpoint)
-	}
-
-	wrapped := newLoggingDelegate(n.delegate, n)
+	// NOTE: success is recorded AFTER the handshake resolves, not here.
+	// MarkConnected used to fire on TCP connect, before we knew whether the
+	// peer would accept us. A peer refusing with
+	//   connection_rejected code=4 "not accepting any more incoming connections"
+	// was therefore booked as a SUCCESS: ConnFailures reset to zero, backoff
+	// never engaged, and we redialled within seconds — one peer refused us 486
+	// times in 33 minutes, roughly once every 4 seconds. That is abusive and a
+	// good way to get banned; the peerdb's backoff existed and was simply never
+	// allowed to see a failure.
+	//
+	// OnPeerConnected fires exactly when the peer reaches StateActive, so it is
+	// the honest signal for "this peer accepted us".
+	activated := &atomic.Bool{}
+	wrapped := newLoggingDelegate(&activationDelegate{
+		inner:     n.delegate,
+		activated: activated,
+		onActive: func() {
+			if dialEndpoint != "" {
+				n.peerdb.MarkConnected(dialEndpoint)
+			}
+		},
+	}, n)
 	peer.run(n.ctx, wrapped)
+	if dialEndpoint != "" && !activated.Load() {
+		// Handshake never completed — rejected, or dropped before accept.
+		// Counting it lets the backoff schedule do its job.
+		n.peerdb.MarkFailed(dialEndpoint)
+	}
 
 	n.mu.Lock()
 	delete(n.peers, peer)
@@ -913,4 +936,35 @@ func (d Direction) String() string {
 		return "inbound"
 	}
 	return "outbound"
+}
+
+// activationDelegate records whether a peer ever reached StateActive, so the
+// caller can tell a completed handshake from a refusal.
+//
+// Without this the peerdb booked a TCP connect as a successful handshake, so a
+// peer that rejected us reset its own failure counter and we redialled it
+// within seconds — 486 refusals from one peer in 33 minutes.
+type activationDelegate struct {
+	inner     Delegate
+	activated *atomic.Bool
+	onActive  func()
+}
+
+func (a *activationDelegate) OnPeerConnected(p *Peer) {
+	if a.activated.CompareAndSwap(false, true) && a.onActive != nil {
+		a.onActive()
+	}
+	a.inner.OnPeerConnected(p)
+}
+func (a *activationDelegate) OnPeerDisconnected(p *Peer, err error) { a.inner.OnPeerDisconnected(p, err) }
+func (a *activationDelegate) OnMessage(p *Peer, t proto.MessageType, body []byte) {
+	a.inner.OnMessage(p, t, body)
+}
+func (a *activationDelegate) OnBlockReceived(p *Peer, body []byte)       { a.inner.OnBlockReceived(p, body) }
+func (a *activationDelegate) OnTransactionReceived(p *Peer, body []byte) { a.inner.OnTransactionReceived(p, body) }
+func (a *activationDelegate) OnAddressesReceived(p *Peer, addrs []proto.AddressInfo) {
+	a.inner.OnAddressesReceived(p, addrs)
+}
+func (a *activationDelegate) BuildAddressReply(p *Peer) []proto.AddressInfo {
+	return a.inner.BuildAddressReply(p)
 }

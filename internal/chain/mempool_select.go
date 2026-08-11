@@ -335,6 +335,29 @@ func (d *Database) ValidateIncomingTx(raw []byte) error {
 	if err := validateTxPreFlight(session, &res.SignedTx, blockNum, dgpo.Time, txID, true); err != nil {
 		return fmt.Errorf("preflight: %w", err)
 	}
+	// Refuse operations whose authority requirements we cannot verify.
+	//
+	// witness_block_approve is authorised through hived's SEPARATE
+	// get_required_witness_signatures category, which we do not implement — our
+	// authorities table correctly returns no ACCOUNT-tier requirement for it, so
+	// VerifyAuthority passes such a transaction with any signature at all. hived
+	// checks the witness signature and refuses; we accepted, and the mempool
+	// filled with 541 of them while real blocks for the same slots contained
+	// ZERO:
+	//
+	//   only-ours op types: map[witness_block_approve:541]
+	//   real block 108918938: comment=2 custom_json=8 vote=2
+	//
+	// Putting them in a block makes it invalid, which is what the network told
+	// us at 108912883. Until the witness-signature category is implemented,
+	// refusing them costs nothing — no real block carries any — and stops us
+	// assembling blocks nobody will accept.
+	for i := range res.SignedTx.Operations {
+		if res.SignedTx.Operations[i].Tag == op.TagWitnessBlockApprove {
+			return fmt.Errorf("op %d: witness_block_approve requires witness-signature authority we do not verify", i)
+		}
+	}
+
 	// Per-operation structural validation, which hived runs on every
 	// transaction it accepts (database.cpp:2627, full_transaction->validate()).
 	// We had the validators and never called them on this path.
