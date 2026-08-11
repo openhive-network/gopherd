@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"hived-go/internal/chain/evaluator"
+	"hived-go/internal/protocol/auth"
 	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/network"
 	"hived-go/internal/protocol/op"
@@ -41,6 +42,7 @@ const (
 	PendingTooLarge                     // would exceed the block size budget
 	PendingMalformed                    // undecodable / no operations
 	PendingInsufficientRC               // payer cannot afford it (what hived refuses at admission)
+	PendingCustomOpLimit                // account is at its per-block custom-op cap
 )
 
 func (o PendingTxOutcome) String() string {
@@ -55,6 +57,8 @@ func (o PendingTxOutcome) String() string {
 		return "apply-failed"
 	case PendingInsufficientRC:
 		return "insufficient-rc"
+	case PendingCustomOpLimit:
+		return "custom-op-limit"
 	case PendingTooLarge:
 		return "too-large"
 	default:
@@ -146,6 +150,15 @@ func (d *Database) SelectPendingTransactions(
 	blockSnap := session.Snapshot()
 	defer session.Restore(blockSnap)
 
+	// Per-account custom-operation budget for THIS block, the same rule
+	// ApplyBlock enforces. Without it we pack in every custom_json we hold and
+	// the block is INVALID — a witness may only include customOpBlockLimit per
+	// account per block. That is very likely why 108912883 was rejected (579
+	// transactions against the real block's 90) and why our mempool grew to
+	// 2020 while hived's stayed near 117: hived refuses the excess, nobody can
+	// include it, and only we kept holding it.
+	customOps := make(map[auth.AccountName]uint8, 64)
+
 	ctx := &evaluator.Context{
 		DB:            session,
 		Hardforks:     hf,
@@ -208,6 +221,13 @@ func (d *Database) SelectPendingTransactions(
 		}
 		if perr := validateTxPreFlight(session, &res.SignedTx, blockNum, headBlockTime, txID, true); perr != nil {
 			sel.Rejected[i] = PendingPreFlightFailed
+			continue
+		}
+		// Custom-op budget. Checked BEFORE the trial apply so a transaction that
+		// cannot legally go in this block costs nothing to reject, and so the
+		// counter only advances for transactions we actually keep.
+		if cerr := applyCustomOpBlockLimit(customOps, &res.SignedTx); cerr != nil {
+			sel.Rejected[i] = PendingCustomOpLimit
 			continue
 		}
 
