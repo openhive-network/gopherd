@@ -28,6 +28,7 @@ import (
 	"hived-go/internal/fcraw"
 	"hived-go/internal/protocol/auth"
 	"hived-go/internal/protocol/block"
+	"hived-go/internal/protocol/op"
 	"hived-go/internal/protocol/tx"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
@@ -247,8 +248,14 @@ func New(c *chain.Database, s *state.Database, producers []Producer) *Plugin {
 // height arrives.
 type dryBlock struct {
 	txIDs [][20]byte
-	bytes int
-	built time.Time
+	// opTags is the first operation's tag per transaction, in the same order as
+	// txIDs. If our block still diverges from the real one, knowing WHAT KIND of
+	// transactions we include and they do not is the difference between "we
+	// accept spam nobody mines" and "we are simply seeing different traffic" —
+	// and it costs one byte per transaction to keep.
+	opTags []op.Tag
+	bytes  int
+	built  time.Time
 }
 
 // pendingTx is one mempool entry: the transaction exactly as it arrived, plus
@@ -398,6 +405,34 @@ func (p *Plugin) OverflowedCount() int {
 	return p.overflowed
 }
 
+// blockFirstOpTags returns the first operation's tag for each transaction in a
+// serialized block, in order. Best-effort: a parse failure yields a short slice
+// and the caller simply reports fewer tags.
+func blockFirstOpTags(rawBlock []byte, want int) []op.Tag {
+	_, hdrLen, err := block.UnmarshalSignedHeader(rawBlock)
+	if err != nil {
+		return nil
+	}
+	r := fcraw.NewReader(rawBlock[hdrLen:])
+	n, err := r.ReadVarUint()
+	if err != nil {
+		return nil
+	}
+	out := make([]op.Tag, 0, want)
+	for i := uint32(0); i < n; i++ {
+		res, rerr := tx.ReadSignedTransaction(r)
+		if rerr != nil {
+			return out
+		}
+		if len(res.SignedTx.Operations) > 0 {
+			out = append(out, res.SignedTx.Operations[0].Tag)
+		} else {
+			out = append(out, 0)
+		}
+	}
+	return out
+}
+
 // CompareProducedBlock diffs a block we assembled in DRY RUN against the block
 // the real witness produced for the same height.
 //
@@ -477,6 +512,17 @@ func (p *Plugin) CompareProducedBlock(blockNum uint32, actual [][20]byte) {
 	early, junk := p.onlyOursLaterMined, p.onlyOursNeverMined
 	p.mu.Unlock()
 
+	// What KIND of transactions are we including that they are not?
+	byTag := map[string]int{}
+	for i, id := range mine.txIDs {
+		if _, inTheirs := theirs[id]; inTheirs {
+			continue
+		}
+		if i < len(mine.opTags) {
+			byTag[mine.opTags[i].Name()]++
+		}
+	}
+
 	verdict := "MATCH"
 	switch {
 	case onlyOurs > 0 && onlyTheirs > 0:
@@ -497,6 +543,9 @@ func (p *Plugin) CompareProducedBlock(blockNum uint32, actual [][20]byte) {
 	fmt.Fprintf(os.Stderr,
 		"witness dry-run DIFF block %d: %s — ours=%d theirs=%d shared=%d only-ours=%d only-theirs=%d (our bytes=%d) [%d/%d matched | only-ours outcome: %d mined-later(we were early) %d never-mined(junk)]\n",
 		blockNum, verdict, len(ours), len(theirs), both, onlyOurs, onlyTheirs, mine.bytes, matched, compared, early, junk)
+	if onlyOurs > 0 && len(byTag) > 0 {
+		fmt.Fprintf(os.Stderr, "  only-ours op types: %v\n", byTag)
+	}
 }
 
 // DryRunMatchRate reports how many compared slots matched the real block.
@@ -928,11 +977,12 @@ func (p *Plugin) dryRunProduce(prod *Producer, dgpo objects.DynamicGlobalPropert
 	// Remember what we assembled so the real block for this height can be
 	// diffed against it when it arrives.
 	if ids := chain.BlockTransactionIDs(rawBlock); true {
+		tags := blockFirstOpTags(rawBlock, len(ids))
 		p.mu.Lock()
 		if p.dryBlocks == nil {
 			p.dryBlocks = make(map[uint32]*dryBlock, 8)
 		}
-		p.dryBlocks[blockNum] = &dryBlock{txIDs: ids, bytes: len(rawBlock), built: time.Now()}
+		p.dryBlocks[blockNum] = &dryBlock{txIDs: ids, opTags: tags, bytes: len(rawBlock), built: time.Now()}
 		// Bounded: only the next few heights can ever be compared.
 		for n := range p.dryBlocks {
 			if n+8 < blockNum {
