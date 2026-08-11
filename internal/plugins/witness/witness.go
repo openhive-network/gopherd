@@ -3,13 +3,13 @@
 //
 // On every wall-clock 3-second slot boundary, the loop:
 //
-//   1. Asks chain.Database.ScheduledWitness(1) who's supposed to produce
-//      the next slot.
-//   2. Checks if that witness name is in our local key registry.
-//   3. If yes: builds the block (collect mempool tx, compute merkle,
-//      build signed_block_header), signs with the configured key,
-//      submits to chain.Database.ApplyBlock.
-//   4. If no: nothing to do — wait for the next slot.
+//  1. Asks chain.Database.ScheduledWitness(1) who's supposed to produce
+//     the next slot.
+//  2. Checks if that witness name is in our local key registry.
+//  3. If yes: builds the block (collect mempool tx, compute merkle,
+//     build signed_block_header), signs with the configured key,
+//     submits to chain.Database.ApplyBlock.
+//  4. If no: nothing to do — wait for the next slot.
 //
 // The keys are loaded from config.ini at process start. Each "witness =
 // alice" + "private-key = 5K..." pair becomes a Producer entry.
@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -118,7 +119,7 @@ type Plugin struct {
 	// counted separately (DryRunStats.Ours).
 	DryRunEverySlot bool
 
-	mu      sync.Mutex
+	mu sync.Mutex
 	// pending is the mempool: whole signed transactions, held as their VERBATIM
 	// wire bytes.
 	//
@@ -140,7 +141,7 @@ type Plugin struct {
 	// that fetches what we advertised gets served. Advertising something we
 	// cannot then provide is what gets a node dropped.
 	pendingByAdvert map[[20]byte][]byte
-	dry        DryRunStats
+	dry             DryRunStats
 	// lastDrySlot dedupes dry-run production: the loop ticks every 500ms but a
 	// slot is 3s, so without this one slot would yield ~6 identical blocks.
 	lastDrySlot uint32
@@ -196,6 +197,12 @@ type Plugin struct {
 	pendingOnlyOurs    map[[20]byte]uint32
 	onlyOursLaterMined int
 	onlyOursNeverMined int
+
+	// seenTx/seenOrder are a bounded ring of every transaction that reached the
+	// admission check, txid -> rejection reason ("" if admitted). Used to
+	// classify the transactions we MISSED. See noteSeen.
+	seenTx    map[[20]byte]string
+	seenOrder [][20]byte
 
 	// produced counts blocks we built and successfully handed to the Publisher.
 	// This is "submitted for publication", NOT "accepted by the network" — the
@@ -523,6 +530,32 @@ func (p *Plugin) CompareProducedBlock(blockNum uint32, actual [][20]byte) {
 		}
 	}
 
+	// Why did we miss the transactions they mined? Three causes, three fixes:
+	//
+	//   refused    our admission check refused it -> the check is too strict
+	//   never-seen no peer ever offered it        -> propagation/topology
+	//   too-late   admitted, but after we built   -> timing
+	//
+	// Without this split "only-theirs=34" is unactionable, and the natural
+	// reading (propagation lag) is only one of the three.
+	missRefused, missNeverSeen, missLate := 0, 0, 0
+	missReasons := map[string]int{}
+	for id := range theirs {
+		if _, inOurs := ours[id]; inOurs {
+			continue
+		}
+		reason, seen := p.seenVerdict(id)
+		switch {
+		case !seen:
+			missNeverSeen++
+		case reason != "":
+			missRefused++
+			missReasons[shortReason(reason)]++
+		default:
+			missLate++
+		}
+	}
+
 	verdict := "MATCH"
 	switch {
 	case onlyOurs > 0 && onlyTheirs > 0:
@@ -545,6 +578,39 @@ func (p *Plugin) CompareProducedBlock(blockNum uint32, actual [][20]byte) {
 		blockNum, verdict, len(ours), len(theirs), both, onlyOurs, onlyTheirs, mine.bytes, matched, compared, early, junk)
 	if onlyOurs > 0 && len(byTag) > 0 {
 		fmt.Fprintf(os.Stderr, "  only-ours op types: %v\n", byTag)
+	}
+	if onlyTheirs > 0 {
+		fmt.Fprintf(os.Stderr,
+			"  only-theirs cause: %d refused %d never-seen %d too-late",
+			missRefused, missNeverSeen, missLate)
+		if len(missReasons) > 0 {
+			fmt.Fprintf(os.Stderr, " | refusals: %v", missReasons)
+		}
+		fmt.Fprintln(os.Stderr)
+	}
+}
+
+// shortReason collapses a rejection error to a stable bucket so the histogram
+// groups by CAUSE rather than by whichever account or id appeared in the text.
+func shortReason(s string) string {
+	switch {
+	case strings.Contains(s, "witness_block_approve"):
+		return "witness_block_approve"
+	case strings.Contains(s, "signature"), strings.Contains(s, "authority"):
+		return "signature/authority"
+	case strings.Contains(s, "expired"), strings.Contains(s, "expiration"):
+		return "expiration"
+	case strings.Contains(s, "tapos"), strings.Contains(s, "ref_block"):
+		return "tapos"
+	case strings.Contains(s, "resource credit"), strings.Contains(s, "RC"):
+		return "rc"
+	case strings.Contains(s, "custom"):
+		return "custom-op-limit"
+	default:
+		if i := strings.LastIndex(s, ": "); i >= 0 && i+2 < len(s) {
+			return s[i+2:]
+		}
+		return s
 	}
 }
 
@@ -642,10 +708,16 @@ func (p *Plugin) AddPendingRaw(body []byte) error {
 	}
 	if p.Chain != nil {
 		if verr := p.Chain.ValidateIncomingTx(body); verr != nil {
+			// Record the rejection AGAINST THE TXID so CompareProducedBlock can
+			// ask the reciprocal question: of the transactions the real witness
+			// mined that we missed, how many did we actively refuse? Precision
+			// (everything we admit gets mined) says nothing about recall.
+			p.noteSeen(tx.IDFromDigest(tx.DigestFromBytes(body[res.UnsignedStart:res.UnsignedEnd])), verr.Error())
 			return fmt.Errorf("witness.AddPendingRaw: rejected: %w", verr)
 		}
 	}
 	txID := tx.IDFromDigest(tx.DigestFromBytes(body[res.UnsignedStart:res.UnsignedEnd]))
+	p.noteSeen(txID, "")
 	if !p.AddPendingTx(body, txID, res.SignedTx.Expiration) {
 		// Duplicate, or the queue is full. Reported distinctly so the accepted
 		// counter means UNIQUE admissions: with 12 peers advertising the same
@@ -656,6 +728,50 @@ func (p *Plugin) AddPendingRaw(body []byte) error {
 	return nil
 }
 
+// noteSeen records that a transaction reached our admission check, and with
+// what verdict ("" = admitted, else the rejection reason).
+//
+// This exists to answer the question the only-ours instrumentation CANNOT.
+// "99.8% of admitted transactions get mined" is a PRECISION statement; the
+// failure mode we are chasing is a RECALL one — real transactions the network
+// mines that we never put in a block. Only a reciprocal lookup keyed by txid
+// can tell "we refused it" from "we never received it", and those two have
+// opposite fixes.
+//
+// Bounded ring: diagnosis needs the recent past, not all of history.
+func (p *Plugin) noteSeen(txID [20]byte, reason string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.seenTx == nil {
+		p.seenTx = make(map[[20]byte]string, seenTxCap+1024)
+		p.seenOrder = make([][20]byte, 0, seenTxCap+1024)
+	}
+	if _, dup := p.seenTx[txID]; dup {
+		return
+	}
+	p.seenTx[txID] = reason
+	p.seenOrder = append(p.seenOrder, txID)
+	if len(p.seenOrder) > seenTxCap {
+		drop := len(p.seenOrder) - seenTxCap
+		for _, old := range p.seenOrder[:drop] {
+			delete(p.seenTx, old)
+		}
+		p.seenOrder = append(p.seenOrder[:0], p.seenOrder[drop:]...)
+	}
+}
+
+// seenVerdict reports whether we ever saw this transaction and what we did.
+func (p *Plugin) seenVerdict(txID [20]byte) (reason string, seen bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	reason, seen = p.seenTx[txID]
+	return reason, seen
+}
+
+// seenTxCap bounds the seen-transaction ring. ~40k transactions is over an hour
+// of mainnet traffic — far more than the few blocks a diff looks back over.
+const seenTxCap = 40000
+
 // duplicateTxError marks "already queued (or queue full)" — ordinary traffic,
 // not a fault, since every transaction is offered by several peers.
 //
@@ -664,7 +780,7 @@ func (p *Plugin) AddPendingRaw(body []byte) error {
 // and must not depend on a consensus plugin.
 type duplicateTxError struct{}
 
-func (duplicateTxError) Error() string      { return "witness: transaction already pending" }
+func (duplicateTxError) Error() string       { return "witness: transaction already pending" }
 func (duplicateTxError) IsDuplicateTx() bool { return true }
 
 // ErrDuplicateTx is the value AddPendingRaw returns for a duplicate.
@@ -1308,4 +1424,3 @@ func appendVarUint(dst []byte, v uint32) []byte {
 	}
 	return append(dst, byte(v))
 }
-
