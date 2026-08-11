@@ -161,3 +161,19 @@ func (s *signState) fetchAuthority(level AuthorityLevel, name auth.AccountName) 
 	}
 	return nil, nil
 }
+
+// signedByKey reports whether the transaction carries a signature from this
+// exact key, and marks it CONSUMED.
+//
+// Mirrors C++ sign_state::signed_by (used at transaction_util.cpp:181 for the
+// witness category). Marking it used is not incidental: without it the key
+// would look unconsumed to the pre-HF28 remove_unused_signatures assert and a
+// correctly-signed witness_block_approve would be rejected as carrying an
+// irrelevant signature.
+func (s *signState) signedByKey(k crypto.PublicKey) bool {
+	if _, ok := s.availableKeys[k]; !ok {
+		return false
+	}
+	s.usedKeys[k] = true
+	return true
+}
