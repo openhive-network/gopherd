@@ -700,12 +700,23 @@ const maxProducePoll = 250 * time.Millisecond
 func nextWake(now time.Time) time.Duration {
 	slot := int64(BlockInterval)
 	ns := now.UnixNano()
-	untilBoundary := time.Duration(((ns/slot)+1)*slot - ns)
+	// Target just AFTER the boundary, not exactly on it. Waking on the instant
+	// loses a race we cannot win: the production gate needs now >= slotTime, and
+	// any scheduling delay or sub-millisecond clock skew leaves us a hair short.
+	// We then return early, and by the next poll the real block for that slot
+	// has arrived and dgpo.Time has advanced — so the target jumps a full slot
+	// ahead and we miss again, consistently rather than occasionally. Observed
+	// as the dry run firing 6 times in 90 slots.
+	untilBoundary := time.Duration(((ns/slot)+1)*slot-ns) + slotWakeSkew
 	if untilBoundary < maxProducePoll {
 		return untilBoundary
 	}
 	return maxProducePoll
 }
+
+// slotWakeSkew puts the wake-up just past the slot instant. Small enough to be
+// noise against the 3s budget (~1%), large enough to absorb timer jitter.
+const slotWakeSkew = 30 * time.Millisecond
 
 func (p *Plugin) run() {
 	defer close(p.doneCh)
