@@ -148,6 +148,11 @@ if [ -n "$PERSIST_STATE_DIR" ]; then
   SERVE_ARGS+=(--persist-state-dir="$PERSIST_STATE_DIR")
 fi
 [ "$FORK_SWITCHING" = "1" ] && SERVE_ARGS+=(--fork-switching)
+# RELAY_TX=1 advertises transactions onward instead of only consuming them.
+# Without it the node sits at the end of every propagation chain: measured
+# holding 2 pending transactions at build time where the producing witness held
+# 28-33 — we get the right transactions, just too late to include them.
+[ "${RELAY_TX:-0}" = "1" ] && SERVE_ARGS+=(--relay-transactions)
 if [ "$SERVE" = "1" ]; then
   SERVE_ARGS+=(--p2p-serve)
   echo "!! SERVE=1 — this node will ADVERTISE INVENTORY AND SERVE BLOCKS to mainnet peers."
