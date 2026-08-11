@@ -234,7 +234,7 @@ func (d *Database) SelectPendingTransactions(
 		// Trial apply. A failure rolls back only this transaction, so a bad
 		// candidate cannot contaminate the ones selected after it.
 		txSnap := session.Snapshot()
-		if aerr := applyOpsTrial(ctx, &res.SignedTx); aerr != nil {
+		if aerr := applyOpsTrial(ctx, &res.SignedTx, blockNum); aerr != nil {
 			session.Restore(txSnap)
 			sel.Rejected[i] = PendingApplyFailed
 			continue
@@ -275,13 +275,20 @@ func (d *Database) SelectPendingTransactions(
 // error. Selection must never take the node down: mempool transactions are
 // attacker-controlled input, and an operation that panics on hostile state
 // would otherwise kill a producing witness.
-func applyOpsTrial(ctx *evaluator.Context, signed *tx.SignedTransaction) (retErr error) {
+func applyOpsTrial(ctx *evaluator.Context, signed *tx.SignedTransaction, blockNum uint32) (retErr error) {
 	defer func() {
 		if r := recover(); r != nil {
 			retErr = fmt.Errorf("panic during trial apply: %v", r)
 		}
 	}()
 	for _, o := range signed.Operations {
+		// Mirror ApplyBlock's per-op sequence exactly: the RC differential pass
+		// runs BEFORE the evaluator, and applyRCForTx later reads what it
+		// accumulated. Skipping it makes the trial compute a DIFFERENT resource
+		// cost from the real apply, so a transaction could be accepted here and
+		// charged differently in the block — or rejected here that hived would
+		// take. A trial apply is only useful insofar as it is the same apply.
+		applyRCDifferentialForOp(ctx.DB, o, blockNum)
 		if err := evaluator.ApplyOp(ctx, o); err != nil {
 			return err
 		}
