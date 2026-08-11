@@ -374,7 +374,13 @@ func (d *Database) validateIncomingTxLocked(raw []byte) error {
 	// admitted structurally invalid transactions the rest of the network had
 	// already refused, then put 579 of them in a block.
 	//
-	// Only ops implementing Validator are checked — 10 of 51 today — so this
+	// Only ops implementing Validator are checked — 36 of 51 today, INCLUDING
+	// the highest-volume real operations (vote, comment, comment_options,
+	// transfer). That makes this the single biggest recall risk in the filter:
+	// a validator even slightly stricter than hived's refuses genuine traffic
+	// while every other metric stays green — the mempool looks clean, admitted
+	// transactions all get mined, and our blocks are quietly short. The
+	// admission audit (chain.AuditBlockAdmission) is what measures it. So this
 	// filters what it can prove invalid and passes the rest. Deliberately
 	// applied at ADMISSION only, never when applying someone else's block: if
 	// our validators were ever stricter than hived's, rejecting a network block
