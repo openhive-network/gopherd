@@ -28,6 +28,13 @@ const minTxBytes = 64
 // maxSelectCandidates caps how many candidates one selection may evaluate.
 const maxSelectCandidates = 1500
 
+// rcRejectLog, when set, receives every RC rejection during block selection.
+// Diagnostic hook for the known RC over-strictness; nil disables.
+var rcRejectLog func(ops []op.Op, err error)
+
+// SetRCRejectLog installs the RC-rejection diagnostic hook.
+func SetRCRejectLog(f func(ops []op.Op, err error)) { rcRejectLog = f }
+
 // maxSelectEvaluated exposes the cap for tests.
 func maxSelectEvaluated() int { return maxSelectCandidates }
 
@@ -257,6 +264,16 @@ func (d *Database) SelectPendingTransactions(
 			rcErr := applyRCForTx(session, &res.SignedTx, blockNum, blockTime,
 				int64(res.SignedEnd-res.UnsignedStart), true /* enforce */)
 			if rcErr != nil {
+				// Log the payer and the shortfall. Our RC cost accounting is
+				// APPROXIMATE and measurably STRICTER than hived's: the block
+				// comparison caught us refusing a transaction the real block
+				// INCLUDED (WE-HAD-IT-AND-DROPPED, ~1 in 100), which means we
+				// silently drop valid traffic. Without the account and the
+				// numbers there is nothing to compare against hived's rc_api,
+				// so capture them here rather than re-deriving them later.
+				if rcRejectLog != nil {
+					rcRejectLog(res.SignedTx.Operations, rcErr)
+				}
 				session.Restore(txSnap)
 				sel.Rejected[i] = PendingInsufficientRC
 				continue
