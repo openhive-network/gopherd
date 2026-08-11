@@ -20,10 +20,10 @@ import (
 // Skipped when opts.SkipBlockSignature is true (the canonical replay
 // path). Live sync sets it false.
 //
-//	1. previous_id must equal dgpo.head_block_id (chain continuity).
-//	2. block size ≤ wso.median_maximum_block_size.
-//	3. transaction merkle root matches the header's recorded root.
-//	4. HF5+: producing witness's running_version ≥ wso.majority_version.
+//  1. previous_id must equal dgpo.head_block_id (chain continuity).
+//  2. block size ≤ wso.median_maximum_block_size.
+//  3. transaction merkle root matches the header's recorded root.
+//  4. HF5+: producing witness's running_version ≥ wso.majority_version.
 //
 // Header extension processing and the witness-scheduling assert live
 // alongside in database.go ApplyBlock.

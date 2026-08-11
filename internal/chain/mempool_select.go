@@ -5,11 +5,11 @@ import (
 	"time"
 
 	"hived-go/internal/chain/evaluator"
+	"hived-go/internal/fcraw"
 	"hived-go/internal/protocol/auth"
 	"hived-go/internal/protocol/hardfork"
 	"hived-go/internal/protocol/network"
 	"hived-go/internal/protocol/op"
-	"hived-go/internal/fcraw"
 	"hived-go/internal/protocol/tx"
 	"hived-go/internal/state"
 	"hived-go/internal/state/objects"
@@ -35,14 +35,14 @@ func maxSelectEvaluated() int { return maxSelectCandidates }
 type PendingTxOutcome int
 
 const (
-	PendingAccepted PendingTxOutcome = iota
-	PendingBadSignature                 // authority/signature check failed
-	PendingPreFlightFailed              // expiration window, dedup, or TaPOS
-	PendingApplyFailed                  // an operation failed against head state
-	PendingTooLarge                     // would exceed the block size budget
-	PendingMalformed                    // undecodable / no operations
-	PendingInsufficientRC               // payer cannot afford it (what hived refuses at admission)
-	PendingCustomOpLimit                // account is at its per-block custom-op cap
+	PendingAccepted        PendingTxOutcome = iota
+	PendingBadSignature                     // authority/signature check failed
+	PendingPreFlightFailed                  // expiration window, dedup, or TaPOS
+	PendingApplyFailed                      // an operation failed against head state
+	PendingTooLarge                         // would exceed the block size budget
+	PendingMalformed                        // undecodable / no operations
+	PendingInsufficientRC                   // payer cannot afford it (what hived refuses at admission)
+	PendingCustomOpLimit                    // account is at its per-block custom-op cap
 )
 
 func (o PendingTxOutcome) String() string {
@@ -172,7 +172,7 @@ func (d *Database) SelectPendingTransactions(
 		// pow.go reads this today (dead on mainnet), so the divergence is
 		// currently harmless — but "currently harmless" is not a property worth
 		// depending on in block assembly.
-		Witness:       producer,
+		Witness: producer,
 		// Virtual ops emitted during selection are discarded: this is a trial
 		// run, and the real ones are produced when the block is actually
 		// applied. Feeding them to the live buffer would duplicate every vop.
@@ -342,16 +342,36 @@ func (d *Database) validateIncomingTxLocked(raw []byte) error {
 	if err := validateTxPreFlight(session, &res.SignedTx, blockNum, dgpo.Time, txID, true); err != nil {
 		return fmt.Errorf("preflight: %w", err)
 	}
-	// NOTE: witness_block_approve used to be refused outright here, because its
-	// authority runs through hived's separate get_required_witness_signatures
-	// category which we had not implemented — so VerifyAuthority passed one
-	// with ANY signature, the mempool filled with 541 of them, and the block we
-	// built from them was rejected by the network (108912883).
+	// witness_block_approve MAY NEVER APPEAR IN A BLOCK. hived's evaluator is a
+	// hard assert, not a validation rule (hive_evaluator.cpp:615):
 	//
-	// That category is now implemented (AuthorityWitness in
-	// verify_authority.go), so the check above VERIFIES these against the
-	// witness's registered signing key instead of refusing the whole op class.
-	// An authority we can check is better than one we decline.
+	//   HIVE_CHAIN_UNREACHABLE_CODE_ASSERT( false &&
+	//     "This operation may not be included in a block" );
+	//
+	// It is a FAST-CONFIRMATION message, handled by
+	// database::process_fast_confirm_transaction — an entirely separate path
+	// from push_transaction. That is why it is ~92% of gossiped traffic and
+	// appears in exactly ZERO real blocks.
+	//
+	// So it must never enter the block-building mempool. Keeping it out is what
+	// made our blocks match; letting it in is what put 579 of them in block
+	// 108912883 and got that block rejected.
+	//
+	// I briefly removed this after implementing the witness-signature authority
+	// category, reasoning that an authority we can VERIFY beats one we decline.
+	// That was the wrong lesson: these transactions are correctly signed — the
+	// verification passes — and admitting them immediately regressed block
+	// assembly from only-ours=0 to ours=379 vs theirs=32. Authority was never
+	// the reason to exclude them; the reason is that no block may carry one.
+	//
+	// (The AuthorityWitness category is still implemented and correct. It is
+	// what a fast-confirm handler would need, if we implement one.)
+	for i := range res.SignedTx.Operations {
+		if OpExcludedFromBlocks(res.SignedTx.Operations[i].Tag) {
+			return fmt.Errorf("op %d: %s is a fast-confirm message and may never be included in a block (hive_evaluator.cpp:615)",
+				i, res.SignedTx.Operations[i].Tag.Name())
+		}
+	}
 
 	// Per-operation structural validation, which hived runs on every
 	// transaction it accepts (database.cpp:2627, full_transaction->validate()).

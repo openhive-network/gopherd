@@ -499,10 +499,10 @@ func applyWitnessVoteDelta(ctx *Context, voter *objects.Account, w *objects.Witn
 // hived's flow (libraries/chain/hive_evaluator.cpp:210):
 //   - nullify_proxied_witness_votes(account)             [always]
 //   - if SETTING a non-empty proxy:
-//       - check for proxy-loop (chain ≤ HIVE_MAX_PROXY_RECURSION_DEPTH=4)
-//       - clear_witness_votes(account)        [removes direct votes]
-//       - set proxy
-//       - re-add the account's voting weight up the new proxy chain
+//   - check for proxy-loop (chain ≤ HIVE_MAX_PROXY_RECURSION_DEPTH=4)
+//   - clear_witness_votes(account)        [removes direct votes]
+//   - set proxy
+//   - re-add the account's voting weight up the new proxy chain
 //   - if CLEARING the proxy (proxy == ""): just clear the proxy field
 //
 // proxied_vsf_votes propagation is fully modeled via

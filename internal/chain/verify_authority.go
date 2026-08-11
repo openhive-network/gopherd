@@ -399,3 +399,25 @@ func sortedSet(m map[string]struct{}) []string {
 	}
 	return out
 }
+
+// OpExcludedFromBlocks reports whether an operation may NEVER appear in a
+// block, regardless of how well it is signed.
+//
+// hived enforces this with a hard assert in the evaluator rather than a
+// validation rule (hive_evaluator.cpp:615, witness_block_approve):
+//
+//	HIVE_CHAIN_UNREACHABLE_CODE_ASSERT( false &&
+//	  "This operation may not be included in a block" );
+//
+// witness_block_approve is a FAST-CONFIRMATION message, routed through
+// database::process_fast_confirm_transaction and never through
+// push_transaction. It is ~92% of gossiped traffic and appears in ZERO real
+// blocks. Admitting it to the block-building mempool is what put 579 of them
+// into block 108912883 and got that block rejected by the network.
+//
+// Kept as a named predicate so the admission path and its test check the SAME
+// rule — a test that re-states the rule locally passes even when the
+// production check is gone.
+func OpExcludedFromBlocks(tag op.Tag) bool {
+	return tag == op.TagWitnessBlockApprove
+}

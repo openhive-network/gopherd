@@ -165,11 +165,11 @@ func TestCurationRewardOneVoteForComment(t *testing.T) {
 //
 // Three parallel posts each get TWO votes in different window
 // combinations. The C++ test asserts:
-//   * sum(vc0a+vc0b) == sum(vc1a+vc1b) == sum(vc2a+vc2b)  (per-comment totals equal)
-//   * vc0a < vc1a  (within early-window, later vote wins after auction discount eases)
-//   * vc1a > vc2a
-//   * vc0b > vc1b
-//   * vc1b < vc2b
+//   - sum(vc0a+vc0b) == sum(vc1a+vc1b) == sum(vc2a+vc2b)  (per-comment totals equal)
+//   - vc0a < vc1a  (within early-window, later vote wins after auction discount eases)
+//   - vc1a > vc2a
+//   - vc0b > vc1b
+//   - vc1b < vc2b
 //
 // These cross-window orderings require an HF25-grade reward fund and
 // the exact reverse_auction discount schedule. We assert the

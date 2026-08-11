@@ -101,8 +101,8 @@ func TestConvertApply(t *testing.T) {
 func TestLimitOrderCreateApply(t *testing.T) {
 	f := New(t)
 	f.Actors("alice", "bob")
-	f.FundLiquid("alice", 1_000_000)    // 1000 HIVE
-	f.FundLiquidHBD("bob", 1_000_000)   // 1000 HBD
+	f.FundLiquid("alice", 1_000_000)  // 1000 HIVE
+	f.FundLiquidHBD("bob", 1_000_000) // 1000 HBD
 	f.GenerateBlock()
 
 	expr := f.HeadBlockTime() + 60*60 // 1h expiration

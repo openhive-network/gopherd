@@ -96,10 +96,10 @@ func ghiveDiffWide(blockNum uint32) bool {
 
 // Errors specific to limit_order evaluators.
 var (
-	ErrLimitOrderExists      = errors.New("limit order with this orderid already exists")
-	ErrLimitOrderNotFound    = errors.New("limit order not found")
-	ErrLimitOrderExpired     = errors.New("limit order expiration has passed")
-	ErrLimitOrderSameSymbol  = errors.New("limit order amount_to_sell and min_to_receive must differ in symbol")
+	ErrLimitOrderExists     = errors.New("limit order with this orderid already exists")
+	ErrLimitOrderNotFound   = errors.New("limit order not found")
+	ErrLimitOrderExpired    = errors.New("limit order expiration has passed")
+	ErrLimitOrderSameSymbol = errors.New("limit order amount_to_sell and min_to_receive must differ in symbol")
 )
 
 // limitOrderCreateEvaluator implements limit_order_create.

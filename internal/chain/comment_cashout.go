@@ -20,17 +20,17 @@ import (
 // path doesn't pay map-lookup cost. Replay sets these at exec time and
 // they don't change mid-process, so caching is safe.
 var (
-	envGhivediff         = os.Getenv("GHIVEDIFF")
-	envGhivediffAll      = os.Getenv("GHIVEDIFF_ALL")
-	envGhivediffAccounts = os.Getenv("GHIVEDIFF_ACCOUNTS")
-	envGhivediffFeed     = os.Getenv("GHIVEDIFF_FEED")
-	envGhivediffDumpFile = os.Getenv("GHIVEDIFF_DUMP_FILE")
-	envGhivediffVsts     = os.Getenv("GHIVEDIFF_VSTS")
-	envGhivediffPowbump  = os.Getenv("GHIVEDIFF_POWBUMP")
+	envGhivediff          = os.Getenv("GHIVEDIFF")
+	envGhivediffAll       = os.Getenv("GHIVEDIFF_ALL")
+	envGhivediffAccounts  = os.Getenv("GHIVEDIFF_ACCOUNTS")
+	envGhivediffFeed      = os.Getenv("GHIVEDIFF_FEED")
+	envGhivediffDumpFile  = os.Getenv("GHIVEDIFF_DUMP_FILE")
+	envGhivediffVsts      = os.Getenv("GHIVEDIFF_VSTS")
+	envGhivediffPowbump   = os.Getenv("GHIVEDIFF_POWBUMP")
 	envGhivediffTimeshare = os.Getenv("GHIVEDIFF_TIMESHARE")
 	envGhivediffGovExp    = os.Getenv("GHIVEDIFF_GOVEXP")
 	envGhivediffFills     = os.Getenv("GHIVEDIFF_FILLS")
-	envGhivediffReset    = os.Getenv("GHIVEDIFF_RESET")
+	envGhivediffReset     = os.Getenv("GHIVEDIFF_RESET")
 	// GHIVEDIFF_CALC_FROM/TO: emit CASHOUT-CALC for all cashouts in the
 	// [from,to] block range (drift localization without recompiling).
 	envCalcFrom = parseUintEnv("GHIVEDIFF_CALC_FROM")

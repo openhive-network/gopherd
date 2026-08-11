@@ -49,21 +49,21 @@ const (
 // Lifetime windows (in HOURS) for each TEMPORARY object. From
 // resource_sizes.cpp.
 const (
-	limitOrderLifetimeHours        int64 = 28 * 24       // HIVE_MAX_LIMIT_ORDER_EXPIRATION (28 days)
-	collateralConvertLifetimeHours int64 = 7 * 12        // 3.5 days
-	declineVotingLifetimeHours     int64 = 30 * 24       // HIVE_OWNER_AUTH_RECOVERY_PERIOD
-	savingsWithdrawLifetimeHours   int64 = 3 * 24        // HIVE_SAVINGS_WITHDRAW_TIME
-	vestingDelegationExpHours      int64 = 5 * 24        // HIVE_DELEGATION_RETURN_PERIOD_HF20
-	witnessVoteLifetimeHours       int64 = 365 * 24      // HIVE_GOVERNANCE_VOTE_EXPIRATION_PERIOD
-	proposalVoteLifetimeHours      int64 = 365 * 24      // same
+	limitOrderLifetimeHours        int64 = 28 * 24  // HIVE_MAX_LIMIT_ORDER_EXPIRATION (28 days)
+	collateralConvertLifetimeHours int64 = 7 * 12   // 3.5 days
+	declineVotingLifetimeHours     int64 = 30 * 24  // HIVE_OWNER_AUTH_RECOVERY_PERIOD
+	savingsWithdrawLifetimeHours   int64 = 3 * 24   // HIVE_SAVINGS_WITHDRAW_TIME
+	vestingDelegationExpHours      int64 = 5 * 24   // HIVE_DELEGATION_RETURN_PERIOD_HF20
+	witnessVoteLifetimeHours       int64 = 365 * 24 // HIVE_GOVERNANCE_VOTE_EXPIRATION_PERIOD
+	proposalVoteLifetimeHours      int64 = 365 * 24 // same
 )
 
 // Per-byte state costs for variable-length fields.
 const (
-	commentPermlinkCharSize       int64 = temporaryStateByte // dynamic
-	witnessUpdateURLCharSize      int64 = persistentStateByte
-	authorityAccountMemberSize    int64 = persistentStateByte * 80   // approx
-	authorityKeyMemberSize        int64 = persistentStateByte * 80
+	commentPermlinkCharSize        int64 = temporaryStateByte // dynamic
+	witnessUpdateURLCharSize       int64 = persistentStateByte
+	authorityAccountMemberSize     int64 = persistentStateByte * 80 // approx
+	authorityKeyMemberSize         int64 = persistentStateByte * 80
 	commentBeneficiariesMemberSize int64 = temporaryStateByte * 16
 	createProposalSubjectCharSize  int64 = temporaryStateByte // × lifetime
 	recurrentTransferMemoCharSize  int64 = temporaryStateByte // × lifetime
@@ -73,53 +73,53 @@ const (
 // operation_exec_info constructor. These are calibrated against a
 // reference machine — they mostly serve to scale across op types.
 var execTimeNS = map[op.Tag]int64{
-	op.TagAccountCreate:                 498 + 31575 + 236 + 6401,
-	op.TagAccountCreateWithDelegation:   770 + 39616 + 139 + 66,
-	op.TagAccountWitnessVote:            516 + 13907 + 173 + 145,
-	op.TagComment:                       2419 + 20408 + 221 + 166 + 42964,
-	op.TagCommentOptions:                413 + 5530 + 142 + 117,
-	op.TagConvert:                       442 + 11491 + 207 + 143 + 8280,
-	op.TagCollateralizedConvert:         613 + 13325 + 332 + 239 + 9154,
-	op.TagCreateClaimedAccount:          964 + 46331 + 342 + 10778,
-	op.TagDeclineVotingRights:           530 + 3894 + 179 + 187 + 24301,
-	op.TagDelegateVestingShares:         411 + 11998 + 3110 + 1208,
-	op.TagEscrowTransfer:                2943 + 16130 + 309 + 204,
-	op.TagLimitOrderCreate:              468 + 13924 + 187 + 124,
-	op.TagLimitOrderCreate2:             607 + 23356 + 310 + 118,
-	op.TagRequestAccountRecovery:        613 + 7058 + 149 + 127,
-	op.TagSetWithdrawVestingRoute:       501 + 9003 + 632 + 121,
-	op.TagVote:                          479 + 17568 + 187 + 78,
-	op.TagWitnessUpdate:                 675 + 3287 + 154 + 121,
-	op.TagTransfer:                      638 + 5023 + 204 + 134,
-	op.TagTransferToVesting:             484 + 15856 + 2174 + 721 + 23010,
-	op.TagTransferToSavings:             771 + 5392 + 205 + 155,
-	op.TagTransferFromSavings:           519 + 7840 + 111 + 106 + 8974,
-	op.TagClaimRewardBalance:            427 + 23366 + 2798 + 970,
-	op.TagWithdrawVesting:               376 + 6524 + 2068 + 567 + 16307*13, // HIVE_VESTING_WITHDRAW_INTERVALS
-	op.TagAccountUpdate:                 1531 + 11433 + 206 + 152,
-	op.TagAccountUpdate2:                2182 + 10804 + 405 + 257,
-	op.TagAccountWitnessProxy:           684 + 57106 + 170 + 166,
-	op.TagCancelTransferFromSavings:     135 + 2881 + 72 + 66,
-	op.TagChangeRecoveryAccount:         580 + 9391 + 297 + 202,
-	op.TagClaimAccount:                  336 + 8028 + 267 + 150,
-	op.TagCustom:                        132 + 183 + 238 + 121,
-	op.TagCustomJSON:                    859 + 162 + 321 + 167,
-	op.TagCustomBinary:                  100000,
-	op.TagDeleteComment:                 521 + 17208 + 175 + 146,
-	op.TagEscrowApprove:                 814 + 8408 + 260 + 181,
-	op.TagEscrowDispute:                 918 + 5219 + 261 + 176,
-	op.TagEscrowRelease:                 1313 + 13586 + 252 + 189,
-	op.TagFeedPublish:                   469 + 2233 + 213 + 144,
-	op.TagLimitOrderCancel:              407 + 5986 + 204 + 142,
-	op.TagWitnessSetProperties:          3986 + 4920 + 310 + 234,
-	op.TagCreateProposal:                831 + 24323 + 5666 + 2168,
-	op.TagUpdateProposal:                820 + 11193 + 4501 + 267,
-	op.TagUpdateProposalVotes:           503 + 12602 + 2993 + 1206,
-	op.TagRemoveProposal:                527 + 129323 + 3886 + 1692,
-	op.TagRecurrentTransfer:             914 + 12426 + 330 + 238,
-	op.TagRecoverAccount:                727 + 17934 + 149 + 145,
-	op.TagPow:                           177321 + 23458 + 165 + 57,
-	op.TagPow2:                          86349 + 17226 + 160 + 92,
+	op.TagAccountCreate:               498 + 31575 + 236 + 6401,
+	op.TagAccountCreateWithDelegation: 770 + 39616 + 139 + 66,
+	op.TagAccountWitnessVote:          516 + 13907 + 173 + 145,
+	op.TagComment:                     2419 + 20408 + 221 + 166 + 42964,
+	op.TagCommentOptions:              413 + 5530 + 142 + 117,
+	op.TagConvert:                     442 + 11491 + 207 + 143 + 8280,
+	op.TagCollateralizedConvert:       613 + 13325 + 332 + 239 + 9154,
+	op.TagCreateClaimedAccount:        964 + 46331 + 342 + 10778,
+	op.TagDeclineVotingRights:         530 + 3894 + 179 + 187 + 24301,
+	op.TagDelegateVestingShares:       411 + 11998 + 3110 + 1208,
+	op.TagEscrowTransfer:              2943 + 16130 + 309 + 204,
+	op.TagLimitOrderCreate:            468 + 13924 + 187 + 124,
+	op.TagLimitOrderCreate2:           607 + 23356 + 310 + 118,
+	op.TagRequestAccountRecovery:      613 + 7058 + 149 + 127,
+	op.TagSetWithdrawVestingRoute:     501 + 9003 + 632 + 121,
+	op.TagVote:                        479 + 17568 + 187 + 78,
+	op.TagWitnessUpdate:               675 + 3287 + 154 + 121,
+	op.TagTransfer:                    638 + 5023 + 204 + 134,
+	op.TagTransferToVesting:           484 + 15856 + 2174 + 721 + 23010,
+	op.TagTransferToSavings:           771 + 5392 + 205 + 155,
+	op.TagTransferFromSavings:         519 + 7840 + 111 + 106 + 8974,
+	op.TagClaimRewardBalance:          427 + 23366 + 2798 + 970,
+	op.TagWithdrawVesting:             376 + 6524 + 2068 + 567 + 16307*13, // HIVE_VESTING_WITHDRAW_INTERVALS
+	op.TagAccountUpdate:               1531 + 11433 + 206 + 152,
+	op.TagAccountUpdate2:              2182 + 10804 + 405 + 257,
+	op.TagAccountWitnessProxy:         684 + 57106 + 170 + 166,
+	op.TagCancelTransferFromSavings:   135 + 2881 + 72 + 66,
+	op.TagChangeRecoveryAccount:       580 + 9391 + 297 + 202,
+	op.TagClaimAccount:                336 + 8028 + 267 + 150,
+	op.TagCustom:                      132 + 183 + 238 + 121,
+	op.TagCustomJSON:                  859 + 162 + 321 + 167,
+	op.TagCustomBinary:                100000,
+	op.TagDeleteComment:               521 + 17208 + 175 + 146,
+	op.TagEscrowApprove:               814 + 8408 + 260 + 181,
+	op.TagEscrowDispute:               918 + 5219 + 261 + 176,
+	op.TagEscrowRelease:               1313 + 13586 + 252 + 189,
+	op.TagFeedPublish:                 469 + 2233 + 213 + 144,
+	op.TagLimitOrderCancel:            407 + 5986 + 204 + 142,
+	op.TagWitnessSetProperties:        3986 + 4920 + 310 + 234,
+	op.TagCreateProposal:              831 + 24323 + 5666 + 2168,
+	op.TagUpdateProposal:              820 + 11193 + 4501 + 267,
+	op.TagUpdateProposalVotes:         503 + 12602 + 2993 + 1206,
+	op.TagRemoveProposal:              527 + 129323 + 3886 + 1692,
+	op.TagRecurrentTransfer:           914 + 12426 + 330 + 238,
+	op.TagRecoverAccount:              727 + 17934 + 149 + 145,
+	op.TagPow:                         177321 + 23458 + 165 + 57,
+	op.TagPow2:                        86349 + 17226 + 160 + 92,
 }
 
 // transactionExecTimeNS — per-tx overhead from operation_exec_info::

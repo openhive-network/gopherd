@@ -129,12 +129,12 @@ func TestIssue971VestingRemoval(t *testing.T) {
 // testfixture, so authority-key signing isn't required to reach the
 // history-match assertion. The test:
 //
-//   1. Rotates bob's owner key — recording the original owner as a
-//      history row at time T0.
-//   2. Advances head_block_time by 30 days + epsilon (history row is
-//      now older than HIVE_OWNER_AUTH_RECOVERY_PERIOD).
-//   3. Requests + attempts recover_account using the now-stale
-//      original owner as recent_owner_authority. Must be rejected.
+//  1. Rotates bob's owner key — recording the original owner as a
+//     history row at time T0.
+//  2. Advances head_block_time by 30 days + epsilon (history row is
+//     now older than HIVE_OWNER_AUTH_RECOVERY_PERIOD).
+//  3. Requests + attempts recover_account using the now-stale
+//     original owner as recent_owner_authority. Must be rejected.
 func TestAccountRecoveryOwnerHistoryExpires(t *testing.T) {
 	f := New(t)
 	f.Actors("alice", "bob")

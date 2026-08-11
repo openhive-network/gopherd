@@ -292,8 +292,8 @@ func TestRCPluginManyRecoverAccounts(t *testing.T) {
 	stx := newSubsidizedRecoverAccountTx("alice", pubKey, 2)
 	// Append a second recover_account op.
 	stx.Operations = append(stx.Operations, op.FromOperation(op.RecoverAccount{
-		AccountToRecover:   "bob",
-		NewOwnerAuthority:  newAuth(pubKey),
+		AccountToRecover:     "bob",
+		NewOwnerAuthority:    newAuth(pubKey),
 		RecentOwnerAuthority: newAuth(pubKey),
 	}))
 	var result [objects.RCNumResources]int64
@@ -423,16 +423,16 @@ func readRCPendingData(t *testing.T, f *Fixture) objects.RCPendingData {
 // hook in the apply loop. The Go assertions follow the C++ `check()`
 // helper coverage:
 //
-//   • account_update.owner    → diff.state_bytes < 0
-//   • account_update.active   → diff.state_bytes < 0
-//   • account_update.posting  → diff.state_bytes < 0
-//   • account_update.memo_key → diff == 0 (no auth changed)
-//   • account_update.metadata → diff == 0 (metadata not subject to diff)
-//   • witness_update (new)    → diff == 0 (witness doesn't exist yet)
-//   • witness_update (modify) → diff.state_bytes < 0 (URL was stored)
-//   • delegate_rc (new)       → diff == 0 (no delegation row to discount)
-//   • delegate_rc (update)    → diff.state_bytes < 0 (rows exist)
-//   • delegate_rc (zero-max)  → diff == 0 (op declines diff usage)
+//   - account_update.owner    → diff.state_bytes < 0
+//   - account_update.active   → diff.state_bytes < 0
+//   - account_update.posting  → diff.state_bytes < 0
+//   - account_update.memo_key → diff == 0 (no auth changed)
+//   - account_update.metadata → diff == 0 (metadata not subject to diff)
+//   - witness_update (new)    → diff == 0 (witness doesn't exist yet)
+//   - witness_update (modify) → diff.state_bytes < 0 (URL was stored)
+//   - delegate_rc (new)       → diff == 0 (no delegation row to discount)
+//   - delegate_rc (update)    → diff.state_bytes < 0 (rows exist)
+//   - delegate_rc (zero-max)  → diff == 0 (op declines diff usage)
 func TestRCPluginDifferentialUsageOperations(t *testing.T) {
 	f := New(t)
 	f.HardforksUpTo(hardfork.HF26)

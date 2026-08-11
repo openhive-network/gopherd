@@ -20,8 +20,10 @@ type recurrentTransferEvaluator struct{}
 // extractRecurrentTransferPairID parses the pair_id extension from a
 // recurrent_transfer op. The extension wire format is a flat_set of
 // static_variant<void_t, recurrent_transfer_pair_id>:
-//   varint count
-//   for each: varint tag (0 = void, 1 = pair_id), uint8 body if tag=1
+//
+//	varint count
+//	for each: varint tag (0 = void, 1 = pair_id), uint8 body if tag=1
+//
 // Returns the pair_id (0 if no pair_id extension is present).
 func extractRecurrentTransferPairID(raw []byte) uint8 {
 	if len(raw) == 0 {

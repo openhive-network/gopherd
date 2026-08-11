@@ -257,10 +257,10 @@ func TestAccountUpdate2Apply(t *testing.T) {
 
 	newMemo := crypto.PublicKey{0x02, 'M', 'E', 'M', 'O'}
 	if err := f.ApplyOp(op.AccountUpdate2{
-		Account:              "alice",
-		MemoKey:              &newMemo,
-		JSONMetadata:         `{"top":1}`,
-		PostingJSONMetadata:  `{"posting":1}`,
+		Account:             "alice",
+		MemoKey:             &newMemo,
+		JSONMetadata:        `{"top":1}`,
+		PostingJSONMetadata: `{"posting":1}`,
 	}); err != nil {
 		t.Fatalf("update2: %v", err)
 	}

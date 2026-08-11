@@ -20,13 +20,13 @@ const liquidityRewardMin int64 = 1000 * int64(liquidityRewardBlocks)
 // libraries/chain/database_vesting.cpp:29. Once per
 // HIVE_LIQUIDITY_REWARD_BLOCKS:
 //
-//   1. Compute reward = max(virtual_supply × HIVE_LIQUIDITY_APR_PERCENT
-//      / 100% / HIVE_BLOCKS_PER_HOUR, HIVE_MIN_LIQUIDITY_REWARD).
-//   2. Find the highest-weight liquidity_reward_balance row.
-//   3. If its weight > 0:
-//        adjust_supply(+reward) — mints new HIVE.
-//        adjust_balance(owner, +reward) — credits the LP.
-//        Reset row's volumes/weight to 0; refresh last_update.
+//  1. Compute reward = max(virtual_supply × HIVE_LIQUIDITY_APR_PERCENT
+//     / 100% / HIVE_BLOCKS_PER_HOUR, HIVE_MIN_LIQUIDITY_REWARD).
+//  2. Find the highest-weight liquidity_reward_balance row.
+//  3. If its weight > 0:
+//     adjust_supply(+reward) — mints new HIVE.
+//     adjust_balance(owner, +reward) — credits the LP.
+//     Reset row's volumes/weight to 0; refresh last_update.
 //
 // HF12__178 disables the entire liquidity-reward subsystem.
 func payLiquidityReward(s *state.Session, blockNum, blockTime uint32) {

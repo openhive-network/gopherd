@@ -172,16 +172,16 @@ func mul128Div64(a, b, c uint64) uint64 {
 // delegate_rc_evaluator::do_apply (libraries/chain/rc/rc_utility.cpp).
 //
 // Validations (FC_ASSERT in C++):
-//   1. op.validate(): from is valid account name, delegatees non-empty,
-//      delegatees.size() <= HIVE_RC_MAX_ACCOUNTS_PER_DELEGATION_OP,
-//      delegatee != from, max_rc >= 0.
-//   2. from must appear in required_posting_auths.
-//   3. min_delegation check: if max_rc != 0 and is_in_control,
-//      max_rc >= (account_creation_fee/3) * vesting_share_price.
-//   4. All delegatees must exist.
-//   5. Creating delegation with max_rc==0 is forbidden.
-//   6. Setting delegation to the same value is forbidden.
-//   7. Total delta cannot exceed from_delegable_rc.
+//  1. op.validate(): from is valid account name, delegatees non-empty,
+//     delegatees.size() <= HIVE_RC_MAX_ACCOUNTS_PER_DELEGATION_OP,
+//     delegatee != from, max_rc >= 0.
+//  2. from must appear in required_posting_auths.
+//  3. min_delegation check: if max_rc != 0 and is_in_control,
+//     max_rc >= (account_creation_fee/3) * vesting_share_price.
+//  4. All delegatees must exist.
+//  5. Creating delegation with max_rc==0 is forbidden.
+//  6. Setting delegation to the same value is forbidden.
+//  7. Total delta cannot exceed from_delegable_rc.
 func applyDelegateRC(ctx *Context, cj op.CustomJSON, args json.RawMessage) error {
 	// The args may be either the canonical object form
 	//   { "from":..., "delegatees":[...], "max_rc":... }
@@ -430,7 +430,8 @@ func applyDelegateRC(ctx *Context, cj op.CustomJSON, args json.RawMessage) error
 }
 
 // computeMinRCDelegation mirrors
-//   min_delegation = ((account_creation_fee / 3) * vesting_share_price).amount
+//
+//	min_delegation = ((account_creation_fee / 3) * vesting_share_price).amount
 //
 // vesting_share_price = TotalVestingShares / TotalVestingFundHive
 // (with the genesis 1:1000 fallback when either is zero).

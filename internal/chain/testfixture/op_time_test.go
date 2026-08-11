@@ -108,7 +108,7 @@ func TestConvertDelayCycle(t *testing.T) {
 	preHive := f.Balance("alice")
 
 	t.Log("--- Skip 3.5 days (HF16+ delay) → request settles")
-	f.SkipSeconds(60*60*24*4) // a bit over 3.5d
+	f.SkipSeconds(60 * 60 * 24 * 4) // a bit over 3.5d
 
 	// Either the request settled or it's still pending. Check.
 	has, _ := objects.HasConvertRequest(state.NewSession(f.State), "alice", 1)

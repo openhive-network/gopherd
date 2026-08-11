@@ -39,18 +39,21 @@ func setCollateralizedFeedAndPrintRate(t *testing.T, f *Fixture, p asset.Price) 
 // the wrong HBD credit.
 //
 // Setup:
-//   price = 1 HBD / 2 HIVE  (i.e. 1 HIVE = 0.5 HBD)
-//   alice funded with 42 sat-HIVE (= 0.042 HIVE)
+//
+//	price = 1 HBD / 2 HIVE  (i.e. 1 HIVE = 0.5 HBD)
+//	alice funded with 42 sat-HIVE (= 0.042 HIVE)
 //
 // At op-apply:
-//   immediate_hive = 42 × 100% / 200%        = 21
-//   converted_hbd  = 21 × 1 × 10000 / (2 × 10500) = 10 sat-HBD
-//   alice.balance: 42 → 0;  alice.hbd_balance: 0 → 10
+//
+//	immediate_hive = 42 × 100% / 200%        = 21
+//	converted_hbd  = 21 × 1 × 10000 / (2 × 10500) = 10 sat-HBD
+//	alice.balance: 42 → 0;  alice.hbd_balance: 0 → 10
 //
 // At settlement (HIVE_COLLATERALIZED_CONVERSION_DELAY = 3.5 days):
-//   required_hive = 10 × 2 × 10500 / (1 × 10000) = 21
-//   excess        = 42 - 21 = 21  ← refunded
-//   alice.balance: 0 → 21;  alice.hbd_balance unchanged at 10
+//
+//	required_hive = 10 × 2 × 10500 / (1 × 10000) = 21
+//	excess        = 42 - 21 = 21  ← refunded
+//	alice.balance: 0 → 21;  alice.hbd_balance unchanged at 10
 func TestCollateralizedConvertNarrowPrice(t *testing.T) {
 	f := New(t)
 	f.HardforksUpTo(hardfork.HF25)
@@ -138,22 +141,25 @@ func advanceToPreSettle(t *testing.T, f *Fixture, delaySecs uint32) {
 // and quote both approach 2^62.
 //
 // Setup:
-//   base  = 4611686018427387000 HBD
-//   quote = 9223372036854774000 HIVE   (≈ base × 2)
-//   alice funded with 50_000_000_000 sat-HIVE (= 50M HIVE).
+//
+//	base  = 4611686018427387000 HBD
+//	quote = 9223372036854774000 HIVE   (≈ base × 2)
+//	alice funded with 50_000_000_000 sat-HIVE (= 50M HIVE).
 //
 // First op: amount = 42M HIVE-precision (42_000_000.000 TESTS =
 // 42_000_000_000 sat-HIVE) — must fail with percent_hbd > hbd_stop_percent.
 //
 // Second op: amount = 4.2M HIVE = 4_200_000_000 sat-HIVE.
-//   immediate_hive = 4_200_000_000 × 100% / 200% = 2_100_000_000
-//   converted_hbd  ≈ 2_100_000_000 × 1/2 × (100/105) = 1_000_000_000 HBD-sat
-//   alice.balance: 50_000_000_000 → 45_800_000_000;  hbd_balance: 0 → 1_000_000_000
+//
+//	immediate_hive = 4_200_000_000 × 100% / 200% = 2_100_000_000
+//	converted_hbd  ≈ 2_100_000_000 × 1/2 × (100/105) = 1_000_000_000 HBD-sat
+//	alice.balance: 50_000_000_000 → 45_800_000_000;  hbd_balance: 0 → 1_000_000_000
 //
 // At settlement (no median drift):
-//   required_hive  ≈ 1_000_000_000 × 2 × (105/100) = 2_100_000_000
-//   excess         = 4_200_000_000 - 2_100_000_000 = 2_100_000_000  ← refunded
-//   alice.balance final = 45_800_000_000 + 2_100_000_000 = 47_900_000_000
+//
+//	required_hive  ≈ 1_000_000_000 × 2 × (105/100) = 2_100_000_000
+//	excess         = 4_200_000_000 - 2_100_000_000 = 2_100_000_000  ← refunded
+//	alice.balance final = 45_800_000_000 + 2_100_000_000 = 47_900_000_000
 func TestCollateralizedConvertWidePrice(t *testing.T) {
 	f := New(t)
 	f.HardforksUpTo(hardfork.HF25)

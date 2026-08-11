@@ -163,9 +163,9 @@ func (accountUpdateEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		// HIVE_OWNER_AUTH_HISTORY_TRACKING_START_BLOCK_NUM.
 		if ctx.BlockNum >= OwnerAuthHistoryTrackingStartBlockNum {
 			objects.PutOwnerAuthorityHistory(ctx.DB, &objects.OwnerAuthorityHistory{
-			Account:                au.Account,
-			PreviousOwnerAuthority: authObj.Owner,
-			LastValidTime:          ctx.HeadBlockTime,
+				Account:                au.Account,
+				PreviousOwnerAuthority: authObj.Owner,
+				LastValidTime:          ctx.HeadBlockTime,
 			})
 		}
 		authObj.Owner = *au.Owner
@@ -234,9 +234,9 @@ func (accountUpdate2Evaluator) Apply(ctx *Context, opArg op.Op) error {
 		// HIVE_OWNER_AUTH_HISTORY_TRACKING_START_BLOCK_NUM.
 		if ctx.BlockNum >= OwnerAuthHistoryTrackingStartBlockNum {
 			objects.PutOwnerAuthorityHistory(ctx.DB, &objects.OwnerAuthorityHistory{
-			Account:                au.Account,
-			PreviousOwnerAuthority: authObj.Owner,
-			LastValidTime:          ctx.HeadBlockTime,
+				Account:                au.Account,
+				PreviousOwnerAuthority: authObj.Owner,
+				LastValidTime:          ctx.HeadBlockTime,
 			})
 		}
 		authObj.Owner = *au.Owner

@@ -852,7 +852,7 @@ func TestDelayedVotingSmallCommon01(t *testing.T) {
 	aliceSmall := f.Account_("alice").VestingShares
 
 	// Jump 29 days forward — still inside the first bucket's window.
-	f.SkipSeconds((objects.DelayedVotingTotalIntervalSec / objects.DelayedVotingIntervalSec) *
+	f.SkipSeconds((objects.DelayedVotingTotalIntervalSec/objects.DelayedVotingIntervalSec)*
 		objects.DelayedVotingIntervalSec - objects.DelayedVotingIntervalSec)
 
 	// Now a huge vest.

@@ -24,8 +24,8 @@ func TestTransferApply(t *testing.T) {
 	f.Actors("alice", "bob")
 	f.GenerateBlock()
 
-	f.FundLiquid("alice", 10_000)  // 10.000 HIVE
-	f.FundLiquidHBD("bob", 1_000)  // 1.000 HBD
+	f.FundLiquid("alice", 10_000) // 10.000 HIVE
+	f.FundLiquidHBD("bob", 1_000) // 1.000 HBD
 
 	if got := f.Balance("alice"); got != 10_000 {
 		t.Fatalf("initial alice.HIVE: got %d, want 10000", got)

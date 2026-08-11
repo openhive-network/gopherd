@@ -55,11 +55,11 @@ type createProposalEvaluator struct{}
 // HIVE_TREASURY_FEE = 10 HBD (10000 sat). HIVE_PROPOSAL_FEE_INCREASE_*
 // constants kick in for HF24+ when proposal duration > 60 days.
 const (
-	treasuryFeeHBD              int64 = 10000
-	proposalFeeIncreaseDays           = 60
-	proposalFeeIncreaseDaysSec        = proposalFeeIncreaseDays * 86400
-	proposalFeeIncreaseAmount   int64 = 1000 // +1 HBD per extra day
-	oneDaySeconds                     = 86400
+	treasuryFeeHBD             int64 = 10000
+	proposalFeeIncreaseDays          = 60
+	proposalFeeIncreaseDaysSec       = proposalFeeIncreaseDays * 86400
+	proposalFeeIncreaseAmount  int64 = 1000 // +1 HBD per extra day
+	oneDaySeconds                    = 86400
 )
 
 func (createProposalEvaluator) Apply(ctx *Context, opArg op.Op) error {

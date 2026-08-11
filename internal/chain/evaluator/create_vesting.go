@@ -76,16 +76,16 @@ func vestTraceAccount(name string) bool {
 //
 // Side effects (matches C++ create_vesting2):
 //   - !toReward (regular path):
-//       account.VestingShares          += new_vesting
-//       dgpo.TotalVestingShares        += new_vesting
-//       dgpo.TotalVestingFundHive      += hiveSatoshi
-//       witness votes                  += new_vesting via AdjustProxiedWitnessVotes
+//     account.VestingShares          += new_vesting
+//     dgpo.TotalVestingShares        += new_vesting
+//     dgpo.TotalVestingFundHive      += hiveSatoshi
+//     witness votes                  += new_vesting via AdjustProxiedWitnessVotes
 //   - toReward (HF17+ comment payout into pending reward pool):
-//       account.RewardVests            += new_vesting
-//       account.RewardVestingHive      += hiveSatoshi
-//       dgpo.PendingRewardedVestingShares += new_vesting
-//       dgpo.PendingRewardedVestingHive   += hiveSatoshi
-//       (no witness vote adjust — reward vests vote only after claim)
+//     account.RewardVests            += new_vesting
+//     account.RewardVestingHive      += hiveSatoshi
+//     dgpo.PendingRewardedVestingShares += new_vesting
+//     dgpo.PendingRewardedVestingHive   += hiveSatoshi
+//     (no witness vote adjust — reward vests vote only after claim)
 //
 // The vesting share price diverges on the toReward branch
 // (database_vesting_helpers.hpp:calculate_vesting):

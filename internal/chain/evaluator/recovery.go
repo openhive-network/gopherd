@@ -196,9 +196,9 @@ func (recoverAccountEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	// HIVE_OWNER_AUTH_HISTORY_TRACKING_START_BLOCK_NUM.
 	if ctx.BlockNum >= OwnerAuthHistoryTrackingStartBlockNum {
 		objects.PutOwnerAuthorityHistory(ctx.DB, &objects.OwnerAuthorityHistory{
-		Account:                r.AccountToRecover,
-		PreviousOwnerAuthority: authObj.Owner,
-		LastValidTime:          ctx.HeadBlockTime,
+			Account:                r.AccountToRecover,
+			PreviousOwnerAuthority: authObj.Owner,
+			LastValidTime:          ctx.HeadBlockTime,
 		})
 	}
 	authObj.Owner = r.NewOwnerAuthority

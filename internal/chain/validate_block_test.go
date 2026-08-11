@@ -150,14 +150,14 @@ func TestSlotNumForBlockTime(t *testing.T) {
 		head, block uint32
 		wantSlot    uint32
 	}{
-		{99, 102, 1},  // aligned head, contiguous
-		{99, 105, 2},  // aligned head, one missed
+		{99, 102, 1}, // aligned head, contiguous
+		{99, 105, 2}, // aligned head, one missed
 		{99, 108, 3},
 		{100, 102, 1}, // unaligned head rounds down to 99 → 102 is slot 1
 		{100, 105, 2},
 		{100, 100, 0}, // block_time < first_slot_time (102) → invalid
 		{100, 101, 0},
-		{100, 99, 0},  // backwards
+		{100, 99, 0}, // backwards
 	}
 	for _, c := range cases {
 		got := slotNumForBlockTime(c.head, c.block)

@@ -539,9 +539,9 @@ func applyHardfork17(s *state.Session) {
 	// state, but keep it faithful.
 	dgpo.TotalRewardShares2 = [16]byte{}
 	objects.PutRewardFund(s, &objects.RewardFund{
-		Name:                   objects.PostRewardFundName,
-		RewardBalance:          seedBalance,
-		RecentClaims:           recent,
+		Name:          objects.PostRewardFundName,
+		RewardBalance: seedBalance,
+		RecentClaims:  recent,
 		// C++ reward_fund_object ctor stamps last_update = head_block_time()
 		// (database_hardfork.cpp:283). It must NOT be genesis: the very first
 		// post-HF17 decayPreAddRecentClaims computes elapsed = blockTime -
@@ -557,7 +557,7 @@ func applyHardfork17(s *state.Session) {
 		AuthorRewardCurve:      objects.CurveQuadratic,
 		// C++ default curation_reward_curve = bounded_curation (curve_id 1),
 		// not quadratic. reward_fund_object.hpp:33.
-		CurationRewardCurve:    objects.CurveBoundedCurve,
+		CurationRewardCurve: objects.CurveBoundedCurve,
 	})
 	objects.PutDGPO(s, &dgpo)
 
@@ -785,7 +785,7 @@ func applyHardfork12CommentCashoutFix(s *state.Session) {
 	//   - replies: untouched (stay frozen until HF17 fix lifts them)
 	// We approximate `was_paid()` via LastPayout > 0 (set by cashout)
 	// and "frozen" via CashoutTime == 0 (our maximum sentinel).
-	const cashoutWindowPreHF17 uint32 = 60 * 60 * 12 // 12 hours
+	const cashoutWindowPreHF17 uint32 = 60 * 60 * 12     // 12 hours
 	const secondCashoutWindow uint32 = 60 * 60 * 24 * 30 // 30 days
 	for _, p := range queue {
 		c, err := objects.GetComment(s, p.author, p.permlink)
@@ -841,8 +841,8 @@ func removeOldCashouts(s *state.Session) {
 // database::apply_hardfork_17_comment_cashout_fix
 // (database_comment.cpp:533-581). Two passes:
 //
-//	1. Root posts:  cashout = max(creation + 7d, old_cashout)
-//	2. Replies:     cashout = max(root.cashout_AFTER_pass_1, creation + 7d)
+//  1. Root posts:  cashout = max(creation + 7d, old_cashout)
+//  2. Replies:     cashout = max(root.cashout_AFTER_pass_1, creation + 7d)
 //
 // The C++ replies pass calls calculate_discussion_payout_time, which
 // returns the ROOT's (just-updated) cashout_time — so replies share
@@ -953,10 +953,10 @@ func applyHardfork17CommentCashoutFix(s *state.Session) {
 // is invoked from the HF10 hardfork handler (database_hardfork.cpp:232).
 func retallyLiquidityWeight(s *state.Session) {
 	type row struct {
-		owner       string
-		hive, hbd   int64
-		lastUpdate  uint32
-		prevWeight  [16]byte
+		owner      string
+		hive, hbd  int64
+		lastUpdate uint32
+		prevWeight [16]byte
 	}
 	var rows []row
 	_ = s.Range(objects.LiquidityRewardBalanceTable, state.PrimaryIndex, nil,

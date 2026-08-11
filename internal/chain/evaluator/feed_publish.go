@@ -51,6 +51,7 @@ const ownerAuthRecoveryPeriodSec uint32 = 60 * 60 * 24 * 30
 // decline_voting_rights_evaluator (libraries/chain/hive_evaluator.cpp).
 //   - decline=true: create request with effective_date = now + 30d
 //   - decline=false: cancel pending request (if any)
+//
 // process_decline_voting_rights fires once the effective date passes.
 func (declineVotingRightsEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	if opArg.Tag != op.TagDeclineVotingRights {

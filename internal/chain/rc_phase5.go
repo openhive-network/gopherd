@@ -67,9 +67,9 @@ const rcMaxNegativePercent int64 = 10
 // txSize is the on-wire signed_transaction byte size (header+ops+ext+sigs).
 //
 // Side effects on the supplied session:
-//   * Updates rc_pending_data (creating it if it doesn't exist).
-//   * Mutates payer Account (RCManaCurrent / RCManaLastUpdate).
-//   * No-op if Operations is empty or the tx pays no cost (the C++
+//   - Updates rc_pending_data (creating it if it doesn't exist).
+//   - Mutates payer Account (RCManaCurrent / RCManaLastUpdate).
+//   - No-op if Operations is empty or the tx pays no cost (the C++
 //     subsidized path).
 func applyRCForTx(s *state.Session, stx *tx.SignedTransaction, blockNum, blockTime uint32, txSize int64, enforce bool) error {
 	if !hardfork.SetForBlock(blockNum).Has(hardfork.HF20) {

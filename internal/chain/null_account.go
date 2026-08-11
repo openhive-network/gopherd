@@ -128,4 +128,3 @@ func clearNullAccountBalance(s *state.Session, blockNum uint32) {
 		objects.PutDGPO(s, &dgpo)
 	}
 }
-

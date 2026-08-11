@@ -95,9 +95,9 @@ func TestProposalObjectApplyFeeIncrease_cpp(t *testing.T) {
 	creator := "alice"
 	receiver := "bob"
 
-	startDate := f.HeadBlockTime() + 60*60*24      // +1d
-	endDate := startDate + 60*60*24*90              // +90d
-	expectedFee := int64(10_000 + 30*1_000)         // 10 HBD + 30 extra-day HBDs
+	startDate := f.HeadBlockTime() + 60*60*24 // +1d
+	endDate := startDate + 60*60*24*90        // +90d
+	expectedFee := int64(10_000 + 30*1_000)   // 10 HBD + 30 extra-day HBDs
 
 	beforeCreator := f.HBDBalance(creator)
 	beforeReceiver := f.HBDBalance(receiver)
