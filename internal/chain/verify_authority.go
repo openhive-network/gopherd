@@ -22,6 +22,16 @@ const (
 	AuthorityActive AuthorityLevel = iota
 	AuthorityOwner
 	AuthorityPosting
+	// AuthorityWitness is hived's SEPARATE witness-signature category
+	// (get_required_witness_signatures, base.hpp:19). It is NOT an account
+	// authority: it is satisfied only by the witness's own signing_key from
+	// the witness object, checked in transaction_util.cpp:169.
+	//
+	// Leaving it unimplemented did not fail safe. Our authorities table
+	// correctly returns no ACCOUNT-tier requirement for witness_block_approve,
+	// so VerifyAuthority passed such a transaction with ANY signature at all,
+	// and the mempool filled with them while real blocks carried zero.
+	AuthorityWitness
 )
 
 // RequiredAuthorities walks the operations in `signedTx` and returns
@@ -33,6 +43,7 @@ func RequiredAuthorities(signedTx *tx.SignedTransaction) map[AuthorityLevel]map[
 		AuthorityActive:  make(map[string]struct{}),
 		AuthorityOwner:   make(map[string]struct{}),
 		AuthorityPosting: make(map[string]struct{}),
+		AuthorityWitness: make(map[string]struct{}),
 	}
 	add := func(level AuthorityLevel, name string) {
 		if name != "" {
@@ -44,6 +55,12 @@ func RequiredAuthorities(signedTx *tx.SignedTransaction) map[AuthorityLevel]map[
 		// Posting-level operations (vote, comment, etc.) — mirrors
 		// the per-op get_required_posting_authorities in C++
 		// libraries/protocol/hive_operations.cpp.
+		// witness_block_approve is authorised ONLY by the witness's signing
+		// key, via hived's separate get_required_witness_signatures category
+		// (hive_operations.hpp:1047 inserts `witness`).
+		case op.TagWitnessBlockApprove:
+			add(AuthorityWitness, string(o.AsWitnessBlockApprove().Witness))
+
 		case op.TagVote:
 			add(AuthorityPosting, string(o.AsVote().Voter))
 		case op.TagComment:
@@ -235,7 +252,8 @@ func VerifyAuthorityWithKeys(s *state.Session, signedTx *tx.SignedTransaction, k
 	// only when a required authority cannot be satisfied below.
 	if len(required[AuthorityOwner]) == 0 &&
 		len(required[AuthorityActive]) == 0 &&
-		len(required[AuthorityPosting]) == 0 {
+		len(required[AuthorityPosting]) == 0 &&
+		len(required[AuthorityWitness]) == 0 {
 		// No required authorities — nothing to satisfy. (Hived would
 		// also reject "unused signatures" pre-HF28, but in practice
 		// pow txs never carry sigs and we don't currently track
@@ -293,6 +311,20 @@ func VerifyAuthorityWithKeys(s *state.Session, signedTx *tx.SignedTransaction, k
 				!state.checkAuthority(AuthorityOwner, name, 0) {
 				return fmt.Errorf("verify_authority: missing posting authority for %q", name)
 			}
+		}
+	}
+	// Witness-signature category — C++ transaction_util.cpp:169. Satisfied
+	// ONLY by the witness's own signing_key from the witness object; no
+	// account-authority substitution applies, and owner/active cannot stand in
+	// for it. A missing witness object is its own failure
+	// (missing_witness_key), not a pass.
+	for _, name := range sortedSet(required[AuthorityWitness]) {
+		w, werr := objects.GetWitness(s, auth.AccountName(name))
+		if werr != nil {
+			return fmt.Errorf("verify_authority: no witness object for %q (missing witness key): %w", name, werr)
+		}
+		if !state.signedByKey(w.BlockSigningKey) {
+			return fmt.Errorf("verify_authority: missing witness signature for %q", name)
 		}
 	}
 	// Mirrors hived's `!s.remove_unused_signatures()` final assert in
