@@ -167,6 +167,39 @@ func InitRCManabar(a *Account, now uint32) {
 	a.LastMaxRC = a.MaximumRC()
 }
 
+// InitRCManabarWithAdjustment primes a NEW account's RC exactly as hived does
+// (account_object.hpp:50-59, via hive_evaluator_account.cpp:159-168).
+//
+// The account creation FEE, converted to VESTS, becomes rc_adjustment — and
+// when it is non-zero the manabar starts FULL, not empty:
+//
+//	if( rc_adjustment.value ) {
+//	  rc_manabar.last_update_time = _creation_time;
+//	  auto max_rc = get_maximum_rc().value;
+//	  rc_manabar.current_mana = max_rc;
+//	  last_max_rc = max_rc;
+//	}
+//
+// We set NEITHER. rc_adjustment was only ever assigned by the HF20 loop, which
+// touches accounts that existed AT HF20 — so every account created afterwards
+// had rc_adjustment=0 and, with little or no VESTS, max_rc=0. It could not
+// transact at all in our view while doing so happily on mainnet.
+//
+// Measured cost before the fix: we refused ~1 transaction per block that the
+// network mined, e.g. `WE-HAD-IT-AND-DROPPED=1 [51f4bcf050a2…=insufficient-rc]`
+// for account "mcbot" (zero VESTS, zero adjustment => our max_rc = 0).
+func InitRCManabarWithAdjustment(a *Account, rcAdjustment int64, now uint32) {
+	a.RCAdjustment = rcAdjustment
+	a.RCManaLastUpdate = now
+	maxRC := a.MaximumRC()
+	a.LastMaxRC = maxRC
+	if rcAdjustment != 0 {
+		a.RCManaCurrent = maxRC // starts FULL, mirroring C++
+	} else {
+		a.RCManaCurrent = 0
+	}
+}
+
 // HIVE_VOTING_MANA_REGENERATION_SECONDS = 5 days. Same as RC regen.
 const VotingManaRegenSec uint32 = 5 * 24 * 60 * 60
 
@@ -263,4 +296,3 @@ func saturatedSub(a, b int64) int64 {
 	}
 	return r
 }
-

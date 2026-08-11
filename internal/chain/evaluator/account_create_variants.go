@@ -155,8 +155,18 @@ func (createClaimedAccountEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		DownvoteManaLastUpdate: ctx.HeadBlockTime,
 		RecoveryAccount:        defaultRecoveryAccount(ctx, cc.Creator),
 	}
+	// hived passes the SCHEDULE MEDIAN account_creation_fee here, not an op
+	// fee — a claimed account is paid for with a token, but its RC adjustment
+	// is still derived from what the fee would have been
+	// (hive_evaluator_account.cpp:504).
 	if ctx.Hardforks.Has(hardfork.HF20) {
-		objects.InitRCManabar(&newAcct, ctx.HeadBlockTime)
+		adj := int64(0)
+		if dgpo, derr := objects.GetDGPO(ctx.DB); derr == nil {
+			if ws, werr := objects.GetWitnessSchedule(ctx.DB); werr == nil {
+				adj = rcAdjustmentFromFee(&dgpo, ws.MedianAccountCreationFee)
+			}
+		}
+		objects.InitRCManabarWithAdjustment(&newAcct, adj, ctx.HeadBlockTime)
 	}
 	objects.PutAccount(ctx.DB, &newAcct)
 	objects.PutAccountAuthority(ctx.DB, &objects.AccountAuthority{
@@ -244,8 +254,13 @@ func (accountCreateWithDelegationEvaluator) Apply(ctx *Context, opArg op.Op) err
 		DownvoteManaLastUpdate: ctx.HeadBlockTime,
 		RecoveryAccount:        defaultRecoveryAccount(ctx, ac.Creator),
 	}
+	// hived passes the OP's fee here (hive_evaluator_account.cpp:260).
 	if ctx.Hardforks.Has(hardfork.HF20) {
-		objects.InitRCManabar(&newAcct, ctx.HeadBlockTime)
+		adj := int64(0)
+		if dgpo, derr := objects.GetDGPO(ctx.DB); derr == nil {
+			adj = rcAdjustmentFromFee(&dgpo, ac.Fee.Amount)
+		}
+		objects.InitRCManabarWithAdjustment(&newAcct, adj, ctx.HeadBlockTime)
 	}
 	objects.PutAccount(ctx.DB, &newAcct)
 	objects.PutAccountAuthority(ctx.DB, &objects.AccountAuthority{
