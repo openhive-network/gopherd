@@ -565,8 +565,8 @@ func (o CommentOptions) Validate() error {
 	if o.MaxAcceptedPayout.Amount < 0 {
 		return errors.New("comment_options.max_accepted_payout: cannot be negative")
 	}
-	if len(o.Permlink) == 0 || len(o.Permlink) > MaxPermlinkLength {
-		return fmt.Errorf("comment_options.permlink: length %d not in (0, %d]", len(o.Permlink), MaxPermlinkLength)
+	if err := validatePermlink("comment_options.permlink", o.Permlink); err != nil {
+		return err
 	}
 	if err := validateCommentBeneficiaries(o.Beneficiaries); err != nil {
 		return err
@@ -689,12 +689,13 @@ func (o CreateProposal) Validate() error {
 		return fmt.Errorf("create_proposal.subject: %d chars exceeds %d",
 			len(o.Subject), proposalSubjectMaxLength)
 	}
+	// C++ dhf_operations.cpp:21 — the DHF ops are the ONLY ones that require a
+	// non-empty permlink, and they then apply validate_permlink on top.
 	if o.Permlink == "" {
 		return errors.New("create_proposal.permlink: must not be empty")
 	}
-	if len(o.Permlink) > MaxPermlinkLength {
-		return fmt.Errorf("create_proposal.permlink: %d chars exceeds %d",
-			len(o.Permlink), MaxPermlinkLength)
+	if err := validatePermlink("create_proposal.permlink", o.Permlink); err != nil {
+		return err
 	}
 	return nil
 }
