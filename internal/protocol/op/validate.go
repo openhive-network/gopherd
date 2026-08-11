@@ -12,6 +12,7 @@ package op
 import (
 	"errors"
 	"fmt"
+	"unicode/utf8"
 
 	"hived-go/internal/protocol/asset"
 	"hived-go/internal/protocol/auth"
@@ -22,6 +23,32 @@ const MaxMemoSize = 2048
 
 // HIVE_MAX_PERMLINK_LENGTH = 256.
 const MaxPermlinkLength = 256
+
+// validatePermlink mirrors C++ validate_permlink (validation.hpp:111) EXACTLY:
+//
+//	permlink.size() < HIVE_MAX_PERMLINK_LENGTH   (strictly less — 255 is the max)
+//	fc::is_utf8( permlink )
+//
+// Both details were wrong here, in OPPOSITE directions, in the validator that
+// runs on the two highest-volume operations on the chain:
+//
+//   - we rejected an EMPTY permlink; C++ permits it. That refuses transactions
+//     the network accepts, and mempool admission is exactly where such a
+//     refusal is invisible — the queue looks healthy and our blocks are short.
+//   - we allowed length 256 and never checked UTF-8; C++ rejects both. That
+//     admits transactions hived refuses, which is how a block gets rejected.
+//
+// A validator that is stricter than hived's costs us traffic; one that is
+// looser costs us the whole block. Neither is safe to approximate.
+func validatePermlink(field, permlink string) error {
+	if len(permlink) >= MaxPermlinkLength {
+		return fmt.Errorf("%s: length %d exceeds %d", field, len(permlink), MaxPermlinkLength-1)
+	}
+	if !utf8.ValidString(permlink) {
+		return fmt.Errorf("%s: not valid UTF-8", field)
+	}
+	return nil
+}
 
 // HIVE_MAX_COMMENT_TITLE_LENGTH = 256.
 const MaxCommentTitleLength = 256
@@ -64,8 +91,8 @@ func (o Vote) Validate() error {
 	if err := validateAccountName("vote.author", string(o.Author)); err != nil {
 		return err
 	}
-	if len(o.Permlink) == 0 || len(o.Permlink) > MaxPermlinkLength {
-		return fmt.Errorf("vote.permlink: length %d not in (0, %d]", len(o.Permlink), MaxPermlinkLength)
+	if err := validatePermlink("vote.permlink", o.Permlink); err != nil {
+		return err
 	}
 	if o.Weight < VoteWeightMin || o.Weight > VoteWeightMax {
 		return fmt.Errorf("vote.weight: %d out of [%d, %d]", o.Weight, VoteWeightMin, VoteWeightMax)
@@ -121,23 +148,30 @@ func (o Comment) Validate() error {
 	if err := validateAccountName("comment.author", string(o.Author)); err != nil {
 		return err
 	}
-	if len(o.Permlink) == 0 || len(o.Permlink) > MaxPermlinkLength {
-		return fmt.Errorf("comment.permlink: length %d not in (0, %d]", len(o.Permlink), MaxPermlinkLength)
+	if err := validatePermlink("comment.permlink", o.Permlink); err != nil {
+		return err
 	}
 	if o.ParentAuthor != "" {
 		if err := validateAccountName("comment.parent_author", string(o.ParentAuthor)); err != nil {
 			return err
 		}
 	}
-	if len(o.ParentPermlink) > MaxPermlinkLength {
-		return fmt.Errorf("comment.parent_permlink: length %d exceeds %d",
-			len(o.ParentPermlink), MaxPermlinkLength)
+	if err := validatePermlink("comment.parent_permlink", o.ParentPermlink); err != nil {
+		return err
 	}
-	if len(o.Title) > MaxCommentTitleLength {
-		return fmt.Errorf("comment.title: length %d exceeds %d", len(o.Title), MaxCommentTitleLength)
+	// C++ validate_string_max_size(title, HIVE_COMMENT_TITLE_LIMIT - 1), i.e.
+	// size <= 255. We allowed 256.
+	if len(o.Title) > MaxCommentTitleLength-1 {
+		return fmt.Errorf("comment.title: length %d exceeds %d", len(o.Title), MaxCommentTitleLength-1)
+	}
+	if !utf8.ValidString(string(o.Title)) {
+		return errors.New("comment.title: not valid UTF-8")
 	}
 	if len(o.Body) == 0 {
 		return errors.New("comment.body: must not be empty")
+	}
+	if !utf8.ValidString(string(o.Body)) {
+		return errors.New("comment.body: not valid UTF-8")
 	}
 	return nil
 }

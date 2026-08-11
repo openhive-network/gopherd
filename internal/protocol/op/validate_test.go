@@ -48,13 +48,25 @@ func TestVoteValidate(t *testing.T) {
 	if err := good.Validate(); err != nil {
 		t.Fatalf("good Vote: %v", err)
 	}
+	// C++ vote_operation::validate calls validate_permlink, which permits an
+	// EMPTY permlink (it checks only size < 256 and UTF-8). Rejecting it made
+	// us refuse transactions hived accepts.
+	for _, ok := range []Vote{
+		{Voter: "alice", Author: "bob", Permlink: "", Weight: 5000},
+		{Voter: "alice", Author: "bob", Permlink: strings.Repeat("a", 255), Weight: 5000},
+	} {
+		if err := ok.Validate(); err != nil {
+			t.Errorf("Vote Validate: C++ accepts this, we rejected: %v", err)
+		}
+	}
 	bad := []struct {
 		name string
 		op   Vote
 	}{
 		{"invalid voter", Vote{Voter: "alice-", Author: "bob", Permlink: "p", Weight: 5000}},
 		{"invalid author", Vote{Voter: "alice", Author: "bob-", Permlink: "p", Weight: 5000}},
-		{"empty permlink", Vote{Voter: "alice", Author: "bob", Permlink: "", Weight: 5000}},
+		{"permlink at limit (C++ requires < 256)", Vote{Voter: "alice", Author: "bob", Permlink: strings.Repeat("a", 256), Weight: 5000}},
+		{"permlink not utf8", Vote{Voter: "alice", Author: "bob", Permlink: "\xff\xfe", Weight: 5000}},
 		{"weight too high", Vote{Voter: "alice", Author: "bob", Permlink: "p", Weight: 10001}},
 		{"weight too low", Vote{Voter: "alice", Author: "bob", Permlink: "p", Weight: -10001}},
 	}
@@ -71,15 +83,32 @@ func TestCommentValidate(t *testing.T) {
 	if err := good.Validate(); err != nil {
 		t.Fatalf("good Comment: %v", err)
 	}
+	// C++ validate_permlink has NO non-empty check — only vote/comment-style
+	// ops; the DHF ops add validate_string_is_not_empty explicitly. We used to
+	// reject an empty permlink here, which refuses transactions the network
+	// accepts. At mempool admission that is invisible: the queue looks healthy
+	// and our blocks are simply short.
+	for _, ok := range []Comment{
+		{Author: "alice", Permlink: "", Body: "x"},
+		{Author: "alice", Permlink: "p", ParentPermlink: "", Body: "x"},
+		{Author: "alice", Permlink: strings.Repeat("a", 255), Body: "x"},
+		{Author: "alice", Permlink: "p", Title: strings.Repeat("a", 255), Body: "x"},
+	} {
+		if err := ok.Validate(); err != nil {
+			t.Errorf("Comment Validate: C++ accepts this, we rejected: %v", err)
+		}
+	}
 	bad := []struct {
 		name string
 		op   Comment
 	}{
 		{"invalid author", Comment{Author: "alice-", Permlink: "p", Body: "x"}},
-		{"empty permlink", Comment{Author: "alice", Permlink: "", Body: "x"}},
+		{"permlink at limit (C++ requires < 256)", Comment{Author: "alice", Permlink: strings.Repeat("a", 256), Body: "x"}},
 		{"permlink too long", Comment{Author: "alice", Permlink: strings.Repeat("a", 257), Body: "x"}},
+		{"permlink not utf8", Comment{Author: "alice", Permlink: "\xff\xfe", Body: "x"}},
 		{"empty body", Comment{Author: "alice", Permlink: "p", Body: ""}},
-		{"title too long", Comment{Author: "alice", Permlink: "p", Title: strings.Repeat("a", 257), Body: "x"}},
+		{"body not utf8", Comment{Author: "alice", Permlink: "p", Body: "\xff\xfe"}},
+		{"title at limit (C++ requires <= 255)", Comment{Author: "alice", Permlink: "p", Title: strings.Repeat("a", 256), Body: "x"}},
 		{"invalid parent", Comment{Author: "alice", Permlink: "p", ParentAuthor: "bob-", Body: "x"}},
 	}
 	for _, c := range bad {
