@@ -201,10 +201,21 @@ func (accountCreateEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		// is the dominant on-chain path.
 		RecoveryAccount: defaultRecoveryAccount(ctx, ac.Creator),
 	}
-	// HF20+: prime the RC manabar at creation so subsequent regen
-	// has a defined origin. max_rc starts at 0 (no VESTS yet).
+	// HF20+: prime the RC fields exactly as hived does. The creation FEE,
+	// converted to VESTS, becomes rc_adjustment, and a non-zero adjustment
+	// starts the manabar FULL (account_object.hpp:54-59).
+	//
+	// The old code called InitRCManabar and commented "max_rc starts at 0 (no
+	// VESTS yet)". That premise was wrong: the fee-derived adjustment is
+	// exactly what gives a fresh, VEST-less account any RC at all. Without it
+	// every post-HF20 account had max_rc=0 for us and we refused all its
+	// transactions while mainnet mined them.
 	if ctx.Hardforks.Has(hardfork.HF20) {
-		objects.InitRCManabar(&newAcct, ctx.HeadBlockTime)
+		adj := int64(0)
+		if dgpo, derr := objects.GetDGPO(ctx.DB); derr == nil {
+			adj = rcAdjustmentFromFee(&dgpo, ac.Fee.Amount)
+		}
+		objects.InitRCManabarWithAdjustment(&newAcct, adj, ctx.HeadBlockTime)
 	}
 	objects.PutAccount(ctx.DB, &newAcct)
 	// Persist the per-account authority record. Mirrors hived's
