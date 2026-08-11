@@ -158,6 +158,16 @@ fi
 # holding 2 pending transactions at build time where the producing witness held
 # 28-33 — we get the right transactions, just too late to include them.
 [ "${RELAY_TX:-0}" = "1" ] && SERVE_ARGS+=(--relay-transactions)
+# PIN_PEERS: comma-separated host:port to ALWAYS dial, on top of the compiled-in
+# seeds. These are the peers measured to be FIRST to offer us transactions
+# (TX-FIRST in the log). Inbound lateness is what makes our blocks a subset of
+# the real one, and peer COUNT does not fix it — 12 -> 24 peers left p50
+# unchanged at ~1.2s. Peer POSITION does: the win distribution is heavily
+# concentrated, with a single peer first to offer 62% of all transactions.
+# Defaults to the top winners measured 2026-08-11; re-check TX-FIRST and update
+# if the ranking shifts.
+PIN_PEERS="${PIN_PEERS:-65.109.89.190:1776,152.53.166.198:2001,195.201.163.125:1776,94.23.12.104:2001,195.201.172.213:1776}"
+[ -n "$PIN_PEERS" ] && SERVE_ARGS+=(--extra-seed="$PIN_PEERS")
 if [ "$SERVE" = "1" ]; then
   SERVE_ARGS+=(--p2p-serve)
   echo "!! SERVE=1 — this node will ADVERTISE INVENTORY AND SERVE BLOCKS to mainnet peers."
