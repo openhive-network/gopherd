@@ -1052,7 +1052,18 @@ func (a *app) run() error {
 		seeds = append(seeds, network.MainnetSeeds...)
 	}
 	if a.cfg.extraSeeds != "" {
-		seeds = append(seeds, a.cfg.extraSeeds)
+		// Comma-separated so several can be pinned in one flag. Pinning
+		// specific peers is the ONLY lever measured to matter for inbound
+		// transaction latency: peer COUNT did nothing (12 -> 24 left p50
+		// unchanged), but the TX-FIRST ranking shows the win distribution is
+		// extremely concentrated — one peer was first to offer 62% of all
+		// transactions. Which peers we hold decides how early we see traffic;
+		// how many we hold does not.
+		for _, sd := range strings.Split(a.cfg.extraSeeds, ",") {
+			if sd = strings.TrimSpace(sd); sd != "" {
+				seeds = append(seeds, sd)
+			}
+		}
 	}
 	a.logger.printf("starting (seeds=%d, listen=%q, target=%d)", len(seeds), a.cfg.listenEndpoint, a.cfg.targetBlock)
 
