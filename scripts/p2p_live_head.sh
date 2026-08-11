@@ -164,9 +164,12 @@ fi
 # the real one, and peer COUNT does not fix it — 12 -> 24 peers left p50
 # unchanged at ~1.2s. Peer POSITION does: the win distribution is heavily
 # concentrated, with a single peer first to offer 62% of all transactions.
-# Defaults to the top winners measured 2026-08-11; re-check TX-FIRST and update
-# if the ranking shifts.
-PIN_PEERS="${PIN_PEERS:-65.109.89.190:1776,152.53.166.198:2001,195.201.163.125:1776,94.23.12.104:2001,195.201.172.213:1776}"
+# ⚠️SAMPLE SIZE MATTERS. The first ranking I pinned came from 493 samples and
+# showed one peer at 61%. At 12,800 samples that same peer is 32% and THREE of
+# the five I had pinned dropped out of the top five entirely. Do not re-pin off
+# a few minutes of data; let TX-FIRST accumulate to >10k before trusting it.
+# Values below are the 12.8k-sample ranking (2026-08-11).
+PIN_PEERS="${PIN_PEERS:-65.109.89.190:1776,51.161.87.109:2001,116.202.192.74:2001,188.165.235.19:2001,195.201.172.213:1776}"
 [ -n "$PIN_PEERS" ] && SERVE_ARGS+=(--extra-seed="$PIN_PEERS")
 if [ "$SERVE" = "1" ]; then
   SERVE_ARGS+=(--p2p-serve)
