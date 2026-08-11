@@ -185,6 +185,13 @@ type Plugin struct {
 	dryCompared int
 	dryMatched  int
 
+	// pendingOnlyOurs tracks transactions we included that the real witness did
+	// not, until the chain either mines them (we were early) or 20 blocks pass
+	// (they are junk we should never have held).
+	pendingOnlyOurs    map[[20]byte]uint32
+	onlyOursLaterMined int
+	onlyOursNeverMined int
+
 	// produced counts blocks we built and successfully handed to the Publisher.
 	// This is "submitted for publication", NOT "accepted by the network" — the
 	// two diverged silently on 2026-08-10, when a produced block was applied
@@ -412,6 +419,42 @@ func (p *Plugin) CompareProducedBlock(blockNum uint32, actual [][20]byte) {
 	onlyOurs := len(ours) - both
 	onlyTheirs := len(theirs) - both
 
+	// Track the transactions we included that the real witness did not, and see
+	// whether the chain mines them SOON. That distinguishes the two very
+	// different meanings of only-ours:
+	//
+	//   mined shortly after  -> we were simply EARLY; the producer had not seen
+	//                           them yet. Harmless, arguably better.
+	//   never mined          -> we are holding transactions the network will
+	//                           not accept, which is what put 579 of them in
+	//                           block 108912883 and got it rejected.
+	p.mu.Lock()
+	if p.pendingOnlyOurs == nil {
+		p.pendingOnlyOurs = make(map[[20]byte]uint32, 256)
+	}
+	for id := range ours {
+		if _, inTheirs := theirs[id]; !inTheirs {
+			p.pendingOnlyOurs[id] = blockNum
+		}
+	}
+	// Anything the chain has now mined counts as "we were early".
+	for _, id := range actual {
+		if from, ok := p.pendingOnlyOurs[id]; ok {
+			delete(p.pendingOnlyOurs, id)
+			p.onlyOursLaterMined++
+			_ = from
+		}
+	}
+	// Age out: if it has not been mined within 20 blocks (~1 min) it is junk.
+	for id, from := range p.pendingOnlyOurs {
+		if blockNum > from+20 {
+			delete(p.pendingOnlyOurs, id)
+			p.onlyOursNeverMined++
+		}
+	}
+	early, junk := p.onlyOursLaterMined, p.onlyOursNeverMined
+	p.mu.Unlock()
+
 	verdict := "MATCH"
 	switch {
 	case onlyOurs > 0 && onlyTheirs > 0:
@@ -430,8 +473,8 @@ func (p *Plugin) CompareProducedBlock(blockNum uint32, actual [][20]byte) {
 	p.mu.Unlock()
 
 	fmt.Fprintf(os.Stderr,
-		"witness dry-run DIFF block %d: %s — ours=%d theirs=%d shared=%d only-ours=%d only-theirs=%d (our bytes=%d) [%d/%d slots matched]\n",
-		blockNum, verdict, len(ours), len(theirs), both, onlyOurs, onlyTheirs, mine.bytes, matched, compared)
+		"witness dry-run DIFF block %d: %s — ours=%d theirs=%d shared=%d only-ours=%d only-theirs=%d (our bytes=%d) [%d/%d matched | only-ours outcome: %d mined-later(we were early) %d never-mined(junk)]\n",
+		blockNum, verdict, len(ours), len(theirs), both, onlyOurs, onlyTheirs, mine.bytes, matched, compared, early, junk)
 }
 
 // DryRunMatchRate reports how many compared slots matched the real block.
