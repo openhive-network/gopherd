@@ -30,6 +30,7 @@ package main
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net"
@@ -652,10 +653,44 @@ func newApp(cfg flags) (*app, error) {
 			fmt.Fprintf(os.Stderr, "gopherd node: cold tier ON — resident cap %d, evict budget %d/block, dir %s\n",
 				cfg.residentCap, cfg.evictBudget, cold.Dir())
 		}
+		// COLD SIDECAR: with GHIVE_COLD_REUSE the load no longer REWRITES the
+		// cold rows, but it still streams all 26 GB to rebuild the bloom and
+		// coldTotal. Both are pure functions of a cold tier that is already on
+		// disk and unchanged, so restore them from a sidecar instead and let
+		// spillToColdReuse skip the per-record work.
+		//
+		// Only valid for the exact (tier, snapshot) pair that wrote it; the
+		// sidecar carries the block number and a CRC and refuses on mismatch,
+		// because a stale bloom yields false NEGATIVES (a cold comment reads as
+		// missing) rather than a loud failure.
+		sidecarUsed := false
+		if cfg.residentCap > 0 && cfg.coldDir != "" && os.Getenv("GHIVE_COLD_REUSE") == "1" {
+			if bn, berr := snapshotManifestBlock(cfg.loadSnapshot); berr == nil {
+				ok, serr := commentStore.LoadColdSidecar(cfg.coldDir, bn)
+				if serr != nil {
+					fmt.Fprintf(os.Stderr, "gopherd node: cold sidecar rejected (%v) — falling back to full scan\n", serr)
+				}
+				if ok {
+					commentStore.SetSidecarLoaded(true)
+					sidecarUsed = true
+					fmt.Fprintf(os.Stderr, "gopherd node: cold sidecar loaded (block %d, %d cold rows) — skipping bloom rebuild\n",
+						bn, commentStore.ColdTotal())
+				}
+			}
+		}
 		man, err := snap.Load(stateDB, cfg.loadSnapshot)
 		if err != nil {
 			stateDB.Close()
 			return nil, fmt.Errorf("load-snapshot %s: %w", cfg.loadSnapshot, err)
+		}
+		if cfg.residentCap > 0 && cfg.coldDir != "" && !sidecarUsed && commentStore != nil {
+			// First run against this tier: bank the bookkeeping so the NEXT
+			// start can skip the scan.
+			if serr := commentStore.SaveColdSidecar(cfg.coldDir, man.BlockNum); serr != nil {
+				fmt.Fprintf(os.Stderr, "gopherd node: cold sidecar save failed (non-fatal): %v\n", serr)
+			} else {
+				fmt.Fprintf(os.Stderr, "gopherd node: cold sidecar written for block %d\n", man.BlockNum)
+			}
 		}
 		fmt.Fprintf(os.Stderr, "gopherd node: loaded snapshot at block %d from %s\n", man.BlockNum, cfg.loadSnapshot)
 		loadedFromSnapshot = true
@@ -1663,4 +1698,23 @@ func attachColdTier(stateDB *state.Database, boot *state.Session, cfg flags) (ob
 	fmt.Fprintf(os.Stderr, "gopherd node: cold tier ON — resident cap %d, evict budget %d/block, dir %s\n",
 		cfg.residentCap, cfg.evictBudget, c.Dir())
 	return c, cs, cvs, nil
+}
+
+// snapshotManifestBlock reads just the block number out of a snapshot manifest,
+// so the cold sidecar can be validated against it before the snapshot is loaded.
+func snapshotManifestBlock(dir string) (uint32, error) {
+	raw, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
+	if err != nil {
+		return 0, err
+	}
+	var m struct {
+		BlockNum uint32 `json:"block_num"`
+	}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return 0, err
+	}
+	if m.BlockNum == 0 {
+		return 0, fmt.Errorf("manifest has no block_num")
+	}
+	return m.BlockNum, nil
 }

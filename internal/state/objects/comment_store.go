@@ -81,6 +81,10 @@ type CommentStore struct {
 	// paid comments evicted from RAM live here, keyed by commentKey (primary,
 	// table 0x01) and commentByRootKey (by-root index, table 0x02).
 	cold coldStore
+	// sidecarLoaded: the bloom + coldTotal were restored from the cold-tier
+	// sidecar, so the load must NOT recompute them per record. See coldsidecar.go.
+	sidecarLoaded bool
+
 	// coldTotal counts all comments resident only in the cold tier; a RAM
 	// miss probes the cold tier only when coldTotal > 0 (so the all-RAM and
 	// eviction-off paths pay zero disk overhead).
@@ -528,6 +532,13 @@ func (s *CommentStore) spillToColdRaw(blob []byte, author, permlink, rootAuthor,
 // the from-snapshot L0-SST explosion. Mirrors spillToColdRaw's bookkeeping half
 // exactly so a RAM miss still probes the tier for this key.
 func (s *CommentStore) spillToColdReuse(author, permlink, rootAuthor, rootPermlink string) {
+	// Sidecar already restored the bloom + coldTotal for this exact tier, so
+	// every per-record update here is recomputing a value we just loaded.
+	// Measured: the bloom.add work is what drags the reuse scan from the file's
+	// 348 MB/s down to ~118 MB/s.
+	if s.sidecarLoaded {
+		return
+	}
 	if rootAuthor == "" {
 		rootAuthor, rootPermlink = author, permlink
 	}
