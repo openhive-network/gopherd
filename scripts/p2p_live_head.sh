@@ -97,6 +97,18 @@ WORK_TIMING="${WORK_TIMING:-0}"
 # --persist-state-dir OFF unless you are working on exactly this.
 COLD_BACKEND="${COLD_BACKEND:-pebble}"
 
+# COLD_REUSE=1: the cold dir already holds this snapshot's cold rows (same run),
+# so the load SKIPS re-writing them. Measured on block-108951302:
+#
+#   rebuild : comment_store 25681 MB in 1384.5s (19 MB/s)   total startup 23.9 min
+#   reuse   : comment_store 25681 MB in  237.7s (108 MB/s)  total startup  4.6 min
+#
+# The 19 MB/s is not disk: reading+parsing those bytes takes 77s (348 MB/s), and
+# the load writes ~310 GB to store a 26 GB corpus (~12x LSM write amplification).
+# CONTRACT: the cold dir MUST come from the same snapshot/run, or lookups return
+# stale rows. Only set this when restarting against a cold dir you did not wipe.
+COLD_REUSE="${COLD_REUSE:-0}"
+
 SNAP_DIR="${SNAP_DIR-/home/martin/p2p-live-snaps}"
 # Block-production DRY RUN: set WITNESS_KEYS to a file of `account WIF` lines.
 # Blocks are built, signed, self-verified, timed and DISCARDED — never applied
@@ -200,7 +212,7 @@ BANNER
 
 exec systemd-run --user --scope --collect \
   -p MemoryMax="$MEM_MAX" -p MemorySwapMax=0 \
-  env GHIVE_COLD_COMPRESS=zstd \
+  env GHIVE_COLD_COMPRESS=zstd GHIVE_COLD_REUSE="$COLD_REUSE" \
   "$BIN" node \
     --data-dir="$DATA" \
     --backend=pebble \
