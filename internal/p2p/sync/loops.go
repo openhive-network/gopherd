@@ -319,7 +319,29 @@ func (d *Delegate) pruneLoop() {
 			for _, st := range sts {
 				st.mu.Lock()
 				for bid := range st.known {
-					if n := bid.Num(); n != 0 && n <= head {
+					n := bid.Num()
+					// Block ids embed their height, so anything at or below
+					// head is already ours and can be forgotten.
+					//
+					// TRANSACTION advert ids also live in this map (since
+					// --relay-transactions), and they are ripemd160 hashes:
+					// Num() reads their first 4 bytes, which are effectively
+					// random and therefore almost always FAR beyond head. The
+					// old `n <= head` test never matched them, so every
+					// transaction ever advertised to or by a peer stayed here
+					// forever — measured at ~2.5 GiB/day of live-heap growth,
+					// with handleInv/broadcastInv the top growers in a heap
+					// diff. Drop anything too far ahead to be a real block;
+					// keep a slack window so genuinely-next blocks survive.
+					if n != 0 && (n <= head || n > head+knownFutureSlack) {
+						delete(st.known, bid)
+						continue
+					}
+					// A hash whose first bytes happen to look like a plausible
+					// height (or zero) slips through the height test, so bound
+					// the map by size as a backstop. Losing dedup only costs a
+					// re-fetch; unbounded growth costs the process.
+					if len(st.known) > maxKnownPerPeer {
 						delete(st.known, bid)
 					}
 				}
@@ -925,3 +947,15 @@ func blockTimestamp(rawBlock []byte) uint32 {
 		uint32(rawBlock[22])<<16 |
 		uint32(rawBlock[23])<<24
 }
+
+const (
+	// knownFutureSlack is how far beyond head an id may claim to be and still
+	// be treated as a plausible block rather than a transaction hash. A few
+	// hundred blocks covers any real reorg/catch-up window.
+	knownFutureSlack = 1000
+
+	// maxKnownPerPeer bounds the per-peer known set. Dedup is an optimisation,
+	// not a correctness requirement: dropping an entry costs at most one
+	// redundant fetch.
+	maxKnownPerPeer = 200_000
+)
