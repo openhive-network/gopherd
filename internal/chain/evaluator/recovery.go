@@ -194,7 +194,7 @@ func (recoverAccountEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	}
 	// Mirror C++ database.cpp:1670-1673 gate on
 	// HIVE_OWNER_AUTH_HISTORY_TRACKING_START_BLOCK_NUM.
-	if ctx.BlockNum >= OwnerAuthHistoryTrackingStartBlockNum {
+	if ctx.BlockNum >= ctx.ownerAuthHistoryStart() {
 		objects.PutOwnerAuthorityHistory(ctx.DB, &objects.OwnerAuthorityHistory{
 			Account:                r.AccountToRecover,
 			PreviousOwnerAuthority: authObj.Owner,

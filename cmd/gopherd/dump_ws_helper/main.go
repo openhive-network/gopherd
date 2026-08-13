@@ -47,12 +47,12 @@ func main() {
 
 	// Walk every witness, collect votes/VST/last_update/position.
 	type wDump struct {
-		name             string
-		votes            int64
-		vst              [16]byte
-		virtualLastUpd   [16]byte
-		virtualPos       [16]byte
-		schedule         objects.WitnessScheduleType
+		name           string
+		votes          int64
+		vst            [16]byte
+		virtualLastUpd [16]byte
+		virtualPos     [16]byte
+		schedule       objects.WitnessScheduleType
 	}
 	var all []wDump
 	_ = s.Range(objects.WitnessTable, state.PrimaryIndex, nil,

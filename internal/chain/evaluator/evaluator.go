@@ -29,6 +29,11 @@ type Context struct {
 	Hardforks hardfork.Set
 	// BlockNum is the block currently being applied (1-based).
 	BlockNum uint32
+	// OwnerAuthHistoryStartBlock overrides where owner_authority_history
+	// tracking begins. Zero means OwnerAuthHistoryDefaultStartBlock (mainnet).
+	// Only tests set it, but it lives here rather than in a package global so
+	// concurrent fixtures cannot stomp on each other's consensus parameters.
+	OwnerAuthHistoryStartBlock uint32
 	// BlockTime is the time_point_sec of the block currently being
 	// applied — i.e., what hived calls `_current_timestamp`. Used for
 	// the few places where C++ explicitly reads the new block's

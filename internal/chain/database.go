@@ -132,6 +132,12 @@ type Database struct {
 	// head state is still its parent. Diagnostic hook for the admission audit.
 	auditAdmission func(rawBlock []byte, blockNum uint32)
 
+	// ownerAuthHistoryStartBlock overrides where owner_authority_history
+	// tracking begins; 0 = mainnet default. Tests that start at block 1 set
+	// it so recovery works without pre-rolling 3M blocks. Previously a
+	// mutable package global in evaluator, which raced between parallel tests.
+	ownerAuthHistoryStartBlock uint32
+
 	// admitWait* measure how long mempool admission blocks on applyMu, i.e.
 	// how much of a transaction's arrival latency is our own lock contention
 	// with ApplyBlock rather than the network.
@@ -758,6 +764,7 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 		}
 	}
 	ctx := &evaluator.Context{
+		OwnerAuthHistoryStartBlock: d.ownerAuthHistoryStartBlock,
 		DB:            session,
 		Hardforks:     hf,
 		BlockNum:      blockNum,
@@ -1571,3 +1578,17 @@ func unwrap(err error) error {
 
 // Reserved for use by tests/CLI: extracts a uint32 ID from a key body.
 var _ = binary.BigEndian.Uint32
+
+// SetOwnerAuthHistoryStartBlock overrides where owner_authority_history
+// tracking begins (0 = mainnet default). Test-only: fixtures that start at
+// block 1 need it so recover_account can find a recent authority without
+// pre-rolling 3,186,477 blocks.
+//
+// This replaces a mutable package-level global in the evaluator package that
+// parallel tests wrote concurrently (flagged by -race). Per-Database state
+// cannot be stomped by another test.
+func (d *Database) SetOwnerAuthHistoryStartBlock(n uint32) {
+	d.applyMu.Lock()
+	defer d.applyMu.Unlock()
+	d.ownerAuthHistoryStartBlock = n
+}

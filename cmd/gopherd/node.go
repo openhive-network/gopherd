@@ -638,6 +638,11 @@ func newApp(cfg flags) (*app, error) {
 		objects.EnsureVestingWithdrawalScheduleStore(boot)
 		objects.EnsureTransactionStore(boot)
 		objects.EnsureConvertRequestStore(boot)
+		// Make the GHIVE_* switches visible BEFORE the load: several of them
+		// change how state is loaded (GHIVE_COLD_REUSE will serve stale rows
+		// against a mismatched cold dir), none appear in --help, and the load
+		// takes over a minute — an operator should see the active set first.
+		logActiveEnvSwitches(func(f string, v ...any) { fmt.Fprintf(os.Stderr, "gopherd node: "+f+"\n", v...) })
 		// Attach the cold tier BEFORE loading so the multi-GB comment +
 		// vote corpus spills to disk during the load instead of piling
 		// up resident (a full-chain snapshot loaded all-resident OOMs).
