@@ -130,8 +130,10 @@ func New(t *testing.T) *Fixture {
 	// then fail "recent authority not found". Override to 1 for
 	// fixture lifetime; restore on cleanup. Mirrors hived's testnet
 	// USE_ALTERNATE_CHAIN_ID config which sets the constant to 1.
-	prevStartBlock := evaluator.SetOwnerAuthHistoryStartBlock(1)
-	t.Cleanup(func() { evaluator.SetOwnerAuthHistoryStartBlock(prevStartBlock) })
+	// Owner-auth-history tracking starts at block 1 for fixtures so recovery
+	// tests need not pre-roll 3M blocks. Set per-Context (see
+	// OwnerAuthHistoryDefaultStartBlock) rather than via a package global,
+	// which raced between parallel tests.
 	dir := t.TempDir()
 	db, err := state.Open(dir, 16<<20)
 	if err != nil {
@@ -141,10 +143,15 @@ func New(t *testing.T) *Fixture {
 	if err := genesis.Apply(db); err != nil {
 		t.Fatalf("testfixture: genesis: %v", err)
 	}
+	ch := chain.New(db)
+	// Owner-auth-history tracking from block 1 (mainnet: 3,186,477) so
+	// recover_account tests need not pre-roll 3M blocks. Per-Database, not a
+	// package global — the global raced between parallel fixtures.
+	ch.SetOwnerAuthHistoryStartBlock(1)
 	f := &Fixture{
 		t:            t,
 		State:        db,
-		Chain:        chain.New(db),
+		Chain:        ch,
 		BlockNum:     0,
 		curBlockTime: network.GenesisTimeUnix + BlockInterval,
 	}

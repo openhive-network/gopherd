@@ -15,26 +15,19 @@ import (
 // minutes between successive owner-authority rotations.
 const HiveOwnerUpdateLimit uint32 = 60 * 60
 
-// OwnerAuthHistoryTrackingStartBlockNum mirrors hived's
-// HIVE_OWNER_AUTH_HISTORY_TRACKING_START_BLOCK_NUM (mainnet
-// 3,186,477). Pre-this-block, hived's update_owner_authority does
-// NOT write owner_authority_history rows; recover_account cannot find
-// recent_owner_authority entries.
+// OwnerAuthHistoryDefaultStartBlock mirrors hived's start block for
+// owner_authority_history tracking. Mainnet replay uses this; tests that
+// exercise account_recovery without pre-rolling 3M blocks set
+// Context.OwnerAuthHistoryStartBlock to 1 instead.
 //
-// A `var` (not `const`) so test fixtures that start at block 1 and
-// exercise account_recovery (without pre-rolling 3M blocks) can
-// override it to 1 via SetOwnerAuthHistoryStartBlock. Mainnet replay
-// uses the default 3,186,477.
-var OwnerAuthHistoryTrackingStartBlockNum uint32 = 3_186_477
-
-// SetOwnerAuthHistoryStartBlock overrides the start block for tests
-// that need owner_authority_history active from block 1. Returns the
-// prior value so callers can restore it on teardown.
-func SetOwnerAuthHistoryStartBlock(n uint32) uint32 {
-	prev := OwnerAuthHistoryTrackingStartBlockNum
-	OwnerAuthHistoryTrackingStartBlockNum = n
-	return prev
-}
+// This was a MUTABLE PACKAGE GLOBAL with a SetOwnerAuthHistoryStartBlock
+// setter that tests called concurrently, which the race detector flagged in
+// internal/chain/testfixture. It never raced in production (nothing outside
+// tests called the setter), but a consensus-gating value has no business
+// living in unsynchronised global state: if anything ever set it while blocks
+// were applying, the resulting divergence would be silent. It is now a const
+// plus a per-Context override, like every other hardfork parameter.
+const OwnerAuthHistoryDefaultStartBlock uint32 = 3_186_477
 
 // ErrOwnerUpdateLimit is returned when an account_update / account_update2
 // op tries to rotate the owner authority more frequently than
@@ -161,7 +154,7 @@ func (accountUpdateEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		}
 		// Mirror C++ database.cpp:1670-1673 gate on
 		// HIVE_OWNER_AUTH_HISTORY_TRACKING_START_BLOCK_NUM.
-		if ctx.BlockNum >= OwnerAuthHistoryTrackingStartBlockNum {
+		if ctx.BlockNum >= ctx.ownerAuthHistoryStart() {
 			objects.PutOwnerAuthorityHistory(ctx.DB, &objects.OwnerAuthorityHistory{
 				Account:                au.Account,
 				PreviousOwnerAuthority: authObj.Owner,
@@ -232,7 +225,7 @@ func (accountUpdate2Evaluator) Apply(ctx *Context, opArg op.Op) error {
 		}
 		// Mirror C++ database.cpp:1670-1673 gate on
 		// HIVE_OWNER_AUTH_HISTORY_TRACKING_START_BLOCK_NUM.
-		if ctx.BlockNum >= OwnerAuthHistoryTrackingStartBlockNum {
+		if ctx.BlockNum >= ctx.ownerAuthHistoryStart() {
 			objects.PutOwnerAuthorityHistory(ctx.DB, &objects.OwnerAuthorityHistory{
 				Account:                au.Account,
 				PreviousOwnerAuthority: authObj.Owner,
@@ -261,4 +254,14 @@ func (accountUpdate2Evaluator) Apply(ctx *Context, opArg op.Op) error {
 func init() {
 	register(op.TagAccountUpdate, accountUpdateEvaluator{})
 	register(op.TagAccountUpdate2, accountUpdate2Evaluator{})
+}
+
+// ownerAuthHistoryStart is the effective start block for
+// owner_authority_history tracking: the per-Context override when set, else
+// the mainnet default.
+func (c *Context) ownerAuthHistoryStart() uint32 {
+	if c.OwnerAuthHistoryStartBlock != 0 {
+		return c.OwnerAuthHistoryStartBlock
+	}
+	return OwnerAuthHistoryDefaultStartBlock
 }

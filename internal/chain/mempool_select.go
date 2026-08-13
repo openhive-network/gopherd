@@ -167,6 +167,7 @@ func (d *Database) SelectPendingTransactions(
 	customOps := make(map[auth.AccountName]uint8, 64)
 
 	ctx := &evaluator.Context{
+		OwnerAuthHistoryStartBlock: d.ownerAuthHistoryStartBlock,
 		DB:            session,
 		Hardforks:     hf,
 		BlockNum:      blockNum,
