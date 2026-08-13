@@ -233,6 +233,26 @@ func (d *cgoDecoder) decompress(payload []byte, dst []byte) ([]byte, error) {
 			return nil, fmt.Errorf("blocklog/zstd: ZSTD_decompressDCtx: %s", errMsg)
 		}
 		out := dst[:int(rc)]
+		// RIGHT-SIZE before handing the slice out. dst is at least 64 KiB (and
+		// doubles up to 16 MiB), but a mainnet block is typically 5-15 KiB, so
+		// the returned slice pins a backing array many times its own length.
+		// Anything that retains a decompressed block — the recent-block ring,
+		// the fork db, an in-flight apply job — therefore retains the WHOLE
+		// buffer, not the block.
+		//
+		// Measured: 2.52 GB of live heap (49.8% of the process) attributed to
+		// this function after 8h at the tip, growing ~1.79 GiB/day, and
+		// 601 MB / 9600 blocks = ~62 KB per block, i.e. almost exactly the
+		// 64 KiB floor rather than the real block size.
+		//
+		// Copying costs one small memcpy per block and lets the big buffer be
+		// reused or collected immediately. Only done when the waste is worth
+		// it, so the fast path for genuinely large blocks is untouched.
+		if cap(out)-len(out) > 8192 && cap(out) > 2*len(out) {
+			exact := make([]byte, len(out))
+			copy(exact, out)
+			out = exact
+		}
 		runtime.KeepAlive(payload)
 		runtime.KeepAlive(d.dictKeep)
 		return out, nil
