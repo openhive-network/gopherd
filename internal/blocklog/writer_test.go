@@ -326,7 +326,7 @@ func TestWriterByteIdenticalToMainnet(t *testing.T) {
 	}
 }
 
-// findMainnetBlockLogForTest mirrors the lookup in cmd/ghive-sync's test
+// findMainnetBlockLogForTest mirrors the lookup in cmd/gopherd's test
 // helper but lives here to avoid importing main.
 func findMainnetBlockLogForTest() string {
 	candidates := []string{

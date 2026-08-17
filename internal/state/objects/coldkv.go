@@ -2,6 +2,7 @@ package objects
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -26,9 +27,12 @@ import (
 // vote by-comment). Callers build keys with the existing key helpers in
 // comment.go and prepend the table byte via tableKey.
 type coldKV struct {
-	db    *pebble.DB
-	dir   string
-	owned bool // dir was created by us → remove it on Close
+	// writeErr is the first failed batch Apply. Sticky — a tier that has lost
+	// a write is missing state permanently.
+	writeErr error
+	db       *pebble.DB
+	dir      string
+	owned    bool // dir was created by us → remove it on Close
 	// wb accumulates eviction-pass writes; committed by flushBatch (end of
 	// pass) or implicitly before any read (reads don't see an open batch).
 	wb *pebble.Batch
@@ -134,10 +138,31 @@ func (c *coldKV) flushBatch() {
 	if c.wb == nil {
 		return
 	}
-	_ = c.db.Apply(c.wb, pebble.NoSync)
+	// A failed cold-tier write is SILENT STATE LOSS, not a transient nuisance:
+	// eviction has already dropped the comment from the resident map, so if the
+	// batch never lands the row is simply gone and every later read reports
+	// "comment does not exist". Disk-full is the realistic trigger and it is not
+	// hypothetical — this box hit 17 GB free twice during snapshot experiments.
+	//
+	// The error used to be discarded outright (`_ = c.db.Apply(...)`) with
+	// nothing logged, so the node would carry on serving a hole in its state.
+	// Record it stickily and shout once; WriteErr lets the node surface it
+	// instead of quietly continuing.
+	if err := c.db.Apply(c.wb, pebble.NoSync); err != nil {
+		if c.writeErr == nil {
+			c.writeErr = err
+			fmt.Fprintf(os.Stderr,
+				"COLD TIER WRITE FAILED — evicted rows are LOST and will read as missing: %v\n", err)
+		}
+	}
 	_ = c.wb.Close()
 	c.wb = nil
 }
+
+// WriteErr returns the first cold-tier write failure, if any. Sticky: once the
+// tier has lost a write its contents can no longer be trusted, so this never
+// clears.
+func (c *coldKV) WriteErr() error { return c.writeErr }
 
 // OpenColdKV is the exported constructor used by cmd/ to open the shared
 // cold tier (dir="" → tempdir removed on Close).

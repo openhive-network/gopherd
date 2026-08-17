@@ -684,7 +684,7 @@ func (d *Delegate) applyLoop() {
 			// Per-block "applied block N" line was the dominant
 			// stderr-overhead source on a fast catch-up (15K writes/s on
 			// a 12K bps stream). The chain-level per-N-block / per-second
-			// progress line in cmd/ghive-sync's afterApply replaces it
+			// progress line in the node's afterApply replaces it
 			// for normal operation; debug ladders can re-enable via the
 			// optional Config.LogEveryBlock flag.
 			if d.cfg.LogEveryBlock {

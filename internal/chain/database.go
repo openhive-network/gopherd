@@ -232,7 +232,8 @@ func (d *Database) WithReadSession(fn func(s *state.Session) error) error {
 // WithApplyLock runs fn while holding the apply write lock. The chain
 // state (Pebble overlay + every typed in-memory store) is guaranteed
 // not to be mutated by ApplyBlock for the duration. Used by the
-// SIGUSR1 snapshot path to serialize the snapshot against the apply
+// snapshot path (--snapshot-every / --shutdown-snapshot-dir; the old
+// SIGUSR1 trigger no longer exists) to serialize the snapshot against the apply
 // goroutine — without it, snapshot.Save races against the apply path
 // (concurrent map read+write inside the typed stores) and crashes the
 // daemon with a Go runtime fatal.

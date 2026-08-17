@@ -17,7 +17,7 @@ import (
 // diagnosing merkle mismatches against API-reported tx_ids.
 func cmdDebugBlock(args []string) int {
 	if len(args) != 2 {
-		fmt.Fprintln(os.Stderr, "usage: ghive-tools debug-block <block_log_path> <block_num>")
+		fmt.Fprintln(os.Stderr, "usage: gopherd debug-block <block_log_path> <block_num>")
 		return 2
 	}
 	num64, err := strconv.ParseUint(args[1], 10, 32)

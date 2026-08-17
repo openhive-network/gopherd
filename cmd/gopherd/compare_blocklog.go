@@ -21,7 +21,7 @@ import (
 // Exit 0 = identical over the compared range, 1 = mismatch or error.
 func cmdCompareBlocklog(args []string) int {
 	if len(args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: ghive-tools compare-blocklog <ref> <other> [from] [to]")
+		fmt.Fprintln(os.Stderr, "usage: gopherd compare-blocklog <ref> <other> [from] [to]")
 		return 2
 	}
 	refPath, otherPath := args[0], args[1]

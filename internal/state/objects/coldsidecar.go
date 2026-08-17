@@ -178,3 +178,8 @@ func (s *CommentStore) SetSidecarLoaded(v bool) { s.sidecarLoaded = v }
 
 // ColdTotal exposes the cold row count (for sidecar validation by the caller).
 func (s *CommentStore) ColdTotal() int { return s.coldTotal }
+
+// ColdReuseEnabled reports whether GHIVE_COLD_REUSE was set at process start.
+// Single source of truth: the load path latches the value at package init, so
+// callers must not re-read the environment and risk disagreeing with it.
+func ColdReuseEnabled() bool { return coldReuseOnLoad }

@@ -30,7 +30,7 @@ func cmdBenchmark(args []string) int {
 	}
 	rest := fs.Args()
 	if len(rest) != 1 {
-		fmt.Fprintln(os.Stderr, "usage: ghive-tools benchmark [flags] <block_log_path>")
+		fmt.Fprintln(os.Stderr, "usage: gopherd benchmark [flags] <block_log_path>")
 		return 2
 	}
 	logPath := rest[0]
