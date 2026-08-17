@@ -704,6 +704,8 @@ func newApp(cfg flags) (*app, error) {
 				}
 			}
 		}
+		fmt.Fprintf(os.Stderr, "gopherd node: loading snapshot from %s (%s)...\n",
+			cfg.loadSnapshot, humanDirSize(cfg.loadSnapshot))
 		man, err := snap.Load(stateDB, cfg.loadSnapshot)
 		if err != nil {
 			stateDB.Close()
@@ -718,7 +720,8 @@ func newApp(cfg flags) (*app, error) {
 				fmt.Fprintf(os.Stderr, "gopherd node: cold sidecar written for block %d\n", man.BlockNum)
 			}
 		}
-		fmt.Fprintf(os.Stderr, "gopherd node: loaded snapshot at block %d from %s\n", man.BlockNum, cfg.loadSnapshot)
+		fmt.Fprintf(os.Stderr, "gopherd node: snapshot loaded — block %d, %.1fs total\n",
+			man.BlockNum, time.Since(procStart).Seconds())
 		loadedFromSnapshot = true
 	}
 	if !loadedFromSnapshot {
@@ -1371,6 +1374,8 @@ func (a *app) run() error {
 		return fmt.Errorf("p2p start: %w", err)
 	}
 	syncDel.Start()
+	a.logger.printf("node ready in %.1fs — head %d, connecting to peers (catch-up begins once peers handshake)",
+		time.Since(procStart).Seconds(), a.headBlockOrZero())
 	defer syncDel.Stop()
 	defer a.p2p.Stop()
 
@@ -1783,4 +1788,35 @@ func snapshotManifestBlock(dir string) (uint32, error) {
 		return 0, fmt.Errorf("manifest has no block_num")
 	}
 	return m.BlockNum, nil
+}
+
+// humanDirSize reports a snapshot directory's total size for the pre-load line,
+// so the operator knows up front whether to expect seconds or minutes. Best
+// effort: an unreadable dir just yields "size unknown" rather than failing a
+// boot over a log line.
+func humanDirSize(dir string) string {
+	var total int64
+	err := filepath.Walk(dir, func(_ string, fi os.FileInfo, err error) error {
+		if err == nil && fi != nil && !fi.IsDir() {
+			total += fi.Size()
+		}
+		return nil
+	})
+	if err != nil || total == 0 {
+		return "size unknown"
+	}
+	return fmt.Sprintf("%.1f GB", float64(total)/(1<<30))
+}
+
+// headBlockOrZero is a log-only convenience: never fail a status line over a
+// head lookup.
+func (a *app) headBlockOrZero() uint32 {
+	if a.chain == nil {
+		return 0
+	}
+	h, err := a.chain.HeadBlock()
+	if err != nil {
+		return 0
+	}
+	return h
 }

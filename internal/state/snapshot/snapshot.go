@@ -671,6 +671,13 @@ func loadSubsystem(m state.SnapshotMarshaler, path, expectedSHA, hashAlgo, name 
 		cr = &countingWriter{w: h, f: f, paceStart: time.Now()}
 		rawSrc = io.TeeReader(f, cr)
 	}
+	// Progress for the big ones. comment_store alone is ~26 GB / 60-90s, and
+	// without this the node prints nothing at all until it finishes — a fresh
+	// start looked hung for over a minute. Small subsystems are unaffected
+	// (newProgressReader returns r unchanged below its size threshold).
+	if fi, serr := f.Stat(); serr == nil {
+		rawSrc = newProgressReader(rawSrc, name, fi.Size())
+	}
 	// The unmarshalers read record-at-a-time; without buffering every tiny
 	// read goes through the TeeReader straight to a file read syscall.
 	raw := bufio.NewReaderSize(rawSrc, 1<<20)
