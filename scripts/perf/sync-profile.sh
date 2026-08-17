@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Capture a CPU + heap profile of cmd/ghive-sync over a self-replay
+# Capture a CPU + heap profile of cmd/gopherd over a self-replay
 # window. See docs/perf/sync-profile.md for a written-up baseline.
 #
 # Usage:
@@ -16,7 +16,7 @@ OUT=${OUT:-/tmp/perf-profile}
 BIN=$ROOT/bin/ghive-sync
 
 mkdir -p "$ROOT/bin"
-go build -o "$BIN" ./cmd/ghive-sync
+go build -o "$BIN" ./cmd/gopherd
 
 rm -rf "$OUT" "$OUT.pprof" "$OUT.mem"
 mkdir -p "$OUT"

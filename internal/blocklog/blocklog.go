@@ -333,7 +333,7 @@ func (r *Reader) blockInto(blockNum uint32, rawScratch, outScratch []byte) ([]by
 
 // RawBlockBytes returns the on-disk bytes for blockNum WITHOUT decompressing
 // them, plus the block's attributes (so callers know whether to decompress
-// themselves). Used by the parity tests in cmd/ghive-sync to compare a freshly
+// themselves). Used by the parity tests in cmd/gopherd to compare a freshly
 // re-compressed slice against the source file.
 func (r *Reader) RawBlockBytes(blockNum uint32) ([]byte, Attributes, error) {
 	if blockNum == 0 || blockNum > r.headBlock {

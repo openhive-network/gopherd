@@ -21,6 +21,10 @@ type coldStore interface {
 	bset(key, val []byte)
 	bdel(key []byte)
 	flushBatch()
+	// WriteErr reports the first failed cold-tier write, if any. A failed write
+	// means evicted rows were lost and will read as missing, so callers must be
+	// able to see it rather than continue over a hole in state.
+	WriteErr() error
 	get(key []byte) ([]byte, bool)
 	has(key []byte) bool
 	set(key, val []byte) error
@@ -473,3 +477,7 @@ func (c *mmapColdKV) Close() error {
 	}
 	return nil
 }
+
+// WriteErr satisfies coldStore. This backend surfaces write failures at the
+// call site rather than deferring them, so there is nothing sticky to report.
+func (c *mmapColdKV) WriteErr() error { return nil }

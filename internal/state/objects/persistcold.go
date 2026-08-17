@@ -132,3 +132,7 @@ func (it *persistColdIter) val() ([]byte, error) {
 	}
 	return v, nil
 }
+
+// WriteErr satisfies coldStore. This backend surfaces write failures at the
+// call site rather than deferring them, so there is nothing sticky to report.
+func (c *PersistCold) WriteErr() error { return nil }

@@ -31,7 +31,7 @@ func cmdValidateBlocklog(args []string) int {
 	}
 	rest := fs.Args()
 	if len(rest) != 1 {
-		fmt.Fprintln(os.Stderr, "usage: ghive-tools validate-blocklog [flags] <block_log_path>")
+		fmt.Fprintln(os.Stderr, "usage: gopherd validate-blocklog [flags] <block_log_path>")
 		return 2
 	}
 	logPath := rest[0]

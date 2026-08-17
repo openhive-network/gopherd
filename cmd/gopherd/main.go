@@ -142,7 +142,7 @@ func cmdBlockID(args []string) int {
 	}
 	rest := fs.Args()
 	if len(rest) != 2 {
-		fmt.Fprintln(os.Stderr, "usage: ghive-tools blockid [--verify --count=N] <block_log_path> <block_num>")
+		fmt.Fprintln(os.Stderr, "usage: gopherd blockid [--verify --count=N] <block_log_path> <block_num>")
 		return 2
 	}
 	logPath := rest[0]
@@ -232,7 +232,7 @@ func computeBlockID(r *blocklog.Reader, num uint32) (block.ID, error) {
 
 func cmdInspect(args []string) int {
 	if len(args) != 1 {
-		fmt.Fprintln(os.Stderr, "usage: ghive-tools inspect <block_log_path>")
+		fmt.Fprintln(os.Stderr, "usage: gopherd inspect <block_log_path>")
 		return 2
 	}
 	r, err := blocklog.Open(args[0])

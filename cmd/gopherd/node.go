@@ -1,4 +1,4 @@
-// Command ghive-sync is the live-mainnet sync skeleton.
+// Command gopherd is the node: live-mainnet sync, block production and API.
 //
 // It dials hived peers, downloads blocks via the P2P+sync code, validates
 // each block (signature + merkle + every op evaluator), and appends the raw
@@ -23,8 +23,8 @@
 //     (see TODO in run()), the only change here is to plumb our writeBlock
 //     callback into the delegate.
 //
-// Compile: `go build ./cmd/ghive-sync`.
-// Quick self-test: `go test ./cmd/ghive-sync/`.
+// Compile: `make` (or `go build -o bin/gopherd ./cmd/gopherd`).
+// Quick self-test: `go test ./cmd/gopherd/`.
 // Live run (once sync agent lands): `ghive-sync --data-dir /tmp/sync-state`.
 package main
 
@@ -677,7 +677,12 @@ func newApp(cfg flags) (*app, error) {
 		// because a stale bloom yields false NEGATIVES (a cold comment reads as
 		// missing) rather than a loud failure.
 		sidecarUsed := false
-		if cfg.residentCap > 0 && cfg.coldDir != "" && os.Getenv("GHIVE_COLD_REUSE") == "1" {
+		// Ask the store rather than re-reading the env: comment_store latches
+		// GHIVE_COLD_REUSE at package init, so a second os.Getenv here could
+		// disagree with it (e.g. a test setting the var after init). The two
+		// halves must agree — sidecar-loaded bookkeeping is only correct if the
+		// per-record rebuild is actually being skipped.
+		if cfg.residentCap > 0 && cfg.coldDir != "" && objects.ColdReuseEnabled() {
 			if bn, berr := snapshotManifestBlock(cfg.loadSnapshot); berr == nil {
 				ok, serr := commentStore.LoadColdSidecar(cfg.coldDir, bn)
 				if serr != nil {
@@ -1219,7 +1224,7 @@ func (a *app) run() error {
 	a.p2p = p2pnode.New(p2pnode.Config{
 		Endpoint:           a.cfg.listenEndpoint,
 		SeedNodes:          seeds,
-		UserAgent:          "ghive-sync/0.1.0",
+		UserAgent:          "gopherd/0.1.0",
 		MaxOutboundPeers:   a.cfg.maxOutboundPeers,
 		MaxConcurrentDials: a.cfg.maxConcurrentDials,
 	}, a.chain, nil)

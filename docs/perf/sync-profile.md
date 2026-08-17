@@ -1,7 +1,7 @@
 # Sync-path CPU + memory profile
 
 Date: 2026-05-09. Branch: `agent-profile`. Tooling: `runtime/pprof` via
-`cmd/ghive-sync --cpuprofile/--memprofile`. Workload: 200K-300K mainnet
+`cmd/gopherd --cpuprofile/--memprofile`. Workload: 200K-300K mainnet
 blocks self-replayed through the full evaluator + writer pipeline (the
 same code path the live P2P sync delegate calls), `--backend=mem`, no
 verify-against, full signature verification (no `SkipBlockSignature`).
@@ -104,7 +104,7 @@ verification by 20:1**.
 
 **Estimated impact: 5-7x replay throughput.**
 
-`cmd/ghive-sync` runs full block-signature recovery even when
+`cmd/gopherd` runs full block-signature recovery even when
 `--source-block-log` is set against a canonical block_log that was
 already verified upstream. We have `SkipBlockSignature` plumbed
 (used by the fully-trusted replay tool and by tests via
@@ -176,7 +176,7 @@ A third candidate is the per-block `fcraw.NewReader` allocation
 
 ```sh
 cd /home/martin/projects/hived-go/.worktrees/profile
-go build -o ./bin/ghive-sync ./cmd/ghive-sync
+go build -o ./bin/gopherd ./cmd/gopherd
 rm -rf /tmp/perf-profile && mkdir -p /tmp/perf-profile
 
 # CPU profile — 200K-300K blocks suffices

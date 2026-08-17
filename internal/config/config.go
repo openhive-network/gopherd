@@ -70,7 +70,7 @@ var SupportedPlugins = map[string]string{
 	"chain":          "core block-application engine (always active)",
 	"p2p":            "peer-to-peer block/transaction sync",
 	"witness":        "block production for configured witnesses",
-	"state_snapshot": "snapshot save/load (also driven by --load-snapshot / SIGUSR1)",
+	"state_snapshot": "snapshot save/load (--load-snapshot / --snapshot-every / --shutdown-snapshot-dir)",
 }
 
 // ValidatePlugins checks every plugin named in the config against

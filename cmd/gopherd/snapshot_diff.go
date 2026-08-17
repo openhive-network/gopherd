@@ -36,7 +36,7 @@ func cmdSnapshotDiff(args []string) int {
 	}
 	rest := fs.Args()
 	if len(rest) != 2 {
-		fmt.Fprintln(os.Stderr, "usage: ghive-tools snapshot-diff <a.jsonl> <b.jsonl>")
+		fmt.Fprintln(os.Stderr, "usage: gopherd snapshot-diff <a.jsonl> <b.jsonl>")
 		return 2
 	}
 
