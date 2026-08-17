@@ -5,6 +5,7 @@ import (
 	"gopherd/internal/config"
 	"sort"
 	"strings"
+	"time"
 )
 
 // gopherdEnvSwitches are the GOPHERD_* environment variables that change node
@@ -48,3 +49,9 @@ func logActiveEnvSwitches(printf func(string, ...any)) {
 	sort.Strings(active)
 	printf("GOPHERD_* switches active (these change node behaviour):\n%s", strings.Join(active, "\n"))
 }
+
+// procStart is stamped as early as possible so every boot phase can be reported
+// against a single origin. Startup previously logged per-file timings but never
+// "how long until this node was actually up", which is the number an operator
+// waiting on a restart actually cares about.
+var procStart = time.Now()
