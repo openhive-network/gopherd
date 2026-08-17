@@ -7,20 +7,20 @@ package objects
 //
 // Keep IDs dense and < hotSubsystemSlotCount.
 const (
-	hotSlotDGPO             = 0
-	hotSlotAccount          = 1
-	hotSlotWitness          = 2
-	hotSlotComment          = 3
-	hotSlotCommentVote      = 4
-	hotSlotWitnessVote      = 5
-	hotSlotWitnessSchedule  = 6
-	hotSlotFeedHistory      = 7
-	hotSlotRewardFund       = 8
-	hotSlotConvertRequest   = 9
-	hotSlotVestWithdrawal   = 10
-	hotSlotCommentCashout   = 11
-	hotSlotTransaction      = 12
-	hotSlotBlockSummary     = 13
+	hotSlotDGPO                  = 0
+	hotSlotAccount               = 1
+	hotSlotWitness               = 2
+	hotSlotComment               = 3
+	hotSlotCommentVote           = 4
+	hotSlotWitnessVote           = 5
+	hotSlotWitnessSchedule       = 6
+	hotSlotFeedHistory           = 7
+	hotSlotRewardFund            = 8
+	hotSlotConvertRequest        = 9
+	hotSlotVestWithdrawal        = 10
+	hotSlotCommentCashout        = 11
+	hotSlotTransaction           = 12
+	hotSlotBlockSummary          = 13
 	hotSlotLimitOrder            = 14
 	hotSlotFutureWitnessSchedule = 15
 )

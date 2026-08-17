@@ -11,15 +11,15 @@ import (
 // RecurrentTransfer is the recurrent_transfer_object — schedules
 // repeated automated transfers from `From` to `To`.
 type RecurrentTransfer struct {
-	From       auth.AccountName
-	To         auth.AccountName
-	PairID     uint8
-	Amount     int64
-	Symbol     uint32
-	Memo       string
-	Recurrence uint16 // hours
-	Executions uint16 // remaining count
-	Trigger    uint32 // next firing time_point_sec
+	From                auth.AccountName
+	To                  auth.AccountName
+	PairID              uint8
+	Amount              int64
+	Symbol              uint32
+	Memo                string
+	Recurrence          uint16 // hours
+	Executions          uint16 // remaining count
+	Trigger             uint32 // next firing time_point_sec
 	ConsecutiveFailures uint8
 }
 

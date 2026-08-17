@@ -742,7 +742,6 @@ func commentVoteKey(voter, author auth.AccountName, permlink string) []byte {
 	return append(out, commentKey(author, permlink)...)
 }
 
-
 // AppendCommentVote serializes cv.
 func AppendCommentVote(dst []byte, cv *CommentVote) []byte {
 	dst = fcraw.AppendVarUint(dst, uint32(len(cv.Voter)))

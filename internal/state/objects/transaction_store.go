@@ -27,11 +27,11 @@ import (
 //     the scan, matching the C++ by_expiration prune).
 //   - undoLog captures pre-mutation state for Snapshot/Restore.
 type TransactionStore struct {
-	db          *state.Database
-	primary     map[[20]byte]uint32
-	byExp       *btree.BTreeG[txExpKey]
-	hintByExp   btree.PathHint
-	undoLog     []txUndo
+	db        *state.Database
+	primary   map[[20]byte]uint32
+	byExp     *btree.BTreeG[txExpKey]
+	hintByExp btree.PathHint
+	undoLog   []txUndo
 	// pruneBuf is reused across PruneExpired calls to avoid the
 	// per-call slice growth that escaped through the btree.Scan closure
 	// (180 MB cum on a 4M-block run).
@@ -70,10 +70,10 @@ func txExpLess(a, b txExpKey) bool {
 }
 
 type txUndo struct {
-	trxID  [20]byte
-	exp    uint32 // pre-mutation expiration when prevHad=true
-	prevHad bool  // true = the row existed before the mutation
-	op      uint8 // 0=Put, 1=Delete
+	trxID   [20]byte
+	exp     uint32 // pre-mutation expiration when prevHad=true
+	prevHad bool   // true = the row existed before the mutation
+	op      uint8  // 0=Put, 1=Delete
 }
 
 const transactionStoreSubsystemKey = "transaction_store"

@@ -90,6 +90,9 @@ func coldKeyIsPrimary(key []byte) bool {
 }
 
 type mmapColdKV struct {
+	// writeErr is the first failed write. Sticky: the tier is missing state
+	// permanently once this is set.
+	writeErr error
 	dir      string
 	owned    bool
 	file     *os.File
@@ -175,12 +178,12 @@ func openMmapColdKV(dir string) (*mmapColdKV, error) {
 		}
 	}
 	return &mmapColdKV{
-		dir:      dir,
-		owned:    owned,
-		file:     f,
-		data:     data,
-		prim:     make(map[string]mmapPrimVal, primCap),
-		idx:      btree.NewBTreeGOptions[mmapColdEntry](mmapColdLess, btree.Options{Degree: 32, NoLocks: true}),
+		dir:   dir,
+		owned: owned,
+		file:  f,
+		data:  data,
+		prim:  make(map[string]mmapPrimVal, primCap),
+		idx:   btree.NewBTreeGOptions[mmapColdEntry](mmapColdLess, btree.Options{Degree: 32, NoLocks: true}),
 		// Default ON: with zero-copy index keys aliasing the data mmap, every
 		// map rehash / btree rebalance re-reads key bytes — once the cold tier
 		// outgrows page cache (40M+ blocks) those become scattered disk faults
@@ -257,8 +260,19 @@ func (c *mmapColdKV) bset(key, val []byte) {
 	// process exits non-zero, the watchdog resumes from the last snapshot, and
 	// the cause is visible. The reservation (mmapColdFileSize) is sized so this
 	// never fires on a 60M replay; the panic is a correctness backstop only.
+	// FAIL-STOP, but cleanly. Eviction has already dropped the row from RAM, so
+	// a failed write is lost state: continuing would diverge silently and write
+	// a snapshot whose count header over-counts. Panicking here achieved the
+	// stop but aborted mid-operation — no clean shutdown, no final snapshot —
+	// and its stated recovery ("the watchdog resumes from the last snapshot")
+	// depended on a watchdog script that no longer exists. Record it stickily
+	// instead: EvictFrozen surfaces it, block application stops, and the node
+	// can shut down in an orderly way.
 	if err := c.set(key, val); err != nil {
-		panic(fmt.Sprintf("mmapcold: %v — raise mmapColdFileSize or add cold-tier compaction", err))
+		if c.writeErr == nil {
+			c.writeErr = fmt.Errorf("mmapcold: %w — raise mmapColdFileSize or add cold-tier compaction", err)
+			fmt.Fprintf(os.Stderr, "COLD TIER WRITE FAILED — evicted rows are LOST: %v\n", c.writeErr)
+		}
 	}
 }
 
@@ -480,4 +494,4 @@ func (c *mmapColdKV) Close() error {
 
 // WriteErr satisfies coldStore. This backend surfaces write failures at the
 // call site rather than deferring them, so there is nothing sticky to report.
-func (c *mmapColdKV) WriteErr() error { return nil }
+func (c *mmapColdKV) WriteErr() error { return c.writeErr }

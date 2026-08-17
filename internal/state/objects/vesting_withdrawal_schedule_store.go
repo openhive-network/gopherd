@@ -43,9 +43,9 @@ func vestingWithdrawalScheduleLess(a, b vestingWithdrawalScheduleKey) bool {
 }
 
 type vestingWithdrawalScheduleUndo struct {
-	key  vestingWithdrawalScheduleKey
-	had  bool  // pre-mutation presence
-	op   uint8 // 0=Put, 1=Delete
+	key vestingWithdrawalScheduleKey
+	had bool  // pre-mutation presence
+	op  uint8 // 0=Put, 1=Delete
 }
 
 const vestingWithdrawalScheduleStoreSubsystemKey = "vesting_withdrawal_schedule_store"

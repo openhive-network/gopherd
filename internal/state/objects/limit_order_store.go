@@ -83,9 +83,9 @@ func priceNodeLess(a, b *priceNode) bool {
 // expNode is one entry in the by-expiration btree. Ordered by
 // expiration ASC, then (owner, orderID) ASC for stable tie-break.
 type expNode struct {
-	exp     uint32
-	pk      orderPK
-	lo      *LimitOrder
+	exp uint32
+	pk  orderPK
+	lo  *LimitOrder
 }
 
 func expNodeLess(a, b *expNode) bool {

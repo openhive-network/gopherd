@@ -5,12 +5,12 @@
 //
 // Six state objects are defined here:
 //
-//   1. RCResourceParam       — singleton  (rc_resource_param_object)
-//   2. RCPool                — singleton  (rc_pool_object)
-//   3. RCStats               — dual: pending + archive (rc_stats_object)
-//   4. RCDirectDelegation    — by (from, to)  (rc_direct_delegation_object)
-//   5. RCExpiredDelegation   — by from        (rc_expired_delegation_object)
-//   6. RCUsageBucket         — 24 hourly buckets (rc_usage_bucket_object)
+//  1. RCResourceParam       — singleton  (rc_resource_param_object)
+//  2. RCPool                — singleton  (rc_pool_object)
+//  3. RCStats               — dual: pending + archive (rc_stats_object)
+//  4. RCDirectDelegation    — by (from, to)  (rc_direct_delegation_object)
+//  5. RCExpiredDelegation   — by from        (rc_expired_delegation_object)
+//  6. RCUsageBucket         — 24 hourly buckets (rc_usage_bucket_object)
 //
 // The RC subsystem activates at HF20 (~block 26,200,000) and remains
 // dormant for the current replay window. The codecs here are the
@@ -19,15 +19,15 @@
 // + set_slot_delegator (Phase 4) and full replay integration (Phase 5).
 //
 // C++ → Go translation notes for exotic FC types:
-//   * fc::int_array<T, N>      → fixed-size Go array [N]T.
-//   * fc::restartable_sha256   → 32-byte [32]byte digest field (we
-//                                serialize the raw digest; the rolling
-//                                state is rebuilt at replay).
-//   * resource_count_type      → [RCNumResources]int64 (= [5]int64).
-//   * resource_share_type      → [RCNumResources]uint16.
-//   * rd_dynamics_params       → flattened struct ResourceDynamics
-//                                with the 6 scalar fields C++ tracks.
-//   * rc_price_curve_params    → flattened struct PriceCurve.
+//   - fc::int_array<T, N>      → fixed-size Go array [N]T.
+//   - fc::restartable_sha256   → 32-byte [32]byte digest field (we
+//     serialize the raw digest; the rolling
+//     state is rebuilt at replay).
+//   - resource_count_type      → [RCNumResources]int64 (= [5]int64).
+//   - resource_share_type      → [RCNumResources]uint16.
+//   - rd_dynamics_params       → flattened struct ResourceDynamics
+//     with the 6 scalar fields C++ tracks.
+//   - rc_price_curve_params    → flattened struct PriceCurve.
 //
 // All multi-byte ints are little-endian on the wire (matches FC).
 package objects

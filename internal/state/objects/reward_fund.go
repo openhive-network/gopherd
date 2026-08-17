@@ -16,11 +16,11 @@ const RewardFundTable state.TableID = 21
 type CurveID uint8
 
 const (
-	CurveQuadratic   CurveID = 0
-	CurveBoundedCurve CurveID = 1
-	CurveLinear      CurveID = 2
-	CurveSquareRoot  CurveID = 3
-	CurveConvergentLinear CurveID = 4
+	CurveQuadratic            CurveID = 0
+	CurveBoundedCurve         CurveID = 1
+	CurveLinear               CurveID = 2
+	CurveSquareRoot           CurveID = 3
+	CurveConvergentLinear     CurveID = 4
 	CurveConvergentSquareRoot CurveID = 5
 )
 
@@ -40,15 +40,15 @@ const PostRewardFundName = "post"
 //     every vote and decays exponentially over RecentClaimDecayRate
 //     (15 days at HF17, 1 day at HF19+).
 type RewardFund struct {
-	Name                string
-	RewardBalance       int64    // HIVE-satoshi
-	RecentClaims        [16]byte // uint128 BE
-	LastUpdate          uint32
-	ContentConstant     int64
+	Name                   string
+	RewardBalance          int64    // HIVE-satoshi
+	RecentClaims           [16]byte // uint128 BE
+	LastUpdate             uint32
+	ContentConstant        int64
 	PercentCurationRewards uint16 // basis points (0..10000)
 	PercentContentRewards  uint16 // basis points
-	AuthorRewardCurve   CurveID
-	CurationRewardCurve CurveID
+	AuthorRewardCurve      CurveID
+	CurationRewardCurve    CurveID
 	// DownvoteRewardBalance (HF21+) — HIVE-satoshi pool that the
 	// dgpo.DownvotePoolPercent share of inflation is routed to. Drained
 	// at cashout in proportion to the comment's downvote weight.

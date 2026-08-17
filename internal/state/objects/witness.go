@@ -19,22 +19,22 @@ import (
 // vote, hardfork_version_vote, and so on; those land alongside the
 // witness scheduler.
 type Witness struct {
-	Owner                  auth.AccountName
-	Created                uint32
-	URL                    string
-	BlockSigningKey        crypto.PublicKey
-	AccountCreationFee     int64 // legacy_chain_properties.account_creation_fee.amount
-	MaximumBlockSize       uint32
-	HBDInterestRate        uint16
-	TotalVotesVests        int64 // sum of voter vesting_shares
-	TotalMissedBlocks      uint32
-	HardforkVersionVote    uint32 // packed v_num; 0 = unset
-	HardforkTimeVote       uint32 // time_point_sec
-	RunningVersion         uint32
+	Owner               auth.AccountName
+	Created             uint32
+	URL                 string
+	BlockSigningKey     crypto.PublicKey
+	AccountCreationFee  int64 // legacy_chain_properties.account_creation_fee.amount
+	MaximumBlockSize    uint32
+	HBDInterestRate     uint16
+	TotalVotesVests     int64 // sum of voter vesting_shares
+	TotalMissedBlocks   uint32
+	HardforkVersionVote uint32 // packed v_num; 0 = unset
+	HardforkTimeVote    uint32 // time_point_sec
+	RunningVersion      uint32
 	// HBDExchangeRate is the most recent feed_publish from this witness
 	// — a price of HBD/HIVE. Zero amount on Base means "not set yet".
-	HBDExchangeRate         asset.Price
-	LastHBDExchangeUpdate   uint32 // time_point_sec of last feed_publish
+	HBDExchangeRate       asset.Price
+	LastHBDExchangeUpdate uint32 // time_point_sec of last feed_publish
 	// AvailableWitnessAccountSubsidies — per-witness subsidy pool that
 	// claim_account can draw from BEFORE the global pool. Mirrors
 	// witness_object::available_witness_account_subsidies. Updated
@@ -141,8 +141,8 @@ type AccountWitnessVote struct {
 
 // Table IDs.
 const (
-	WitnessTable      state.TableID = 2
-	WitnessVoteTable  state.TableID = 3
+	WitnessTable             state.TableID = 2
+	WitnessVoteTable         state.TableID = 3
 	WitnessVotesByOwnerIndex state.IndexID = 1 // secondary: owner -> witness names voted
 	// WitnessByVoteIndex orders witnesses by total_votes_vests DESC,
 	// owner ASC. Used by update_witness_schedule to pick the top 21
