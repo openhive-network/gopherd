@@ -29,11 +29,11 @@ import (
 // `hive_volume`/`hbd_volume` may go negative (the taker side gets
 // debited) but `weight` is zero whenever either volume is non-positive.
 type LiquidityRewardBalance struct {
-	Owner       auth.AccountName
-	LastUpdate  uint32
-	Weight      [16]byte // big-endian uint128
-	HiveVolume  int64
-	HBDVolume   int64
+	Owner      auth.AccountName
+	LastUpdate uint32
+	Weight     [16]byte // big-endian uint128
+	HiveVolume int64
+	HBDVolume  int64
 }
 
 const LiquidityRewardBalanceTable state.TableID = 21

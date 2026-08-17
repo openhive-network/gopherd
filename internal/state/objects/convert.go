@@ -13,9 +13,9 @@ import (
 // conversion. Settles after HIVE_CONVERSION_DELAY (3.5 days post-HF16,
 // 7 days pre-HF16) via a per-block hook (deferred).
 type ConvertRequest struct {
-	Owner     auth.AccountName
-	RequestID uint32
-	Amount    int64  // HBD satoshi
+	Owner      auth.AccountName
+	RequestID  uint32
+	Amount     int64  // HBD satoshi
 	Conversion uint32 // time_point_sec when settles
 }
 
@@ -95,11 +95,11 @@ func DeleteConvertRequestFull(s *state.Session, c *ConvertRequest) {
 // CollateralizedConvert (HF26+) — separate table since the semantics differ
 // (collateral up-front, partial refund after).
 type CollateralizedConvert struct {
-	Owner             auth.AccountName
-	RequestID         uint32
-	Collateral        int64 // HIVE satoshi escrowed up-front
-	HBDOut            int64 // HBD satoshi credited immediately
-	Conversion        uint32
+	Owner      auth.AccountName
+	RequestID  uint32
+	Collateral int64 // HIVE satoshi escrowed up-front
+	HBDOut     int64 // HBD satoshi credited immediately
+	Conversion uint32
 }
 
 const CollateralizedConvertTable state.TableID = 12

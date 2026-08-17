@@ -40,11 +40,11 @@ func legacyCommentRec(author, permlink string, wasPaid bool) []byte {
 	dst = append(dst, author...)
 	dst = fcraw.AppendVarUint(dst, uint32(len(permlink)))
 	dst = append(dst, permlink...)
-	dst = fcraw.AppendVarUint(dst, 0) // parent author
-	dst = fcraw.AppendVarUint(dst, 0) // parent permlink
+	dst = fcraw.AppendVarUint(dst, 0)      // parent author
+	dst = fcraw.AppendVarUint(dst, 0)      // parent permlink
 	dst = append(dst, make([]byte, 36)...) // Created..AllowCurationRewards
-	dst = fcraw.AppendVarUint(dst, 0) // beneficiaries
-	dst = append(dst, make([]byte, 8)...) // AbsRshares
+	dst = fcraw.AppendVarUint(dst, 0)      // beneficiaries
+	dst = append(dst, make([]byte, 8)...)  // AbsRshares
 	if wasPaid {
 		dst = append(dst, 1)
 	} else {
@@ -101,8 +101,8 @@ func TestSelfContainedSnapshotRawSpillLoad(t *testing.T) {
 	stream := buildCommentSnapshotStream(raw)
 
 	for _, tc := range []struct {
-		name   string
-		byRoot bool
+		name    string
+		byRoot  bool
 		persist bool
 	}{
 		{"mmap-byroot", true, false},

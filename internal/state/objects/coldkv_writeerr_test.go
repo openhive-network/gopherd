@@ -42,3 +42,37 @@ type testWriteErr struct{}
 func (testWriteErr) Error() string { return "simulated cold write failure" }
 
 var errTestWrite = testWriteErr{}
+
+// TestColdWriteErrSurfacesThroughStore pins the fail-stop CHAIN: a backend write
+// failure must be visible via CommentStore.ColdWriteErr, because that is what
+// the apply path checks to stop applying blocks.
+//
+// Without this, the backend can know it lost a row while the node keeps
+// applying over the hole and then snapshots it.
+func TestColdWriteErrSurfacesThroughStore(t *testing.T) {
+	c, err := openColdKV(t.TempDir())
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer c.db.Close()
+
+	s := &CommentStore{}
+	s.SetColdTier(c)
+
+	if s.ColdWriteErr() != nil {
+		t.Fatalf("healthy tier reported an error: %v", s.ColdWriteErr())
+	}
+	c.writeErr = errTestWrite
+	if s.ColdWriteErr() == nil {
+		t.Fatal("backend write failure is not visible through the store — the apply path would never stop")
+	}
+}
+
+// TestColdWriteErrNilWithoutTier pins that an all-RAM store (no cold tier) does
+// not report a phantom failure, which would halt a perfectly healthy node.
+func TestColdWriteErrNilWithoutTier(t *testing.T) {
+	s := &CommentStore{}
+	if s.ColdWriteErr() != nil {
+		t.Fatal("store with no cold tier must not report a write error")
+	}
+}

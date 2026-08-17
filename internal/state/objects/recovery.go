@@ -15,17 +15,17 @@ import (
 // We capture the new owner authority as raw bytes; full authority
 // rotation lands with the account_authority_object schema.
 type AccountRecoveryRequest struct {
-	AccountToRecover    auth.AccountName
+	AccountToRecover     auth.AccountName
 	NewOwnerAuthorityRaw []byte
-	Expiration          uint32
+	Expiration           uint32
 }
 
 // ChangeRecoveryAccountRequest tracks a pending change of the recovery
 // account, with a HIVE_OWNER_AUTH_RECOVERY_PERIOD (30 day) waiting period.
 type ChangeRecoveryAccountRequest struct {
-	AccountToRecover   auth.AccountName
-	RecoveryAccount    auth.AccountName
-	EffectiveOn        uint32
+	AccountToRecover auth.AccountName
+	RecoveryAccount  auth.AccountName
+	EffectiveOn      uint32
 }
 
 const (

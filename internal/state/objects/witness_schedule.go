@@ -36,8 +36,8 @@ const (
 // — the slice can be shorter than 21 in the early chain when fewer
 // witnesses are registered.
 type WitnessSchedule struct {
-	CurrentVirtualTime [16]byte
-	NextShuffleBlockNum uint32
+	CurrentVirtualTime       [16]byte
+	NextShuffleBlockNum      uint32
 	CurrentShuffledWitnesses []auth.AccountName
 	NumScheduledWitnesses    uint8
 
@@ -54,9 +54,9 @@ type WitnessSchedule struct {
 	// witness_reward *= 21 * type_weight / pay_normalization.
 	// Defaults from witness_schedule_object: timeshare=5, miner=1,
 	// elected=1; normalization = sum(num_T*W_T + num_M*W_M + num_E*W_E).
-	TimeshareWeight             uint32
-	MinerWeight                 uint32
-	ElectedWeight               uint32
+	TimeshareWeight               uint32
+	MinerWeight                   uint32
+	ElectedWeight                 uint32
 	WitnessPayNormalizationFactor uint32
 
 	// RecentBlockProducers is a sliding window of producer names from

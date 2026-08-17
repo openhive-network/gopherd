@@ -2,6 +2,7 @@ package objects
 
 import (
 	"fmt"
+	"os"
 
 	"hived-go/internal/state/persiststore"
 )
@@ -21,7 +22,9 @@ import (
 // (comment-by-root, vote-by-comment) are registered as ordered so rangePrefix
 // works; the primary point-op tables stay map-only.
 type PersistCold struct {
-	ps *persiststore.Store
+	// writeErr is the first failed write. Sticky — see bset.
+	writeErr error
+	ps       *persiststore.Store
 }
 
 // persistColdReserve is the sparse mmap reservation (only touched pages cost
@@ -42,11 +45,16 @@ func OpenPersistCold(dir string) (*PersistCold, error) {
 	return &PersistCold{ps: ps}, nil
 }
 
-// bset must not silently fail (Evict drops the row from RAM regardless); panic
-// loudly on a full mapping, exactly like mmapColdKV.bset.
+// bset must not silently fail: Evict drops the row from RAM regardless, so a
+// failed write is lost state. Fail-stop, but cleanly — record it stickily so
+// EvictFrozen can surface it and block application stops, rather than panicking
+// mid-operation (which skipped clean shutdown and the final snapshot).
 func (c *PersistCold) bset(key, val []byte) {
 	if err := c.ps.Set(string(key), val); err != nil {
-		panic(fmt.Sprintf("persistcold: %v — raise persistColdReserve or compact", err))
+		if c.writeErr == nil {
+			c.writeErr = fmt.Errorf("persistcold: %w — raise persistColdReserve or compact", err)
+			fmt.Fprintf(os.Stderr, "COLD TIER WRITE FAILED — evicted rows are LOST: %v\n", c.writeErr)
+		}
 	}
 }
 func (c *PersistCold) bdel(key []byte)           { c.ps.Delete(string(key)) }
@@ -135,4 +143,4 @@ func (it *persistColdIter) val() ([]byte, error) {
 
 // WriteErr satisfies coldStore. This backend surfaces write failures at the
 // call site rather than deferring them, so there is nothing sticky to report.
-func (c *PersistCold) WriteErr() error { return nil }
+func (c *PersistCold) WriteErr() error { return c.writeErr }

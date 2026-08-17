@@ -1321,3 +1321,20 @@ func (s *CommentStore) UnmarshalSnapshot(r io.Reader) error {
 	}
 	return nil
 }
+
+// ColdWriteErr reports the first cold-tier write failure, if any.
+//
+// This is FAIL-STOP state, not a warning. Eviction removes a comment from the
+// resident map before the write lands, so once a write has failed the row is
+// gone: reads return "does not exist", consensus diverges silently, and a
+// snapshot taken afterwards bakes the hole in. Callers on the apply path must
+// stop applying blocks rather than continue over it.
+//
+// Sticky by construction — a tier that has lost a row never becomes correct
+// again on its own.
+func (s *CommentStore) ColdWriteErr() error {
+	if s.cold == nil {
+		return nil
+	}
+	return s.cold.WriteErr()
+}

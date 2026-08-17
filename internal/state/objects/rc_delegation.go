@@ -15,9 +15,9 @@ const RCDirectDelegationTable state.TableID = 23
 
 // RCDirectDelegation is one (from, to, delegated_rc) row.
 type RCDirectDelegation struct {
-	From         auth.AccountName
-	To           auth.AccountName
-	DelegatedRC  uint64
+	From        auth.AccountName
+	To          auth.AccountName
+	DelegatedRC uint64
 }
 
 // rcDirectDelegationKey: (from, to) — at most one delegation per pair.

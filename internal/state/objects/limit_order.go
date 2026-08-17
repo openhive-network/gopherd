@@ -68,7 +68,8 @@ func limitOrderByExpirationKey(expiration uint32, owner auth.AccountName, orderI
 // (owner, orderID) ASCENDING as the tie-break.
 //
 // Key layout: [base_sym_BE_4][quote_sym_BE_4][price_descending_16]
-//             [owner_padded_16][orderid_BE_4] (44 bytes total).
+//
+//	[owner_padded_16][orderid_BE_4] (44 bytes total).
 //
 // price_descending_16 encodes the sell_price ratio in a 16-byte form
 // where lex-byte order matches DESCENDING numeric price. We encode
@@ -94,7 +95,8 @@ const hivePriceFixedScale = 1_000_000_000_000_000_000
 // lookup.
 //
 // Layout: [base_sym:4][quote_sym:4][price_descending:16][id:8]
-//         [owner_padded:16][orderid:4] — 52 bytes total.
+//
+//	[owner_padded:16][orderid:4] — 52 bytes total.
 func limitOrderByPriceKey(baseSym uint32, quoteSym uint32, baseAmount, quoteAmount int64, id uint64, owner auth.AccountName, orderID uint32) []byte {
 	out := state.AppendUint32BE(nil, baseSym)
 	out = state.AppendUint32BE(out, quoteSym)

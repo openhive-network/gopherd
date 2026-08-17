@@ -44,6 +44,7 @@ import (
 	"runtime/pprof"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -458,6 +459,12 @@ func parseNodeFlags(args []string) flags {
 
 // app bundles the long-lived per-process resources.
 type app struct {
+	// fatalCh is closed when the node must stop applying blocks because state
+	// is no longer trustworthy (currently: a lost cold-tier write). Fail-stop
+	// rather than fail-silent — see commentStore.ColdWriteErr.
+	fatalCh   chan struct{}
+	fatalOnce sync.Once
+
 	cfg          flags
 	state        *state.Database
 	chain        *chain.Database
@@ -809,6 +816,7 @@ func newApp(cfg flags) (*app, error) {
 	}
 
 	a := &app{
+		fatalCh:          make(chan struct{}),
 		cfg:              cfg,
 		state:            stateDB,
 		chain:            cdb,
@@ -850,6 +858,18 @@ func newApp(cfg flags) (*app, error) {
 		a.verify = ref
 	}
 	return a, nil
+}
+
+// fatalf records an unrecoverable state condition: log it loudly and trigger an
+// orderly shutdown. Used instead of panic so the node still flushes and writes
+// its shutdown snapshot rather than aborting mid-operation.
+func (a *app) fatalf(format string, args ...any) {
+	a.fatalOnce.Do(func() {
+		a.logger.printf("FATAL: "+format, args...)
+		if a.fatalCh != nil {
+			close(a.fatalCh)
+		}
+	})
 }
 
 func (a *app) close() {
@@ -1071,6 +1091,15 @@ func (a *app) recover() error {
 		if a.commentStore != nil {
 			a.commentStore.SetColdByRootEnabled(!hardfork.SetForBlock(n).Has(hardfork.HF17))
 			a.commentStore.EvictFrozen(a.voteStore, a.evictBudget)
+			if cwErr := a.commentStore.ColdWriteErr(); cwErr != nil {
+				a.fatalf("cold tier lost a write — refusing to apply further blocks: %v", cwErr)
+			}
+			// FAIL-STOP on a lost cold write: the row was dropped from RAM
+			// before the write failed, so continuing would apply blocks over a
+			// hole in state and then snapshot it. Stop here instead.
+			if cwErr := a.commentStore.ColdWriteErr(); cwErr != nil {
+				a.fatalf("cold tier lost a write — refusing to apply further blocks: %v", cwErr)
+			}
 		}
 		if n%5000 == 0 {
 			elapsed := time.Since(startedAt).Seconds()
@@ -1395,6 +1424,8 @@ func (a *app) run() error {
 		a.logger.printf("shutting down (signal)...")
 	case <-stopCh:
 		a.logger.printf("shutting down (target block %d reached)...", a.cfg.targetBlock)
+	case <-a.fatalCh:
+		a.logger.printf("shutting down (unrecoverable state error)...")
 	}
 	return nil
 }
@@ -1430,6 +1461,9 @@ func (a *app) afterApply(rawBlock []byte, blockNum uint32) error {
 	if a.commentStore != nil {
 		a.commentStore.SetColdByRootEnabled(!hardfork.SetForBlock(blockNum).Has(hardfork.HF17))
 		a.commentStore.EvictFrozen(a.voteStore, a.evictBudget)
+		if cwErr := a.commentStore.ColdWriteErr(); cwErr != nil {
+			a.fatalf("cold tier lost a write — refusing to apply further blocks: %v", cwErr)
+		}
 	}
 	// Ephemeral resume marker: periodically record the applied head so a restart
 	// with --recover-block-log can rebuild to here from the mirror instead of
@@ -1513,6 +1547,9 @@ func (a *app) applyBlock(rawBlock []byte, blockNum uint32) error {
 	if a.commentStore != nil {
 		a.commentStore.SetColdByRootEnabled(!hardfork.SetForBlock(blockNum).Has(hardfork.HF17))
 		a.commentStore.EvictFrozen(a.voteStore, a.evictBudget)
+		if cwErr := a.commentStore.ColdWriteErr(); cwErr != nil {
+			a.fatalf("cold tier lost a write — refusing to apply further blocks: %v", cwErr)
+		}
 	}
 
 	if blockNum%1000 == 0 {
