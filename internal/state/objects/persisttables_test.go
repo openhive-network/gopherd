@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"hived-go/internal/protocol/auth"
+	"gopherd/internal/protocol/auth"
 )
 
 // TestPersistTables_RestartAtHead is the phase-6 capstone: drive all tables like

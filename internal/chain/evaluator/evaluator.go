@@ -13,9 +13,9 @@ import (
 	"errors"
 	"fmt"
 
-	"hived-go/internal/protocol/hardfork"
-	"hived-go/internal/protocol/op"
-	"hived-go/internal/state"
+	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/protocol/op"
+	"gopherd/internal/state"
 )
 
 // Context carries the per-block state visible to evaluators. One Context

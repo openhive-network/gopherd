@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"testing"
 
-	"hived-go/internal/crypto"
-	"hived-go/internal/fcraw"
+	"gopherd/internal/crypto"
+	"gopherd/internal/fcraw"
 )
 
 func TestEmptyAuthorityRoundTrip(t *testing.T) {

@@ -5,10 +5,10 @@ import (
 	"errors"
 	"fmt"
 
-	"hived-go/internal/protocol/hardfork"
-	"hived-go/internal/protocol/tx"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/protocol/tx"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // HIVE_MAX_TIME_UNTIL_EXPIRATION = 1 hour. Mirrors libraries/protocol/

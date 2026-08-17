@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"reflect"
 
-	"hived-go/internal/crypto"
-	"hived-go/internal/protocol/asset"
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/protocol/op"
-	"hived-go/internal/protocol/tx"
+	"gopherd/internal/crypto"
+	"gopherd/internal/protocol/asset"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/protocol/op"
+	"gopherd/internal/protocol/tx"
 )
 
 // opProtos lists a zero value of every operation the parser can build (the ops

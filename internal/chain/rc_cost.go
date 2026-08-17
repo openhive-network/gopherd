@@ -1,9 +1,9 @@
 package chain
 
 import (
-	"hived-go/internal/protocol/hardfork"
-	"hived-go/internal/protocol/op"
-	"hived-go/internal/protocol/tx"
+	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/protocol/op"
+	"gopherd/internal/protocol/tx"
 )
 
 // HIVE_RC_NUM_RESOURCE_TYPES — 5 resource types: history_bytes,

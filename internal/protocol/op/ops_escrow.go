@@ -5,9 +5,9 @@ import (
 
 	"encoding/binary"
 
-	"hived-go/internal/fcraw"
-	"hived-go/internal/protocol/asset"
-	"hived-go/internal/protocol/auth"
+	"gopherd/internal/fcraw"
+	"gopherd/internal/protocol/asset"
+	"gopherd/internal/protocol/auth"
 )
 
 // ---- 27 escrow_transfer -------------------------------------------------

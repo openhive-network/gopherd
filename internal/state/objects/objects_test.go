@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"hived-go/internal/state"
+	"gopherd/internal/state"
 )
 
 func openTempDB(t *testing.T) *state.Database {

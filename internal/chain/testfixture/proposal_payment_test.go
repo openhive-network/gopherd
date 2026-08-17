@@ -3,8 +3,8 @@ package testfixture
 import (
 	"testing"
 
-	"hived-go/internal/protocol/hardfork"
-	"hived-go/internal/protocol/op"
+	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/protocol/op"
 )
 
 // Helper: seed the treasury account with HBD for proposal payouts.

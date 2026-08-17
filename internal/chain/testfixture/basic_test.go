@@ -3,9 +3,9 @@ package testfixture
 import (
 	"testing"
 
-	"hived-go/internal/protocol/hardfork"
-	"hived-go/internal/protocol/op"
-	"hived-go/internal/protocol/tx"
+	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/protocol/op"
+	"gopherd/internal/protocol/tx"
 )
 
 // Port of basic_tests.cpp::merkle_root.

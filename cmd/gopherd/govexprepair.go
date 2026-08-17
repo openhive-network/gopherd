@@ -31,10 +31,10 @@ import (
 
 	"fmt"
 
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
-	"hived-go/internal/state/snapshot"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
+	"gopherd/internal/state/snapshot"
 )
 
 const (

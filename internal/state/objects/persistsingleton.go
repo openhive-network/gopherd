@@ -1,6 +1,6 @@
 package objects
 
-import "hived-go/internal/state/persiststore"
+import "gopherd/internal/state/persiststore"
 
 // PersistSingleton is a persiststore-backed single-row table (chainbase-in-Go
 // phase 5) for the singleton objects: DynamicGlobalProperty, FeedHistory,

@@ -10,13 +10,13 @@ import (
 	"strconv"
 	"testing"
 
-	"hived-go/internal/api/jsonrpc"
-	"hived-go/internal/chain"
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/protocol/tx"
-	"hived-go/internal/state"
-	"hived-go/internal/state/genesis"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/api/jsonrpc"
+	"gopherd/internal/chain"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/protocol/tx"
+	"gopherd/internal/state"
+	"gopherd/internal/state/genesis"
+	"gopherd/internal/state/objects"
 )
 
 // seedAccounts builds a server with `n` deterministically-named accounts

@@ -9,9 +9,9 @@ import (
 	"bytes"
 	"testing"
 
-	"hived-go/internal/fcraw"
-	"hived-go/internal/protocol/asset"
-	"hived-go/internal/protocol/op"
+	"gopherd/internal/fcraw"
+	"gopherd/internal/protocol/asset"
+	"gopherd/internal/protocol/op"
 )
 
 // TestSerializationRawRoundTrip ports

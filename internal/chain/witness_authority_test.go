@@ -3,9 +3,9 @@ package chain
 import (
 	"testing"
 
-	"hived-go/internal/crypto"
-	"hived-go/internal/protocol/op"
-	"hived-go/internal/protocol/tx"
+	"gopherd/internal/crypto"
+	"gopherd/internal/protocol/op"
+	"gopherd/internal/protocol/tx"
 )
 
 // TestWitnessBlockApproveRequiresWitnessCategory pins the bug that let a flood

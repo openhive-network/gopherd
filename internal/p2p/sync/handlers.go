@@ -4,10 +4,10 @@ import (
 	"errors"
 	"time"
 
-	"hived-go/internal/crypto"
-	"hived-go/internal/p2p/node"
-	"hived-go/internal/p2p/proto"
-	"hived-go/internal/protocol/block"
+	"gopherd/internal/crypto"
+	"gopherd/internal/p2p/node"
+	"gopherd/internal/p2p/proto"
+	"gopherd/internal/protocol/block"
 )
 
 // OnPeerConnected is invoked once per peer when it reaches StateActive.

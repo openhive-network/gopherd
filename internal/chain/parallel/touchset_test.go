@@ -3,7 +3,7 @@ package parallel
 import (
 	"testing"
 
-	"hived-go/internal/protocol/op"
+	"gopherd/internal/protocol/op"
 )
 
 func TestAccountSetAddDedup(t *testing.T) {

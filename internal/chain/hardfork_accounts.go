@@ -6,10 +6,10 @@ import (
 	"math/bits"
 	"os"
 
-	"hived-go/internal/protocol/asset"
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/protocol/asset"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // ErrCollateralizedConvertInClearAccount mirrors hived's FC_ASSERT in

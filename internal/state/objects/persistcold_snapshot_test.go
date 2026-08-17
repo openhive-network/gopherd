@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/state"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/state"
 )
 
 // TestDurableColdSnapshotRestart is the end-to-end cutover proof WITHOUT a

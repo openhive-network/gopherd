@@ -34,9 +34,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"gopherd/internal/config"
 	"hash"
 	"hash/crc32"
-	"hived-go/internal/config"
 	"io"
 	"os"
 	"path/filepath"
@@ -48,7 +48,7 @@ import (
 
 	"github.com/klauspost/compress/zstd"
 
-	"hived-go/internal/state"
+	"gopherd/internal/state"
 )
 
 // Format is bumped only on incompatible on-disk changes. Loaders refuse

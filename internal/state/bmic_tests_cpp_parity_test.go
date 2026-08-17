@@ -9,7 +9,7 @@ import "testing"
 // collisions, in-place modify, and miscellaneous corner cases over
 // three synthetic test_object types.
 //
-// hived-go does NOT use boost::multi_index. The equivalent indexing
+// gopherd does NOT use boost::multi_index. The equivalent indexing
 // layer is built on tidwall/btree (see internal/state/mem.go +
 // internal/state/objects/*_store.go). Per project memory
 // (project_typed_store_overhaul_2026_05_07.md) the typed K/V backing

@@ -3,8 +3,8 @@ package objects
 import (
 	"math/big"
 
-	"hived-go/internal/protocol/asset"
-	"hived-go/internal/state"
+	"gopherd/internal/protocol/asset"
+	"gopherd/internal/state"
 )
 
 // feedPriceIsZero is a local copy of chain.priceIsZero (we can't import

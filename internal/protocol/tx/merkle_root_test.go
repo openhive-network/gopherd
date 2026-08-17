@@ -3,7 +3,7 @@ package tx
 import (
 	"testing"
 
-	"hived-go/internal/crypto"
+	"gopherd/internal/crypto"
 )
 
 // TestMerkleRootIncrementalGrowth ports basic_tests.cpp::merkle_root.

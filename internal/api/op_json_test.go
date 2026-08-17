@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"hived-go/internal/protocol/op"
+	"gopherd/internal/protocol/op"
 )
 
 func TestSnakeCase(t *testing.T) {

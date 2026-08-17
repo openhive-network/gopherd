@@ -10,7 +10,7 @@ package main
 import (
 	"flag"
 	"fmt"
-	"hived-go/internal/config"
+	"gopherd/internal/config"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
@@ -26,13 +26,13 @@ import (
 	"syscall"
 	"time"
 
-	"hived-go/internal/blocklog"
-	"hived-go/internal/chain"
-	"hived-go/internal/protocol/hardfork"
-	"hived-go/internal/state"
-	"hived-go/internal/state/genesis"
-	"hived-go/internal/state/objects"
-	"hived-go/internal/state/snapshot"
+	"gopherd/internal/blocklog"
+	"gopherd/internal/chain"
+	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/state"
+	"gopherd/internal/state/genesis"
+	"gopherd/internal/state/objects"
+	"gopherd/internal/state/snapshot"
 )
 
 // snapBlockNum parses the block height from a snapshot dir path of the form

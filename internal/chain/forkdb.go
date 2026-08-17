@@ -1,6 +1,6 @@
 package chain
 
-import "hived-go/internal/protocol/block"
+import "gopherd/internal/protocol/block"
 
 // forkNode is one block in the fork DAG: its id, its parent (prev), height, and
 // the raw signed_block bytes needed to (re)apply it during a reorg.

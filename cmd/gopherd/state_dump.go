@@ -12,9 +12,9 @@ import (
 	"fmt"
 	"os"
 
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
-	"hived-go/internal/state/snapshot"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
+	"gopherd/internal/state/snapshot"
 )
 
 func cmdStateDump(args []string) int {

@@ -2,7 +2,7 @@ package sync
 
 import (
 	"fmt"
-	"hived-go/internal/config"
+	"gopherd/internal/config"
 	"io"
 	"os"
 	"sort"
@@ -11,11 +11,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	blockzstd "hived-go/internal/blocklog/zstd"
-	"hived-go/internal/chain"
-	"hived-go/internal/crypto"
-	"hived-go/internal/p2p/node"
-	"hived-go/internal/protocol/block"
+	blockzstd "gopherd/internal/blocklog/zstd"
+	"gopherd/internal/chain"
+	"gopherd/internal/crypto"
+	"gopherd/internal/p2p/node"
+	"gopherd/internal/protocol/block"
 )
 
 // Defaults — tunable via Config.

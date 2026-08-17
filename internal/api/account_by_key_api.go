@@ -4,11 +4,11 @@ import (
 	"context"
 	"encoding/json"
 
-	"hived-go/internal/api/jsonrpc"
-	"hived-go/internal/crypto"
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/api/jsonrpc"
+	"gopherd/internal/crypto"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // registerAccountByKeyAPI wires get_key_references (pubkey → accounts).

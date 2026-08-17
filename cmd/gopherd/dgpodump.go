@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"hived-go/internal/state/objects"
+	"gopherd/internal/state/objects"
 )
 
 // dgpodump decodes a snapshot dgpo_store.bin and prints the vesting pool + supply.

@@ -3,9 +3,9 @@ package genesis
 import (
 	"testing"
 
-	"hived-go/internal/crypto"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/crypto"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // TestApplyTestnet_WitnessesPresent verifies all 21 deterministic

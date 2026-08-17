@@ -4,9 +4,9 @@ import (
 	"errors"
 	"fmt"
 
-	"hived-go/internal/fcraw"
-	"hived-go/internal/protocol/asset"
-	"hived-go/internal/state"
+	"gopherd/internal/fcraw"
+	"gopherd/internal/protocol/asset"
+	"gopherd/internal/state"
 )
 
 // FeedHistoryTable is the singleton table holding the price-feed

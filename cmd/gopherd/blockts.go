@@ -5,8 +5,8 @@ import (
 	"os"
 	"strconv"
 
-	"hived-go/internal/blocklog"
-	"hived-go/internal/protocol/block"
+	"gopherd/internal/blocklog"
+	"gopherd/internal/protocol/block"
 )
 
 func cmdBlocklogTS(args []string) int {

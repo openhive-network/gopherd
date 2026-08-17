@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"hived-go/internal/p2p/proto"
-	"hived-go/internal/p2p/transport"
+	"gopherd/internal/p2p/proto"
+	"gopherd/internal/p2p/transport"
 )
 
 // captureDelegate is a test helper that records connect/disconnect events.

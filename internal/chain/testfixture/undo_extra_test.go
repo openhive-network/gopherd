@@ -3,10 +3,10 @@ package testfixture
 import (
 	"testing"
 
-	"hived-go/internal/protocol/asset"
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/protocol/asset"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // TestUndoFeedHistory ports undo_tests.cpp::undo_feed_history. Mutating

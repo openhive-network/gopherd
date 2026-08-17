@@ -3,8 +3,8 @@ package objects
 import (
 	"bytes"
 
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/state"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/state"
 )
 
 // snapColdDurableFlag marks a snapshot whose cold tier is DURABLE: the cold rows

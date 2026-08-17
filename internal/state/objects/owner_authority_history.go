@@ -4,9 +4,9 @@ import (
 	"errors"
 	"fmt"
 
-	"hived-go/internal/fcraw"
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/state"
+	"gopherd/internal/fcraw"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/state"
 )
 
 // OwnerAuthorityHistoryTable holds rows recorded every time an account

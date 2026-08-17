@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"os"
 
-	"hived-go/internal/blocklog"
-	"hived-go/internal/fcraw"
-	"hived-go/internal/protocol/block"
-	"hived-go/internal/protocol/tx"
+	"gopherd/internal/blocklog"
+	"gopherd/internal/fcraw"
+	"gopherd/internal/protocol/block"
+	"gopherd/internal/protocol/tx"
 )
 
 func main() {

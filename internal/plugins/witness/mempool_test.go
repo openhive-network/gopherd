@@ -6,12 +6,12 @@ import (
 	"errors"
 	"testing"
 
-	"hived-go/internal/crypto"
-	"hived-go/internal/fcraw"
-	"hived-go/internal/protocol/asset"
-	"hived-go/internal/protocol/op"
-	"hived-go/internal/protocol/tx"
-	"hived-go/internal/state/genesis"
+	"gopherd/internal/crypto"
+	"gopherd/internal/fcraw"
+	"gopherd/internal/protocol/asset"
+	"gopherd/internal/protocol/op"
+	"gopherd/internal/protocol/tx"
+	"gopherd/internal/state/genesis"
 )
 
 // rawTx builds a serialized signed_transaction carrying a transfer, plus its id.

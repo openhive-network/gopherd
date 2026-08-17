@@ -4,9 +4,9 @@ import (
 	"context"
 	"encoding/json"
 
-	"hived-go/internal/api/jsonrpc"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/api/jsonrpc"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // registerCondenserAPI wires the legacy positional-args aggregator. Assets

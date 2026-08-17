@@ -5,8 +5,8 @@ import (
 	"os"
 	"strconv"
 
-	"hived-go/internal/blocklog"
-	"hived-go/internal/protocol/block"
+	"gopherd/internal/blocklog"
+	"gopherd/internal/protocol/block"
 )
 
 // Usage: scan_producers <block_log> <start_block> <count>

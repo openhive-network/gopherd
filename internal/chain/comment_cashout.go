@@ -7,13 +7,13 @@ import (
 	"slices"
 	"strings"
 
-	"hived-go/internal/math128"
-	"hived-go/internal/protocol/asset"
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/protocol/hardfork"
-	"hived-go/internal/reward"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/math128"
+	"gopherd/internal/protocol/asset"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/reward"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // GHIVEDIFF env vars are read ONCE at process start so the per-block hot

@@ -24,8 +24,8 @@ import (
 	"errors"
 	"fmt"
 
-	"hived-go/internal/fcraw"
-	"hived-go/internal/state"
+	"gopherd/internal/fcraw"
+	"gopherd/internal/state"
 )
 
 // RCPendingDataTable holds the singleton rc_pending_data row.

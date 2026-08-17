@@ -29,7 +29,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"hived-go/internal/state/genesis"
+	"gopherd/internal/state/genesis"
 )
 
 const (

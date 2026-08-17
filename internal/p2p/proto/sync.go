@@ -3,7 +3,7 @@ package proto
 import (
 	"fmt"
 
-	"hived-go/internal/fcraw"
+	"gopherd/internal/fcraw"
 )
 
 // ItemIDsInventoryMessage mirrors graphene::net::item_ids_inventory_message.

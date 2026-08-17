@@ -4,8 +4,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	blockzstd "hived-go/internal/blocklog/zstd"
-	"hived-go/internal/protocol/block"
+	blockzstd "gopherd/internal/blocklog/zstd"
+	"gopherd/internal/protocol/block"
 )
 
 // RecentBlockCacheSize bounds how many of the most-recently-applied blocks

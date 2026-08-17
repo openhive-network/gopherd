@@ -1,8 +1,8 @@
 package chain
 
 import (
-	"hived-go/internal/chain/evaluator"
-	"hived-go/internal/state"
+	"gopherd/internal/chain/evaluator"
+	"gopherd/internal/state"
 )
 
 // CreateVesting_via_chain is a thin re-export so chain/funds.go can call

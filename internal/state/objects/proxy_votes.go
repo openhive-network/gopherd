@@ -1,8 +1,8 @@
 package objects
 
 import (
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/state"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/state"
 )
 
 // MaxProxyRecursionDepth mirrors HIVE_MAX_PROXY_RECURSION_DEPTH from

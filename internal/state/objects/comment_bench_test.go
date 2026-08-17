@@ -3,7 +3,7 @@ package objects
 import (
 	"testing"
 
-	"hived-go/internal/protocol/auth"
+	"gopherd/internal/protocol/auth"
 )
 
 // Cold-tier read microbenchmark. The 48M+ replay slowdown is dominated by

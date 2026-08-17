@@ -4,10 +4,10 @@ import (
 	"errors"
 	"testing"
 
-	"hived-go/internal/protocol/asset"
-	"hived-go/internal/protocol/op"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/protocol/asset"
+	"gopherd/internal/protocol/op"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // seedAccounts opens a fresh DB, creates Alice and Bob with the given

@@ -6,8 +6,8 @@ import (
 	"os"
 	"testing"
 
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // TestSavePersistLoadRoundtrip is the zero-snapshot-node round-trip: the full

@@ -4,13 +4,13 @@ import (
 	"errors"
 	"fmt"
 
-	"hived-go/internal/fcraw"
-	"hived-go/internal/protocol/asset"
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/protocol/hardfork"
-	"hived-go/internal/protocol/op"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/fcraw"
+	"gopherd/internal/protocol/asset"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/protocol/op"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // Errors specific to witness evaluators.

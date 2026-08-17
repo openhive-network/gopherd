@@ -2,9 +2,9 @@ package chain
 
 import (
 	"fmt"
-	"hived-go/internal/crypto"
+	"gopherd/internal/crypto"
 
-	"hived-go/internal/protocol/block"
+	"gopherd/internal/protocol/block"
 )
 
 // PushOutcome reports the net effect of a PushLiveBlock call.

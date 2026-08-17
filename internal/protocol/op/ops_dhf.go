@@ -6,9 +6,9 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"hived-go/internal/fcraw"
-	"hived-go/internal/protocol/asset"
-	"hived-go/internal/protocol/auth"
+	"gopherd/internal/fcraw"
+	"gopherd/internal/protocol/asset"
+	"gopherd/internal/protocol/auth"
 )
 
 // readSortedInt64Set reads a flat_set_ex<int64_t> on the wire: varint count

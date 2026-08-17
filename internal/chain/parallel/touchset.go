@@ -12,8 +12,8 @@
 package parallel
 
 import (
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/protocol/op"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/protocol/op"
 )
 
 // AccountSet is a tiny inline-array-based set of account names. Most

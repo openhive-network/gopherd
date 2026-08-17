@@ -4,11 +4,11 @@ import (
 	"errors"
 	"fmt"
 
-	"hived-go/internal/protocol/asset"
-	"hived-go/internal/protocol/hardfork"
-	"hived-go/internal/protocol/op"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/protocol/asset"
+	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/protocol/op"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // HIVE_SAVINGS_WITHDRAW_TIME from libraries/protocol/include/hive/protocol/config.hpp:

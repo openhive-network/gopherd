@@ -5,7 +5,7 @@ import (
 	"encoding/hex"
 	"sync"
 
-	"hived-go/internal/protocol/tx"
+	"gopherd/internal/protocol/tx"
 )
 
 // Mempool is a minimal in-memory pool of accepted-but-unconfirmed transactions.

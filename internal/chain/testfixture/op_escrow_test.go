@@ -3,9 +3,9 @@ package testfixture
 import (
 	"testing"
 
-	"hived-go/internal/protocol/op"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/protocol/op"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // Port of operation_tests.cpp::escrow_transfer_apply.

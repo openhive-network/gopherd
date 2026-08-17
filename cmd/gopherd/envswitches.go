@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"hived-go/internal/config"
+	"gopherd/internal/config"
 	"sort"
 	"strings"
 )

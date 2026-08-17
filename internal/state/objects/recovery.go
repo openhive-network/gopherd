@@ -3,9 +3,9 @@ package objects
 import (
 	"errors"
 
-	"hived-go/internal/fcraw"
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/state"
+	"gopherd/internal/fcraw"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/state"
 )
 
 // AccountRecoveryRequest is the account_recovery_request_object — a

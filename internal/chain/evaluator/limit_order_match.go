@@ -5,10 +5,10 @@ import (
 	"math/bits"
 	"os"
 
-	"hived-go/internal/protocol/asset"
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/protocol/hardfork"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/protocol/asset"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/state/objects"
 )
 
 // liquidityRewardMinAgePreHF10 — pre-HF10 a maker's order must rest on

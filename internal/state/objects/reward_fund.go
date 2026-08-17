@@ -4,8 +4,8 @@ import (
 	"errors"
 	"fmt"
 
-	"hived-go/internal/fcraw"
-	"hived-go/internal/state"
+	"gopherd/internal/fcraw"
+	"gopherd/internal/state"
 )
 
 // RewardFundTable holds reward_fund_object rows. Created at HF17 with a

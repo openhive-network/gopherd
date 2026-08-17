@@ -3,9 +3,9 @@ package testfixture
 import (
 	"testing"
 
-	"hived-go/internal/protocol/hardfork"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // TestHF24ConsolidateBalance ports hf24_tests.cpp::consolidate_balance.

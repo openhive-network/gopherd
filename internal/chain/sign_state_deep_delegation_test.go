@@ -3,8 +3,8 @@ package chain
 import (
 	"testing"
 
-	"hived-go/internal/crypto"
-	"hived-go/internal/protocol/auth"
+	"gopherd/internal/crypto"
+	"gopherd/internal/protocol/auth"
 )
 
 // mapFetcher is a trivial authorityFetcher backed by a posting-authority map.

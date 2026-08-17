@@ -9,9 +9,11 @@ It replays the chain from genesis, syncs over the graphene P2P protocol, follows
 the live mainnet head, serves a read-only JSON-RPC subset, and can run the block
 production pipeline.
 
-> **Naming:** the project and binary are **gopherd**. The Go module is still
-> `hived-go`, so import paths read `hived-go/internal/...`. Renaming the module
-> is a mechanical change nobody has needed badly enough to do.
+> **Naming:** the project, binary and Go module are all **gopherd**, so import
+> paths read `gopherd/internal/...`. The checkout directory may still be named
+> `hived-go` on older machines — Go does not require it to match the module.
+> Environment switches are `GOPHERD_*`; the old `GHIVE_*` names still work but
+> warn once.
 
 ## Status
 

@@ -6,13 +6,13 @@ import (
 	"strings"
 	"testing"
 
-	"hived-go/internal/api/jsonrpc"
-	"hived-go/internal/chain"
-	"hived-go/internal/protocol/asset"
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/state"
-	"hived-go/internal/state/genesis"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/api/jsonrpc"
+	"gopherd/internal/chain"
+	"gopherd/internal/protocol/asset"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/state"
+	"gopherd/internal/state/genesis"
+	"gopherd/internal/state/objects"
 )
 
 // call runs one JSON-RPC request through the server and returns the decoded

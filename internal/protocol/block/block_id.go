@@ -22,7 +22,7 @@ package block
 import (
 	"encoding/binary"
 
-	"hived-go/internal/crypto"
+	"gopherd/internal/crypto"
 )
 
 // IDSize is the on-disk / in-memory size of a Hive block ID.

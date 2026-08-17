@@ -1,8 +1,8 @@
 package chain
 
 import (
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // adjustSupplyHive mirrors C++ database::adjust_supply(HIVE_asset)

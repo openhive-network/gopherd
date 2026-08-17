@@ -3,7 +3,7 @@ package objects
 import (
 	"testing"
 
-	"hived-go/internal/protocol/auth"
+	"gopherd/internal/protocol/auth"
 )
 
 func TestCommentSlimRoundTrip(t *testing.T) {

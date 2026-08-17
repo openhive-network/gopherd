@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	bz "hived-go/internal/blocklog/zstd"
+	bz "gopherd/internal/blocklog/zstd"
 )
 
 func zstdNewCompressor(t *testing.T) *bz.Compressor {

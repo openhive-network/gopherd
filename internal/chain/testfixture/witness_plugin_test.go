@@ -34,10 +34,10 @@ import (
 	"strings"
 	"testing"
 
-	"hived-go/internal/protocol/asset"
-	"hived-go/internal/protocol/op"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/protocol/asset"
+	"gopherd/internal/protocol/op"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // witnessBasicScenario is the shared body of witness_basic_test and the

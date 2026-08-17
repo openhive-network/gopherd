@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"testing"
 
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/state"
-	"hived-go/internal/state/genesis"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/state"
+	"gopherd/internal/state/genesis"
+	"gopherd/internal/state/objects"
 )
 
 // newBenchState builds a fresh state.Database with genesis applied,
@@ -464,14 +464,14 @@ func BenchmarkEmptyUndoSessionsKeepAlive(b *testing.B) {
 // debug_update() modifies state while a block_session sits on the
 // undo stack; the modification must persist past block boundaries
 // without being undone. It exercises the debug_plugin code path which
-// is NOT present in hived-go (no debug_plugin, no live mutation
+// is NOT present in gopherd (no debug_plugin, no live mutation
 // outside Session-bracketed apply_block path).
 //
 // Reporting the skip lets future ports come back to it if a Go
 // debug_update equivalent is ever added.
 func TestDebugUpdateUndoBug(t *testing.T) {
 	t.Skip("requires db_plugin->debug_update equivalent in Go; not present " +
-		"in hived-go. The C++ bug repro relies on debug_update modifying " +
+		"in gopherd. The C++ bug repro relies on debug_update modifying " +
 		"state OUTSIDE a Session-bracketed apply_block path so the modification " +
 		"survives subsequent block sessions on the undo stack. Go's state.Session " +
 		"makes that path nonexistent by construction (no mutation outside an " +

@@ -15,13 +15,13 @@ import (
 	"sync/atomic"
 	"time"
 
-	"hived-go/internal/blocklog/zstd"
-	"hived-go/internal/chain"
-	"hived-go/internal/crypto"
-	"hived-go/internal/p2p/peerdb"
-	"hived-go/internal/p2p/proto"
-	"hived-go/internal/p2p/transport"
-	"hived-go/internal/protocol/network"
+	"gopherd/internal/blocklog/zstd"
+	"gopherd/internal/chain"
+	"gopherd/internal/crypto"
+	"gopherd/internal/p2p/peerdb"
+	"gopherd/internal/p2p/proto"
+	"gopherd/internal/p2p/transport"
+	"gopherd/internal/protocol/network"
 )
 
 // ChainView is the slice of chain.Database the node layer needs. We take

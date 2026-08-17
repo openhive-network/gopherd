@@ -3,14 +3,14 @@ package chain
 import (
 	"testing"
 
-	"hived-go/internal/protocol/block"
-	"hived-go/internal/protocol/hardfork"
-	"hived-go/internal/protocol/network"
-	"hived-go/internal/protocol/op"
-	"hived-go/internal/protocol/tx"
-	"hived-go/internal/state"
-	"hived-go/internal/state/genesis"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/protocol/block"
+	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/protocol/network"
+	"gopherd/internal/protocol/op"
+	"gopherd/internal/protocol/tx"
+	"gopherd/internal/state"
+	"gopherd/internal/state/genesis"
+	"gopherd/internal/state/objects"
 )
 
 // TestValidateBlockChainContinuity ports the previous-id check from

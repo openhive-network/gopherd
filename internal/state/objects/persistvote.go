@@ -1,8 +1,8 @@
 package objects
 
 import (
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/state/persiststore"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/state/persiststore"
 )
 
 // PersistCommentVoteStore is a persiststore-backed comment-vote store

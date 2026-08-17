@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"hived-go/internal/protocol/asset"
+	"gopherd/internal/protocol/asset"
 )
 
 func hive(amount int64) asset.Asset {

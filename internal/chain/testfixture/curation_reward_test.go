@@ -24,8 +24,8 @@ package testfixture
 import (
 	"testing"
 
-	"hived-go/internal/protocol/hardfork"
-	"hived-go/internal/protocol/op"
+	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/protocol/op"
 )
 
 // TestCurationRewardNoVotes ports curation_reward_tests.cpp::no_votes.

@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"strconv"
 
-	"hived-go/internal/api/jsonrpc"
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/api/jsonrpc"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // registerWitnessListAPI wires the witness enumeration methods (count / lookup /

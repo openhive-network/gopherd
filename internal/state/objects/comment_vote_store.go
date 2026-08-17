@@ -6,8 +6,8 @@ import (
 	"io"
 	"sort"
 
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/state"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/state"
 )
 
 // CommentVoteStore is the in-memory typed container for the

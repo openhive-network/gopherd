@@ -3,9 +3,9 @@ package chain
 import (
 	"fmt"
 
-	"hived-go/internal/protocol/block"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/protocol/block"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // processHeaderExtensions ports hive::chain::database::process_header_extensions

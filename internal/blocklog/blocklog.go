@@ -38,7 +38,7 @@ import (
 	"sort"
 	"strings"
 
-	"hived-go/internal/blocklog/zstd"
+	"gopherd/internal/blocklog/zstd"
 )
 
 const (

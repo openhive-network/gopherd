@@ -4,7 +4,7 @@ import (
 	"container/list"
 	"sync"
 
-	"hived-go/internal/protocol/block"
+	"gopherd/internal/protocol/block"
 )
 
 // seenSet is a concurrent FIFO-LRU bounded set of 20-byte IDs. Used to

@@ -3,9 +3,9 @@ package sync
 import (
 	"sync"
 
-	"hived-go/internal/chain"
-	"hived-go/internal/crypto"
-	"hived-go/internal/protocol/block"
+	"gopherd/internal/chain"
+	"gopherd/internal/crypto"
+	"gopherd/internal/protocol/block"
 )
 
 // signerCache caches the result of RecoverBlockSigner keyed by block.ID.

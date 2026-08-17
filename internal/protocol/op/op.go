@@ -18,7 +18,7 @@ package op
 import (
 	"fmt"
 
-	"hived-go/internal/fcraw"
+	"gopherd/internal/fcraw"
 )
 
 // Tag is the static_variant tag of a regular operation. Values 0..49 are

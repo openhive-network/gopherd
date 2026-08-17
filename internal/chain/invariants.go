@@ -3,9 +3,9 @@ package chain
 import (
 	"fmt"
 
-	"hived-go/internal/protocol/asset"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/protocol/asset"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // InvariantResult holds the conservation sums recomputed from raw state

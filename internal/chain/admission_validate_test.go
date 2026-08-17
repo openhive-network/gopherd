@@ -3,10 +3,10 @@ package chain
 import (
 	"testing"
 
-	"hived-go/internal/protocol/asset"
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/protocol/op"
-	"hived-go/internal/protocol/tx"
+	"gopherd/internal/protocol/asset"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/protocol/op"
+	"gopherd/internal/protocol/tx"
 )
 
 // TestAdmissionRunsOperationValidators pins that structurally invalid

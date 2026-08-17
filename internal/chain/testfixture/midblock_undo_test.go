@@ -3,7 +3,7 @@ package testfixture
 import (
 	"testing"
 
-	"hived-go/internal/protocol/op"
+	"gopherd/internal/protocol/op"
 )
 
 // Port of undo_tests.cpp idiom: a transaction that fails mid-flight

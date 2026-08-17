@@ -20,12 +20,12 @@ import (
 	"strings"
 	"testing"
 
-	"hived-go/internal/api/jsonrpc"
-	"hived-go/internal/chain"
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/state"
-	"hived-go/internal/state/genesis"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/api/jsonrpc"
+	"gopherd/internal/chain"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/state"
+	"gopherd/internal/state/genesis"
+	"gopherd/internal/state/objects"
 )
 
 // callR is a non-fatal variant of the api_test.go `call` helper: it returns the

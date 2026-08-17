@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"hived-go/internal/state"
-	"hived-go/internal/state/persiststore"
+	"gopherd/internal/state"
+	"gopherd/internal/state/persiststore"
 )
 
 // persiststate is the "zero-snapshot node" container (chainbase-in-Go): the

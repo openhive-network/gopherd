@@ -3,7 +3,7 @@ package testfixture
 import (
 	"testing"
 
-	"hived-go/internal/protocol/hardfork"
+	"gopherd/internal/protocol/hardfork"
 )
 
 // Verify that walking blocks via SkipSecondsReal accrues inflation

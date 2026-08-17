@@ -3,9 +3,9 @@ package testfixture
 import (
 	"testing"
 
-	"hived-go/internal/chain"
-	"hived-go/internal/protocol/hardfork"
-	"hived-go/internal/protocol/op"
+	"gopherd/internal/chain"
+	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/protocol/op"
 )
 
 // TestProxyClearedOperationBasic ports

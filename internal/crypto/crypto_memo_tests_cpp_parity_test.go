@@ -8,7 +8,7 @@ import "testing"
 // encrypt/decrypt/serialize round-trip, including a regression for the
 // "buggy" field order shipped in hived 1.27.5-1.28.6.
 //
-// hived-go has no memo encrypt/decrypt path yet — internal/crypto only
+// gopherd has no memo encrypt/decrypt path yet — internal/crypto only
 // covers secp256k1, ECDH primitives, base58/WIF, and CityHash. Memo
 // encryption is a client-side feature (wallets); the replay /
 // validation engines never touch encrypted memos.

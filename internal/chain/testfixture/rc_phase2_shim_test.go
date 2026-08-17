@@ -7,9 +7,9 @@ package testfixture
 // lowercase symbols local to the test package so the file links.
 
 import (
-	"hived-go/internal/chain"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/chain"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 func processRCExpiredDelegationsForTest(s *state.Session, now uint32) {

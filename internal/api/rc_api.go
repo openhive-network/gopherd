@@ -9,11 +9,11 @@ import (
 	"sort"
 	"strconv"
 
-	"hived-go/internal/api/jsonrpc"
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/protocol/op"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/api/jsonrpc"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/protocol/op"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // rcResourceNames mirrors fc::reflector<rc_resource_types>::to_string — the

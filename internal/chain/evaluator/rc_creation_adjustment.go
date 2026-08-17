@@ -4,7 +4,7 @@ import (
 	"math"
 	"math/bits"
 
-	"hived-go/internal/state/objects"
+	"gopherd/internal/state/objects"
 )
 
 // rcAdjustmentFromFee converts an account-creation fee in HIVE to VESTS at the

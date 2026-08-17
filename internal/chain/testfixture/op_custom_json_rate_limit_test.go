@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"hived-go/internal/protocol/op"
+	"gopherd/internal/protocol/op"
 )
 
 // TestCustomJSONRateLimit ports operation_tests.cpp::custom_json_rate_limit

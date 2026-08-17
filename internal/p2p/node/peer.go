@@ -20,8 +20,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"hived-go/internal/p2p/proto"
-	"hived-go/internal/p2p/transport"
+	"gopherd/internal/p2p/proto"
+	"gopherd/internal/p2p/transport"
 )
 
 // netipAddrFrom4 wraps netip.AddrFrom4 so the helper near

@@ -4,8 +4,8 @@ import (
 	"sort"
 	"testing"
 
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/state"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/state"
 )
 
 // TestAccountStoreSnapshotRestore exercises the chainbase-style undo log

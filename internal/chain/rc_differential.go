@@ -34,10 +34,10 @@ package chain
 import (
 	"encoding/json"
 
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/protocol/op"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/protocol/op"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // countDifferentialOp returns the per-resource differential usage for op

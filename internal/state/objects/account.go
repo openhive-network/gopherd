@@ -12,9 +12,9 @@ import (
 	"errors"
 	"fmt"
 
-	"hived-go/internal/fcraw"
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/state"
+	"gopherd/internal/fcraw"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/state"
 )
 
 // AccountTable is the TableID for account_object state.

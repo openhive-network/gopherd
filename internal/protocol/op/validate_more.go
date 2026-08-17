@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"unicode/utf8"
 
-	"hived-go/internal/fcraw"
-	"hived-go/internal/protocol/asset"
+	"gopherd/internal/fcraw"
+	"gopherd/internal/protocol/asset"
 )
 
 // Validate methods ported from libraries/protocol/hive_operations.cpp.

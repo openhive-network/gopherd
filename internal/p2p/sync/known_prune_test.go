@@ -3,7 +3,7 @@ package sync
 import (
 	"testing"
 
-	"hived-go/internal/protocol/block"
+	"gopherd/internal/protocol/block"
 )
 
 // TestKnownPruneDropsTransactionIDs pins the leak fix.

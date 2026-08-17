@@ -6,13 +6,13 @@ import (
 	"encoding/json"
 	"sort"
 
-	"hived-go/internal/api/jsonrpc"
-	"hived-go/internal/chain"
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/protocol/network"
-	"hived-go/internal/protocol/tx"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/api/jsonrpc"
+	"gopherd/internal/chain"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/protocol/network"
+	"gopherd/internal/protocol/tx"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 func (s *Server) registerTxAPI() {

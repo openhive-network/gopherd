@@ -3,8 +3,8 @@ package chain
 import (
 	"testing"
 
-	"hived-go/internal/math128"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/math128"
+	"gopherd/internal/state/objects"
 )
 
 // TestCurationWeight ports basic_tests.cpp::curation_weight_test from

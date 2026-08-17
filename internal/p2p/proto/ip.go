@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"net/netip"
 
-	"hived-go/internal/fcraw"
+	"gopherd/internal/fcraw"
 )
 
 // IP wire format

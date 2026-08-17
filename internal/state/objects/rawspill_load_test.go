@@ -7,8 +7,8 @@ import (
 	"reflect"
 	"testing"
 
-	"hived-go/internal/fcraw"
-	"hived-go/internal/state"
+	"gopherd/internal/fcraw"
+	"gopherd/internal/state"
 )
 
 // buildCommentSnapshotStream hand-assembles a comment_store snapshot stream

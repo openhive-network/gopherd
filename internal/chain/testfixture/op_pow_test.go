@@ -3,10 +3,10 @@ package testfixture
 import (
 	"testing"
 
-	"hived-go/internal/crypto"
-	"hived-go/internal/protocol/op"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/crypto"
+	"gopherd/internal/protocol/op"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // validPowProps returns LegacyChainProperties with HIVE-symbol fee and

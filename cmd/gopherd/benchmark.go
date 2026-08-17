@@ -7,10 +7,10 @@ import (
 	"runtime"
 	"time"
 
-	"hived-go/internal/blocklog"
-	"hived-go/internal/chain"
-	"hived-go/internal/state"
-	"hived-go/internal/state/genesis"
+	"gopherd/internal/blocklog"
+	"gopherd/internal/chain"
+	"gopherd/internal/state"
+	"gopherd/internal/state/genesis"
 )
 
 // cmdBenchmark runs a cold-start replay benchmark and reports

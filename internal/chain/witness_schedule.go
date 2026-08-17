@@ -8,11 +8,11 @@ import (
 	"sort"
 	"strings"
 
-	"hived-go/internal/math128"
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/protocol/hardfork"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/math128"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 func bigEndianUint64(b []byte) uint64 { return binary.BigEndian.Uint64(b) }

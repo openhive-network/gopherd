@@ -4,9 +4,9 @@ import (
 	"testing"
 	"time"
 
-	blockzstd "hived-go/internal/blocklog/zstd"
-	"hived-go/internal/p2p/proto"
-	"hived-go/internal/protocol/block"
+	blockzstd "gopherd/internal/blocklog/zstd"
+	"gopherd/internal/p2p/proto"
+	"gopherd/internal/protocol/block"
 )
 
 // buildTestSignedBlock builds the FC-binary form of a minimal signed_block

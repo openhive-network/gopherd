@@ -3,9 +3,9 @@ package testfixture
 import (
 	"testing"
 
-	"hived-go/internal/chain"
-	"hived-go/internal/protocol/op"
-	"hived-go/internal/protocol/tx"
+	"gopherd/internal/chain"
+	"gopherd/internal/protocol/op"
+	"gopherd/internal/protocol/tx"
 )
 
 // ComputeRCCost should return zero pre-HF20 (RC subsystem inactive).

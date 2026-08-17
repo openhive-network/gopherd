@@ -3,11 +3,11 @@ package testfixture
 import (
 	"testing"
 
-	"hived-go/internal/protocol/asset"
-	"hived-go/internal/protocol/hardfork"
-	"hived-go/internal/protocol/op"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/protocol/asset"
+	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/protocol/op"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // Port of operation_tests.cpp::feed_publish_apply.

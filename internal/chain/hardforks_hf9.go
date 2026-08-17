@@ -1,10 +1,10 @@
 package chain
 
 import (
-	"hived-go/internal/crypto"
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/crypto"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // HF9 mass-rotates the owner/active/posting authorities of 150

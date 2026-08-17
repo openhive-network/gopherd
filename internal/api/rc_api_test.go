@@ -3,10 +3,10 @@ package api
 import (
 	"testing"
 
-	"hived-go/internal/chain"
-	"hived-go/internal/state"
-	"hived-go/internal/state/genesis"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/chain"
+	"gopherd/internal/state"
+	"gopherd/internal/state/genesis"
+	"gopherd/internal/state/objects"
 )
 
 // TestRCAPI exercises the rc_api surface over seeded RC state: per-account RC

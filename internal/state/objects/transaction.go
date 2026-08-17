@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 
-	"hived-go/internal/state"
+	"gopherd/internal/state"
 )
 
 // TransactionTable is the dedup window of recently-applied transactions.

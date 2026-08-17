@@ -3,7 +3,7 @@ package objects
 import (
 	"testing"
 
-	"hived-go/internal/state"
+	"gopherd/internal/state"
 )
 
 // TestRCResourceParamRoundTrip exercises the singleton encoder/decoder
