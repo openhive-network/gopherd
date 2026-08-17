@@ -3,9 +3,9 @@ package chain
 import (
 	"testing"
 
-	"hived-go/internal/state"
-	"hived-go/internal/state/genesis"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/state"
+	"gopherd/internal/state/genesis"
+	"gopherd/internal/state/objects"
 )
 
 // TestApplyRCDelegationFromTo ports the simplest direct_rc_delegation

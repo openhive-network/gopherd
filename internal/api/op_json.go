@@ -5,10 +5,10 @@ import (
 	"reflect"
 	"strings"
 
-	"hived-go/internal/crypto"
-	"hived-go/internal/protocol/asset"
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/protocol/op"
+	"gopherd/internal/crypto"
+	"gopherd/internal/protocol/asset"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/protocol/op"
 )
 
 // opToJSON renders one operation in hived's LEGACY form used by condenser /

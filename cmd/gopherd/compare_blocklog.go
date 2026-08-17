@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"time"
 
-	"hived-go/internal/blocklog"
+	"gopherd/internal/blocklog"
 )
 
 // cmdCompareBlocklog byte-compares blocks in [from,to] between a reference

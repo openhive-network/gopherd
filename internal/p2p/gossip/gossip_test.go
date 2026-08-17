@@ -4,7 +4,7 @@ import (
 	"sync"
 	"testing"
 
-	"hived-go/internal/protocol/block"
+	"gopherd/internal/protocol/block"
 )
 
 // TestOnBlockReceivedIsNoOp pins the regression: gossip's

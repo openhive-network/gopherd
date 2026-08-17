@@ -3,11 +3,11 @@ package chain
 import (
 	"math/big"
 
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/protocol/hardfork"
-	"hived-go/internal/reward"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/reward"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // processHardforks fires apply_hardfork(N) once for each hardfork whose

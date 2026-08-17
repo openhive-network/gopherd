@@ -144,7 +144,7 @@ func TestBlockPopBlockTwiceParity(t *testing.T) {
 }
 
 func TestBlockRSFMissedBlocksParity(t *testing.T) {
-	t.Skip("MISSING: hived-go's DGPO does not yet carry recent_slots_filled or " +
+	t.Skip("MISSING: gopherd's DGPO does not yet carry recent_slots_filled or " +
 		"a witness_participation_rate getter (see " +
 		"internal/state/objects/dgpo.go). Skip mirrored in " +
 		"block_extra_test.go::TestBlockRSFMissedBlocks.")

@@ -1,9 +1,9 @@
 package chain
 
 import (
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // ApplyRCDelegation applies a (from → to, max_rc) RC delegation. Mirrors

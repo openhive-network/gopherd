@@ -3,11 +3,11 @@ package testfixture
 import (
 	"testing"
 
-	"hived-go/internal/protocol/hardfork"
-	"hived-go/internal/protocol/op"
-	"hived-go/internal/state"
-	"hived-go/internal/state/genesis"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/protocol/op"
+	"gopherd/internal/state"
+	"gopherd/internal/state/genesis"
+	"gopherd/internal/state/objects"
 )
 
 // TestInitHiveHBDSupply ports the spirit of block_tests.cpp::init_hive_hbd_supply.
@@ -234,10 +234,10 @@ func TestBlockFastConfirmPlusOutOfOrderBlocks(t *testing.T) {
 // The C++ test asserts the contents of dgpo.recent_slots_filled — a
 // 128-bit bitmask updated per applied block where each bit reflects
 // whether the corresponding slot in the recent window was filled.
-// hived-go does not yet track recent_slots_filled on the DGPO; the
+// gopherd does not yet track recent_slots_filled on the DGPO; the
 // participation-rate metric is unused by current consensus paths.
 func TestBlockRSFMissedBlocks(t *testing.T) {
-	t.Skip("hived-go's DGPO does not yet carry recent_slots_filled or a " +
+	t.Skip("gopherd's DGPO does not yet carry recent_slots_filled or a " +
 		"witness_participation_rate getter — see " +
 		"internal/state/objects/dgpo.go. Bit-bashing the slot mask is " +
 		"non-functional without the field plumbed through ApplyBlock.")
@@ -376,7 +376,7 @@ func TestBlockSafeClosingDatabase(t *testing.T) {
 // before/after start_miner_voting_block to exercise both pre- and
 // post-voting LIB advancement rules.
 //
-// hived-go's updateLastIrreversibleBlock enforces monotonicity in code
+// gopherd's updateLastIrreversibleBlock enforces monotonicity in code
 // (lib.go:71 `if newLIB > dgpoRef.LastIrreversibleBlockNum`). We test
 // the invariant directly: across a run of generated blocks, LIB never
 // decreases. Hived's direct-set helper has no Go equivalent so we can't
@@ -406,7 +406,7 @@ func TestBlockSetLowerLibThenCurrent(t *testing.T) {
 
 // TestBlockDoubleSignCheck ports block_tests.cpp::double_sign_check.
 // The C++ test verifies that a transaction signed TWICE with the same
-// private key is rejected as tx_duplicate_sig. hived-go's
+// private key is rejected as tx_duplicate_sig. gopherd's
 // VerifyAuthority does not currently de-duplicate redundant signatures
 // (see comment on extra-signature rejection in op_signature_stripping_test.go:
 // "Go's VerifyAuthority does not reject extra/irrelevant signatures yet").
@@ -423,7 +423,7 @@ func TestBlockDoubleSignCheck(t *testing.T) {
 // block_flow_control subclass that records every phase callback
 // (on_write_queue_pop, on_fork_db_insert, on_fork_normal, etc.) and
 // asserts the call order through one block generation cycle.
-// hived-go has no block_flow_control type — apply_block is monolithic
+// gopherd has no block_flow_control type — apply_block is monolithic
 // without phase hooks.
 func TestBlockFlowControlGeneration(t *testing.T) {
 	t.Skip("Go has no block_flow_control hook surface — ApplyBlock " +

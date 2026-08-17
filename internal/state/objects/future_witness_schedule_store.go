@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 
-	"hived-go/internal/state"
+	"gopherd/internal/state"
 )
 
 // FutureWitnessScheduleStore mirrors WitnessScheduleStore but holds the

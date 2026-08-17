@@ -3,10 +3,10 @@ package op
 import (
 	"unsafe"
 
-	"hived-go/internal/crypto"
-	"hived-go/internal/fcraw"
-	"hived-go/internal/protocol/asset"
-	"hived-go/internal/protocol/auth"
+	"gopherd/internal/crypto"
+	"gopherd/internal/fcraw"
+	"gopherd/internal/protocol/asset"
+	"gopherd/internal/protocol/auth"
 )
 
 // ---- 9 account_create ---------------------------------------------------

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"net/netip"
 
-	"hived-go/internal/fcraw"
+	"gopherd/internal/fcraw"
 )
 
 // LegacyHelloMessage is graphene::net::legacy_hello_message — the IPv4-only

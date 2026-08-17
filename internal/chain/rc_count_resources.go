@@ -21,9 +21,9 @@
 package chain
 
 import (
-	"hived-go/internal/protocol/op"
-	"hived-go/internal/protocol/tx"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/protocol/op"
+	"gopherd/internal/protocol/tx"
+	"gopherd/internal/state/objects"
 )
 
 // transactionBaseStateBytes mirrors state_object_size_info::transaction_base_size

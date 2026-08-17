@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"hived-go/internal/p2p/proto"
+	"gopherd/internal/p2p/proto"
 )
 
 // TestHandshakeAndRoundTrip spawns a listener and a dialer on 127.0.0.1

@@ -3,12 +3,12 @@ package testfixture
 import (
 	"testing"
 
-	"hived-go/internal/chain"
-	"hived-go/internal/protocol/asset"
-	"hived-go/internal/protocol/hardfork"
-	"hived-go/internal/protocol/op"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/chain"
+	"gopherd/internal/protocol/asset"
+	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/protocol/op"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // 1:1 parity scaffolds for hive_tes/tests/unit/tests/hf23_tests.cpp.

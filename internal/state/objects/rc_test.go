@@ -3,7 +3,7 @@ package objects
 import (
 	"testing"
 
-	"hived-go/internal/state"
+	"gopherd/internal/state"
 )
 
 // TestRCPoolRoundTrip exercises the rc_pool_object encoder/decoder.

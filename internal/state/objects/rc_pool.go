@@ -1,7 +1,7 @@
 package objects
 
 import (
-	"hived-go/internal/state"
+	"gopherd/internal/state"
 )
 
 // RCPoolTable is the singleton holding the chain-wide rc_pool_object.

@@ -1,9 +1,9 @@
 package sync
 
 import (
-	"hived-go/internal/p2p/node"
-	"hived-go/internal/p2p/proto"
-	"hived-go/internal/protocol/block"
+	"gopherd/internal/p2p/node"
+	"gopherd/internal/p2p/proto"
+	"gopherd/internal/protocol/block"
 )
 
 // handleCompressedBlock parses a compressed_block_message body, decompresses

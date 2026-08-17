@@ -4,11 +4,11 @@ import (
 	"strings"
 	"testing"
 
-	"hived-go/internal/chain/evaluator"
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/protocol/op"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/chain/evaluator"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/protocol/op"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // TestEscrowLimit ports a slice of operation_tests.cpp::escrow_limit:

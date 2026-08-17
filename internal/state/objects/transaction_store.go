@@ -7,7 +7,7 @@ import (
 
 	"github.com/tidwall/btree"
 
-	"hived-go/internal/state"
+	"gopherd/internal/state"
 )
 
 // TransactionStore is the in-memory typed container for the dedup-window

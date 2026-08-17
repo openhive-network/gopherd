@@ -5,10 +5,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 
-	"hived-go/internal/api/jsonrpc"
-	"hived-go/internal/fcraw"
-	"hived-go/internal/protocol/block"
-	"hived-go/internal/protocol/tx"
+	"gopherd/internal/api/jsonrpc"
+	"gopherd/internal/fcraw"
+	"gopherd/internal/protocol/block"
+	"gopherd/internal/protocol/tx"
 )
 
 func (s *Server) registerBlockAPI() {

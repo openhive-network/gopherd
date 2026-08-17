@@ -4,7 +4,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 
-	"hived-go/internal/fcraw"
+	"gopherd/internal/fcraw"
 )
 
 // BlockSigningDigest is the message hash a witness signs to produce

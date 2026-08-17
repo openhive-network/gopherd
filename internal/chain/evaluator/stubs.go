@@ -17,7 +17,7 @@ package evaluator
 // Every other tag has a real evaluator registered elsewhere; the
 // TestEveryRegularTagHasEvaluator test enforces full coverage.
 
-import "hived-go/internal/protocol/op"
+import "gopherd/internal/protocol/op"
 
 // noopStub returns nil for every op — used for tags whose state effects
 // live in plugins (custom*) or are pre-HF1 placeholders that never fire

@@ -28,9 +28,9 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"hived-go/internal/crypto"
-	"hived-go/internal/fcraw"
-	"hived-go/internal/protocol/op"
+	"gopherd/internal/crypto"
+	"gopherd/internal/fcraw"
+	"gopherd/internal/protocol/op"
 )
 
 // SignatureSize is the on-wire size of one signature_type

@@ -1,4 +1,4 @@
-module hived-go
+module gopherd
 
 go 1.26
 

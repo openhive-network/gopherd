@@ -3,7 +3,7 @@ package chain
 import (
 	"testing"
 
-	"hived-go/internal/crypto"
+	"gopherd/internal/crypto"
 )
 
 // TestOptsForOtherStripsPerBlockHints pins the scoping of the per-block

@@ -14,8 +14,8 @@ import (
 	"fmt"
 	"unicode/utf8"
 
-	"hived-go/internal/protocol/asset"
-	"hived-go/internal/protocol/auth"
+	"gopherd/internal/protocol/asset"
+	"gopherd/internal/protocol/auth"
 )
 
 // HIVE_MAX_MEMO_SIZE = 2048 bytes (config.hpp).

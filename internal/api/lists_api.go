@@ -4,11 +4,11 @@ import (
 	"context"
 	"encoding/json"
 
-	"hived-go/internal/api/jsonrpc"
-	"hived-go/internal/protocol/asset"
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/api/jsonrpc"
+	"gopherd/internal/protocol/asset"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // registerListsAPI wires the account-scoped list/find reads over the typed K/V

@@ -6,8 +6,8 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"hived-go/internal/fcraw"
-	"hived-go/internal/protocol/auth"
+	"gopherd/internal/fcraw"
+	"gopherd/internal/protocol/auth"
 )
 
 // readSortedAccountSet reads a flat_set<account_name_type> as varint count +

@@ -3,14 +3,14 @@ package chain
 import (
 	"fmt"
 
-	"hived-go/internal/crypto"
-	"hived-go/internal/fcraw"
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/protocol/block"
-	"hived-go/internal/protocol/hardfork"
-	"hived-go/internal/protocol/tx"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/crypto"
+	"gopherd/internal/fcraw"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/protocol/block"
+	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/protocol/tx"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // validateBlock runs the block-level invariants that hived's

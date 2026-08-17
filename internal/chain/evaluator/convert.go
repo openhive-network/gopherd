@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"math/bits"
 
-	"hived-go/internal/math128"
-	"hived-go/internal/protocol/asset"
-	"hived-go/internal/protocol/hardfork"
-	"hived-go/internal/protocol/op"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/math128"
+	"gopherd/internal/protocol/asset"
+	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/protocol/op"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // HIVE_CONVERSION_DELAY: pre-HF16 it's 7 days; HF16+ is 3.5 days.

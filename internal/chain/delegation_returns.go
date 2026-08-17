@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"os"
 
-	"hived-go/internal/protocol/hardfork"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // envDelegretTrace (GHIVEDIFF_DELEGRET=1) traces every delegation-return

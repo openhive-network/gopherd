@@ -1,9 +1,9 @@
 package chain
 
 import (
-	"hived-go/internal/protocol/asset"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/protocol/asset"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // processSavingsWithdraws mirrors database::process_savings_withdraws

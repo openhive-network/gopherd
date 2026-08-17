@@ -7,8 +7,8 @@ import (
 	"os"
 	"strconv"
 
-	"hived-go/internal/blocklog"
-	"hived-go/internal/protocol/block"
+	"gopherd/internal/blocklog"
+	"gopherd/internal/protocol/block"
 )
 
 const usage = `gopherd — Go implementation of the Hive blockchain daemon + tools

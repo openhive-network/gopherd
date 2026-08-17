@@ -5,7 +5,7 @@ import (
 	"net/netip"
 	"testing"
 
-	"hived-go/internal/fcraw"
+	"gopherd/internal/fcraw"
 )
 
 // TestIPv4WireByteOrder asserts the EXACT bytes an IPv4 address occupies on the

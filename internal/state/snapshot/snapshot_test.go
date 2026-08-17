@@ -5,9 +5,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // TestSaveLoadRoundtrip writes a few rows to one in-memory database via

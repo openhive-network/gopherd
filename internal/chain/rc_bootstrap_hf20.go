@@ -1,8 +1,8 @@
 package chain
 
 import (
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // HF20 RC bootstrap — ports database_hardfork.cpp:355-403 piecewise.

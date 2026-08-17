@@ -5,13 +5,13 @@ import (
 	"strings"
 	"testing"
 
-	"hived-go/internal/chain"
-	"hived-go/internal/crypto"
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/protocol/network"
-	"hived-go/internal/state"
-	"hived-go/internal/state/genesis"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/chain"
+	"gopherd/internal/crypto"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/protocol/network"
+	"gopherd/internal/state"
+	"gopherd/internal/state/genesis"
+	"gopherd/internal/state/objects"
 )
 
 // newSigningFixture spins up an in-memory state DB, applies genesis, then

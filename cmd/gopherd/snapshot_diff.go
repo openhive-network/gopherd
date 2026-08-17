@@ -20,7 +20,7 @@ import (
 	"io"
 	"os"
 
-	"hived-go/internal/statejsonl"
+	"gopherd/internal/statejsonl"
 )
 
 func cmdSnapshotDiff(args []string) int {

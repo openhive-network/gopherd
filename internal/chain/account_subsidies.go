@@ -4,8 +4,8 @@ import (
 	"math"
 	"math/bits"
 
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // HIVE_ACCOUNT_SUBSIDY_PRECISION = HIVE_100_PERCENT = 10000.

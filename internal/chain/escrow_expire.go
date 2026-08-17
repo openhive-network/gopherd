@@ -1,8 +1,8 @@
 package chain
 
 import (
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // expireEscrowRatifications mirrors database::expire_escrow_ratification

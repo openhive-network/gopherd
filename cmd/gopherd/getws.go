@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"os"
 
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
-	snap "hived-go/internal/state/snapshot"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
+	snap "gopherd/internal/state/snapshot"
 )
 
 // getws is a small inspector for Go state snapshots.

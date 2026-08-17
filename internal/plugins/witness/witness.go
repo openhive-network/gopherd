@@ -25,15 +25,15 @@ import (
 	"sync"
 	"time"
 
-	"hived-go/internal/chain"
-	"hived-go/internal/crypto"
-	"hived-go/internal/fcraw"
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/protocol/block"
-	"hived-go/internal/protocol/op"
-	"hived-go/internal/protocol/tx"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/chain"
+	"gopherd/internal/crypto"
+	"gopherd/internal/fcraw"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/protocol/block"
+	"gopherd/internal/protocol/op"
+	"gopherd/internal/protocol/tx"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // Publisher hands a freshly produced block to the node's single-writer apply

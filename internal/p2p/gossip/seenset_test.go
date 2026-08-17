@@ -3,7 +3,7 @@ package gossip
 import (
 	"testing"
 
-	"hived-go/internal/protocol/block"
+	"gopherd/internal/protocol/block"
 )
 
 // TestSeenSetAddContains exercises the basic add/contains behavior:

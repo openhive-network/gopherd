@@ -15,7 +15,7 @@ import "testing"
 //     up to HIVE_MAX_SIG_CHECK_DEPTH levels and returns the minimal
 //     set of public keys that satisfies every required authority.
 //
-// hived-go's equivalent helpers live in:
+// gopherd's equivalent helpers live in:
 //
 //   - internal/chain/verify_authority.go  (RequiredAuthorities + VerifyAuthority)
 //   - internal/protocol/op/authorities.go (per-op required_active/owner/posting)
@@ -26,7 +26,7 @@ import "testing"
 //   - internal/protocol/op/authorities_test.go
 //   - internal/protocol/op/authorities_cpp_parity_test.go
 //
-// What hived-go does NOT have is an exported "collect minimal signing
+// What gopherd does NOT have is an exported "collect minimal signing
 // key set" helper that walks indirect account_auths recursion to
 // HIVE_MAX_SIG_CHECK_DEPTH and returns the public-key set the wallet
 // should sign with. That helper is wallet/CLI-facing in hived; the Go

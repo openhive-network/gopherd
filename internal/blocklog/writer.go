@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"hived-go/internal/blocklog/zstd"
+	"gopherd/internal/blocklog/zstd"
 )
 
 // Writer is the append-only counterpart to Reader. Each Append writes one

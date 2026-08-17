@@ -6,8 +6,8 @@ import (
 	"os"
 	"sort"
 
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // dump_ws_helper dumps witness schedule + per-witness votes/VSTs from a

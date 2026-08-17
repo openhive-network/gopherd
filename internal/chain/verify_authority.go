@@ -3,14 +3,14 @@ package chain
 import (
 	"fmt"
 
-	"hived-go/internal/crypto"
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/protocol/hardfork"
-	"hived-go/internal/protocol/network"
-	"hived-go/internal/protocol/op"
-	"hived-go/internal/protocol/tx"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/crypto"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/protocol/network"
+	"gopherd/internal/protocol/op"
+	"gopherd/internal/protocol/tx"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // AuthorityLevel is a coarse categorization of which authority a given

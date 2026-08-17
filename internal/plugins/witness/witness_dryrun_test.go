@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"hived-go/internal/crypto"
-	"hived-go/internal/state"
-	"hived-go/internal/state/genesis"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/crypto"
+	"gopherd/internal/state"
+	"gopherd/internal/state/genesis"
+	"gopherd/internal/state/objects"
 )
 
 func dryRunFixture(t *testing.T) (*Plugin, *state.Database, Producer) {

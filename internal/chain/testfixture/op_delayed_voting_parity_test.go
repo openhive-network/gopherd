@@ -3,8 +3,8 @@ package testfixture
 import (
 	"testing"
 
-	"hived-go/internal/protocol/op"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/protocol/op"
+	"gopherd/internal/state/objects"
 )
 
 // -----------------------------------------------------------------------------

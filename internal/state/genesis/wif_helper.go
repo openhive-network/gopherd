@@ -13,7 +13,7 @@ package genesis
 import (
 	"errors"
 
-	"hived-go/internal/crypto"
+	"gopherd/internal/crypto"
 )
 
 // wifPrefix is the leading byte for Hive WIF strings (matches Bitcoin

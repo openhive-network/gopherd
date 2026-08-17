@@ -1,6 +1,6 @@
 package node
 
-import "hived-go/internal/p2p/proto"
+import "gopherd/internal/p2p/proto"
 
 // MultiDelegate fans inbound peer events out to a fixed slice of delegates,
 // in registration order. Each child delegate is invoked for every event,

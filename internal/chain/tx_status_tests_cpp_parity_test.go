@@ -17,7 +17,7 @@ import "testing"
 //   - transactions reapplied during a fork switch,
 //   - the failure-during-fork-switch path.
 //
-// hived-go has no equivalent state-machine. The chain pipeline
+// gopherd has no equivalent state-machine. The chain pipeline
 // (internal/chain/database.go, evaluator package, hooks) is driven
 // entirely by direct calls; there are no pre/post-apply signal slots,
 // no transaction_status enum exposed via the session, and no

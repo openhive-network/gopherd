@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 
-	"hived-go/internal/api/jsonrpc"
+	"gopherd/internal/api/jsonrpc"
 )
 
 // expensiveUnboundedMethods are the read methods that scan a whole store under

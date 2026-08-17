@@ -7,8 +7,8 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"hived-go/internal/crypto"
-	"hived-go/internal/fcraw"
+	"gopherd/internal/crypto"
+	"gopherd/internal/fcraw"
 )
 
 // AccountName is hive::protocol::account_name_type. It is declared as a

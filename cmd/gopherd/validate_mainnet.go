@@ -22,7 +22,7 @@ import (
 	"os"
 	"time"
 
-	"hived-go/internal/protocol/block"
+	"gopherd/internal/protocol/block"
 )
 
 func cmdValidateMainnet(args []string) int {

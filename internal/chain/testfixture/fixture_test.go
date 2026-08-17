@@ -3,7 +3,7 @@ package testfixture
 import (
 	"testing"
 
-	"hived-go/internal/protocol/op"
+	"gopherd/internal/protocol/op"
 )
 
 // TestFixtureBootstraps verifies the basic fixture can boot, create

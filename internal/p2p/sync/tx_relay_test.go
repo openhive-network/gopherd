@@ -3,7 +3,7 @@ package sync
 import (
 	"testing"
 
-	"hived-go/internal/protocol/block"
+	"gopherd/internal/protocol/block"
 )
 
 // TestTxRelayQueue covers the relay path's queue: bounded, drained in capped

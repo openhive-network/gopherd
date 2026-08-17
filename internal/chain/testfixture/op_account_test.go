@@ -4,10 +4,10 @@ import (
 	"strings"
 	"testing"
 
-	"hived-go/internal/crypto"
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/protocol/hardfork"
-	"hived-go/internal/protocol/op"
+	"gopherd/internal/crypto"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/protocol/op"
 )
 
 // Helper: minimum-viable Authority with one weight=1 key.

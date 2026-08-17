@@ -32,12 +32,12 @@ import (
 	"sort"
 	"strings"
 
-	"hived-go/internal/protocol/asset"
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
-	"hived-go/internal/state/snapshot"
-	"hived-go/internal/statejsonl"
+	"gopherd/internal/protocol/asset"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
+	"gopherd/internal/state/snapshot"
+	"gopherd/internal/statejsonl"
 )
 
 // registerAllStores pre-registers every typed subsystem on a freshly

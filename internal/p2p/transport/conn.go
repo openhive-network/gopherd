@@ -32,8 +32,8 @@ import (
 	"sync"
 	"time"
 
-	"hived-go/internal/crypto"
-	"hived-go/internal/p2p/proto"
+	"gopherd/internal/crypto"
+	"gopherd/internal/p2p/proto"
 )
 
 // AESBlockSize is the on-wire alignment unit (16 bytes for AES-128/256).

@@ -4,7 +4,7 @@ package block
 import (
 	"testing"
 
-	"hived-go/internal/fcraw"
+	"gopherd/internal/fcraw"
 )
 
 // TestMinBlockSize ports serialization_tests.cpp::min_block_size. The C++ test

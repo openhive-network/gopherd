@@ -1,8 +1,8 @@
 package chain
 
 import (
-	"hived-go/internal/crypto"
-	"hived-go/internal/protocol/auth"
+	"gopherd/internal/crypto"
+	"gopherd/internal/protocol/auth"
 )
 
 // HIVE_MAX_SIG_CHECK_DEPTH = 2 (libraries/protocol/include/hive/protocol/

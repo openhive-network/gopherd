@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"hived-go/internal/protocol/op"
+	"gopherd/internal/protocol/op"
 )
 
 // TestAccountWitnessProxyTooLong ports

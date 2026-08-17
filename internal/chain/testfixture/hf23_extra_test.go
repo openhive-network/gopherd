@@ -3,10 +3,10 @@ package testfixture
 import (
 	"testing"
 
-	"hived-go/internal/protocol/asset"
-	"hived-go/internal/protocol/hardfork"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/protocol/asset"
+	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // TestHF23HiveInflation ports operation_time_tests.cpp::hive_inflation.

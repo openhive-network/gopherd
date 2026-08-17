@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"os"
 
-	"hived-go/internal/protocol/hardfork"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // HIVE_LIQUIDITY_REWARD_BLOCKS — once per hour (60×60 / 3-second blocks).

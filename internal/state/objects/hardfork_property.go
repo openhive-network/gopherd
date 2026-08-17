@@ -4,8 +4,8 @@ import (
 	"errors"
 	"fmt"
 
-	"hived-go/internal/fcraw"
-	"hived-go/internal/state"
+	"gopherd/internal/fcraw"
+	"gopherd/internal/state"
 )
 
 // HardforkPropertyTable is the singleton table for hardfork_property_object.

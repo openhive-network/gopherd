@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"hived-go/internal/fcraw"
+	"gopherd/internal/fcraw"
 )
 
 func TestSymbolConstants(t *testing.T) {

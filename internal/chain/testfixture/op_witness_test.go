@@ -3,7 +3,7 @@ package testfixture
 import (
 	"testing"
 
-	"hived-go/internal/protocol/op"
+	"gopherd/internal/protocol/op"
 )
 
 // Port of operation_tests.cpp::witness_update_apply.

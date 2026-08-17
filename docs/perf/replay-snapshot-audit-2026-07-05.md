@@ -73,7 +73,7 @@ either way. Restart command for gen60:
 systemd-run --user --unit=gen60 -p MemoryMax=30G -p MemorySwapMax=0 \
   -E GOMEMLIMIT=24GiB \
   -p StandardOutput=append:/home/martin/gen60.log -p StandardError=inherit \
-  /home/martin/projects/hived-go/bin/ghive-tools replay --backend=mem \
+  /home/martin/projects/hived-go/bin/gopherd replay --backend=mem \
   --pprof=localhost:6060 --cold-backend=persist --cold-dir=/home/martin/cold-genp \
   --comment-resident-cap=4000000 --snapshot-every=5000000 \
   --snapshot-dir=/home/martin/snaps_clean --snapshot-self-contained \

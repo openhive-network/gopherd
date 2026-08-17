@@ -7,13 +7,13 @@ import (
 	"math/bits"
 	"os"
 
-	"hived-go/internal/math128"
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/protocol/hardfork"
-	"hived-go/internal/protocol/op"
-	"hived-go/internal/reward"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/math128"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/protocol/op"
+	"gopherd/internal/reward"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // Cashout windows from libraries/protocol/include/hive/protocol/config.hpp:

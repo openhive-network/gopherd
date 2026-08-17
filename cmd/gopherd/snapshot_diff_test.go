@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"hived-go/internal/statejsonl"
+	"gopherd/internal/statejsonl"
 )
 
 // identKey extracts type+identifier; verify the few cases used in

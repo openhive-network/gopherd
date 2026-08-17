@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"io"
 
-	"hived-go/internal/state"
+	"gopherd/internal/state"
 )
 
 // WitnessScheduleStore is the in-memory typed container for the

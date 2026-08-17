@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"testing"
 
-	"hived-go/internal/fcraw"
-	"hived-go/internal/protocol/asset"
-	"hived-go/internal/protocol/auth"
+	"gopherd/internal/fcraw"
+	"gopherd/internal/protocol/asset"
+	"gopherd/internal/protocol/auth"
 )
 
 // TestAllRegularTagsRegistered guards against forgetting to wire up an op

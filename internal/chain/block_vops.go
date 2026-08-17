@@ -1,9 +1,9 @@
 package chain
 
 import (
-	"hived-go/internal/chain/evaluator"
-	"hived-go/internal/protocol/asset"
-	"hived-go/internal/protocol/auth"
+	"gopherd/internal/chain/evaluator"
+	"gopherd/internal/protocol/asset"
+	"gopherd/internal/protocol/auth"
 )
 
 // BlockVOp captures the small set of virtual operations the Go chain

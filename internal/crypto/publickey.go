@@ -5,7 +5,7 @@ import (
 	"errors"
 	"strings"
 
-	"hived-go/internal/protocol/network"
+	"gopherd/internal/protocol/network"
 )
 
 // PublicKeySize is the on-wire size of a compressed secp256k1 public key.

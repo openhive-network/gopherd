@@ -4,8 +4,8 @@ import (
 	"sort"
 	"testing"
 
-	"hived-go/internal/protocol/asset"
-	"hived-go/internal/protocol/auth"
+	"gopherd/internal/protocol/asset"
+	"gopherd/internal/protocol/auth"
 )
 
 // Mirrors the per-op _authorities test pattern from

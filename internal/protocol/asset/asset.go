@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"strconv"
 
-	"hived-go/internal/fcraw"
+	"gopherd/internal/fcraw"
 )
 
 // Asset is the wire form of `hive::protocol::asset` — an int64 amount paired

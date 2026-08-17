@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 
-	"hived-go/internal/state"
+	"gopherd/internal/state"
 )
 
 // BlockSummaryTable is the ring buffer of recent block IDs keyed by

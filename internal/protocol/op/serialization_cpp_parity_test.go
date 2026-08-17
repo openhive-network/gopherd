@@ -11,8 +11,8 @@ import (
 	"bytes"
 	"testing"
 
-	"hived-go/internal/fcraw"
-	"hived-go/internal/protocol/asset"
+	"gopherd/internal/fcraw"
+	"gopherd/internal/protocol/asset"
 )
 
 // TestPow2WorkRoundTrip ports serialization_tests.cpp::pow2_work_test. The C++

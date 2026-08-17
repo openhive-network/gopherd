@@ -6,8 +6,8 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"hived-go/internal/crypto"
-	"hived-go/internal/fcraw"
+	"gopherd/internal/crypto"
+	"gopherd/internal/fcraw"
 )
 
 // ---- 14 pow -------------------------------------------------------------

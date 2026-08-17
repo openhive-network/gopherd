@@ -8,8 +8,8 @@ import (
 
 	"github.com/tidwall/btree"
 
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/state"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/state"
 )
 
 // LimitOrderStore is the in-memory typed container for the

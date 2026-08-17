@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"hived-go/internal/state/persiststore"
+	"gopherd/internal/state/persiststore"
 )
 
 // PersistCold is a coldStore backed by persiststore — a DROP-IN replacement for

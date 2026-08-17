@@ -3,11 +3,11 @@ package chain
 import (
 	"math/bits"
 
-	"hived-go/internal/chain/evaluator"
-	"hived-go/internal/protocol/asset"
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/chain/evaluator"
+	"gopherd/internal/protocol/asset"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // processConversions mirrors libraries/chain/database_conversion.cpp:34.

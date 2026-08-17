@@ -6,7 +6,7 @@ import (
 	"net/netip"
 	"testing"
 
-	"hived-go/internal/fcraw"
+	"gopherd/internal/fcraw"
 )
 
 func TestPaddedLen(t *testing.T) {

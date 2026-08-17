@@ -7,7 +7,7 @@ import (
 	"math"
 	"sort"
 
-	"hived-go/internal/fcraw"
+	"gopherd/internal/fcraw"
 )
 
 // fc::variant wire format

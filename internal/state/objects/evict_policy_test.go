@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"hived-go/internal/state"
+	"gopherd/internal/state"
 )
 
 // TestEvictFrozenPolicy checks that EvictFrozen evicts only frozen

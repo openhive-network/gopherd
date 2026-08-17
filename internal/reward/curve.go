@@ -6,7 +6,7 @@ package reward
 import (
 	"math/bits"
 
-	"hived-go/internal/math128"
+	"gopherd/internal/math128"
 )
 
 // ContentConstantHF0Val — the `s` constant used by the quadratic reward

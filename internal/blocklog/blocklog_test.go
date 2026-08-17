@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"hived-go/internal/protocol/block"
+	"gopherd/internal/protocol/block"
 )
 
 // writeLegacyLog builds a synthetic single-file block_log + .index in dir

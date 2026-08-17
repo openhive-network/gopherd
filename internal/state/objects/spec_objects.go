@@ -3,8 +3,8 @@ package objects
 import (
 	"bytes"
 
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/state"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/state"
 )
 
 // SpecTyped holds the objects-layer (typed-store) speculative buffers for one

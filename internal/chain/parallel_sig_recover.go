@@ -5,11 +5,11 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"hived-go/internal/crypto"
-	"hived-go/internal/fcraw"
-	"hived-go/internal/protocol/block"
-	"hived-go/internal/protocol/network"
-	"hived-go/internal/protocol/tx"
+	"gopherd/internal/crypto"
+	"gopherd/internal/fcraw"
+	"gopherd/internal/protocol/block"
+	"gopherd/internal/protocol/network"
+	"gopherd/internal/protocol/tx"
 )
 
 // RecoveredBlockSigs is the result of a parallel pre-recovery pass over

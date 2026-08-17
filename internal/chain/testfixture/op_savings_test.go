@@ -3,7 +3,7 @@ package testfixture
 import (
 	"testing"
 
-	"hived-go/internal/protocol/op"
+	"gopherd/internal/protocol/op"
 )
 
 // Port of operation_tests.cpp::transfer_to_savings_apply.

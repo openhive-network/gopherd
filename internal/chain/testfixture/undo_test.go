@@ -4,8 +4,8 @@ import (
 	"reflect"
 	"testing"
 
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // Port of undo_tests.cpp::undo_basic.

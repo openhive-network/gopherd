@@ -3,7 +3,7 @@ package objects
 import (
 	"errors"
 	"fmt"
-	"hived-go/internal/config"
+	"gopherd/internal/config"
 	"os"
 	"path/filepath"
 

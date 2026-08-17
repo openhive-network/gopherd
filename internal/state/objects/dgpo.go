@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 
-	"hived-go/internal/fcraw"
-	"hived-go/internal/state"
+	"gopherd/internal/fcraw"
+	"gopherd/internal/state"
 )
 
 // DynamicGlobalPropertyTable is the TableID for the singleton

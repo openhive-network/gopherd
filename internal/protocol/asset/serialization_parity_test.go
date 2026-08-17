@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"hived-go/internal/fcraw"
+	"gopherd/internal/fcraw"
 )
 
 // hiveMaxShareSupply mirrors HIVE_MAX_SHARE_SUPPLY (1e15 * 1e3 sat = 1e18).

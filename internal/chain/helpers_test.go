@@ -1,6 +1,6 @@
 package chain
 
-import "hived-go/internal/protocol/asset"
+import "gopherd/internal/protocol/asset"
 
 // hiveAsset builds an asset.Asset for `amount` HIVE in legacy encoding.
 func hiveAsset(amount int64) asset.Asset {

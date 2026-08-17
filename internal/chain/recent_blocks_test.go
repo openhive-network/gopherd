@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"testing"
 
-	blockzstd "hived-go/internal/blocklog/zstd"
-	"hived-go/internal/protocol/block"
+	blockzstd "gopherd/internal/blocklog/zstd"
+	"gopherd/internal/protocol/block"
 )
 
 func makeID(num uint32) block.ID {

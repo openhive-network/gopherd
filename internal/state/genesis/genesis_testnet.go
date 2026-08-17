@@ -12,13 +12,13 @@ package genesis
 import (
 	"fmt"
 
-	"hived-go/internal/crypto"
-	"hived-go/internal/protocol/asset"
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/protocol/hardfork"
-	"hived-go/internal/protocol/network"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/crypto"
+	"gopherd/internal/protocol/asset"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/protocol/network"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // Per-account testnet funding numbers. Picked to be:

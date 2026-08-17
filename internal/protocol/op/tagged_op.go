@@ -3,7 +3,7 @@ package op
 import (
 	"unsafe"
 
-	"hived-go/internal/fcraw"
+	"gopherd/internal/fcraw"
 )
 
 // Op is a tagged-union representation of a regular operation, replacing

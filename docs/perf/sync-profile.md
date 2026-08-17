@@ -180,7 +180,7 @@ go build -o ./bin/gopherd ./cmd/gopherd
 rm -rf /tmp/perf-profile && mkdir -p /tmp/perf-profile
 
 # CPU profile — 200K-300K blocks suffices
-timeout 180 ./bin/ghive-sync \
+timeout 180 ./bin/gopherd \
   --data-dir=/tmp/perf-profile --backend=mem \
   --source-block-log=/home/martin/projects/hived-go/block_log \
   --max-blocks=300000 \
@@ -188,7 +188,7 @@ timeout 180 ./bin/ghive-sync \
   > /tmp/perf-profile.log 2>&1
 
 # Heap profile (allocator pressure)
-timeout 90 ./bin/ghive-sync \
+timeout 90 ./bin/gopherd \
   --data-dir=/tmp/perf-profile-mem --backend=mem \
   --source-block-log=/home/martin/projects/hived-go/block_log \
   --max-blocks=200000 \

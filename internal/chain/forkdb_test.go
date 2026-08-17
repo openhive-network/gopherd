@@ -3,7 +3,7 @@ package chain
 import (
 	"testing"
 
-	"hived-go/internal/protocol/block"
+	"gopherd/internal/protocol/block"
 )
 
 func mkID(b byte) block.ID { var id block.ID; id[0] = b; return id }

@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"hived-go/internal/chain"
-	"hived-go/internal/p2p/node"
-	"hived-go/internal/p2p/proto"
-	"hived-go/internal/protocol/block"
+	"gopherd/internal/chain"
+	"gopherd/internal/p2p/node"
+	"gopherd/internal/p2p/proto"
+	"gopherd/internal/protocol/block"
 )
 
 // stubChain is an in-memory Chain implementation. It's enough to drive

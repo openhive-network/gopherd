@@ -3,9 +3,9 @@ package objects
 import (
 	"errors"
 
-	"hived-go/internal/fcraw"
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/state"
+	"gopherd/internal/fcraw"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/state"
 )
 
 // RecurrentTransfer is the recurrent_transfer_object — schedules

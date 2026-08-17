@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"hived-go/internal/p2p/node"
+	"gopherd/internal/p2p/node"
 )
 
 // TestLateJoinerCatchesUp verifies the end-to-end catch-up flow:

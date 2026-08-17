@@ -5,7 +5,7 @@ import (
 	"math/rand"
 	"testing"
 
-	"hived-go/internal/protocol/auth"
+	"gopherd/internal/protocol/auth"
 )
 
 const pcReserve = 512 << 20

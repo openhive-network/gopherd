@@ -5,11 +5,11 @@ import (
 	"encoding/json"
 	"strconv"
 
-	"hived-go/internal/api/jsonrpc"
-	"hived-go/internal/crypto"
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/api/jsonrpc"
+	"gopherd/internal/crypto"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // authorityResult renders an auth.Authority as hived's

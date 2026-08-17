@@ -3,7 +3,7 @@ package op
 import (
 	"testing"
 
-	"hived-go/internal/protocol/asset"
+	"gopherd/internal/protocol/asset"
 )
 
 // CPP-parity validate tests ported from

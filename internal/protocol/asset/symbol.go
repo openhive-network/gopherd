@@ -25,7 +25,7 @@ import (
 	"errors"
 	"fmt"
 
-	"hived-go/internal/fcraw"
+	"gopherd/internal/fcraw"
 )
 
 // AssetNum is the canonical internal representation of an asset symbol — a

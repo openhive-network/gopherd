@@ -7,10 +7,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"hived-go/internal/blocklog"
-	"hived-go/internal/chain"
-	"hived-go/internal/state"
-	"hived-go/internal/state/genesis"
+	"gopherd/internal/blocklog"
+	"gopherd/internal/chain"
+	"gopherd/internal/state"
+	"gopherd/internal/state/genesis"
 )
 
 // projectBlockLog returns the path to the canonical mainnet block_log

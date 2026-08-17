@@ -9,10 +9,10 @@ import (
 	"strconv"
 	"time"
 
-	"hived-go/internal/api/jsonrpc"
-	"hived-go/internal/chain"
-	"hived-go/internal/protocol/asset"
-	"hived-go/internal/protocol/network"
+	"gopherd/internal/api/jsonrpc"
+	"gopherd/internal/chain"
+	"gopherd/internal/protocol/asset"
+	"gopherd/internal/protocol/network"
 )
 
 // Server exposes gopherd chain state over a JSON-RPC registry.

@@ -4,7 +4,7 @@ import (
 	"math/big"
 	"testing"
 
-	"hived-go/internal/protocol/op"
+	"gopherd/internal/protocol/op"
 )
 
 // HIVE_HBD_INTEREST_COMPOUND_INTERVAL_SEC = 30 days.

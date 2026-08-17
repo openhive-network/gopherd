@@ -3,13 +3,13 @@ package objects
 import (
 	"encoding/binary"
 	"fmt"
-	"hived-go/internal/config"
+	"gopherd/internal/config"
 	"io"
 	"sort"
 	"strings"
 
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/state"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/state"
 )
 
 // slimColdOnLoad (GHIVE_SLIM_COLD=1): decode every cold-bound record on

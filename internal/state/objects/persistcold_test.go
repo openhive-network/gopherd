@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"hived-go/internal/protocol/auth"
+	"gopherd/internal/protocol/auth"
 )
 
 // TestPersistCold_RestartSurvival is the cutover proof: the cold tier backed by

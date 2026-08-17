@@ -6,10 +6,10 @@ import (
 	"os"
 	"strconv"
 
-	"hived-go/internal/math128"
-	"hived-go/internal/protocol/hardfork"
-	"hived-go/internal/state"
-	"hived-go/internal/state/objects"
+	"gopherd/internal/math128"
+	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
 
 // VS-DUMP diagnostic window (env VSDUMP_FROM/VSDUMP_TO): dumps the HBD

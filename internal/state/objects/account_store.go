@@ -11,8 +11,8 @@ import (
 	"sort"
 	"strings"
 
-	"hived-go/internal/protocol/auth"
-	"hived-go/internal/state"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/state"
 )
 
 // envBalanceTrace is a comma-separated list of account names whose

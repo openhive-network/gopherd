@@ -39,9 +39,9 @@ import (
 	"bytes"
 	"fmt"
 
-	"hived-go/internal/fcraw"
-	"hived-go/internal/protocol/asset"
-	"hived-go/internal/protocol/op"
+	"gopherd/internal/fcraw"
+	"gopherd/internal/protocol/asset"
+	"gopherd/internal/protocol/op"
 )
 
 // IsLegacyPack reports whether the wire-encoded signed_transaction in

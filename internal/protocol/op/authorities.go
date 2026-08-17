@@ -10,7 +10,7 @@
 
 package op
 
-import "hived-go/internal/protocol/auth"
+import "gopherd/internal/protocol/auth"
 
 // AuthorityLevel mirrors hive::protocol::authority::classification.
 // Note that posting authorities can NOT mix with active or owner in a

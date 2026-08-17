@@ -1,6 +1,6 @@
 package chain
 
-import "hived-go/internal/state"
+import "gopherd/internal/state"
 
 // applyStateDriftCorrections is intentionally a NO-OP.
 //

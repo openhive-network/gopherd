@@ -26,7 +26,7 @@ package genesis
 import (
 	"fmt"
 
-	"hived-go/internal/crypto"
+	"gopherd/internal/crypto"
 )
 
 // TestnetWitnessCount is the number of init witnesses minted at genesis.

@@ -3,11 +3,11 @@ package chain
 import (
 	"testing"
 
-	"hived-go/internal/fcraw"
-	"hived-go/internal/protocol/block"
-	"hived-go/internal/protocol/network"
-	"hived-go/internal/protocol/op"
-	"hived-go/internal/protocol/tx"
+	"gopherd/internal/fcraw"
+	"gopherd/internal/protocol/block"
+	"gopherd/internal/protocol/network"
+	"gopherd/internal/protocol/op"
+	"gopherd/internal/protocol/tx"
 )
 
 // TestBlockTransactionBodiesRoundTrip pins the property the admission audit
