@@ -44,9 +44,15 @@ func (s *Server) Registry() *jsonrpc.Registry { return s.reg }
 // hiveAsset/hbdAsset/vestsAsset wrap an int64 satoshi amount in an asset.Asset,
 // which marshals as the HF26 NAI object — the database_api form. condenser
 // methods wrap these in legacyAsset for the "1.234 HIVE" string form.
-func hiveAsset(a int64) asset.Asset  { return asset.Asset{Amount: a, Symbol: asset.Symbol{Num: asset.HiveSymbol}} }
-func hbdAsset(a int64) asset.Asset   { return asset.Asset{Amount: a, Symbol: asset.Symbol{Num: asset.HbdSymbol}} }
-func vestsAsset(a int64) asset.Asset { return asset.Asset{Amount: a, Symbol: asset.Symbol{Num: asset.VestsSymbol}} }
+func hiveAsset(a int64) asset.Asset {
+	return asset.Asset{Amount: a, Symbol: asset.Symbol{Num: asset.HiveSymbol}}
+}
+func hbdAsset(a int64) asset.Asset {
+	return asset.Asset{Amount: a, Symbol: asset.Symbol{Num: asset.HbdSymbol}}
+}
+func vestsAsset(a int64) asset.Asset {
+	return asset.Asset{Amount: a, Symbol: asset.Symbol{Num: asset.VestsSymbol}}
+}
 
 // legacyAsset marshals as the legacy "1.234 HIVE" string (condenser_api form).
 type legacyAsset asset.Asset

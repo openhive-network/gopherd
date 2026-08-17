@@ -766,14 +766,14 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	}
 	ctx := &evaluator.Context{
 		OwnerAuthHistoryStartBlock: d.ownerAuthHistoryStartBlock,
-		DB:            session,
-		Hardforks:     hf,
-		BlockNum:      blockNum,
-		BlockTime:     hdr.Timestamp,
-		HeadBlockTime: headBlockTime,
-		Witness:       hdr.Witness,
-		EmitVOp:       d.emitVOpClosure(),
-		InControl:     opts.InControl,
+		DB:                         session,
+		Hardforks:                  hf,
+		BlockNum:                   blockNum,
+		BlockTime:                  hdr.Timestamp,
+		HeadBlockTime:              headBlockTime,
+		Witness:                    hdr.Witness,
+		EmitVOp:                    d.emitVOpClosure(),
+		InControl:                  opts.InControl,
 	}
 
 	// Mirror C++ database.cpp:2374-2376 — set dgp.current_witness BEFORE

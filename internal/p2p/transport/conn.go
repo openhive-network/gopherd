@@ -8,14 +8,15 @@
 //
 // Wire format (all multi-byte integers little-endian):
 //
-//   1) 33-byte raw compressed secp256k1 pubkey (each side, simultaneously)
-//   2) Forever after: AES-256-CBC ciphertext of:
-//        [ size:u32 ][ msg_type:u32 ][ body...padded to 16-byte boundary ]
+//  1. 33-byte raw compressed secp256k1 pubkey (each side, simultaneously)
+//  2. Forever after: AES-256-CBC ciphertext of:
+//     [ size:u32 ][ msg_type:u32 ][ body...padded to 16-byte boundary ]
 //
 // AES key + IV derivation:
-//   shared = sha512( ECDH(local_priv, remote_pub).X )            // 64 B
-//   key    = sha256(shared)                                       // 32 B
-//   iv     = halves-swapped(city_hash_crc_128(shared))            // 16 B
+//
+//	shared = sha512( ECDH(local_priv, remote_pub).X )            // 64 B
+//	key    = sha256(shared)                                       // 32 B
+//	iv     = halves-swapped(city_hash_crc_128(shared))            // 16 B
 //
 // (See internal/crypto/cityhash.go for why iv is byte-half-swapped vs
 // the raw uint128.)
@@ -49,15 +50,15 @@ var HandshakeTimeout = 10 * time.Second
 // serializes Send so multiple goroutines can call it without corrupting
 // the AES stream. Receive must be called from a single reader goroutine.
 type Conn struct {
-	raw         net.Conn
-	sharedKey   crypto.SharedSecret512
-	encrypter   cipher.BlockMode
-	decrypter   cipher.BlockMode
-	sendMu      sync.Mutex
-	recvBuf     []byte // scratch for read alignment
-	closeOnce   sync.Once
-	remotePub   crypto.PublicKey
-	localPub    crypto.PublicKey
+	raw       net.Conn
+	sharedKey crypto.SharedSecret512
+	encrypter cipher.BlockMode
+	decrypter cipher.BlockMode
+	sendMu    sync.Mutex
+	recvBuf   []byte // scratch for read alignment
+	closeOnce sync.Once
+	remotePub crypto.PublicKey
+	localPub  crypto.PublicKey
 	// localPriv is the ephemeral secp256k1 private key we generated for
 	// this connection's stcp handshake. Hived's hello_message handler
 	// requires us to sign sha256(shared_secret_64) with this key and

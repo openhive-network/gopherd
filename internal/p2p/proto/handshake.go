@@ -92,14 +92,15 @@ func (m *LegacyHelloMessage) Unmarshal(src []byte) error {
 // sends after the stcp handshake.
 //
 // FC_REFLECT order:
-//   user_agent              string
-//   core_protocol_version   uint32 LE
-//   inbound_address         fc::ip::address  (family + body)
-//   inbound_port            uint16 LE
-//   outbound_port           uint16 LE
-//   node_public_key         fc::ecc::public_key_data  (33 raw bytes)
-//   signed_shared_secret    fc::ecc::compact_signature (65 raw bytes)
-//   user_data               fc::variant_object
+//
+//	user_agent              string
+//	core_protocol_version   uint32 LE
+//	inbound_address         fc::ip::address  (family + body)
+//	inbound_port            uint16 LE
+//	outbound_port           uint16 LE
+//	node_public_key         fc::ecc::public_key_data  (33 raw bytes)
+//	signed_shared_secret    fc::ecc::compact_signature (65 raw bytes)
+//	user_data               fc::variant_object
 type HelloMessage struct {
 	UserAgent           string
 	CoreProtocolVersion uint32
@@ -187,24 +188,25 @@ func (*ConnectionAcceptedMessage) Unmarshal(src []byte) error {
 type RejectionReasonCode uint8
 
 const (
-	RejectUnspecified              RejectionReasonCode = 0
-	RejectDifferentChain           RejectionReasonCode = 1
-	RejectAlreadyConnected         RejectionReasonCode = 2
-	RejectConnectedToSelf          RejectionReasonCode = 3
-	RejectNotAcceptingConnections  RejectionReasonCode = 4
-	RejectBlocked                  RejectionReasonCode = 5
-	RejectInvalidHelloMessage      RejectionReasonCode = 6
-	RejectClientTooOld             RejectionReasonCode = 7
+	RejectUnspecified             RejectionReasonCode = 0
+	RejectDifferentChain          RejectionReasonCode = 1
+	RejectAlreadyConnected        RejectionReasonCode = 2
+	RejectConnectedToSelf         RejectionReasonCode = 3
+	RejectNotAcceptingConnections RejectionReasonCode = 4
+	RejectBlocked                 RejectionReasonCode = 5
+	RejectInvalidHelloMessage     RejectionReasonCode = 6
+	RejectClientTooOld            RejectionReasonCode = 7
 )
 
 // ConnectionRejectedMessage mirrors graphene::net::connection_rejected_message.
 //
 // FC_REFLECT order:
-//   user_agent              string
-//   core_protocol_version   uint32 LE
-//   remote_endpoint         fc::ip::endpoint  (address + uint16 port)
-//   reason_code             uint8 (fc::enum_type<uint8_t, rejection_reason_code>)
-//   reason_string           string
+//
+//	user_agent              string
+//	core_protocol_version   uint32 LE
+//	remote_endpoint         fc::ip::endpoint  (address + uint16 port)
+//	reason_code             uint8 (fc::enum_type<uint8_t, rejection_reason_code>)
+//	reason_string           string
 type ConnectionRejectedMessage struct {
 	UserAgent           string
 	CoreProtocolVersion uint32
@@ -276,12 +278,13 @@ const (
 // AddressInfo mirrors graphene::net::address_info.
 //
 // FC_REFLECT order:
-//   remote_endpoint  fc::ip::endpoint
-//   last_seen_time   fc::time_point_sec  (uint32 LE)
-//   latency          fc::microseconds    (uint64 LE)
-//   node_id          fc::ecc::public_key_data (33 raw bytes)
-//   direction        uint8
-//   firewalled       uint8
+//
+//	remote_endpoint  fc::ip::endpoint
+//	last_seen_time   fc::time_point_sec  (uint32 LE)
+//	latency          fc::microseconds    (uint64 LE)
+//	node_id          fc::ecc::public_key_data (33 raw bytes)
+//	direction        uint8
+//	firewalled       uint8
 type AddressInfo struct {
 	RemoteEndpoint Endpoint
 	LastSeenTime   uint32 // seconds since epoch
@@ -338,7 +341,8 @@ func ReadAddressInfo(r *fcraw.Reader) (AddressInfo, error) {
 // AddressMessage mirrors graphene::net::address_message.
 //
 // FC_REFLECT order:
-//   addresses  vector<address_info>
+//
+//	addresses  vector<address_info>
 type AddressMessage struct {
 	Addresses []AddressInfo
 }
@@ -396,9 +400,10 @@ func (*AddressRequestMessage) Unmarshal(src []byte) error {
 // ClosingConnectionMessage mirrors graphene::net::closing_connection_message.
 //
 // FC_REFLECT order:
-//   reason_for_closing     string
-//   closing_due_to_error   bool
-//   error                  fc::oexception   (1-byte present-flag, then optional payload)
+//
+//	reason_for_closing     string
+//	closing_due_to_error   bool
+//	error                  fc::oexception   (1-byte present-flag, then optional payload)
 //
 // fc::oexception is fc::optional<fc::exception>. fc::exception is
 // pack-encoded as int64 code + string name + string what + log_messages
@@ -412,10 +417,10 @@ func (*AddressRequestMessage) Unmarshal(src []byte) error {
 // originated error through unchanged. ErrorPresent=false → the flag byte is
 // emitted as 0 and ErrorBytes is ignored.
 type ClosingConnectionMessage struct {
-	ReasonForClosing    string
-	ClosingDueToError   bool
-	ErrorPresent        bool
-	ErrorBytes          []byte // raw fc::exception body when ErrorPresent
+	ReasonForClosing  string
+	ClosingDueToError bool
+	ErrorPresent      bool
+	ErrorBytes        []byte // raw fc::exception body when ErrorPresent
 }
 
 // Type returns the message type tag.
@@ -508,9 +513,10 @@ func (m *CurrentTimeRequestMessage) Unmarshal(src []byte) error {
 // CurrentTimeReplyMessage is graphene::net::current_time_reply_message.
 //
 // FC_REFLECT order:
-//   request_sent_time         fc::time_point (uint64 LE us)
-//   request_received_time     fc::time_point (uint64 LE us)
-//   reply_transmitted_time    fc::time_point (uint64 LE us)
+//
+//	request_sent_time         fc::time_point (uint64 LE us)
+//	request_received_time     fc::time_point (uint64 LE us)
+//	reply_transmitted_time    fc::time_point (uint64 LE us)
 type CurrentTimeReplyMessage struct {
 	RequestSentTime      uint64
 	RequestReceivedTime  uint64

@@ -2,6 +2,7 @@ package sync
 
 import (
 	"fmt"
+	"hived-go/internal/config"
 	"io"
 	"os"
 	"sort"
@@ -873,12 +874,12 @@ func newWithChain(cfg Config, c Chain) *Delegate {
 		txSigCache:      newTxSigCache(),
 		inflight:        make(map[block.ID]inflightEntry, 8192),
 	}
-	if lo := os.Getenv("GHIVE_TRACE_LO"); lo != "" {
+	if lo := config.Env("GOPHERD_TRACE_LO"); lo != "" {
 		if v, err := strconv.ParseUint(lo, 10, 32); err == nil {
 			d.traceLo = uint32(v)
 		}
 	}
-	if hi := os.Getenv("GHIVE_TRACE_HI"); hi != "" {
+	if hi := config.Env("GOPHERD_TRACE_HI"); hi != "" {
 		if v, err := strconv.ParseUint(hi, 10, 32); err == nil {
 			d.traceHi = uint32(v)
 		}

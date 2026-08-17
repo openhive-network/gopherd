@@ -39,7 +39,7 @@ func TestPow2WorkRoundTrip(t *testing.T) {
 			PrevBlock:     prev,
 			Nonce:         1050,
 		},
-		PowSummary: 0,
+		PowSummary:  0,
 		NewOwnerKey: nil,
 		Props: LegacyChainProperties{
 			AccountCreationFee: asset.LegacyHiveAsset{

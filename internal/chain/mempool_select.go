@@ -168,11 +168,11 @@ func (d *Database) SelectPendingTransactions(
 
 	ctx := &evaluator.Context{
 		OwnerAuthHistoryStartBlock: d.ownerAuthHistoryStartBlock,
-		DB:            session,
-		Hardforks:     hf,
-		BlockNum:      blockNum,
-		BlockTime:     blockTime,
-		HeadBlockTime: headBlockTime,
+		DB:                         session,
+		Hardforks:                  hf,
+		BlockNum:                   blockNum,
+		BlockTime:                  blockTime,
+		HeadBlockTime:              headBlockTime,
 		// The PRODUCER of the block being built — not dgpo.CurrentWitness, which
 		// is the PREVIOUS block's producer. ApplyBlock uses hdr.Witness here, and
 		// a trial apply that does not model the real apply can approve a

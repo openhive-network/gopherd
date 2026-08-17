@@ -730,10 +730,10 @@ func readSetResetAccount(r *fcraw.Reader) (Op, error) {
 // ---- 39 claim_reward_balance --------------------------------------------
 
 type ClaimRewardBalance struct {
-	Account      auth.AccountName
-	RewardHive   asset.Asset
-	RewardHbd    asset.Asset
-	RewardVests  asset.Asset
+	Account     auth.AccountName
+	RewardHive  asset.Asset
+	RewardHbd   asset.Asset
+	RewardVests asset.Asset
 }
 
 func (ClaimRewardBalance) OpTag() Tag { return TagClaimRewardBalance }

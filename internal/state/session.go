@@ -131,7 +131,6 @@ func (s *Session) RegisterPreCommit(fn func()) {
 	s.preCommit = append(s.preCommit, fn)
 }
 
-
 // AuxInvalidate drops a cached parsed object. Called by domain Put
 // helpers when they overwrite the underlying row.
 func (s *Session) AuxInvalidate(key string) {
@@ -866,4 +865,3 @@ func compareBytes(a, b []byte) int {
 	}
 	return len(a) - len(b)
 }
-

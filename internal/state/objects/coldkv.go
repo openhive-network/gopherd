@@ -3,6 +3,7 @@ package objects
 import (
 	"errors"
 	"fmt"
+	"hived-go/internal/config"
 	"os"
 	"path/filepath"
 
@@ -55,7 +56,7 @@ const (
 // Default NoCompression (CPU-cheapest); set zstd/snappy when disk space is
 // the binding constraint for the run.
 func coldCompression() pebble.Compression {
-	switch os.Getenv("GHIVE_COLD_COMPRESS") {
+	switch config.Env("GOPHERD_COLD_COMPRESS") {
 	case "zstd":
 		return pebble.ZstdCompression
 	case "snappy":

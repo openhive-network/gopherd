@@ -8,9 +8,9 @@ import (
 // Google CityHash 1.0.x 128-bit variant (no CRC). hived's stcp_socket uses
 // this to derive the 128-bit IV for its AES-256-CBC stream:
 //
-//   shared = sha512(ECDH(priv, remote_pub).X)        // 64 bytes
-//   key    = sha256(shared)                          // 32 bytes
-//   iv128  = city_hash_crc_128(shared, sizeof shared)
+//	shared = sha512(ECDH(priv, remote_pub).X)        // 64 bytes
+//	key    = sha256(shared)                          // 32 bytes
+//	iv128  = city_hash_crc_128(shared, sizeof shared)
 //
 // For inputs <= 900 bytes (and our SHA-512 is 64), city_hash_crc_128
 // delegates to city_hash128 (no SSE4.2 CRC tail), so this single function
@@ -37,8 +37,8 @@ func CityHash128(s []byte) (lo, hi uint64) {
 // In native uint128 layout, low 8 bytes sit at offset 0 and high 8 bytes
 // at offset 8. Therefore the bytes the AES init sees are:
 //
-//   bytes[0..8]  = original_high (LE)   — was high_bits(iv)
-//   bytes[8..16] = original_low  (LE)   — was low_bits(iv)
+//	bytes[0..8]  = original_high (LE)   — was high_bits(iv)
+//	bytes[8..16] = original_low  (LE)   — was low_bits(iv)
 //
 // i.e. the two 64-bit halves of the original uint128 are byte-swapped.
 func CityHashIVBytes(s []byte) [16]byte {
@@ -71,8 +71,8 @@ func shiftMix(v uint64) uint64 { return v ^ (v >> 47) }
 // hashLen16 = Hash128to64(to_uint128(u, v)). Note: this is NOT the same
 // as the 3-arg HashLen16(u, v, mul). The 2-arg variant computes
 //
-//   a = (low ^ high) * kMul; a ^= a>>47
-//   b = (high ^ a)   * kMul; b ^= b>>47; b *= kMul
+//	a = (low ^ high) * kMul; a ^= a>>47
+//	b = (high ^ a)   * kMul; b ^= b>>47; b *= kMul
 //
 // where to_uint128(u, v) puts u in the high half and v in the low half,
 // so the second line is `(u ^ a) * kMul` — NOT `(v ^ a) * kMul` like the

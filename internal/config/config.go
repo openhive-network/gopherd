@@ -1,10 +1,10 @@
 // Package config parses hived-style config.ini files into structured
 // settings. The file format mirrors Boost.program_options:
 //
-//   key = value          (single value)
-//   key = "value"        (quoted, supports embedded spaces)
-//   key = value          (repeated key → slice)
-//   # comment            (line ignored)
+//	key = value          (single value)
+//	key = "value"        (quoted, supports embedded spaces)
+//	key = value          (repeated key → slice)
+//	# comment            (line ignored)
 //
 // Boost's `multitoken` keys (witness, private-key, plugin) appear
 // multiple times, each adding to the list. Single-valued keys take
@@ -41,8 +41,8 @@ type Config struct {
 	// P2PMaxConcurrentDials caps in-flight dial attempts. 0 = p2pnode
 	// default (24). Maps to "p2p-max-concurrent-dials = N" in config.ini.
 	P2PMaxConcurrentDials int
-	RPCEndpoint  string
-	DataDir      string
+	RPCEndpoint           string
+	DataDir               string
 	// SharedFileSize is the soft memory bound (Boost INI string like
 	// "20G", "8G"). We parse it into bytes for our Pebble cache.
 	SharedFileSize string

@@ -10,6 +10,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"hived-go/internal/config"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
@@ -330,10 +331,10 @@ func cmdReplay(args []string) int {
 
 	// Windowed fine-grained invariant checking (see the check site below).
 	var invFineFrom, invFineEvery uint64
-	if v := os.Getenv("GHIVE_INV_FINE_FROM"); v != "" {
+	if v := config.Env("GOPHERD_INV_FINE_FROM"); v != "" {
 		invFineFrom, _ = strconv.ParseUint(v, 10, 64)
 	}
-	if v := os.Getenv("GHIVE_INV_FINE_EVERY"); v != "" {
+	if v := config.Env("GOPHERD_INV_FINE_EVERY"); v != "" {
 		invFineEvery, _ = strconv.ParseUint(v, 10, 64)
 	}
 	if invFineFrom > 0 {

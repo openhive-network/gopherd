@@ -3,8 +3,8 @@ package objects
 import (
 	"encoding/binary"
 	"fmt"
+	"hived-go/internal/config"
 	"io"
-	"os"
 	"sort"
 	"strings"
 
@@ -17,7 +17,7 @@ import (
 // reward accumulators of frozen comments. Trades the verbatim fast path
 // for a much smaller cold tier — required so a full-chain node warm-starts
 // without the mmap OOM. Replays leave it unset to keep the fast load.
-var slimColdOnLoad = os.Getenv("GHIVE_SLIM_COLD") == "1"
+var slimColdOnLoad = config.Env("GOPHERD_SLIM_COLD") == "1"
 
 // coldReuseOnLoad (GHIVE_COLD_REUSE=1): the attached cold tier is ALREADY
 // populated with the correct paid/frozen records (e.g. a replay-built pebble
@@ -29,7 +29,7 @@ var slimColdOnLoad = os.Getenv("GHIVE_SLIM_COLD") == "1"
 // write, trusting the pre-populated tier. The tier and snapshot MUST come from
 // the same block/run (identical partition of resident vs cold, identical slim
 // blob format) or lookups return stale/missing records.
-var coldReuseOnLoad = os.Getenv("GHIVE_COLD_REUSE") == "1"
+var coldReuseOnLoad = config.Env("GOPHERD_COLD_REUSE") == "1"
 
 // CommentStore is the in-memory typed container for the Comment table.
 // Replaces the K/V serde path with a primary map + per-root index.

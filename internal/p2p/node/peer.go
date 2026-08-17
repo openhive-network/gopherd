@@ -270,17 +270,17 @@ func (p *Peer) close(cause error) {
 //
 // The state machine is:
 //
-//   1. Send HelloMessage              (state -> HelloSent)
-//   2. Loop receiving:
-//      - ConnectionAccepted          -> state Active, fire OnPeerConnected,
-//                                       start heartbeat goroutine
-//      - ConnectionRejected          -> close cleanly with reason error
-//      - HelloMessage (inbound peer) -> reply with ConnectionAccepted
-//      - CurrentTimeRequest          -> reply with CurrentTimeReply
-//      - CurrentTimeReply            -> reset heartbeat deadline
-//      - business message            -> if Active, forward to delegate;
-//                                       else drop with "premature" warning
-//   3. On read error or heartbeat timeout, close.
+//  1. Send HelloMessage              (state -> HelloSent)
+//  2. Loop receiving:
+//     - ConnectionAccepted          -> state Active, fire OnPeerConnected,
+//     start heartbeat goroutine
+//     - ConnectionRejected          -> close cleanly with reason error
+//     - HelloMessage (inbound peer) -> reply with ConnectionAccepted
+//     - CurrentTimeRequest          -> reply with CurrentTimeReply
+//     - CurrentTimeReply            -> reset heartbeat deadline
+//     - business message            -> if Active, forward to delegate;
+//     else drop with "premature" warning
+//  3. On read error or heartbeat timeout, close.
 func (p *Peer) run(ctx context.Context, delegate Delegate) {
 	defer p.close(nil)
 

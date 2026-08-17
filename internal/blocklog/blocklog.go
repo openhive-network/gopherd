@@ -62,9 +62,9 @@ const (
 
 // Attributes captures the per-block metadata packed into trailer high bits.
 type Attributes struct {
-	Compressed     bool
-	DictionaryNum  uint8 // valid only when HasDictNum is true
-	HasDictNum     bool
+	Compressed    bool
+	DictionaryNum uint8 // valid only when HasDictNum is true
+	HasDictNum    bool
 }
 
 func decodeTrailer(packed uint64) (offset uint64, attr Attributes) {
@@ -553,8 +553,8 @@ func buildInMemoryIndex(p *part) error {
 // in range, or the block must be block 1 with blockOffset 0).
 func recoverValidEnd(p *part) (int64, bool) {
 	const (
-		maxBlockLen = 8 << 20    // generous upper bound on one serialized block
-		maxScan     = 64 << 20   // how far back from EOF to hunt for the boundary
+		maxBlockLen = 8 << 20  // generous upper bound on one serialized block
+		maxScan     = 64 << 20 // how far back from EOF to hunt for the boundary
 	)
 	valid := func(tp int64) bool {
 		if tp < 0 || tp+trailerSize > p.mainSize {

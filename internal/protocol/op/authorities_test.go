@@ -136,8 +136,8 @@ func TestAutodetectKeysWitnessSetPropertiesNoRequirement(t *testing.T) {
 // TestAutodetectKeysProposalActions verify proposal ops require active.
 func TestAutodetectKeysProposalActions(t *testing.T) {
 	cases := []struct {
-		op       Operation
-		account  string
+		op      Operation
+		account string
 	}{
 		{CreateProposal{Creator: "alice"}, "alice"},
 		{UpdateProposal{Creator: "alice"}, "alice"},

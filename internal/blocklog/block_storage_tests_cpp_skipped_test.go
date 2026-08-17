@@ -34,30 +34,72 @@ func TestSkippedBlockStorageLegacyToZero(t *testing.T) {
 	t.Skip("Go has no compress_block_log/legacy→legacy converter; round-trip covered by TestWriterByteIdenticalToMainnet")
 }
 
-func TestSkippedBlockStorageLegacyToSplit(t *testing.T)                 { t.Skip("Go has no legacy→split converter binary") }
-func TestSkippedBlockStorageSplitToZero(t *testing.T)                   { t.Skip("Go has no split→legacy converter binary") }
-func TestSkippedBlockStorageCleanReplayLegacyToZero(t *testing.T)       { t.Skip("hived replay+convert chain test; Go replay covers the read side only") }
-func TestSkippedBlockStorageCleanReplayLegacyToSplit(t *testing.T)      { t.Skip("hived replay+convert chain test; no Go-side converter") }
+func TestSkippedBlockStorageLegacyToSplit(t *testing.T) {
+	t.Skip("Go has no legacy→split converter binary")
+}
+func TestSkippedBlockStorageSplitToZero(t *testing.T) {
+	t.Skip("Go has no split→legacy converter binary")
+}
+func TestSkippedBlockStorageCleanReplayLegacyToZero(t *testing.T) {
+	t.Skip("hived replay+convert chain test; Go replay covers the read side only")
+}
+func TestSkippedBlockStorageCleanReplayLegacyToSplit(t *testing.T) {
+	t.Skip("hived replay+convert chain test; no Go-side converter")
+}
 func TestSkippedBlockStorageCleanReplaySplitToEffectivelyPruned(t *testing.T) {
 	t.Skip("Go has no pruning facility (compact_block_log --prune)")
 }
-func TestSkippedBlockStorageReplayLegacyToZero(t *testing.T)            { t.Skip("hived replay+convert chain test; no Go-side converter") }
-func TestSkippedBlockStorageReplayLegacyToSplit(t *testing.T)           { t.Skip("hived replay+convert chain test; no Go-side converter") }
-func TestSkippedBlockStorageSplitOverSplit(t *testing.T)                { t.Skip("hived split-over-split idempotency test; Go has no converter") }
-func TestSkippedBlockStorageAutoSplit(t *testing.T)                     { t.Skip("Go writer does not auto-split at 1M-block boundary at runtime") }
-func TestSkippedBlockStorageAutoSplit2(t *testing.T)                    { t.Skip("Go writer does not auto-split at 1M-block boundary at runtime") }
-func TestSkippedBlockStorageAutoSplit3(t *testing.T)                    { t.Skip("Go writer does not auto-split at 1M-block boundary at runtime") }
-func TestSkippedBlockStorageAutoSplit4(t *testing.T)                    { t.Skip("Go writer does not auto-split at 1M-block boundary at runtime") }
-func TestSkippedBlockStorageGetBlockRange(t *testing.T)                 { t.Skip("Go Reader has no get_block_range public API; ReadAt loops cover the equivalent") }
-func TestSkippedBlockStorageIncrementalReplayPruned(t *testing.T)       { t.Skip("Go has no pruned-mode incremental replay tooling") }
-func TestSkippedBlockStorageSnapshotLegacyToZero(t *testing.T)          { t.Skip("Go state-snapshot tool does not bundle block_log") }
-func TestSkippedBlockStorageSnapshotZeroToZero(t *testing.T)            { t.Skip("Go state-snapshot tool does not bundle block_log") }
-func TestSkippedBlockStorageSnapshotReplayLegacyToSplit(t *testing.T)   { t.Skip("Go has no combined state-snapshot+converter flow") }
-func TestSkippedBlockStorageSnapshotReplayLegacyToZero(t *testing.T)    { t.Skip("Go has no combined state-snapshot+converter flow") }
-func TestSkippedBlockStorageSnapshotReplaySplitToSplit(t *testing.T)    { t.Skip("Go has no combined state-snapshot+converter flow") }
-func TestSkippedBlockStorageSnapshotReplaySplitToZero(t *testing.T)     { t.Skip("Go has no combined state-snapshot+converter flow") }
-func TestSkippedBlockStorageSnapshotPrunedToPruned(t *testing.T)        { t.Skip("Go has no pruned-mode snapshot tooling") }
-func TestSkippedBlockStorageSnapshotReplayPrunedToPruned(t *testing.T)  { t.Skip("Go has no pruned-mode snapshot tooling") }
+func TestSkippedBlockStorageReplayLegacyToZero(t *testing.T) {
+	t.Skip("hived replay+convert chain test; no Go-side converter")
+}
+func TestSkippedBlockStorageReplayLegacyToSplit(t *testing.T) {
+	t.Skip("hived replay+convert chain test; no Go-side converter")
+}
+func TestSkippedBlockStorageSplitOverSplit(t *testing.T) {
+	t.Skip("hived split-over-split idempotency test; Go has no converter")
+}
+func TestSkippedBlockStorageAutoSplit(t *testing.T) {
+	t.Skip("Go writer does not auto-split at 1M-block boundary at runtime")
+}
+func TestSkippedBlockStorageAutoSplit2(t *testing.T) {
+	t.Skip("Go writer does not auto-split at 1M-block boundary at runtime")
+}
+func TestSkippedBlockStorageAutoSplit3(t *testing.T) {
+	t.Skip("Go writer does not auto-split at 1M-block boundary at runtime")
+}
+func TestSkippedBlockStorageAutoSplit4(t *testing.T) {
+	t.Skip("Go writer does not auto-split at 1M-block boundary at runtime")
+}
+func TestSkippedBlockStorageGetBlockRange(t *testing.T) {
+	t.Skip("Go Reader has no get_block_range public API; ReadAt loops cover the equivalent")
+}
+func TestSkippedBlockStorageIncrementalReplayPruned(t *testing.T) {
+	t.Skip("Go has no pruned-mode incremental replay tooling")
+}
+func TestSkippedBlockStorageSnapshotLegacyToZero(t *testing.T) {
+	t.Skip("Go state-snapshot tool does not bundle block_log")
+}
+func TestSkippedBlockStorageSnapshotZeroToZero(t *testing.T) {
+	t.Skip("Go state-snapshot tool does not bundle block_log")
+}
+func TestSkippedBlockStorageSnapshotReplayLegacyToSplit(t *testing.T) {
+	t.Skip("Go has no combined state-snapshot+converter flow")
+}
+func TestSkippedBlockStorageSnapshotReplayLegacyToZero(t *testing.T) {
+	t.Skip("Go has no combined state-snapshot+converter flow")
+}
+func TestSkippedBlockStorageSnapshotReplaySplitToSplit(t *testing.T) {
+	t.Skip("Go has no combined state-snapshot+converter flow")
+}
+func TestSkippedBlockStorageSnapshotReplaySplitToZero(t *testing.T) {
+	t.Skip("Go has no combined state-snapshot+converter flow")
+}
+func TestSkippedBlockStorageSnapshotPrunedToPruned(t *testing.T) {
+	t.Skip("Go has no pruned-mode snapshot tooling")
+}
+func TestSkippedBlockStorageSnapshotReplayPrunedToPruned(t *testing.T) {
+	t.Skip("Go has no pruned-mode snapshot tooling")
+}
 func TestSkippedBlockStorageAllowArtifactsRegenFalseRejectsNonexistentLog(t *testing.T) {
 	t.Skip("Go has no allow_artifacts_regeneration policy flag; missing-log is a hard error in NewReader")
 }
