@@ -13,9 +13,9 @@ import (
 //
 // Layout:
 //
-//   nodeA seed=B
-//   nodeB endpoint=B (no seeds)
-//   nodeC seed=B
+//	nodeA seed=B
+//	nodeB endpoint=B (no seeds)
+//	nodeC seed=B
 //
 // Expected: B is the rendezvous; once both A and C have peered with B,
 // B's address_reply contains the other side's endpoint, and the dialer

@@ -167,9 +167,9 @@ type ItemID struct {
 // graphene's core_message_type_enum overloads the same enum for both
 // roles. Source: libraries/net/include/graphene/net/core_messages.hpp.
 const (
-	ItemTypeTrx              = uint32(TrxMessageType)              // 1000
-	ItemTypeBlock            = uint32(BlockMessageType)            // 1001
-	ItemTypeBlockCompressed  = uint32(CompressedBlockMessageType)  // 1002
+	ItemTypeTrx             = uint32(TrxMessageType)             // 1000
+	ItemTypeBlock           = uint32(BlockMessageType)           // 1001
+	ItemTypeBlockCompressed = uint32(CompressedBlockMessageType) // 1002
 )
 
 // AdvertiseBlocksByBlockIDVersion is the graphene core_protocol_version at

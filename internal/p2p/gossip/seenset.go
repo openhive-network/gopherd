@@ -20,7 +20,7 @@ type seenSet struct {
 	mu  sync.Mutex
 	cap int
 
-	order *list.List          // *list.Element values are block.ID
+	order *list.List // *list.Element values are block.ID
 	idx   map[block.ID]*list.Element
 }
 

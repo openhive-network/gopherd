@@ -120,7 +120,7 @@ func TestMempoolEviction(t *testing.T) {
 	if m.Has("tx-0") || m.Has("tx-99") {
 		t.Fatalf("oldest entries should have been evicted")
 	}
-	if !m.Has("tx-"+strconv.Itoa(maxMempool+99)) {
+	if !m.Has("tx-" + strconv.Itoa(maxMempool+99)) {
 		t.Fatalf("newest entry should be present")
 	}
 }

@@ -46,16 +46,16 @@ func TestParseLegacyAsset(t *testing.T) {
 		"1 .333",                       // no symbol after split
 		"1 1.1",                        // multiple spaces, three tokens
 		"11111111111111111111111111111111111111111111111 TESTS", // overflow
-		"1.1.1 TESTS",   // multiple dots
-		"1.abc TESTS",   // non-digit in frac
-		" TESTS",        // missing amount
-		"TESTS",         // single token
-		"1.333",         // no symbol
-		"1.333 ",        // trailing space
-		"",              // empty
-		" ",             // whitespace only
-		"  ",            // whitespace only
-		"100 TESTS",     // missing decimals
+		"1.1.1 TESTS", // multiple dots
+		"1.abc TESTS", // non-digit in frac
+		" TESTS",      // missing amount
+		"TESTS",       // single token
+		"1.333",       // no symbol
+		"1.333 ",      // trailing space
+		"",            // empty
+		" ",           // whitespace only
+		"  ",          // whitespace only
+		"100 TESTS",   // missing decimals
 	}
 	for _, in := range bad {
 		_, err := ParseLegacyAsset(in)

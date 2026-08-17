@@ -118,7 +118,7 @@ type Node struct {
 	wg     sync.WaitGroup
 
 	// helloPayload removed: now built per-peer in buildHelloPayload(c).
-	peerdb       *peerdb.Store
+	peerdb *peerdb.Store
 
 	// localAddrPorts caches the parsed forms of cfg.Endpoint so
 	// self-dial protection is cheap.
@@ -956,12 +956,16 @@ func (a *activationDelegate) OnPeerConnected(p *Peer) {
 	}
 	a.inner.OnPeerConnected(p)
 }
-func (a *activationDelegate) OnPeerDisconnected(p *Peer, err error) { a.inner.OnPeerDisconnected(p, err) }
+func (a *activationDelegate) OnPeerDisconnected(p *Peer, err error) {
+	a.inner.OnPeerDisconnected(p, err)
+}
 func (a *activationDelegate) OnMessage(p *Peer, t proto.MessageType, body []byte) {
 	a.inner.OnMessage(p, t, body)
 }
-func (a *activationDelegate) OnBlockReceived(p *Peer, body []byte)       { a.inner.OnBlockReceived(p, body) }
-func (a *activationDelegate) OnTransactionReceived(p *Peer, body []byte) { a.inner.OnTransactionReceived(p, body) }
+func (a *activationDelegate) OnBlockReceived(p *Peer, body []byte) { a.inner.OnBlockReceived(p, body) }
+func (a *activationDelegate) OnTransactionReceived(p *Peer, body []byte) {
+	a.inner.OnTransactionReceived(p, body)
+}
 func (a *activationDelegate) OnAddressesReceived(p *Peer, addrs []proto.AddressInfo) {
 	a.inner.OnAddressesReceived(p, addrs)
 }

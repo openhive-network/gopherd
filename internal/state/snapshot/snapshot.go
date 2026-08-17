@@ -36,6 +36,7 @@ import (
 	"fmt"
 	"hash"
 	"hash/crc32"
+	"hived-go/internal/config"
 	"io"
 	"os"
 	"path/filepath"
@@ -71,16 +72,16 @@ func newSnapshotHash(algo string) hash.Hash {
 
 // Manifest is the JSON sidecar describing a snapshot directory.
 type Manifest struct {
-	Format       int               `json:"format"`
-	BlockNum     uint32            `json:"block_num"`
-	HeadBlockID  string            `json:"head_block_id,omitempty"` // hex; empty if unknown
-	WrittenAtNs  int64             `json:"written_at_ns"`
+	Format      int    `json:"format"`
+	BlockNum    uint32 `json:"block_num"`
+	HeadBlockID string `json:"head_block_id,omitempty"` // hex; empty if unknown
+	WrittenAtNs int64  `json:"written_at_ns"`
 	// HashAlgo names the checksum in the *sha256 fields: "" = sha256
 	// (legacy), "crc32c" = Castagnoli CRC32 (the write default).
-	HashAlgo     string            `json:"hash_algo,omitempty"`
-	MemFile      string            `json:"mem_file"`
-	MemSHA256    string            `json:"mem_sha256"`
-	Subsystems   []SubsystemEntry  `json:"subsystems"`
+	HashAlgo   string           `json:"hash_algo,omitempty"`
+	MemFile    string           `json:"mem_file"`
+	MemSHA256  string           `json:"mem_sha256"`
+	Subsystems []SubsystemEntry `json:"subsystems"`
 }
 
 // SubsystemEntry records one subsystem file in the manifest.
@@ -327,7 +328,7 @@ func Load(db *state.Database, snapDir string) (*Manifest, error) {
 	// with --tolerate-failing-ops: comment-touching ops fail and are skipped,
 	// while witness state, feeds, and the schedule replay faithfully. NEVER
 	// valid for consensus replay.
-	skipComments := os.Getenv("GHIVE_SNAPSHOT_SKIP_COMMENTS") == "1"
+	skipComments := config.Env("GOPHERD_SNAPSHOT_SKIP_COMMENTS") == "1"
 	loads := make([]subLoad, 0, len(man.Subsystems))
 	for _, sub := range man.Subsystems {
 		if skipComments && (sub.Name == "comment_store" || sub.Name == "comment_vote_store" || sub.Name == "comment_cashout_schedule_store") {
@@ -355,7 +356,7 @@ func Load(db *state.Database, snapDir string) (*Manifest, error) {
 	// peak memory/reclaim pressure (a 25GB parallel load on a 31GB box
 	// repeatedly tripped systemd-oomd's ">50% pressure for >20s" kill) at
 	// the cost of wall-clock.
-	serialLoad := os.Getenv("GHIVE_SNAPSHOT_LOAD_SERIAL") == "1"
+	serialLoad := config.Env("GOPHERD_SNAPSHOT_LOAD_SERIAL") == "1"
 	var (
 		wg       sync.WaitGroup
 		mu       sync.Mutex
@@ -444,7 +445,7 @@ const dropCacheStride = 256 << 20
 // not). Loads ALWAYS auto-detect by sniffing the zstd frame magic, so
 // compressed and uncompressed snapshots interoperate transparently.
 // Manifest checksums cover the FILE bytes (compressed when enabled).
-var snapshotZstd = os.Getenv("GHIVE_SNAPSHOT_ZSTD") == "1"
+var snapshotZstd = config.Env("GOPHERD_SNAPSHOT_ZSTD") == "1"
 
 // zstdMagic is the 4-byte zstd frame header (RFC 8878). No snapshot
 // subsystem format begins with these bytes, so sniffing is unambiguous.
@@ -479,7 +480,7 @@ func maybeZstdReader(br *bufio.Reader) (*bufio.Reader, func(), error) {
 // + cold-tier spill) reliably trips that on a 31GB machine. Pacing the read
 // side paces the whole pipeline and keeps pressure under the trigger.
 var loadPaceMBs = func() int64 {
-	n, _ := strconv.ParseInt(os.Getenv("GHIVE_SNAPSHOT_LOAD_PACE_MB"), 10, 64)
+	n, _ := strconv.ParseInt(config.Env("GOPHERD_SNAPSHOT_LOAD_PACE_MB"), 10, 64)
 	return n
 }()
 

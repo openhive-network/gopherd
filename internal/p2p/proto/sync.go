@@ -9,8 +9,9 @@ import (
 // ItemIDsInventoryMessage mirrors graphene::net::item_ids_inventory_message.
 //
 // FC_REFLECT order:
-//   item_type             uint32 LE
-//   item_hashes_available vector<item_hash_t>     (varuint count + 20-byte hashes)
+//
+//	item_type             uint32 LE
+//	item_hashes_available vector<item_hash_t>     (varuint count + 20-byte hashes)
 type ItemIDsInventoryMessage struct {
 	ItemType            uint32
 	ItemHashesAvailable []ItemHash
@@ -58,9 +59,10 @@ func (m *ItemIDsInventoryMessage) Unmarshal(src []byte) error {
 // graphene::net::blockchain_item_ids_inventory_message.
 //
 // FC_REFLECT order:
-//   total_remaining_item_count  uint32 LE
-//   item_type                   uint32 LE
-//   item_hashes_available       vector<item_hash_t>
+//
+//	total_remaining_item_count  uint32 LE
+//	item_type                   uint32 LE
+//	item_hashes_available       vector<item_hash_t>
 type BlockchainItemIDsInventoryMessage struct {
 	TotalRemainingItemCount uint32
 	ItemType                uint32
@@ -115,8 +117,9 @@ func (m *BlockchainItemIDsInventoryMessage) Unmarshal(src []byte) error {
 // graphene::net::fetch_blockchain_item_ids_message.
 //
 // FC_REFLECT order:
-//   item_type            uint32 LE
-//   blockchain_synopsis  vector<item_hash_t>
+//
+//	item_type            uint32 LE
+//	blockchain_synopsis  vector<item_hash_t>
 type FetchBlockchainItemIDsMessage struct {
 	ItemType           uint32
 	BlockchainSynopsis []ItemHash
@@ -163,11 +166,12 @@ func (m *FetchBlockchainItemIDsMessage) Unmarshal(src []byte) error {
 // FetchItemsMessage mirrors graphene::net::fetch_items_message.
 //
 // FC_REFLECT order:
-//   item_type        uint32 LE
-//   items_to_fetch   vector<item_hash_t>
+//
+//	item_type        uint32 LE
+//	items_to_fetch   vector<item_hash_t>
 type FetchItemsMessage struct {
-	ItemType      uint32
-	ItemsToFetch  []ItemHash
+	ItemType     uint32
+	ItemsToFetch []ItemHash
 }
 
 // Type returns the message type tag.
@@ -211,7 +215,8 @@ func (m *FetchItemsMessage) Unmarshal(src []byte) error {
 // ItemNotAvailableMessage mirrors graphene::net::item_not_available_message.
 //
 // FC_REFLECT order:
-//   requested_item   item_id  (uint32 item_type + 20-byte item_hash)
+//
+//	requested_item   item_id  (uint32 item_type + 20-byte item_hash)
 type ItemNotAvailableMessage struct {
 	RequestedItem ItemID
 }
@@ -288,15 +293,16 @@ func (m *BlockMessage) Unmarshal(src []byte) error {
 // CompressedBlockMessage carries a zstd-compressed signed_block.
 //
 // Wire format (libraries/net/core_messages.cpp:114):
-//   byte 0   bit 7  → zstd flag       (0x80 = zstd-compressed)
-//            bit 6  → dictionary flag (0x40 = a dictionary number follows)
-//   byte 1   uint8  → dictionary number when bit 6 set, else 0
-//   bytes 2+        → compressed payload bytes
+//
+//	byte 0   bit 7  → zstd flag       (0x80 = zstd-compressed)
+//	         bit 6  → dictionary flag (0x40 = a dictionary number follows)
+//	byte 1   uint8  → dictionary number when bit 6 set, else 0
+//	bytes 2+        → compressed payload bytes
 type CompressedBlockMessage struct {
-	Zstd                  bool
-	DictionaryNumber      uint8
-	HasDictionary         bool
-	CompressedBytes       []byte
+	Zstd             bool
+	DictionaryNumber uint8
+	HasDictionary    bool
+	CompressedBytes  []byte
 }
 
 // Type returns the message type tag.

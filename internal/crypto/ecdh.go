@@ -29,9 +29,9 @@ func GenerateEphemeralKey() (*PrivateKey, error) {
 //
 // This mirrors `fc::ecc::private_key::get_shared_secret`:
 //
-//   pub = pubkey_tweak_mul(remote_pub, priv)        // P = priv*Q
-//   serialized = secp256k1_ec_pubkey_serialize(pub) // 33 bytes [parity || X]
-//   sha512(serialized + 1, serialized.size() - 1)   // sha512(X), 32 bytes input
+//	pub = pubkey_tweak_mul(remote_pub, priv)        // P = priv*Q
+//	serialized = secp256k1_ec_pubkey_serialize(pub) // 33 bytes [parity || X]
+//	sha512(serialized + 1, serialized.size() - 1)   // sha512(X), 32 bytes input
 //
 // dcrec's GenerateSharedSecret returns the X coordinate as a big-endian
 // 32-byte value, which is the same byte layout as the trailing 32 bytes of

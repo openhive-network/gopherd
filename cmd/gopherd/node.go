@@ -33,6 +33,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"hived-go/internal/config"
 	"net"
 	"net/http"
 	_ "net/http/pprof"
@@ -75,7 +76,7 @@ import (
 var resumeMarkerInterval uint32 = 50000
 
 func init() {
-	if v := os.Getenv("GHIVE_RESUME_MARKER_INTERVAL"); v != "" {
+	if v := config.Env("GOPHERD_RESUME_MARKER_INTERVAL"); v != "" {
 		if n, err := strconv.ParseUint(v, 10, 32); err == nil && n > 0 {
 			resumeMarkerInterval = uint32(n)
 		}

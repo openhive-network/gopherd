@@ -42,10 +42,10 @@ const (
 // HeaderExtension is a typed view of one entry in block_header_extensions.
 // Only the variant indicated by Tag carries a meaningful payload.
 type HeaderExtension struct {
-	Tag                  HeaderExtensionTag
-	Version              uint32 // packed v_num for HeaderExtVersion
-	HardforkVersion      uint32 // packed v_num for HeaderExtHardforkVersionVote
-	HardforkVersionTime  uint32 // time_point_sec for HeaderExtHardforkVersionVote
+	Tag                 HeaderExtensionTag
+	Version             uint32 // packed v_num for HeaderExtVersion
+	HardforkVersion     uint32 // packed v_num for HeaderExtHardforkVersionVote
+	HardforkVersionTime uint32 // time_point_sec for HeaderExtHardforkVersionVote
 }
 
 // ParseHeaderExtensions decodes the opaque Extensions byte range into

@@ -212,7 +212,7 @@ BANNER
 
 exec systemd-run --user --scope --collect \
   -p MemoryMax="$MEM_MAX" -p MemorySwapMax=0 \
-  env GHIVE_COLD_COMPRESS=zstd GHIVE_COLD_REUSE="$COLD_REUSE" \
+  env GOPHERD_COLD_COMPRESS=zstd GOPHERD_COLD_REUSE="$COLD_REUSE" \
   "$BIN" node \
     --data-dir="$DATA" \
     --backend=pebble \

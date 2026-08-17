@@ -32,9 +32,9 @@ func TestIPv4WireByteOrder(t *testing.T) {
 		wire []byte // the 4 address bytes, after any family tag
 	}{
 		{"1.2.3.4", []byte{4, 3, 2, 1}},
-		{"192.168.18.2", []byte{2, 18, 168, 192}},   // the real NAT address we mis-dialled
+		{"192.168.18.2", []byte{2, 18, 168, 192}}, // the real NAT address we mis-dialled
 		{"127.0.0.1", []byte{1, 0, 0, 127}},
-		{"172.31.14.10", []byte{10, 14, 31, 172}},   // decoded as 10.14.31.172 before the fix
+		{"172.31.14.10", []byte{10, 14, 31, 172}}, // decoded as 10.14.31.172 before the fix
 		{"255.254.253.252", []byte{252, 253, 254, 255}},
 	}
 

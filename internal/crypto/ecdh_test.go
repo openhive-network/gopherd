@@ -38,13 +38,13 @@ func TestECDHRoundTrip(t *testing.T) {
 // TestSharedSecretMatchesHived pins our ECDH+SHA512 against a vector
 // generated from libfc with scalars 0x01||0...0 and 0x02||0...0:
 //
-//   privA = 0100000000000000000000000000000000000000000000000000000000000000
-//   privB = 0200000000000000000000000000000000000000000000000000000000000000
-//   pubA  = 028c28a97bf8298bc0d23d8c749452a32e694b65e30a9472a3954ab30fe5324caa
-//   pubB  = 03ab1ac1872a38a2f196bed5a6047f0da2c8130fe8de49fc4d5dfb201f7611d8e2
-//   shared = sha512(X(privA*pubB))
-//          = 481394b3952799c1094901d9b3fbc99d95161bacd6ccc491e29b077cd4ae3e4b
-//            828d4d6f37e1931002ebad22f02b9a74839e880ca11bf81bcac8f49f9e0bf459
+//	privA = 0100000000000000000000000000000000000000000000000000000000000000
+//	privB = 0200000000000000000000000000000000000000000000000000000000000000
+//	pubA  = 028c28a97bf8298bc0d23d8c749452a32e694b65e30a9472a3954ab30fe5324caa
+//	pubB  = 03ab1ac1872a38a2f196bed5a6047f0da2c8130fe8de49fc4d5dfb201f7611d8e2
+//	shared = sha512(X(privA*pubB))
+//	       = 481394b3952799c1094901d9b3fbc99d95161bacd6ccc491e29b077cd4ae3e4b
+//	         828d4d6f37e1931002ebad22f02b9a74839e880ca11bf81bcac8f49f9e0bf459
 //
 // (Note: fc::ecc::private_key::regenerate(fc::sha256(buf, 32)) does NOT hash
 // `buf` — fc::sha256 is a 32-byte container with that constructor, so the

@@ -5,8 +5,8 @@ package state
 // chain or evaluator code. Implementations:
 //   - pebbleBackend: persistent LSM-tree (production / general use)
 //   - memBackend:    sorted in-memory btree (replay-only — fits the
-//                    full mainnet state in a few GB and avoids LSM
-//                    Get/iter/compaction overhead)
+//     full mainnet state in a few GB and avoids LSM
+//     Get/iter/compaction overhead)
 type backend interface {
 	rawGet(physicalKey []byte) ([]byte, error)
 	rawHas(physicalKey []byte) (bool, error)

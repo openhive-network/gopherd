@@ -13,12 +13,12 @@ import (
 // ---- 5 limit_order_create -----------------------------------------------
 
 type LimitOrderCreate struct {
-	Owner         auth.AccountName
-	OrderID       uint32
-	AmountToSell  asset.Asset
-	MinToReceive  asset.Asset
-	FillOrKill    bool
-	Expiration    uint32 // time_point_sec
+	Owner        auth.AccountName
+	OrderID      uint32
+	AmountToSell asset.Asset
+	MinToReceive asset.Asset
+	FillOrKill   bool
+	Expiration   uint32 // time_point_sec
 }
 
 func (LimitOrderCreate) OpTag() Tag { return TagLimitOrderCreate }

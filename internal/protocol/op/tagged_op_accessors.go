@@ -8,26 +8,26 @@ import "unsafe"
 //
 // This file is mechanical — one accessor per op tag, in tag order.
 
-func (o Op) AsVote() *Vote                                 { return (*Vote)(o.ptr) }
-func (o Op) AsComment() *Comment                           { return (*Comment)(o.ptr) }
-func (o Op) AsTransfer() *Transfer                         { return (*Transfer)(o.ptr) }
-func (o Op) AsTransferToVesting() *TransferToVesting       { return (*TransferToVesting)(o.ptr) }
-func (o Op) AsWithdrawVesting() *WithdrawVesting           { return (*WithdrawVesting)(o.ptr) }
-func (o Op) AsLimitOrderCreate() *LimitOrderCreate         { return (*LimitOrderCreate)(o.ptr) }
-func (o Op) AsLimitOrderCancel() *LimitOrderCancel         { return (*LimitOrderCancel)(o.ptr) }
-func (o Op) AsFeedPublish() *FeedPublish                   { return (*FeedPublish)(o.ptr) }
-func (o Op) AsConvert() *Convert                           { return (*Convert)(o.ptr) }
-func (o Op) AsAccountCreate() *AccountCreate               { return (*AccountCreate)(o.ptr) }
-func (o Op) AsAccountUpdate() *AccountUpdate               { return (*AccountUpdate)(o.ptr) }
-func (o Op) AsWitnessUpdate() *WitnessUpdate               { return (*WitnessUpdate)(o.ptr) }
-func (o Op) AsAccountWitnessVote() *AccountWitnessVote     { return (*AccountWitnessVote)(o.ptr) }
-func (o Op) AsAccountWitnessProxy() *AccountWitnessProxy   { return (*AccountWitnessProxy)(o.ptr) }
-func (o Op) AsPow() *Pow                                   { return (*Pow)(o.ptr) }
-func (o Op) AsCustom() *Custom                             { return (*Custom)(o.ptr) }
-func (o Op) AsWitnessBlockApprove() *WitnessBlockApprove   { return (*WitnessBlockApprove)(o.ptr) }
-func (o Op) AsDeleteComment() *DeleteComment               { return (*DeleteComment)(o.ptr) }
-func (o Op) AsCustomJSON() *CustomJSON                     { return (*CustomJSON)(o.ptr) }
-func (o Op) AsCommentOptions() *CommentOptions             { return (*CommentOptions)(o.ptr) }
+func (o Op) AsVote() *Vote                               { return (*Vote)(o.ptr) }
+func (o Op) AsComment() *Comment                         { return (*Comment)(o.ptr) }
+func (o Op) AsTransfer() *Transfer                       { return (*Transfer)(o.ptr) }
+func (o Op) AsTransferToVesting() *TransferToVesting     { return (*TransferToVesting)(o.ptr) }
+func (o Op) AsWithdrawVesting() *WithdrawVesting         { return (*WithdrawVesting)(o.ptr) }
+func (o Op) AsLimitOrderCreate() *LimitOrderCreate       { return (*LimitOrderCreate)(o.ptr) }
+func (o Op) AsLimitOrderCancel() *LimitOrderCancel       { return (*LimitOrderCancel)(o.ptr) }
+func (o Op) AsFeedPublish() *FeedPublish                 { return (*FeedPublish)(o.ptr) }
+func (o Op) AsConvert() *Convert                         { return (*Convert)(o.ptr) }
+func (o Op) AsAccountCreate() *AccountCreate             { return (*AccountCreate)(o.ptr) }
+func (o Op) AsAccountUpdate() *AccountUpdate             { return (*AccountUpdate)(o.ptr) }
+func (o Op) AsWitnessUpdate() *WitnessUpdate             { return (*WitnessUpdate)(o.ptr) }
+func (o Op) AsAccountWitnessVote() *AccountWitnessVote   { return (*AccountWitnessVote)(o.ptr) }
+func (o Op) AsAccountWitnessProxy() *AccountWitnessProxy { return (*AccountWitnessProxy)(o.ptr) }
+func (o Op) AsPow() *Pow                                 { return (*Pow)(o.ptr) }
+func (o Op) AsCustom() *Custom                           { return (*Custom)(o.ptr) }
+func (o Op) AsWitnessBlockApprove() *WitnessBlockApprove { return (*WitnessBlockApprove)(o.ptr) }
+func (o Op) AsDeleteComment() *DeleteComment             { return (*DeleteComment)(o.ptr) }
+func (o Op) AsCustomJSON() *CustomJSON                   { return (*CustomJSON)(o.ptr) }
+func (o Op) AsCommentOptions() *CommentOptions           { return (*CommentOptions)(o.ptr) }
 func (o Op) AsSetWithdrawVestingRoute() *SetWithdrawVestingRoute {
 	return (*SetWithdrawVestingRoute)(o.ptr)
 }
@@ -51,7 +51,7 @@ func (o Op) AsTransferFromSavings() *TransferFromSavings     { return (*Transfer
 func (o Op) AsCancelTransferFromSavings() *CancelTransferFromSavings {
 	return (*CancelTransferFromSavings)(o.ptr)
 }
-func (o Op) AsCustomBinary() *CustomBinary             { return (*CustomBinary)(o.ptr) }
+func (o Op) AsCustomBinary() *CustomBinary { return (*CustomBinary)(o.ptr) }
 func (o Op) AsDeclineVotingRights() *DeclineVotingRights {
 	return (*DeclineVotingRights)(o.ptr)
 }

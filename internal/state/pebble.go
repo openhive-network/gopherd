@@ -185,11 +185,11 @@ type pebbleIter struct {
 	it *pebble.Iterator
 }
 
-func (p *pebbleIter) SetBounds(lower, upper []byte)   { p.it.SetBounds(lower, upper) }
-func (p *pebbleIter) First() bool                     { return p.it.First() }
-func (p *pebbleIter) Valid() bool                     { return p.it.Valid() }
-func (p *pebbleIter) Next() bool                      { return p.it.Next() }
-func (p *pebbleIter) Key() []byte                     { return p.it.Key() }
-func (p *pebbleIter) ValueAndErr() ([]byte, error)    { return p.it.ValueAndErr() }
-func (p *pebbleIter) Error() error                    { return p.it.Error() }
-func (p *pebbleIter) Close() error                    { return p.it.Close() }
+func (p *pebbleIter) SetBounds(lower, upper []byte) { p.it.SetBounds(lower, upper) }
+func (p *pebbleIter) First() bool                   { return p.it.First() }
+func (p *pebbleIter) Valid() bool                   { return p.it.Valid() }
+func (p *pebbleIter) Next() bool                    { return p.it.Next() }
+func (p *pebbleIter) Key() []byte                   { return p.it.Key() }
+func (p *pebbleIter) ValueAndErr() ([]byte, error)  { return p.it.ValueAndErr() }
+func (p *pebbleIter) Error() error                  { return p.it.Error() }
+func (p *pebbleIter) Close() error                  { return p.it.Close() }

@@ -24,9 +24,9 @@ const maxAccountCreationFeeSatoshi int64 = 1_000_000_000
 
 // ----- helpers -----
 
-func isHive(a asset.Asset) bool   { return a.Symbol.Num == asset.HiveSymbol }
-func isHbd(a asset.Asset) bool    { return a.Symbol.Num == asset.HbdSymbol }
-func isVests(a asset.Asset) bool  { return a.Symbol.Num == asset.VestsSymbol }
+func isHive(a asset.Asset) bool  { return a.Symbol.Num == asset.HiveSymbol }
+func isHbd(a asset.Asset) bool   { return a.Symbol.Num == asset.HbdSymbol }
+func isVests(a asset.Asset) bool { return a.Symbol.Num == asset.VestsSymbol }
 
 // ---- WithdrawVesting --------------------------------------------------
 

@@ -2,8 +2,8 @@ package witness
 
 import (
 	"bytes"
-	"errors"
 	"crypto/sha256"
+	"errors"
 	"testing"
 
 	"hived-go/internal/crypto"
@@ -255,9 +255,9 @@ func TestMempoolIndexStaysInLockstep(t *testing.T) {
 		t.Fatal("index failed to dedup")
 	}
 
-	p.dropExpired(1500)                                    // removes a
-	p.RemoveIncludedTxIDs([][20]byte{bid})                 // removes b
-	p.removeIncluded(map[[20]byte]struct{}{cid: {}})       // removes c
+	p.dropExpired(1500)                              // removes a
+	p.RemoveIncludedTxIDs([][20]byte{bid})           // removes b
+	p.removeIncluded(map[[20]byte]struct{}{cid: {}}) // removes c
 
 	if n := p.PendingCount(); n != 0 {
 		t.Fatalf("PendingCount=%d want 0", n)
