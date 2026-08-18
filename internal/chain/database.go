@@ -187,6 +187,10 @@ type Database struct {
 	// applyLoop goroutine); no lock of its own.
 	fork *forkDB
 
+	// forkPrunedBelow is the horizon the fork DAG has already been pruned to,
+	// so the O(n) sweep runs only when the irreversible block actually moves.
+	forkPrunedBelow uint32
+
 	// customOpCountByAccount tracks per-account count of custom /
 	// custom_json / custom_binary ops applied in the CURRENT block.
 	// HIVE_CUSTOM_OP_BLOCK_LIMIT (=5) caps it: the 6th custom op for the
