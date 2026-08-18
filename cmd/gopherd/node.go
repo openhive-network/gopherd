@@ -438,7 +438,7 @@ func parseNodeFlags(args []string) flags {
 	fs.StringVar(&f.coldDir, "cold-dir", "", "directory for the cold tier (used when --comment-resident-cap>0). With --cold-backend=persist it must be stable across restarts")
 	fs.StringVar(&f.coldBackend, "cold-backend", "", "cold-tier backend: \"\"/mmap|pebble|persist")
 	fs.IntVar(&f.evictBudget, "evict-budget", 20000, "max comments evicted per block when over the resident cap")
-	fs.IntVar(&f.memLimitGiB, "mem-limit-gib", 0, "if >0, set the Go soft memory limit (debug.SetMemoryLimit) to this many GiB")
+	fs.IntVar(&f.memLimitGiB, "mem-limit-gib", 0, "if >0, set the Go soft memory limit (debug.SetMemoryLimit) to this many GiB. NOTE: raising this SLOWS SNAPSHOT LOADING — the heap competes with the OS page cache over a ~26 GB snapshot file. Measured on a 31 GB box, same snapshot: 22 GiB -> 155s (166 MB/s), 12 GiB -> 108s (238 MB/s), 12 GiB with the file already cached -> 65s (394 MB/s). Leave headroom for the page cache rather than handing it all to Go")
 	fs.Parse(args)
 	f.targetBlock = uint32(target)
 	f.maxBlocks = uint32(max)
