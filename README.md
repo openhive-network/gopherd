@@ -202,7 +202,7 @@ Known gaps:
 - The production loop polls rather than arming a timer for the exact slot
   boundary. Adequate for the current margin, not ideal.
 - Produced blocks are a *subset* of what other witnesses produce: measured
-  p50 ~1.3 s of inbound transaction lateness means some transactions reach us
+  p50 inbound transaction lateness of ~0.6-1.4 s means some transactions reach us
   after we have already built. This is propagation position, not filtering —
   audits show the selector refuses nothing and drops nothing it holds.
 
