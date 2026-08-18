@@ -56,6 +56,12 @@ func (o PushOutcome) String() string {
 // every ApplyBlock it drives, with Reversible forced on.
 func (d *Database) PushLiveBlock(raw []byte, num uint32, opts ApplyOptions) (PushOutcome, error) {
 	d.ensureForkDB()
+	// Bound the DAG on every path out of here. Without this the fork database
+	// grew without limit: add() retains each block's RAW bytes and prune() had
+	// no production caller at all, so a node held every block it ever received
+	// (~28.8k/day). That is what made zstd's decompressed buffers top every
+	// heap diff -- they were not leaking, they were PINNED here.
+	defer d.pruneForkDB()
 
 	sh, hdrLen, err := block.UnmarshalSignedHeader(raw)
 	if err != nil {
@@ -105,6 +111,41 @@ func (d *Database) PushLiveBlock(raw []byte, num uint32, opts ApplyOptions) (Pus
 		}
 	}
 	return PushBuffered, nil
+}
+
+// forkKeepBelowLIB is how much history the DAG keeps BELOW the last
+// irreversible block. Nothing at or under the LIB can take part in a reorg, so
+// consensus needs none of it; the margin exists purely so a stale block that
+// is re-offered still hits the get()/PushDuplicate fast path instead of being
+// re-decoded every time a peer replays it. ~3 minutes of chain.
+const forkKeepBelowLIB = 64
+
+// pruneForkDB drops DAG nodes below the irreversible horizon. The sweep is
+// O(len(byID)), so it is skipped unless the horizon actually advanced.
+func (d *Database) pruneForkDB() {
+	if d.fork == nil {
+		return
+	}
+	lib := d.committedNum()
+	if lib <= forkKeepBelowLIB {
+		return // early chain: nothing safe to drop (and avoids uint32 underflow)
+	}
+	horizon := lib - forkKeepBelowLIB
+	if horizon <= d.forkPrunedBelow {
+		return
+	}
+	d.fork.prune(horizon)
+	d.forkPrunedBelow = horizon
+}
+
+// ForkDBLen reports how many blocks the fork DAG holds. Exported for the
+// periodic STATS line: this number growing without bound is precisely the
+// failure that went unnoticed, so it is worth watching.
+func (d *Database) ForkDBLen() int {
+	if d.fork == nil {
+		return 0
+	}
+	return d.fork.len()
 }
 
 // ensureForkDB lazily creates the DAG, seeding it with the current committed
