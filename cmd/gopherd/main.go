@@ -105,6 +105,8 @@ func main() {
 		os.Exit(cmdDebugBlock(os.Args[2:]))
 	case "replay":
 		os.Exit(cmdReplay(os.Args[2:]))
+	case "testnet-bootstrap":
+		os.Exit(cmdTestnetBootstrap(os.Args[2:]))
 	case "state-dump":
 		os.Exit(cmdStateDump(os.Args[2:]))
 	case "state-jsonl":

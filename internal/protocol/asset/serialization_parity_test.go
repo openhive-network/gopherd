@@ -30,6 +30,13 @@ const hiveMaxShareSupply int64 = 1_000_000_000_000_000_000
 // well-known names "STEEM\0\0" (HIVE), "SBD\0\0\0\0" (HBD), "VESTS\0\0"
 // (VESTS). We reproduce the same 16-byte expected layout and compare.
 func TestAssetRawRoundTripSweep(t *testing.T) {
+	// The expected hex below was captured from MAINNET hived, so it embeds the
+	// mainnet legacy symbol names (STEEM/SBD). A testnet build legitimately
+	// emits TESTS/TBD, which this table cannot express; the encoder itself is
+	// covered per-network by TestLegacySymbolDecode.
+	if legacyHiveName != "STEEM" {
+		t.Skip("mainnet C++ parity vectors: testnet uses different legacy symbol names")
+	}
 	// Confirm the ordering invariants the C++ test asserts up front.
 	if !(HbdSymbol < HiveSymbol) {
 		t.Errorf("expected HBD asset_num < HIVE asset_num, got %#x vs %#x",

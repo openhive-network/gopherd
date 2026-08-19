@@ -218,10 +218,10 @@ type LegacyHiveAsset struct {
 
 // canonical legacy and non-canonical accepted serializations (8 bytes each).
 var (
-	legacyHiveSymCanonical = []byte{0x03, 'S', 'T', 'E', 'E', 'M', 0x00, 0x00}
-	legacyHiveSym1         = []byte{0x01, 'S', 'T', 'E', 'E', 'M', 0x00, 0x00}
-	legacyHiveSym2         = []byte{0x02, 'S', 'T', 'E', 'E', 'M', 0x00, 0x00}
-	legacyHiveSym3         = []byte{0x05, 'S', 'T', 'E', 'E', 'M', 0x00, 0x00}
+	legacyHiveSymCanonical = legacySymBytes(3, legacyHiveName)
+	legacyHiveSym1         = legacySymBytes(1, legacyHiveName)
+	legacyHiveSym2         = legacySymBytes(2, legacyHiveName)
+	legacyHiveSym3         = legacySymBytes(5, legacyHiveName)
 	legacyHiveSym4         = []byte{0x03, '0', '.', '0', '0', '1', 0x00, 0x00}
 	legacyHiveSym5         = []byte{0x03, '6', '.', '0', '0', '0', 0x00, 0x00}
 )

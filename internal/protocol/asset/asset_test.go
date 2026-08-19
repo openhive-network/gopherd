@@ -45,8 +45,11 @@ func TestLegacySymbolDecode(t *testing.T) {
 		bytes   []byte
 		wantNum AssetNum
 	}{
-		{"HIVE (legacy STEEM)", []byte{0x03, 'S', 'T', 'E', 'E', 'M', 0x00, 0x00}, HiveSymbol},
-		{"HBD (legacy SBD)", []byte{0x03, 'S', 'B', 'D', 0x00, 0x00, 0x00, 0x00}, HbdSymbol},
+		// Legacy names are per-network: STEEM/SBD on mainnet, TESTS/TBD on a
+		// testnet build. Built from the same source as the encoder so this
+		// asserts the ACTIVE network's wire format rather than mainnet's.
+		{"HIVE (legacy " + legacyHiveName + ")", legacySymBytes(3, legacyHiveName), HiveSymbol},
+		{"HBD (legacy " + legacyHbdName + ")", legacySymBytes(3, legacyHbdName), HbdSymbol},
 		{"VESTS", []byte{0x06, 'V', 'E', 'S', 'T', 'S', 0x00, 0x00}, VestsSymbol},
 	}
 	for _, c := range cases {

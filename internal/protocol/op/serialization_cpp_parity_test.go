@@ -9,6 +9,7 @@ package op
 
 import (
 	"bytes"
+	"gopherd/internal/protocol/network"
 	"testing"
 
 	"gopherd/internal/fcraw"
@@ -29,6 +30,12 @@ import (
 // tail of the signed_block_header. We mirror that here: bytes [0xAB,0xCD,0xEF,0,
 // 0,0,0,0,...].
 func TestPow2WorkRoundTrip(t *testing.T) {
+	// The fixture encodes legacy_chain_properties with the MAINNET legacy asset
+	// name (STEEM). A testnet build's reader accepts TESTS instead, so this
+	// vector is not decodable there — correctly so.
+	if network.Name != "mainnet" {
+		t.Skip("mainnet C++ parity vector: testnet legacy asset names differ")
+	}
 	var prev [20]byte
 	prev[0], prev[1], prev[2] = 0xAB, 0xCD, 0xEF // "abcdef" → block_id high bytes
 
