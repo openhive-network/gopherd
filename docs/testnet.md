@@ -100,15 +100,25 @@ and the node can reorg off it if the network picks another block for that slot.
 Production is still key-gated: gopherd refuses the slot unless the chain's
 registered signing key for the witness matches the key it holds.
 
-## Known divergence
+## Parity status
 
-`current_supply` and `total_vesting_fund_hive` are **1558 satoshi** higher on
-gopherd than on hived. The offset is established once, at block 1, and does not
-grow — per-block inflation matches exactly, verified constant over many blocks
-on repeated fresh chains. Because it shifts the VESTS/HIVE price slightly, the
-resulting `total_vesting_shares` differ by a larger proportion once a large
-`transfer_to_vesting` lands.
+A gopherd node on a hived testnet agrees with hived on block IDs **and** on
+chain state: supply, HBD supply, vesting shares, vesting fund and virtual
+supply are all exact, verified from block 1 onward with
+`scripts/testnet-state-diff`.
 
-It does not prevent interoperation: blocks produced by either implementation
-are accepted by the other, and block IDs match. It is a genuine parity gap and
-`scripts/testnet-state-diff` reproduces it in seconds.
+Getting there took one non-obvious fix worth recording.
+`witness_schedule_object` hard-codes `witness_pay_normalization_factor = 25`
+(`witness_objects.hpp:194`) — a literal struct default, not something computed
+at genesis. `process_funds` multiplies the witness reward by
+`HIVE_MAX_WITNESSES` and divides by that factor, so leaving it zero makes the
+divide-by-zero guard pay the *unweighted* slice: 234 sat at block 1 instead of
+`234 * 21 / 25` = 196. Because the 38-sat overpayment lands in the vesting
+fund it shifts the VESTS/HIVE price permanently, and later surfaced as 1558 sat
+of supply and a 30% vesting-share gap once a large `transfer_to_vesting` was
+converted at the wrong price.
+
+The lesson generalises: a small error in a *price input* does not stay small.
+Compare state early and from block 1, where the arithmetic is still simple
+enough to back-solve — freezing hived with `--stop-at-block=1` and reading its
+numbers is far more reliable than reasoning about what they should be.
