@@ -1,58 +1,45 @@
 #!/usr/bin/env bash
-# scripts/testnet-status — print per-node liveness for the local testnet.
+# scripts/testnet-status — verify a mixed hived+gopherd testnet actually agrees.
 #
-# For each ./testnet/node-*/ghive.pid:
-#   - pid + alive/dead status
-#   - p2p-endpoint from the node's config.ini
-#   - last 3 lines of run.log (proxy for "what is the daemon doing")
-#
-# Real RPC head_block / peer count probing lands once cmd/ghive ships
-# the JSON-RPC plugin (P2 work).
-
+# Compares block IDs across every node over the recent window and reports who
+# produced what. Block-id equality is the real check: the nodes can hold
+# different STATE while agreeing on ids, because Hive block ids do not commit
+# to state, so testnet-state-diff exists separately for that.
 set -euo pipefail
+TN=${TESTNET_DIR:-/home/martin/testnet}
+WINDOW=${1:-60}
 
-ROOT=$(cd "$(dirname "$0")/.." && pwd)
-OUT=${ROOT}/testnet
-
-if [[ ! -d "${OUT}" ]]; then
-  echo "no testnet/ directory — run scripts/testnet-up first"
-  exit 1
-fi
-
-shopt -s nullglob
-NODES=("${OUT}"/node-*/)
-if [[ "${#NODES[@]}" -eq 0 ]]; then
-  echo "no node-* directories under ${OUT}"
-  exit 1
-fi
-
-printf '%-12s %-8s %-22s %s\n' "NODE" "PID" "P2P" "STATUS"
-printf '%-12s %-8s %-22s %s\n' "----" "---" "---" "------"
-for ND in "${NODES[@]}"; do
-  NODE=$(basename "${ND}")
-  CFG="${ND}config.ini"
-  PID_FILE="${ND}ghive.pid"
-  P2P=$(grep -E '^p2p-endpoint' "${CFG}" 2>/dev/null | sed -E 's/.*=\s*//' || echo "?")
-
-  if [[ ! -f "${PID_FILE}" ]]; then
-    printf '%-12s %-8s %-22s %s\n' "${NODE}" "-" "${P2P}" "(not started)"
-    continue
-  fi
-  PID=$(cat "${PID_FILE}")
-  if kill -0 "${PID}" 2>/dev/null; then
-    STATUS="alive"
-  else
-    STATUS="dead (stale pid file)"
-  fi
-  printf '%-12s %-8s %-22s %s\n' "${NODE}" "${PID}" "${P2P}" "${STATUS}"
-done
-
-echo
-for ND in "${NODES[@]}"; do
-  LOG="${ND}run.log"
-  NODE=$(basename "${ND}")
-  if [[ -s "${LOG}" ]]; then
-    echo "--- ${NODE} run.log (tail -3) ---"
-    tail -n 3 "${LOG}"
-  fi
-done
+python3 - "$WINDOW" <<'PY'
+import json,sys,urllib.request,collections
+window=int(sys.argv[1])
+NODES=[("hived1",8751),("hived2",8752),("gopherd",8791)]
+def rpc(port,method,params):
+    req=urllib.request.Request(f"http://127.0.0.1:{port}",
+        data=json.dumps({"jsonrpc":"2.0","method":method,"params":params,"id":1}).encode(),
+        headers={'Content-Type':'application/json'})
+    return json.load(urllib.request.urlopen(req,timeout=8))['result']
+live=[]
+for name,port in NODES:
+    try:
+        d=rpc(port,"database_api.get_dynamic_global_properties",{})
+        live.append((name,port,d['head_block_number']))
+        print(f"  {name:<8} head={d['head_block_number']} witness={d['current_witness']}")
+    except Exception as e:
+        print(f"  {name:<8} UNREACHABLE ({e})")
+if len(live)<2:
+    print("\n  need at least two live nodes to compare"); sys.exit(1)
+ref=live[0]; head=min(h for _,_,h in live)
+lo=max(1,head-window)
+prod=collections.Counter(); mism=[]
+for n in range(lo,head):
+    ids={}
+    for name,port,_ in live:
+        b=rpc(port,"block_api.get_block",{"block_num":n}).get('block')
+        if b: ids[name]=b['block_id']; w=b['witness']
+    if len(set(ids.values()))>1: mism.append(n)
+    if ids: prod[w]+=1
+print(f"\n  blocks {lo}..{head-1}: {'ALL MATCH' if not mism else 'MISMATCH at '+str(mism[:5])}")
+print("  producers:")
+for w,c in sorted(prod.items()): print(f"    {w:<10} {c}")
+sys.exit(1 if mism else 0)
+PY
