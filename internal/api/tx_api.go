@@ -35,7 +35,14 @@ func (s *Server) registerTxAPI() {
 // on-chain inclusion.
 func (s *Server) mBroadcast(sync bool) jsonrpc.Handler {
 	return func(_ context.Context, params json.RawMessage) (interface{}, error) {
-		txRaw, err := txParam(params, false)
+		// Accept BOTH shapes. hived's network_broadcast_api.broadcast_transaction
+		// takes the named form {"trx": {...}}, condenser_api takes positional
+		// [tx]. Passing named=false here meant the named form fell through to
+		// "treat the whole params object as the transaction", so the wrapper was
+		// parsed as the tx and every field came back empty — the error surfaced
+		// as `expiration: parsing time ""`, which points at the timestamp rather
+		// than at the envelope. Every standard client uses the named form.
+		txRaw, err := txParam(params, true)
 		if err != nil {
 			return nil, err
 		}

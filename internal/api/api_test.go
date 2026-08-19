@@ -66,7 +66,9 @@ func TestDatabaseAPIGlobals(t *testing.T) {
 	// condenser get_dynamic_global_properties → legacy "X.XXX HIVE" string.
 	cm := resultMap(t, call(t, srv, "condenser_api.get_dynamic_global_properties", "[]"))
 	cs, ok := cm["virtual_supply"].(string)
-	if !ok || !strings.HasSuffix(cs, " HIVE") {
+	// Suffix is the active network's HIVE display symbol (HIVE / TESTS).
+	hiveSuffix := " " + (asset.Symbol{Num: asset.HiveSymbol}).String()
+	if !ok || !strings.HasSuffix(cs, hiveSuffix) {
 		t.Fatalf("condenser asset should be a legacy string, got %#v", cm["virtual_supply"])
 	}
 
@@ -107,8 +109,9 @@ func TestDatabaseAPIGlobals(t *testing.T) {
 	if len(arr) != 1 || arr[0]["name"] != "alice" {
 		t.Fatalf("get_accounts should return exactly alice, got %#v", ga.Result)
 	}
-	if bal, _ := arr[0]["balance"].(legacyAsset); asset.Asset(bal).String() != "1.234 HIVE" {
-		t.Fatalf("alice legacy balance = %#v want 1.234 HIVE", arr[0]["balance"])
+	wantBal := "1.234" + hiveSuffix
+	if bal, _ := arr[0]["balance"].(legacyAsset); asset.Asset(bal).String() != wantBal {
+		t.Fatalf("alice legacy balance = %#v want %s", arr[0]["balance"], wantBal)
 	}
 	// database_api find_accounts (named, NAI assets, {accounts:[...]}).
 	fa := resultMap(t, call(t, srv, "database_api.find_accounts", `{"accounts":["alice"]}`))

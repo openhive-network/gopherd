@@ -134,11 +134,15 @@ func TestAssetString(t *testing.T) {
 		a    Asset
 		want string
 	}{
-		{Asset{1234, Symbol{Num: HiveSymbol}}, "1.234 HIVE"},
-		{Asset{42_500, Symbol{Num: HbdSymbol}}, "42.500 HBD"},
+		// Display names are per-network: HIVE/HBD on mainnet, TESTS/TBD on a
+		// testnet build (hived defines HIVE_SYMBOL_U64 as OBSOLETE_SYMBOL_U64
+		// there, so its JSON says TESTS too). Built from the same constants as
+		// the renderer so this asserts the ACTIVE network's form.
+		{Asset{1234, Symbol{Num: HiveSymbol}}, "1.234 " + displayHiveName},
+		{Asset{42_500, Symbol{Num: HbdSymbol}}, "42.500 " + displayHbdName},
 		{Asset{1_500_000, Symbol{Num: VestsSymbol}}, "1.500000 VESTS"},
-		{Asset{-1500, Symbol{Num: HiveSymbol}}, "-1.500 HIVE"},
-		{Asset{1, Symbol{Num: HiveSymbol}}, "0.001 HIVE"},
+		{Asset{-1500, Symbol{Num: HiveSymbol}}, "-1.500 " + displayHiveName},
+		{Asset{1, Symbol{Num: HiveSymbol}}, "0.001 " + displayHiveName},
 	}
 	for _, c := range cases {
 		if got := c.a.String(); got != c.want {

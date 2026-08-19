@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"gopherd/internal/api"
 	"gopherd/internal/crypto"
 	"gopherd/internal/protocol/asset"
 	"gopherd/internal/protocol/auth"
@@ -115,19 +116,11 @@ func runTestnetBootstrap(args []string) error {
 
 	// Both hived and gopherd take the transaction as a JSON object, not hex —
 	// the signature is still computed over the BINARY form above.
-	jsonOps := []any{
-		[]any{"transfer_to_vesting", map[string]any{
-			"from":   genesis.MainnetInitminer,
-			"to":     genesis.MainnetInitminer,
-			"amount": fmt.Sprintf("%d.000 %s", *vestAmount, network.HiveSymbol),
-		}},
-	}
-	for _, n := range names {
-		jsonOps = append(jsonOps, []any{"account_witness_vote", map[string]any{
-			"account": genesis.MainnetInitminer,
-			"witness": n,
-			"approve": true,
-		}})
+	// Render from the SAME op structs that were signed, so the JSON can never
+	// drift from the bytes the signature covers.
+	jsonOps := make([]any, 0, len(ops))
+	for _, o := range ops {
+		jsonOps = append(jsonOps, api.OpToJSON(o, true))
 	}
 	trx := map[string]any{
 		"ref_block_num":    signed.RefBlockNum,
@@ -189,6 +182,29 @@ func rpcCall(endpoint, method string, params any) (map[string]any, error) {
 	}
 	if len(out.Error) > 0 {
 		return nil, fmt.Errorf("%s: %s", method, truncate(string(out.Error), 300))
+	}
+	return out.Result, nil
+}
+
+// rpcCallAny is rpcCall for methods whose result is not an object (condenser
+// list methods return arrays).
+func rpcCallAny(endpoint, method string, params any) (any, error) {
+	body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": method, "params": params, "id": 1})
+	resp, err := http.Post(endpoint, "application/json", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	var out struct {
+		Result any             `json:"result"`
+		Error  json.RawMessage `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, err
+	}
+	if len(out.Error) > 0 {
+		return nil, fmt.Errorf("%s: %s", method, truncate(string(out.Error), 200))
 	}
 	return out.Result, nil
 }

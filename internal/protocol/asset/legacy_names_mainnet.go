@@ -9,3 +9,11 @@ const (
 	legacyHiveName = "STEEM"
 	legacyHbdName  = "SBD"
 )
+
+// Display names used in JSON ("1.000 HIVE"). On MAINNET these differ from the
+// legacy binary names above: the wire carries "STEEM" while the JSON says
+// "HIVE".
+const (
+	displayHiveName = "HIVE"
+	displayHbdName  = "HBD"
+)
