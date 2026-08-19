@@ -34,6 +34,7 @@ func runTestnetBots(args []string) error {
 	seed := fs.String("seed", "default", "seed for deterministic bot keys and op choices")
 	setupOnly := fs.Bool("setup-only", false, "create and fund the accounts, then stop")
 	witnesses := fs.String("witnesses", "initminer,wit-a,wit-b,wit-c,wit-d", "witnesses bots may vote for")
+	onlyOps := fs.String("only-ops", "", "restrict traffic to these operations (comma-separated). Essential for RC parity work: a mixed workload cannot be compared per-transaction against hived because the cost depends on which operations ran")
 	fs.Parse(args)
 
 	if *count < 2 {
@@ -70,13 +71,31 @@ func runTestnetBots(args []string) error {
 		return nil
 	}
 
+	active := generators
+	if *onlyOps != "" {
+		want := map[string]bool{}
+		for _, n := range strings.Split(*onlyOps, ",") {
+			if n = strings.TrimSpace(n); n != "" {
+				want[n] = true
+			}
+		}
+		active = nil
+		for _, g := range generators {
+			if want[g.name] {
+				active = append(active, g)
+			}
+		}
+		if len(active) == 0 {
+			return fmt.Errorf("--only-ops matched no generators")
+		}
+	}
 	totalWeight := 0
-	for _, g := range generators {
+	for _, g := range active {
 		totalWeight += g.weight
 	}
 
 	fmt.Fprintf(os.Stderr, "testnet-bots: generating traffic for %s at ~%.1f tx/s across %d ops...\n",
-		*duration, *tps, len(generators))
+		*duration, *tps, len(active))
 
 	// One ticker shared by all bots enforces the aggregate rate; each tick is
 	// handed to a random bot. Rate-limiting per bot instead would make the
@@ -96,7 +115,7 @@ func runTestnetBots(args []string) error {
 	for time.Now().Before(deadline) {
 		<-tick.C
 		b := w.bots[pickRng.Intn(len(w.bots))]
-		g := pickGenerator(pickRng, totalWeight)
+		g := pickGenerator(active, pickRng, totalWeight)
 
 		b.mu.Lock()
 		b.pending = nil
@@ -126,19 +145,19 @@ func runTestnetBots(args []string) error {
 	}
 	wg.Wait()
 
-	report(w, skipped)
+	report(w, skipped, len(active))
 	return nil
 }
 
-func pickGenerator(r *rand.Rand, total int) generator {
+func pickGenerator(gens []generator, r *rand.Rand, total int) generator {
 	n := r.Intn(total)
-	for _, g := range generators {
+	for _, g := range gens {
 		if n < g.weight {
 			return g
 		}
 		n -= g.weight
 	}
-	return generators[0]
+	return gens[0]
 }
 
 // setupBots creates every bot account from initminer and funds it with HIVE,
@@ -181,7 +200,7 @@ func setupBots(w *world) error {
 	return nil
 }
 
-func report(w *world, skipped int) {
+func report(w *world, skipped, nGen int) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	names := make([]string, 0, len(w.stats))
@@ -215,7 +234,7 @@ func report(w *world, skipped int) {
 	}
 	fmt.Fprintf(os.Stderr, "%s\n%-32s %7d %7d %7d\n", strings.Repeat("-", 58), "TOTAL", sent, ok, failed)
 	fmt.Fprintf(os.Stderr, "\ncovered %d/%d operation types; %d attempts skipped (preconditions unmet)\n",
-		len(names), len(generators), skipped)
+		len(names), nGen, skipped)
 
 	// Failure reasons matter more than the counts: a rejection is only
 	// interesting if it is not one the chain is supposed to produce.

@@ -12,6 +12,7 @@ import (
 	"gopherd/internal/protocol/hardfork"
 	"gopherd/internal/state"
 	"gopherd/internal/state/objects"
+	"math"
 )
 
 // HIVE_RC_DELEGATION_RETURN_PERIOD = 5 days. Matches
@@ -38,14 +39,80 @@ func initRCPoolIfNeeded(s *state.Session, blockTime uint32) {
 // Re-derives per-resource pool maxima from the witness-voted dynamic
 // params + median chain_properties. Called from update_witness_schedule
 // after the median is rolled.
-//
-// Scaffolding pre-HF20 replay: initialize the pool object so it's
-// addressable; fine-grained per-resource scaling lands later.
 func rcSetPoolParams(s *state.Session, blockNum uint32, blockTime uint32) {
 	if !hardfork.SetForBlock(blockNum).Has(hardfork.HF20) {
 		return
 	}
 	initRCPoolIfNeeded(s, blockTime)
+	applyAccountSubsidyRDToRC(s)
+}
+
+// applyAccountSubsidyRDToRC replaces the new_accounts resource's dynamics with
+// the witness-voted account-subsidy parameters and REGENERATES its price curve
+// from them, mirroring resource_credits::set_pool_params (rc_utility.cpp:858).
+//
+// new_accounts is the one resource whose parameters do not come from
+// resource_parameters.json: the jsonball entry is a placeholder ("this pool is
+// recalculated with account subsidy witness params") whose budget rounds to
+// zero per block. Leaving it that way gave a pool of 0 and coeff_b of 0, so
+// the cost function divided by nothing and returned ZERO — gopherd charged no
+// RC at all for claim_account, where hived charges heavily. That is an
+// under-charge, i.e. a free-account spam path, and the only place gopherd was
+// more permissive than hived.
+func applyAccountSubsidyRDToRC(s *state.Session) {
+	global, _ := subsidyRDParams(s)
+	if global.budget <= 0 || global.decay <= 0 || global.maxPool <= 0 {
+		return
+	}
+	params, err := objects.GetRCResourceParam(s)
+	if err != nil {
+		return
+	}
+	e := &params.Entries[objects.RCNewAccounts]
+
+	budget := global.budget
+	if budget > math.MaxInt32 {
+		budget = math.MaxInt32
+	}
+	decay := global.decay
+	if decay > math.MaxUint32 {
+		decay = math.MaxUint32
+	}
+	next := objects.ResourceDynamics{
+		// resource_unit is a property of the resource, not of the witness
+		// params, so it carries over from the jsonball entry.
+		ResourceUnit:    e.Dynamics.ResourceUnit,
+		BudgetPerTime:   int32(budget),
+		PoolEq:          uint64(global.maxPool),
+		MaxPool:         uint64(global.maxPool),
+		DecayPerTime:    uint32(decay),
+		DecayDenomShift: rdDecayDenomShift,
+	}
+	if e.Dynamics == next {
+		return
+	}
+	e.Dynamics = next
+	// new_accounts uses a=37/1000, u=1/2 (resource_parameters.json).
+	e.Curve = generateRCCurveParams(&next, 37, 1000, 1, 2)
+	objects.PutRCResourceParam(s, &params)
+
+	// The pool's per-block budget and ceiling are cached from whatever the
+	// params said at bootstrap, which for new_accounts is the zero placeholder.
+	// Refresh them, or the pool never accumulates: it sat at 0 forever while
+	// hived's climbed at 797/block, leaving the denominator at coeff_b and
+	// account creation permanently at maximum price.
+	//
+	// The POOL LEVEL itself is deliberately left alone — hived's
+	// set_pool_params only rewrites params, so the pool keeps filling from
+	// wherever it was rather than jumping to the new equilibrium.
+	if pool, perr := objects.GetRCPool(s); perr == nil {
+		i := int(objects.RCNewAccounts)
+		if pool.LastKnownBudget[i] != int64(next.BudgetPerTime) || pool.Pool[i].Max != int64(next.MaxPool) {
+			pool.LastKnownBudget[i] = int64(next.BudgetPerTime)
+			pool.Pool[i].Max = int64(next.MaxPool)
+			objects.PutRCPool(s, &pool)
+		}
+	}
 }
 
 // rcFinalizeBlock ports rc_plugin::on_finish_block. Per-block hooks:

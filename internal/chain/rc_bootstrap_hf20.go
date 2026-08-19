@@ -165,6 +165,19 @@ func initRCBootstrapHF20(s *state.Session, blockTime uint32) {
 		// history_bytes, state_bytes and execution_time all have
 		// resource_unit 1, which is why only market_bytes visibly diverged.
 		budgetPerTime := (r.budget * r.resourceUnit) / budgetTimeBlocks
+		if i == int(objects.RCNewAccounts) {
+			// new_accounts is the exception: its jsonball entry is an explicit
+			// placeholder ("this pool is recalculated with account subsidy
+			// witness params") and hived does NOT scale it, so the per-block
+			// budget truncates to zero and the POOL starts empty, filling at
+			// the witness-voted subsidy rate once set_pool_params installs the
+			// real dynamics.
+			//
+			// Scaling it here instead gave pool_eq 165,457,537 and a pool that
+			// started FULL, which made claim_account cheap — under-charging
+			// against hived, whose pool reads 13*797 a few blocks in.
+			budgetPerTime = r.budget / budgetTimeBlocks
+		}
 		if budgetPerTime > (1<<31 - 1) {
 			budgetPerTime = 1<<31 - 1
 		}
