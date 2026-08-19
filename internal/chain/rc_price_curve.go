@@ -1,7 +1,10 @@
 package chain
 
 import (
+	"fmt"
 	"math/big"
+	"os"
+	"sync/atomic"
 
 	"gopherd/internal/protocol/network"
 	"gopherd/internal/state"
@@ -164,8 +167,24 @@ func rcCostOfUsageDetailed(s *state.Session, usage [objects.RCNumResources]int64
 		per[i] = computeCostOfResource(entry.Curve, pool.PoolArray[i], scaled, regenShare)
 		total += per[i]
 	}
+	// GOPHERD_RC_DEBUG prints the per-resource breakdown for the first few
+	// priced transactions. Kept because RC parity work is impossible without
+	// it: an aggregate mana delta cannot distinguish a wrong PRICE from a
+	// wrong USAGE from a wrong POOL, and every RC bug so far looked identical
+	// in the aggregate.
+	if os.Getenv("GOPHERD_RC_DEBUG") != "" && rcDebugCount.Add(1) <= 8 {
+		fmt.Fprintf(os.Stderr, "RC DEBUG rc_regen=%d divisor=%d\n", rcRegen, divisor)
+		for i := 0; i < objects.RCNumResources; i++ {
+			e := params.Entries[i]
+			fmt.Fprintf(os.Stderr, "  res%d usage=%-12d unit=%-6d pool=%-16d cost=%d\n",
+				i, usage[i], e.Dynamics.ResourceUnit, pool.PoolArray[i], per[i])
+		}
+		fmt.Fprintf(os.Stderr, "  TOTAL cost=%d\n", total)
+	}
 	return total, per
 }
+
+var rcDebugCount atomic.Int64
 
 // rcInelasticityThreshold is hive::chain::rc_curve_gen_params' default
 // (rc_curve.hpp:11-18): coeff_b = pool_eq * 1/128.

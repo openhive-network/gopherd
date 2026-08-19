@@ -173,9 +173,14 @@ func ApplyTestnet(db *state.Database, extraWitnesses []string) error {
 	// feed_history at a 1:1 TESTS/TBD price. Testnet seeds this at genesis
 	// (mainnet has no feed until witnesses publish), and virtual_supply
 	// depends on it from the very first block.
+	// hived seeds HBD_price(1, 1) — literally amount 1 on each side, not a
+	// scaled 1000/1000. The ratio is the same, so no economic value differs and
+	// a dgpo comparison stays clean, but the STORED object does not match and
+	// any full state dump diverges. Scaling also inflates every intermediate in
+	// the conversion math by 1000x for no benefit.
 	oneToOne := asset.Price{
-		Base:  asset.Asset{Amount: 1000, Symbol: asset.Symbol{Num: asset.HbdSymbol, WasLegacyEncoded: true}},
-		Quote: asset.Asset{Amount: 1000, Symbol: asset.Symbol{Num: asset.HiveSymbol, WasLegacyEncoded: true}},
+		Base:  asset.Asset{Amount: 1, Symbol: asset.Symbol{Num: asset.HbdSymbol, WasLegacyEncoded: true}},
+		Quote: asset.Asset{Amount: 1, Symbol: asset.Symbol{Num: asset.HiveSymbol, WasLegacyEncoded: true}},
 	}
 	objects.PutFeedHistory(s, &objects.FeedHistory{
 		CurrentMedianHistory: oneToOne,
