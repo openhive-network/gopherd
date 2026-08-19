@@ -230,10 +230,22 @@ func ApplyTestnet(db *state.Database, extraWitnesses []string) error {
 		// guard then pays the UNWEIGHTED reward, and the witness earns 1/21 of
 		// what hived pays. Measured against a live hived testnet: 2093 vs 6773
 		// sat/block of inflation.
-		ElectedWeight:             1,
-		MinerWeight:               1,
-		TimeshareWeight:           5,
-		HardforkRequiredWitnesses: 17,
+		ElectedWeight:   1,
+		MinerWeight:     1,
+		TimeshareWeight: 5,
+		// witness_pay_normalization_factor's C++ struct default is the LITERAL
+		// 25 (witness_objects.hpp:194) — it is not computed at genesis. It
+		// happens to equal elected*HIVE_MAX_VOTED_WITNESSES_HF0 +
+		// miner*MAX_MINER + timeshare*MAX_RUNNER = 19 + 1 + 5, but hived hard-codes
+		// it, so we do too.
+		//
+		// Leaving it 0 makes block 1's witness reward 234 sat instead of
+		// 234*21/25 = 196: gopherd's divide-by-zero guard pays the UNWEIGHTED
+		// slice. That single 38-sat overpayment is the entire block-1
+		// divergence against hived, and because it lands in the vesting fund it
+		// shifts the VESTS price permanently.
+		WitnessPayNormalizationFactor: 25,
+		HardforkRequiredWitnesses:     17,
 	})
 
 	return s.Commit(true)
