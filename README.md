@@ -33,6 +33,7 @@ transactions, making Hive a genuinely multi-client network.
 | JSON-RPC (read side) | 71 methods. Consensus-node scope only — see `docs/api-implementation-map.md`. |
 | Block production | Working. Dry run and real production both validated on mainnet; real production is key-gated. |
 | Fork switching | Implemented, default off (`--fork-switching`). |
+| Testnet | Joins **hived's** testnet: syncs, matches block IDs, and produces blocks hived accepts. See `docs/testnet.md`. |
 | Zero-snapshot fast restart | **Not delivered.** `--persist-state-dir` exists but is slower than a snapshot load at mainnet scale. |
 
 ### Safety note on serving
@@ -171,6 +172,16 @@ which takes hours and 149 GB of log.
   On the pebble cold tier the load re-spills the entire ~25 GB comment corpus and
   was still running at 22 minutes, slower than the snapshot load it replaces.
   Leave it off.
+
+## Testnet
+
+A `-tags testnet` build joins a hived testnet rather than running a chain of its
+own. `scripts/testnet-up` brings up a mixed network (2 hived + 1 gopherd, five
+witnesses, all producing) and `scripts/testnet-status` verifies they agree.
+
+Read `docs/testnet.md` before changing consensus code — in particular, block-ID
+agreement does **not** prove state agreement, and every consensus bug found
+during testnet bring-up was invisible to a block-ID comparison.
 
 ## Block production
 

@@ -1,67 +1,16 @@
 #!/usr/bin/env bash
-# scripts/testnet-down — stop every running ghive testnet node.
-#
-# Usage: scripts/testnet-down
-#
-# Walks ./testnet/node-*/ghive.pid, sends SIGTERM, then waits up to
-# 10 seconds for graceful exit before SIGKILL. Leaves data/ dirs
-# intact so the testnet can be re-brought-up against the same state.
-
+# scripts/testnet-down — stop every node of the local mixed testnet.
+# Data directories are left intact so the chain can be restarted.
 set -euo pipefail
-
-ROOT=$(cd "$(dirname "$0")/.." && pwd)
-OUT=${ROOT}/testnet
-
-if [[ ! -d "${OUT}" ]]; then
-  echo "no testnet/ directory; nothing to do"
-  exit 0
-fi
-
-shopt -s nullglob
-PIDS_KILLED=0
-for PID_FILE in "${OUT}"/node-*/ghive.pid; do
-  PID=$(cat "${PID_FILE}")
-  NODE=$(basename "$(dirname "${PID_FILE}")")
-  if kill -0 "${PID}" 2>/dev/null; then
-    echo "stopping ${NODE} (pid ${PID})..."
-    kill "${PID}" 2>/dev/null || true
-    PIDS_KILLED=$((PIDS_KILLED + 1))
-  else
-    echo "${NODE} already exited"
+for p in hived gopherd-testnet; do
+  if pgrep -x "$p" >/dev/null 2>&1; then
+    echo "stopping $p"; pkill -x "$p" || true
   fi
-  rm -f "${PID_FILE}"
 done
-
-if [[ "${PIDS_KILLED}" -eq 0 ]]; then
-  echo "no running nodes to stop"
-  exit 0
-fi
-
-# Grace period for SIGTERM cleanup.
 for _ in $(seq 1 10); do
-  ANY_ALIVE=0
-  for PID_FILE in "${OUT}"/node-*/ghive.pid; do
-    PID=$(cat "${PID_FILE}" 2>/dev/null || echo)
-    [[ -z "${PID}" ]] && continue
-    if kill -0 "${PID}" 2>/dev/null; then
-      ANY_ALIVE=1
-      break
-    fi
-  done
-  [[ "${ANY_ALIVE}" -eq 0 ]] && break
+  pgrep -x hived >/dev/null 2>&1 || pgrep -x gopherd-testnet >/dev/null 2>&1 || { echo "all stopped"; exit 0; }
   sleep 1
 done
-
-# Anything still alive: SIGKILL.
-for PID_FILE in "${OUT}"/node-*/ghive.pid; do
-  PID=$(cat "${PID_FILE}" 2>/dev/null || echo)
-  [[ -z "${PID}" ]] && continue
-  if kill -0 "${PID}" 2>/dev/null; then
-    NODE=$(basename "$(dirname "${PID_FILE}")")
-    echo "force-killing ${NODE} (pid ${PID})"
-    kill -9 "${PID}" 2>/dev/null || true
-  fi
-  rm -f "${PID_FILE}"
-done
-
-echo "testnet-down complete (${PIDS_KILLED} processes signalled)"
+pkill -9 -x hived 2>/dev/null || true
+pkill -9 -x gopherd-testnet 2>/dev/null || true
+echo "all stopped (forced)"
