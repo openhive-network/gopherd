@@ -183,6 +183,15 @@ func createVestingImpl(s *state.Session, accountName string, hiveSatoshi int64, 
 				objects.UpdateVotingManabar(a, dgpoRef.Time, dvPoolPct, vestsAmount, dgpoRef.HeadBlockNumber)
 			}
 			a.VestingShares += vestsAmount
+			// Gaining VESTS raises max_rc, and hived credits that increase to
+			// current mana immediately (update_account_after_vest_change) so the
+			// account can use the new RC right away. gopherd only ran this on
+			// withdrawals and delegations, never on powering up, so an account
+			// funded after creation carried a billion-RC ceiling with zero
+			// usable mana until five days of regeneration had passed.
+			if manabarHF20 {
+				objects.HandleVestingWithdrawalRCImpact(s, a, dgpoRef.Time)
+			}
 		}
 		aSlot = a
 	}) {

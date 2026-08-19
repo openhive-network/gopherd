@@ -262,6 +262,19 @@ func (d *Database) SelectPendingTransactions(
 		// for correctness — without it, several transactions from the same payer
 		// could each pass on the payer's full mana and collectively overdraw it.
 		if hf.Has(hardfork.HF20) {
+			// Clear the per-transaction differential-usage accumulator first,
+			// exactly as the apply paths do (parallel.go, database.go) and as
+			// hived's on_pre_apply_transaction hook does for EVERY transaction,
+			// block production included.
+			//
+			// Without it the accumulator carried across candidates inside one
+			// selection pass, so each successive transaction was charged the
+			// summed usage of every transaction before it. Measured against
+			// hived on the same load, the same account spent 3,612,603,273 RC
+			// where hived spent 302,547 — while the per-transaction cost this
+			// code computes was only ~500k, i.e. the price was right and the
+			// transaction was being charged for its predecessors.
+			resetRCDifferentialForTx(session, blockNum)
 			rcErr := applyRCForTx(session, &res.SignedTx, blockNum, blockTime,
 				int64(res.SignedEnd-res.UnsignedStart), true /* enforce */)
 			if rcErr != nil {
