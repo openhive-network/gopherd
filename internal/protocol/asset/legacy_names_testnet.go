@@ -17,3 +17,12 @@ const (
 	legacyHiveName = "TESTS"
 	legacyHbdName  = "TBD"
 )
+
+// Display names used in JSON. On testnet these are the SAME as the legacy
+// binary names — hived defines HIVE_SYMBOL_U64 as OBSOLETE_SYMBOL_U64 there, so
+// both the wire and the JSON say TESTS. Rendering "HIVE" makes hived reject the
+// transaction with "Cannot parse asset symbol".
+const (
+	displayHiveName = "TESTS"
+	displayHbdName  = "TBD"
+)

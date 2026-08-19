@@ -72,12 +72,15 @@ func TestAssetStringRoundTrip(t *testing.T) {
 		sym    AssetNum
 		want   string
 	}{
-		{123456, HiveSymbol, "123.456 HIVE"},
-		{50, HiveSymbol, "0.050 HIVE"},
-		{50000, HiveSymbol, "50.000 HIVE"},
-		{50, HbdSymbol, "0.050 HBD"},
-		{654321, HbdSymbol, "654.321 HBD"},
-		{0, HiveSymbol, "0.000 HIVE"},
+		// Rendering is per-network (HIVE/HBD on mainnet, TESTS/TBD on a testnet
+		// build); PARSING accepts both spellings on either, which is why the
+		// round-trip below holds regardless.
+		{123456, HiveSymbol, "123.456 " + displayHiveName},
+		{50, HiveSymbol, "0.050 " + displayHiveName},
+		{50000, HiveSymbol, "50.000 " + displayHiveName},
+		{50, HbdSymbol, "0.050 " + displayHbdName},
+		{654321, HbdSymbol, "654.321 " + displayHbdName},
+		{0, HiveSymbol, "0.000 " + displayHiveName},
 	}
 	for _, c := range cases {
 		a := Asset{Amount: c.amount, Symbol: Symbol{Num: c.sym}}

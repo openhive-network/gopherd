@@ -16,3 +16,8 @@ func legacySymBytes(precision byte, name string) []byte {
 func legacyLow4(precision byte, name string) uint32 {
 	return binary.LittleEndian.Uint32(legacySymBytes(precision, name)[:4])
 }
+
+// LegacyHiveSymBytes returns the canonical 8-byte legacy HIVE symbol frame for
+// the active network (STEEM on mainnet, TESTS on testnet). Callers that build a
+// LegacyHiveAsset from scratch — witness_update's chain properties — need it.
+func LegacyHiveSymBytes() []byte { return legacySymBytes(3, legacyHiveName) }

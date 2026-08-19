@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"gopherd/internal/protocol/asset"
 	"testing"
 
 	"gopherd/internal/protocol/op"
@@ -40,7 +41,9 @@ func TestOpToJSONTransfer(t *testing.T) {
 	if fields["from"] != "alice" || fields["to"] != "bob" || fields["memo"] != "hi" {
 		t.Fatalf("transfer fields wrong: %v", fields)
 	}
-	if fields["amount"] != "1.000 HIVE" {
+	// Symbol display is per-network: HIVE on mainnet, TESTS on a testnet build.
+	wantAmount := "1.000 " + asset.Asset{Amount: 1000, Symbol: asset.Symbol{Num: asset.HiveSymbol}}.Symbol.String()
+	if fields["amount"] != wantAmount {
 		t.Fatalf("legacy amount = %v want '1.000 HIVE'", fields["amount"])
 	}
 

@@ -81,9 +81,9 @@ func (s Symbol) Decimals() uint8 { return uint8(s.Num & 0xf) }
 func (s Symbol) String() string {
 	switch s.Num {
 	case HiveSymbol:
-		return "HIVE"
+		return displayHiveName
 	case HbdSymbol:
-		return "HBD"
+		return displayHbdName
 	case VestsSymbol:
 		return "VESTS"
 	default:
