@@ -92,13 +92,21 @@ func applyRCForTx(s *state.Session, stx *tx.SignedTransaction, blockNum, blockTi
 	usage := pending.DifferentialUsage
 	CountResources(stx, txSize, &usage)
 
-	// 2. Compute the total cost.
-	cost := ComputeRCCost(stx, blockNum)
-	var costPerResource [objects.RCNumResources]int64
-	// Phase 5 minimum: charge the entire cost to state_bytes (the
-	// dominant resource slot in practice). Full per-resource splits
-	// land with the price-curve math in Phase 4 (set_pool_params).
-	costPerResource[objects.RCStateBytes] = cost
+	// 2. Price the usage through hived's per-resource curve.
+	//
+	// This used to charge the raw resource count (execution nanoseconds +
+	// state bytes) straight to the state_bytes slot, skipping the curve that
+	// converts resource units onto the RC scale. That over-charged by two to
+	// three orders of magnitude: on a loaded testnet the same account showed
+	// current_mana 3,641,947,366 on hived and -141,083,244 here, and gopherd's
+	// producers built near-empty blocks because every candidate was refused
+	// with insufficient-rc. RC is non-consensus, so block ids matched
+	// throughout and only load exposed it.
+	// A zero here means the RC subsystem has nothing to price against (no
+	// vesting yet, or pre-HF20), which hived treats as FREE — "when rc_regen is
+	// 0, everything is free". Falling back to the old raw-resource-count cost
+	// instead would silently reinstate the very over-charging this replaces.
+	cost, costPerResource := rcCostOfUsageDetailed(s, usage)
 
 	// 3. Accumulate into rc_pending_data.
 	pending.AddPendingUsage(usage, costPerResource)
@@ -266,8 +274,17 @@ func HasSufficientRC(s *state.Session, stx *tx.SignedTransaction, blockNum, bloc
 	if !hardfork.SetForBlock(blockNum).Has(hardfork.HF20) || len(stx.Operations) == 0 {
 		return nil
 	}
-	cost := ComputeRCCost(stx, blockNum)
+	// Price the transaction the same way the charge path does. Using the raw
+	// resource count here made admission two to three orders of magnitude
+	// stricter than hived's, so gopherd's producers refused nearly every
+	// candidate with insufficient-rc and built near-empty blocks while the
+	// hived witnesses mined the same transactions.
+	var usage [objects.RCNumResources]int64
+	CountResources(stx, txSize, &usage)
+	cost := rcCostOfUsage(s, usage)
 	if cost <= 0 {
+		// RC subsystem not initialised (no vesting yet): everything is free,
+		// matching hived's "when rc_regen is 0" branch.
 		return nil
 	}
 	payer := PayerOf(stx.Operations[0])

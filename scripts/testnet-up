@@ -81,7 +81,7 @@ echo "==> starting hived2 (wit-b)"
 echo "==> starting gopherd (wit-c, wit-d)"
 # --produce requires --fork-switching: a produced block must stay reversible so
 # the node can reorg off it if the network picks another block for that slot.
-( cd "$ROOT" && setsid nohup ./bin/gopherd-testnet node \
+( cd "$ROOT" && setsid nohup env GOPHERD_RC_DEBUG=${GOPHERD_RC_DEBUG:-} ./bin/gopherd-testnet node \
     --data-dir="$TN/gopherd1/data" --backend=pebble --no-block-log --no-default-seeds \
     --extra-seed=127.0.0.1:2101,127.0.0.1:2102 \
     --p2p-endpoint=127.0.0.1:2201 --max-outbound-peers=4 \

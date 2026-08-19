@@ -153,11 +153,18 @@ func initRCBootstrapHF20(s *state.Session, blockTime uint32) {
 		r := canonicalRCResources[i]
 		budgetTimeBlocks := r.budgetTimeSeconds / uint64(hiveBlockInterval)
 		halfLifeBlocks := r.halfLifeSeconds / uint64(hiveBlockInterval)
-		// budget_per_time_unit per block. Hived's rd_setup pre-multiplies
-		// by resource_unit only for new_accounts; for the other 4 the
-		// resource_unit is on the *consumer* side (per-tx cost), and
-		// budget_per_time_unit reads directly from the JSON.
-		budgetPerTime := r.budget / budgetTimeBlocks
+		// budget_per_time_unit per block, with the budget scaled by
+		// resource_unit for EVERY resource.
+		//
+		// This previously skipped the scaling, on the belief that hived applied
+		// it only to new_accounts. It does not: market_bytes has
+		// resource_unit 10, and a live hived node reports its pool as
+		// 2,001,842,832 against gopherd's 200,209,445 — exactly 10x. The
+		// resource_unit also multiplies usage at cost time, so missing it here
+		// shrank the pool and inflated the price by the same factor.
+		// history_bytes, state_bytes and execution_time all have
+		// resource_unit 1, which is why only market_bytes visibly diverged.
+		budgetPerTime := (r.budget * r.resourceUnit) / budgetTimeBlocks
 		if budgetPerTime > (1<<31 - 1) {
 			budgetPerTime = 1<<31 - 1
 		}
@@ -181,18 +188,22 @@ func initRCBootstrapHF20(s *state.Session, blockTime uint32) {
 				DecayDenomShift: uint8(rdDecayDenomShift),
 				MinDecay:        0,
 			},
-			// Price-curve coefficients. C++ stores raw a_point / u_point
-			// fractions; the cost computation uses both together via
-			// compute_cost(curve, pool, count, regen). We seed with the
-			// ratios captured in jsonball — exact fixed-point conversion
-			// (the shift factor used in compute_cost) is determined at
-			// query time, so storing the numerator product against the
-			// denom is enough for replay-time pool-state parity.
-			Curve: objects.PriceCurve{
-				CoeffA: poolEq * r.aPointNum / r.aPointDenom,
-				CoeffB: poolEq * r.uPointNum / r.uPointDenom,
-				Shift:  0,
-			},
+			// Price curve, generated exactly as hived does
+			// (generate_rc_curve_params, rc_curve.cpp:33).
+			//
+			// This used to be a placeholder — coeff_a = pool_eq*a_num/a_denom,
+			// coeff_b = pool_eq*u_num/u_denom, shift = 0 — which is not the
+			// generator at all. Against a live hived testnet the state_bytes
+			// curve read coeff_a=10525659774662010880 coeff_b=212030656091
+			// shift=50, where gopherd had 406810620401 / 13560354013374 / 0.
+			// The coefficients set the RC PRICE, so gopherd over-charged by
+			// orders of magnitude, drove every account to the -10% mana floor
+			// and produced near-empty blocks under load.
+			Curve: generateRCCurveParams(&objects.ResourceDynamics{
+				PoolEq:          poolEq,
+				DecayPerTime:    decayPerTime,
+				DecayDenomShift: uint8(rdDecayDenomShift),
+			}, r.aPointNum, r.aPointDenom, r.uPointNum, r.uPointDenom),
 		}
 	}
 	if !objects.HasRCResourceParam(s) {

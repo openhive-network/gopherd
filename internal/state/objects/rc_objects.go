@@ -860,6 +860,18 @@ const RCDelegationReturnPeriodSec uint32 = 5 * 24 * 60 * 60
 var RCClipEnabled = true
 
 func HandleVestingWithdrawalRCImpact(s *state.Session, a *Account, now uint32) {
+	// Regenerate FIRST, against the OLD maximum — hived warns loudly
+	// ("Account not regenerated prior to RC change") if a vest change lands on
+	// a stale manabar, because the regeneration would then be computed against
+	// the new ceiling.
+	// Capture the previous ceiling BEFORE regenerating: RegenerateRCMana
+	// itself assigns LastMaxRC = MaximumRC(), so reading it afterwards yields
+	// the NEW maximum and the delta below is always zero. (That is exactly how
+	// the first version of this fix silently did nothing — the account still
+	// showed 0.0% mana after funding.)
+	oldMaxRC := a.LastMaxRC
+	RegenerateRCMana(a, now)
+
 	// effective_delegable_rc = effective_vesting - DelegatedRCOut
 	eff := a.VestingShares - a.DelegatedVestingShares + a.ReceivedVestingShares
 	if eff < 0 {
@@ -869,7 +881,28 @@ func HandleVestingWithdrawalRCImpact(s *state.Session, a *Account, now uint32) {
 	if a.LastMaxRC < 0 {
 		a.LastMaxRC = 0
 	}
-	RegenerateRCMana(a, now)
+
+	// Credit a POSITIVE change in maximum RC straight to current mana, so an
+	// account that gains VESTS can use the new RC immediately
+	// (resource_credits::update_account_after_vest_change, rc_utility.cpp:458:
+	// "only positive delta is applied directly to mana, so receiver can
+	// immediately start using it"). A negative delta is deliberately NOT
+	// applied: power-down and reduced delegation both carry a delay longer than
+	// full RC regeneration, so skipping it cannot be used to pump RC.
+	//
+	// Without this an account whose VESTS arrive AFTER creation had max_rc in
+	// the billions and current_mana stuck at 0, regenerating over the full five
+	// days. On a testnet — where account_creation_fee is 0, so rc_adjustment is
+	// 0 and the manabar starts empty — every funded account read as completely
+	// drained: measured spent=3,602,697,328 of a 3,602,939,936 maximum after
+	// FIVE transactions, against hived's 2,835. That, not the pricing, is why
+	// gopherd's witnesses produced near-empty blocks under load.
+	if delta := a.LastMaxRC - oldMaxRC; delta > 0 {
+		a.RCManaCurrent += delta
+		if a.RCManaCurrent > a.LastMaxRC {
+			a.RCManaCurrent = a.LastMaxRC
+		}
+	}
 
 	// Over-delegated? Only when DelegatedRCOut > eff.
 	if a.DelegatedRCOut <= eff {
