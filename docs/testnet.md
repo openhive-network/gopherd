@@ -74,6 +74,46 @@ than from `config.hpp` — the header and the shipped binary disagree:
   `5JNHfZYKGaomSFvd4NUdQ9qMcEAC43kujbfjueTHpVapX1Kzq2n`, and every
   `init_witness` shares it.
 
+## Generating chain activity
+
+A testnet with no traffic produces empty blocks, which proves very little:
+consensus bugs hide in the operations nobody exercises.
+
+```sh
+gopherd testnet-bots --bots=6 --duration=3m --tps=8 --seed=run1
+gopherd testnet-bots --only-ops=transfer --seed=iso1      # isolate one operation
+gopherd testnet-bots --bots=2 --setup-only --seed=fund1   # just create + fund accounts
+```
+
+It covers 40 of the 51 operations. Each bot models what it has created —
+comments, orders, escrows, savings requests, account tickets — so it can emit
+valid follow-ups, and records that state only once the chain ACCEPTS the
+transaction (crediting it at build time makes bots vote on posts that were
+refused, and spend account tickets that were never granted).
+
+Excluded on purpose, each because the chain cannot accept it:
+
+| operation | why |
+|---|---|
+| `pow`, `pow2` | mining, dead since HF16 |
+| `witness_block_approve` | a fast-confirm message, never valid inside a block |
+| `custom_binary` | rejected from HF20 |
+| `recover_account`, `reset_account` | need multi-step flows with old keys |
+| `set_reset_account` | hived asserts `false && ...` — hard-disabled |
+| `account_create_with_delegation` | asserts `!has_hardfork(HF20)`; a testnet starts at HF28 |
+| `decline_voting_rights` | one-way; it would permanently shrink coverage |
+
+The last two were found by RUNNING the generator. Both look plausible in the
+operation list and only the chain says otherwise.
+
+**A 100% acceptance rate is the wrong target.** Real chains refuse
+transactions, and the failure histogram is the useful output: it buckets by
+hived's assertion PREDICATE, so `!comment_is_required` (voting on a post that
+was never accepted) reads differently from
+`( _now - auth.last_root_post ) > HIVE_MIN_ROOT_COMMENT_INTERVAL` (posting too
+fast). Both are correct chain behaviour. `GOPHERD_BOTS_DEBUG=1` dumps the first
+raw error in full when a bucket is unclear.
+
 ## Electing witnesses
 
 A fresh testnet creates its `init_witnesses` but gives them **no votes**, so
