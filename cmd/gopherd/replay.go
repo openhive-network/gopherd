@@ -310,7 +310,7 @@ func cmdReplay(args []string) int {
 			*startBlock = uint(head) + 1
 		}
 	} else {
-		if err := genesis.Apply(stateDB); err != nil {
+		if err := genesis.ApplyForNetwork(stateDB, nil); err != nil {
 			fmt.Fprintf(os.Stderr, "replay: genesis: %v\n", err)
 			return 1
 		}

@@ -16,8 +16,9 @@ import "strings"
 // fullness in a way that looks like random network variance.
 //
 // Both forms now work, and they compose:
-//   --extra-seed a:2001 --extra-seed b:2001
-//   --extra-seed a:2001,b:2001
+//
+//	--extra-seed a:2001 --extra-seed b:2001
+//	--extra-seed a:2001,b:2001
 type repeatableSeeds string
 
 func (r *repeatableSeeds) String() string { return string(*r) }

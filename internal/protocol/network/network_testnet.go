@@ -2,35 +2,51 @@
 
 package network
 
-// Testnet constants. Source: config.hpp under the IS_TEST_NET branch,
-// with ghive-specific overrides for the chain_id (so that ghive testnet
-// traffic can never be confused with hived's stock testnet OR with
-// mainnet — pre-empts cross-chain replay attacks the moment we expose
-// any RPC).
+// Testnet constants, matching hived's testnet build (IS_TEST_NET +
+// USE_ALTERNATE_CHAIN_ID) so a gopherd node can join a hived testnet.
+//
+// Verified empirically against a running hived testnet node
+// (build_testnet, node_type "testnet") via database_api.get_config rather
+// than read off config.hpp — the source and the shipped binary disagreed on
+// the single most important value here. config.hpp reads
+// `HIVE_CHAIN_ID (fc::sha256::hash("testnet"))`, but the actual chain ID is
+// 18dcf0a2..., because the testnet build exposes --chain-id as a RUNTIME
+// option with that default. Deriving it from the source would have produced
+// a node that could never handshake.
 const (
-	Name          = "testnet"
-	AddressPrefix = "TST"
+	Name = "testnet"
 
+	// hived defines HIVE_ADDRESS_PREFIX as "STM" UNCONDITIONALLY — testnet
+	// included. An earlier gopherd testnet used "TST", which alone makes
+	// every key string incompatible with hived's.
+	AddressPrefix = "STM"
+
+	// Legacy display symbols differ from mainnet, but the binary NAI codes
+	// do not (@@000000021 / @@000000013 / @@000000037 are identical), so
+	// asset serialisation is unaffected.
 	HiveSymbol  = "TESTS"
 	HbdSymbol   = "TBD"
 	VestsSymbol = "VESTS"
 
-	// Testnet genesis time — 2016-01-01 00:00:00 UTC, same as mainnet's
-	// configurable HF0 time.
+	// HIVE_GENESIS_TIME — 2016-01-01T00:00:00 UTC.
 	GenesisTimeUnix = 1451606400
 
-	// chainIDSeed is the deterministic preimage hashed to produce the
-	// testnet chain_id. v1 — bump when we ever need to fork the testnet
-	// genesis (post-bump, old testnet binaries refuse to peer with new
-	// ones, exactly the desired behavior on a chain reset).
-	chainIDSeed = "ghive-testnet-v1"
+	// defaultChainIDHex is hived's --chain-id default on a testnet build.
+	defaultChainIDHex = "18dcf0a285365fc58b71f18b3d3fec954aa0c141c44e4e5cb4cf777b9eab274e"
 )
 
-// ChainID is sha256("ghive-testnet-v1"). DIFFERENT from both mainnet
-// (beeab0de...) and hived's stock testnet (sha256("testnet")) — verified
-// by TestChainIDDifferentFromMainnet.
-var ChainID = sha256OfString(chainIDSeed)
+// ChainID is the testnet chain ID used for transaction signing and the P2P
+// handshake. Overridable via SetChainID so a node can join a testnet started
+// with a non-default --chain-id, exactly as hived allows.
+var ChainID = MustHexHash32(defaultChainIDHex)
 
-// OldChainID equals ChainID on testnet — pre-HF24 mainnet used the
-// all-zero hash for tx signing, but testnet has no such legacy.
+// OldChainID equals ChainID on testnet — the pre-HF24 zero-hash signing rule
+// is mainnet legacy that testnet never had.
 var OldChainID = ChainID
+
+// SetChainID overrides the chain ID at startup. Must be called before any
+// signing or peer handshake; it is not safe to call on a running node.
+func SetChainID(h Hash32) {
+	ChainID = h
+	OldChainID = h
+}

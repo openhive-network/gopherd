@@ -10,6 +10,10 @@ import (
 
 // ComputeRCCost should return zero pre-HF20 (RC subsystem inactive).
 func TestComputeRCCostPreHF20Zero(t *testing.T) {
+	// Mainnet semantics: RC costs nothing before HF20. A testnet build has no
+	// pre-HF20 era — block 1 already runs the latest rules — so there is no
+	// such block to test.
+	skipIfTestnetSemantics(t)
 	signedTx := tx.SignedTransaction{
 		Transaction: tx.Transaction{
 			Operations: op.Ops(

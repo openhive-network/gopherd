@@ -3,6 +3,9 @@ package hardfork
 import "testing"
 
 func TestActivationOrdering(t *testing.T) {
+	if MainnetActivationBlock[HF20] == 0 {
+		t.Skip("testnet build: activation blocks are zeroed")
+	}
 	// Activation block numbers must be monotonically non-decreasing in HF order.
 	// HF18 == HF17 + 31 and HF22 is only ~52k blocks after HF21, so equal-or-greater
 	// with strict-greater between distant hardforks.
@@ -16,7 +19,15 @@ func TestActivationOrdering(t *testing.T) {
 	}
 }
 
+// TestSetForBlock covers MAINNET activation semantics: a hardfork is inactive
+// during its own activation block and active from the next one. It is
+// meaningless on a testnet build, where every hardfork is active from block 1
+// (see hardfork_testnet.go) — the testnet rule is pinned by
+// TestAllHardforksActiveOnTestnet instead.
 func TestSetForBlock(t *testing.T) {
+	if MainnetActivationBlock[HF20] == 0 {
+		t.Skip("testnet build: all hardforks active from block 1")
+	}
 	// Genesis: only HF0.
 	if !SetForBlock(0).Has(HF0) {
 		t.Fatal("HF0 must always be active")

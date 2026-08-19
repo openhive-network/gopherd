@@ -705,6 +705,22 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 			}
 		}()
 	}
+	// Block 1 applies every hardfork already due by its timestamp, BEFORE any
+	// of the block's own processing. Mirrors hived database.cpp:2240, where the
+	// genesis-hardfork loop sits at the top of apply_block.
+	//
+	// The ordering is load-bearing, not cosmetic. HF1 multiplies all vesting
+	// shares by 1,000,000. Run it first and it scales ZERO. Run it after block
+	// 1's producer reward has already vested, and that reward gets multiplied
+	// by a million: measured against a live hived testnet, gopherd's
+	// total_vesting_shares came out 66,932,455,491,605 against hived's
+	// 51,369,685 for exactly this reason.
+	//
+	// No-op on mainnet, where block 1 predates HF1 (see
+	// TestGenesisHardforksNoOpOnMainnet).
+	if blockNum == 1 {
+		applyGenesisHardforks(session, hdr.Timestamp)
+	}
 	hf := hardfork.SetForBlock(blockNum)
 	// hived's head_block_time() during transactions returns dgpo.time,
 	// which is the PREVIOUS block's timestamp — update_global_dynamic_data
@@ -1281,7 +1297,7 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	processDelayedVoting(session, hdr.Timestamp, blockNum)
 	removeExpiredGovernanceVotes(session, hdr.Timestamp, blockNum, d)
 	processRecurrentTransfers(session, hdr.Timestamp, blockNum, d)
-	processHardforks(session, blockNum)
+	processHardforks(session, blockNum, hdr.Timestamp)
 
 	{
 		dgpoRef, _ := objects.GetDGPORef(session)

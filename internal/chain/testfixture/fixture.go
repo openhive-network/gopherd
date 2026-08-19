@@ -123,6 +123,7 @@ type Fixture struct {
 // fully isolated and the test suite saturates available cores.
 func New(t *testing.T) *Fixture {
 	t.Helper()
+	skipIfTestnetSemantics(t)
 	t.Parallel()
 	// Mainnet HIVE_OWNER_AUTH_HISTORY_TRACKING_START_BLOCK_NUM = 3,186,477
 	// would prevent any fixture starting at block 1 from ever writing
