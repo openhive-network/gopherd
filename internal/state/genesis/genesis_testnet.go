@@ -1,15 +1,22 @@
-// Package genesis — genesis_testnet.go bootstraps a fresh state.Database
-// for a multi-node ghive testnet. Unlike Apply (mainnet shape, only
-// initminer seeded), ApplyTestnet pre-creates 21 elected witnesses with
-// deterministic keys and 5 (default) node-operator accounts pre-funded
-// with HIVE/HBD/VESTS so they can vote, transfer, and vest from block 1.
+// Package genesis — genesis_testnet.go reproduces hived's TESTNET genesis
+// (database_init.cpp::init_genesis compiled with IS_TEST_NET +
+// USE_ALTERNATE_CHAIN_ID) so a gopherd node can join a hived testnet and
+// agree with it from block 1.
 //
-// Determinism is the whole point: every operator running `scripts/testnet-up`
-// gets the same genesis state, the same 21 witnesses, the same WIFs.
-// Reproducibility makes consensus drift trivial to diff across nodes.
+// An earlier version of this file built a BESPOKE gopherd-only testnet: its
+// own chain ID, 21 pre-elected init-1..init-21 witnesses, TST key prefix, and
+// pre-funded operator accounts. That chain was self-consistent but could never
+// interoperate with hived, because two nodes with different genesis state
+// disagree at block 1 no matter how correct each is on its own.
+//
+// Every constant here was taken from a RUNNING hived testnet node via
+// database_api.get_config / list_accounts / list_witnesses, not from
+// config.hpp — the header and the shipped binary disagree (most importantly on
+// the chain ID), so the source is not a reliable spec.
 package genesis
 
 import (
+	"crypto/sha256"
 	"fmt"
 
 	"gopherd/internal/crypto"
@@ -21,301 +28,213 @@ import (
 	"gopherd/internal/state/objects"
 )
 
-// Per-account testnet funding numbers. Picked to be:
-//
-//   - large enough that 21 elected witnesses each get serious vote
-//     weight from the operators' VESTS,
-//   - small enough that the totals comfortably fit in int64 (we're not
-//     stress-testing satoshi precision here),
-//   - round numbers in human form so tests can assert exact totals.
-//
-// Operator: 1,000,000 HIVE liquid + 1,000,000 HBD liquid + 10,000,000
-// VESTS-backing-HIVE worth of vesting (denominated in HIVE-satoshi at
-// the genesis 1:1000 vest ratio = 10,000,000,000,000,000 sat-VESTS).
-//
-// Witness: 1,000 HIVE liquid + 1,000,000 sat-VESTS (just enough to cast
-// a vote; operators do the heavy voting).
+// Testnet initial supply, issued to initminer at genesis.
+// HIVE_INIT_SUPPLY = 243 * 1e6 * 1e3, HIVE_HBD_INIT_SUPPLY = 7 * 1e6 * 1e3.
+// Confirmed live: initminer holds 243000000000 / 7000000000 at block 1.
 const (
-	// HIVE_BLOCKCHAIN_PRECISION = 1000 (libraries/protocol/include/hive/
-	// protocol/config.hpp). HIVE / HBD are 3-decimal.
-	hiveSatPerCoin = 1_000
-
-	// HIVE_BLOCKCHAIN_PRECISION_DIGITS = 3; VESTS is 6-decimal so 1 VESTS
-	// = 1_000_000 sat-VESTS.
-	vestsSatPerCoin = 1_000_000
-
-	// Initial vest:HIVE ratio at genesis. hived's create_vesting uses
-	// 1 HIVE → 1000 VESTS when both totals are 0, so 1 sat-HIVE → 1000
-	// sat-VESTS (precision adjustment baked in: 3-decimal HIVE × 1000 =
-	// 6-decimal VESTS-satoshi). We mirror that ratio for the genesis
-	// vesting pool so first-block convert math doesn't surprise.
-	initialVestPerHiveSat = 1_000
+	TestnetInitHiveSupply = int64(243) * 1_000_000 * 1_000
+	TestnetInitHbdSupply  = int64(7) * 1_000_000 * 1_000
 )
 
-// per-operator funding (in satoshi).
-var (
-	operatorLiquidHive = int64(1_000_000) * hiveSatPerCoin // 1,000,000.000 HIVE
-	operatorLiquidHBD  = int64(1_000_000) * hiveSatPerCoin // 1,000,000.000 HBD
-	// 10,000,000 HIVE worth of VESTS at genesis ratio
-	operatorVestingHiveBacking = int64(10_000_000) * hiveSatPerCoin
-	operatorVestingShares      = operatorVestingHiveBacking * initialVestPerHiveSat
+// TestnetSkeletonSeed is the preimage hived hashes to build the default
+// testnet initminer key: private_key::regenerate(sha256("init_key")).
+// The resulting public key is STM6LLegbAgLAy28EHrffBVuANFWcFgmqRMW13wBmTExqFE9SCkg4,
+// which TestInitminerKeyMatchesHived pins against the live node.
+const TestnetSkeletonSeed = "init_key"
 
-	witnessLiquidHive    = int64(1_000) * hiveSatPerCoin // 1,000.000 HIVE
-	witnessVestingShares = int64(1_000_000)              // 1.000000 VESTS — enough to register
-	// Witnesses don't need VESTS-backing-HIVE separately on the dgpo
-	// side; we lump their share into the operator total when computing
-	// TotalVestingFundHive below.
-)
+// TestnetInitminerKey derives the testnet initminer key pair from the
+// skeleton seed. hived exposes the same thing as --skeleton-key, defaulting
+// to the WIF 5JNHfZYKGaomSFvd4NUdQ9qMcEAC43kujbfjueTHpVapX1Kzq2n.
+func TestnetInitminerKey() (*crypto.PrivateKey, error) {
+	sec := sha256.Sum256([]byte(TestnetSkeletonSeed))
+	return crypto.PrivateKeyFromBytes(sec[:])
+}
 
-// ApplyTestnet seeds db with the testnet genesis state. Idempotent:
-// re-applying on an already-bootstrapped db is a no-op (writes overwrite
-// to identical values).
+// ApplyTestnet seeds db with hived's testnet genesis state.
 //
-// Builds:
-//   - initminer + the system accounts (null/temp/miner/steem) — kept for
-//     parity with mainnet evaluators that special-case "null" etc.
-//   - 21 deterministic witnesses (init-1 ... init-21) registered with
-//     valid block-signing keys, pre-elected into the schedule.
-//   - operatorCount node accounts (node-1 ... node-N) pre-funded with
-//     HIVE / HBD / VESTS.
-//   - dgpo with CurrentSupply / CurrentHBDSupply / TotalVestingShares /
-//     TotalVestingFundHive consistent with the seeded balances so
-//     update_virtual_supply on block 1 doesn't surprise.
-//   - witness_schedule with all 21 witnesses scheduled.
-//
-// operatorCount must be in [1, 64]; pass 0 for the default
-// (DefaultTestnetOperatorCount).
-func ApplyTestnet(db *state.Database, operatorCount int) error {
-	if operatorCount == 0 {
-		operatorCount = DefaultTestnetOperatorCount
+// extraWitnesses mirrors hived's configurable `init_witnesses` list: each name
+// is created as an account and registered as a witness signing with the SAME
+// init key, exactly as init_genesis does. Pass nil for hived's default (only
+// initminer).
+func ApplyTestnet(db *state.Database, extraWitnesses []string) error {
+	priv, err := TestnetInitminerKey()
+	if err != nil {
+		return fmt.Errorf("genesis: derive testnet initminer key: %w", err)
 	}
-	if operatorCount < 1 || operatorCount > 64 {
-		return fmt.Errorf("genesis: operatorCount must be in [1,64], got %d", operatorCount)
-	}
+	initPub := priv.PublicKey()
+
 	s := state.NewSession(db)
 
-	// Initminer: kept for compatibility with evaluators that still
-	// reference HIVE_INIT_MINER_NAME. On testnet it does NOT produce
-	// blocks (it's not in the schedule) and holds no balances.
-	memoKey, err := crypto.DecodePublicKey(testnetInitminerKey())
-	if err != nil {
-		return fmt.Errorf("genesis: decode initminer key: %w", err)
-	}
-	objects.PutAccount(s, &objects.Account{
-		Name:                 MainnetInitminer,
-		Created:              network.GenesisTimeUnix,
-		MemoKey:              memoKey,
-		VotingManaCurrent:    10000,
-		VotingManaLastUpdate: network.GenesisTimeUnix,
-	})
-	initAuth := auth.Authority{
-		WeightThreshold: 1,
-		KeyAuths:        []auth.KeyAuth{{Key: memoKey, Weight: 1}},
-	}
-	objects.PutAccountAuthority(s, &objects.AccountAuthority{
-		Account:             MainnetInitminer,
-		Owner:               initAuth,
-		Active:              initAuth,
-		Posting:             initAuth,
-		LastOwnerUpdate:     network.GenesisTimeUnix,
-		PreviousOwnerUpdate: network.GenesisTimeUnix,
-	})
+	const gt = network.GenesisTimeUnix
 
-	// System accounts — same set Apply() seeds. null is the burn sink;
-	// removing it would break first-block transfers to "null".
-	systemAuth := auth.Authority{WeightThreshold: 1}
-	// "miners" with 's' matches hived's HIVE_MINER_ACCOUNT
-	// (config.hpp:443 + database_init.cpp:197).
-	for _, name := range []string{"null", "temp", "miners", "steem"} {
+	// locked_auth( 1 ): threshold 1 with no keys — unusable by design.
+	lockedAuth := auth.Authority{WeightThreshold: 1}
+	// open_auth( 0 ): threshold 0, so ANY signature satisfies it. hived uses
+	// this for "temp" only; seeding it as a locked authority instead would
+	// silently reject transactions the network accepts.
+	openAuth := auth.Authority{WeightThreshold: 0}
+
+	putSystem := func(name string, a auth.Authority) {
 		objects.PutAccount(s, &objects.Account{
 			Name:                 name,
-			Created:              network.GenesisTimeUnix,
-			VotingManaCurrent:    10000,
-			VotingManaLastUpdate: network.GenesisTimeUnix,
+			Created:              gt,
+			VotingManaCurrent:    0,
+			VotingManaLastUpdate: gt,
+			Mined:                true,
 		})
 		objects.PutAccountAuthority(s, &objects.AccountAuthority{
-			Account:             name,
-			Owner:               systemAuth,
-			Active:              systemAuth,
-			Posting:             systemAuth,
-			LastOwnerUpdate:     network.GenesisTimeUnix,
-			PreviousOwnerUpdate: network.GenesisTimeUnix,
+			Account: name, Owner: a, Active: a, Posting: a,
+			LastOwnerUpdate: gt, PreviousOwnerUpdate: gt,
 		})
 	}
 
-	// 21 witness accounts + their witness_object rows.
-	witnessKeys := TestnetWitnessKeys()
-	scheduled := make([]auth.AccountName, 0, len(witnessKeys))
-	for _, k := range witnessKeys {
-		acctAuth := auth.Authority{
-			WeightThreshold: 1,
-			KeyAuths:        []auth.KeyAuth{{Key: k.PublicKey, Weight: 1}},
-		}
+	// Order mirrors init_genesis. On testnet BOTH treasuries exist from
+	// genesis (mainnet creates them at HF21/HF24 instead) — confirmed live,
+	// list_accounts returns steem.dao and hive.fund at block 1.
+	putSystem("miners", lockedAuth)
+	putSystem("null", lockedAuth)
+	putSystem("steem.dao", lockedAuth)
+	putSystem("hive.fund", lockedAuth)
+	putSystem("temp", openAuth)
+
+	// initminer + any configured init witnesses, all signing with initPub.
+	initAuth := auth.Authority{
+		WeightThreshold: 1,
+		KeyAuths:        []auth.KeyAuth{{Key: initPub, Weight: 1}},
+	}
+	var vstMax [16]byte
+	for i := range vstMax {
+		vstMax[i] = 0xff
+	}
+	witnessNames := append([]string{MainnetInitminer}, extraWitnesses...)
+	scheduled := make([]auth.AccountName, 0, len(witnessNames))
+	for _, name := range witnessNames {
 		objects.PutAccount(s, &objects.Account{
-			Name:                 k.Name,
-			Created:              network.GenesisTimeUnix,
-			Balance:              witnessLiquidHive,
-			VestingShares:        witnessVestingShares,
-			MemoKey:              k.PublicKey,
+			Name:                 name,
+			Created:              gt,
+			MemoKey:              initPub,
 			VotingManaCurrent:    10000,
-			VotingManaLastUpdate: network.GenesisTimeUnix,
+			VotingManaLastUpdate: gt,
 		})
 		objects.PutAccountAuthority(s, &objects.AccountAuthority{
-			Account:             k.Name,
-			Owner:               acctAuth,
-			Active:              acctAuth,
-			Posting:             acctAuth,
-			LastOwnerUpdate:     network.GenesisTimeUnix,
-			PreviousOwnerUpdate: network.GenesisTimeUnix,
+			Account: name, Owner: initAuth, Active: initAuth, Posting: initAuth,
+			LastOwnerUpdate: gt, PreviousOwnerUpdate: gt,
 		})
-
-		// Pre-elected witness — VST=0 puts them at the FRONT of
-		// by_schedule_time, so the first update_witness_schedule will
-		// pick them as elected slots immediately. (A genuine schedule
-		// rebuild on block 1 will set real VSTs; we just need the
-		// initial scheduled set to be non-empty.)
 		objects.PutWitness(s, &objects.Witness{
-			Owner:              k.Name,
-			Created:            network.GenesisTimeUnix,
-			URL:                "",
-			BlockSigningKey:    k.PublicKey,
-			AccountCreationFee: 0,
-			MaximumBlockSize:   65536,
-			HBDInterestRate:    1000,
-			HBDExchangeRate: asset.Price{
-				Base:  asset.Asset{Amount: 1000, Symbol: asset.Symbol{Num: asset.HbdSymbol, WasLegacyEncoded: true}},
-				Quote: asset.Asset{Amount: 1000, Symbol: asset.Symbol{Num: asset.HiveSymbol, WasLegacyEncoded: true}},
-			},
-			LastHBDExchangeUpdate: network.GenesisTimeUnix,
-			Schedule:              objects.WitnessScheduleElected,
+			Owner: name,
+			// hived's init_witness does not set `created`, so the field keeps
+			// its zero value — list_witnesses reports 1970-01-01, NOT the
+			// genesis time.
+			Created:              0,
+			BlockSigningKey:      initPub,
+			AccountCreationFee:   0,
+			MaximumBlockSize:     65536,
+			HBDInterestRate:      1000,
+			AccountSubsidyBudget: 797,
+			AccountSubsidyDecay:  347321,
+			VirtualScheduledTime: vstMax,
+			Schedule:             objects.WitnessScheduleMiner,
 		})
-		scheduled = append(scheduled, auth.AccountName(k.Name))
+		scheduled = append(scheduled, auth.AccountName(name))
 	}
 
-	// N operator accounts pre-funded with serious balances.
-	operatorKeys := TestnetOperatorKeys(operatorCount)
-	for _, k := range operatorKeys {
-		opAuth := auth.Authority{
-			WeightThreshold: 1,
-			KeyAuths:        []auth.KeyAuth{{Key: k.PublicKey, Weight: 1}},
-		}
-		objects.PutAccount(s, &objects.Account{
-			Name:                 k.Name,
-			Created:              network.GenesisTimeUnix,
-			Balance:              operatorLiquidHive,
-			HBDBalance:           operatorLiquidHBD,
-			VestingShares:        operatorVestingShares,
-			MemoKey:              k.PublicKey,
-			VotingManaCurrent:    10000,
-			VotingManaLastUpdate: network.GenesisTimeUnix,
-		})
-		objects.PutAccountAuthority(s, &objects.AccountAuthority{
-			Account:             k.Name,
-			Owner:               opAuth,
-			Active:              opAuth,
-			Posting:             opAuth,
-			LastOwnerUpdate:     network.GenesisTimeUnix,
-			PreviousOwnerUpdate: network.GenesisTimeUnix,
-		})
+	// "steem": on testnet its authority carries the init key ALONGSIDE the
+	// legacy steem key (init_genesis wraps this in USE_ALTERNATE_CHAIN_ID), so
+	// testnet tooling can act as it.
+	steemKey, err := crypto.DecodePublicKey("STM65wH1LZ7BfSHcK69SShnqCAH5xdoSZpGkUjmzHJ5GCuxEK9V5G")
+	if err != nil {
+		return fmt.Errorf("genesis: decode steem key: %w", err)
 	}
+	steemAuth := auth.Authority{
+		WeightThreshold: 1,
+		KeyAuths: []auth.KeyAuth{
+			{Key: steemKey, Weight: 1},
+			{Key: initPub, Weight: 1},
+		},
+	}
+	objects.PutAccount(s, &objects.Account{
+		Name: "steem", Created: gt, MemoKey: steemKey,
+		VotingManaCurrent: 10000, VotingManaLastUpdate: gt, Mined: true,
+	})
+	objects.PutAccountAuthority(s, &objects.AccountAuthority{
+		Account: "steem", Owner: steemAuth, Active: steemAuth, Posting: steemAuth,
+		LastOwnerUpdate: gt, PreviousOwnerUpdate: gt,
+	})
 
-	// Tally what the dgpo invariants expect: liquid HIVE + HBD across
-	// all funded accounts, plus the HIVE backing the vesting pool.
-	totalLiquidHive := int64(len(operatorKeys)) * operatorLiquidHive
-	totalLiquidHive += int64(len(witnessKeys)) * witnessLiquidHive
-	totalHBD := int64(len(operatorKeys)) * operatorLiquidHBD
+	// Issue the initial supply to initminer.
+	initminer, err := objects.GetAccount(s, MainnetInitminer)
+	if err != nil {
+		return fmt.Errorf("genesis: initminer missing after seeding: %w", err)
+	}
+	initminer.Balance = TestnetInitHiveSupply
+	initminer.HBDBalance = TestnetInitHbdSupply
+	objects.PutAccount(s, &initminer)
 
-	// VESTS-side: each operator's vest backing + each witness's vest
-	// backing (witnesses get a tiny stake, denominated in sat-VESTS;
-	// convert back to sat-HIVE backing at the genesis 1:1000 ratio).
-	totalVestingShares := int64(len(operatorKeys))*operatorVestingShares +
-		int64(len(witnessKeys))*witnessVestingShares
-	witnessVestingHiveBacking := witnessVestingShares / initialVestPerHiveSat
-	totalVestingFundHive := int64(len(operatorKeys))*operatorVestingHiveBacking +
-		int64(len(witnessKeys))*witnessVestingHiveBacking
-
-	// CurrentSupply per dynamic_global_property_object semantics is the
-	// liquid HIVE supply + the vesting fund's HIVE backing (vesting
-	// shares aren't HIVE — only their backing counts).
-	currentSupply := totalLiquidHive + totalVestingFundHive
+	// feed_history at a 1:1 TESTS/TBD price. Testnet seeds this at genesis
+	// (mainnet has no feed until witnesses publish), and virtual_supply
+	// depends on it from the very first block.
+	oneToOne := asset.Price{
+		Base:  asset.Asset{Amount: 1000, Symbol: asset.Symbol{Num: asset.HbdSymbol, WasLegacyEncoded: true}},
+		Quote: asset.Asset{Amount: 1000, Symbol: asset.Symbol{Num: asset.HiveSymbol, WasLegacyEncoded: true}},
+	}
+	objects.PutFeedHistory(s, &objects.FeedHistory{
+		CurrentMedianHistory: oneToOne,
+		MarketMedianHistory:  oneToOne,
+		CurrentMinHistory:    oneToOne,
+		CurrentMaxHistory:    oneToOne,
+	})
 
 	objects.PutDGPO(s, &objects.DynamicGlobalProperty{
-		HeadBlockNumber: 0,
-		Time:            network.GenesisTimeUnix,
-		// Block 0 has no producer in either chain — leave empty so
-		// process_funds doesn't try to credit a phantom producer.
-		CurrentWitness:         "",
-		CurrentSupply:          currentSupply,
-		CurrentHBDSupply:       totalHBD,
-		TotalVestingShares:     totalVestingShares,
-		TotalVestingFundHive:   totalVestingFundHive,
-		VirtualSupply:          currentSupply + totalHBD, // 1:1 feed at genesis
-		HBDInterestRate:        1000,
+		HeadBlockNumber:  0,
+		Time:             gt,
+		CurrentWitness:   MainnetInitminer,
+		CurrentSupply:    TestnetInitHiveSupply,
+		CurrentHBDSupply: TestnetInitHbdSupply,
+		// 1:1 feed at genesis, so virtual = HIVE + HBD.
+		VirtualSupply:          TestnetInitHiveSupply + TestnetInitHbdSupply,
+		HBDInterestRate:        0,
 		HBDPrintRate:           10000,
 		HBDStartPercent:        200,
 		HBDStopPercent:         500,
 		ContentRewardPercent:   7500,
 		VestingRewardPercent:   1500,
 		ProposalFundPercent:    0,
-		ReverseAuctionSeconds:  0,
-		DelegationReturnPeriod: 5 * 24 * 60 * 60,
-		// total_pow init — see Apply() for the full rationale; pre-HF13
-		// PoW eval still references this even on a chain that never sees
-		// a real pow op.
-		TotalPow: ^uint64(0),
+		ReverseAuctionSeconds:  1800,
+		DelegationReturnPeriod: 7 * 24 * 60 * 60,
+		TotalPow:               ^uint64(0),
 	})
 
 	objects.PutHardforkPropertyObject(s, &objects.HardforkPropertyObject{
-		ProcessedHardforks:     []uint32{network.GenesisTimeUnix},
+		ProcessedHardforks:     []uint32{gt},
 		LastHardfork:           0,
 		CurrentHardforkVersion: hardfork.PackedVersion(hardfork.HF0),
 		NextHardfork:           hardfork.PackedVersion(hardfork.HF0),
-		NextHardforkTime:       network.GenesisTimeUnix,
+		NextHardforkTime:       gt,
 	})
 
-	// Pre-elected schedule: all 21 witnesses, no initminer fallback.
-	// Median chain props pulled from witness defaults (every witness
-	// publishes the same values at genesis so the median IS the
-	// default).
 	objects.PutWitnessSchedule(s, &objects.WitnessSchedule{
 		NumScheduledWitnesses:    uint8(len(scheduled)),
 		CurrentShuffledWitnesses: scheduled,
-		MaxVotedWitnesses:        objects.MaxVotedWitnessesHF20,
-		MaxMinerWitnesses:        0,
-		MaxRunnerWitnesses:       1,
-		NextShuffleBlockNum:      uint32(len(scheduled)) + 1, // first reshuffle after one full round
+		MaxVotedWitnesses:        objects.MaxVotedWitnessesHF0,
+		MaxMinerWitnesses:        objects.MaxMinerWitnessesHF0,
+		NextShuffleBlockNum:      1,
 		MedianAccountCreationFee: 0,
 		MedianMaximumBlockSize:   65536,
 		MedianHBDInterestRate:    1000,
-		// Pay weights match witness_schedule_object defaults
-		// (timeshare=5, miner=1, elected=1). Normalization picks up
-		// 21*1 = 21 since on testnet every slot is elected.
-		TimeshareWeight:               5,
-		MinerWeight:                   1,
-		ElectedWeight:                 1,
-		WitnessPayNormalizationFactor: uint32(len(scheduled)),
-		MajorityVersion:               0,
-		HardforkRequiredWitnesses:     17,
+		// witness_schedule_object's C++ struct defaults. These are NOT
+		// decorative: process_funds multiplies the witness reward by
+		// HIVE_MAX_WITNESSES and then by the producer's schedule weight, and
+		// divides by witness_pay_normalization_factor — which is itself
+		// computed as (elected_weight * num_elected + ...). Leaving the weights
+		// at zero makes the normalization factor zero, gopherd's divide-by-zero
+		// guard then pays the UNWEIGHTED reward, and the witness earns 1/21 of
+		// what hived pays. Measured against a live hived testnet: 2093 vs 6773
+		// sat/block of inflation.
+		ElectedWeight:             1,
+		MinerWeight:               1,
+		TimeshareWeight:           5,
+		HardforkRequiredWitnesses: 17,
 	})
 
 	return s.Commit(true)
-}
-
-// testnetInitminerKey returns the initminer's compile-time-prefixed
-// public key. We use the same canonical key as mainnet so historical
-// references in tests / docs keep working; on testnet the address
-// prefix is TST so the encoded form differs even though the underlying
-// 33 bytes are identical.
-func testnetInitminerKey() string {
-	// We can't reuse the literal mainnet "STM..." string because
-	// network.AddressPrefix is "TST" under -tags testnet, and
-	// crypto.DecodePublicKey rejects mismatched prefixes.
-	//
-	// Easier path: re-encode the well-known initminer pubkey under the
-	// active prefix at call time. The compressed bytes of the canonical
-	// initminer are the public form of the secret 5JNHfZYKGaomSFvd4NUdQ9qMcEAC43kujbfjueTHpVapX1Kzq2n
-	// — but we can produce ANY known pubkey here. Use the testnet-witness
-	// scope with name "initminer" so even initminer's key is deterministic.
-	k := mustDeriveTestnetKey("witness", "initminer")
-	return k.PublicKey.EncodeBase58()
 }

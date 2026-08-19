@@ -53,7 +53,7 @@ func cmdBenchmark(args []string) int {
 	}
 	defer stateDB.Close()
 
-	if err := genesis.Apply(stateDB); err != nil {
+	if err := genesis.ApplyForNetwork(stateDB, nil); err != nil {
 		fmt.Fprintf(os.Stderr, "benchmark: genesis: %v\n", err)
 		return 1
 	}

@@ -23,8 +23,28 @@ import (
 // hooks observe HF state matching the head block" — which is fine
 // either way since the block whose HF activates can't reference the
 // HF's effects in its own evaluator dispatch.
-func processHardforks(s *state.Session, blockNum uint32) {
+func processHardforks(s *state.Session, blockNum uint32, blockTime uint32) {
 	if blockNum == 0 {
+		return
+	}
+	// Block 1 applies EVERY hardfork already due by the block's timestamp, in
+	// one shot. Mirrors database.cpp:2246-2252 ("For every existing before the
+	// head_block_time (genesis time), apply the hardfork. This allows the test
+	// net to launch with past hardforks").
+	//
+	// On mainnet this is a no-op and cannot change consensus: block 1 is dated
+	// 1458835203 while HF1 is 1461605400, so the loop stops at n=0. It matters
+	// on a testnet, whose block 1 carries TODAY's timestamp — every hardfork
+	// time is in the past, so the chain starts at HF28 running current rules.
+	// Without this a gopherd testnet node runs HF0 rules against hived peers on
+	// HF28 and silently diverges on inflation and reward-fund math while still
+	// agreeing on every block ID (block IDs do not commit to state).
+	// Block 1's genesis hardforks are applied at the TOP of ApplyBlock, not
+	// here — HF1's vesting-share multiplication must scale the empty genesis
+	// state, not block 1's producer reward. Nothing activates by block number
+	// at height 1 (TestNoHardforkActivatesAtBlockOne), so there is nothing
+	// left to do for this block.
+	if blockNum == 1 {
 		return
 	}
 	// Fire applyHardfork at the END of the activation block (matches C++
@@ -36,6 +56,22 @@ func processHardforks(s *state.Session, blockNum uint32) {
 		if blockNum == hardfork.MainnetActivationBlock[id] {
 			applyHardfork(s, id)
 		}
+	}
+}
+
+// applyGenesisHardforks applies each hardfork whose activation time has already
+// passed as of blockTime, contiguously from HF1. Stops at the first hardfork
+// still in the future, matching hived's break-on-first-future loop.
+func applyGenesisHardforks(s *state.Session, blockTime uint32) {
+	n := hardfork.ID(0)
+	for id := hardfork.ID(1); id <= hardfork.NumHardforks; id++ {
+		if hardfork.MainnetActivationTime[id] > blockTime {
+			break
+		}
+		n = id
+	}
+	for id := hardfork.ID(1); id <= n; id++ {
+		applyHardfork(s, id)
 	}
 }
 

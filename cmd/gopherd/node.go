@@ -316,6 +316,9 @@ type flags struct {
 	showSeeds        bool
 	listenEndpoint   string
 	extraSeeds       string
+	initWitnesses    []string
+	initWitnessesRaw string
+	chainID          string
 	disableMainSeeds bool
 	// compressBlocks controls whether the on-disk block_log we write is
 	// zstd-compressed (per-block, with the hived dictionary scheme) or
@@ -416,6 +419,8 @@ func parseNodeFlags(args []string) flags {
 	fs.BoolVar(&f.showSeeds, "show-seeds", false, "print the compiled-in mainnet seed list and exit")
 	fs.StringVar(&f.listenEndpoint, "p2p-endpoint", "", "local listen address (host:port); empty = outbound-only")
 	fs.Var((*repeatableSeeds)(&f.extraSeeds), "extra-seed", "additional seed (host:port); repeatable, and accepts a comma-separated list")
+	fs.Var((*repeatableSeeds)(&f.initWitnessesRaw), "init-witness", "TESTNET ONLY: extra genesis witness registered with the shared init key, mirroring hived's init_witnesses. Repeatable / comma-separated. Must match the hived nodes on the same testnet exactly, or genesis state differs and the chains disagree at block 1")
+	fs.StringVar(&f.chainID, "chain-id", "", "override the chain ID (64-hex), mirroring hived's --chain-id. Empty = the build's default. Wrong value = the P2P handshake never completes")
 	fs.BoolVar(&f.disableMainSeeds, "no-default-seeds", false, "skip the compiled-in mainnet seeds; only --extra-seed peers will be dialed")
 	fs.BoolVar(&f.compressBlocks, "compress-blocks", false, "zstd-compress each block in the local block_log (matches hived's on-disk format byte-for-byte)")
 	fs.BoolVar(&f.noBlockLog, "no-block-log", false, "do NOT write a local block_log (state + cold tier only); shrinks a from-scratch p2p sync from ~400GB to tens of GB. No local log = no recover-on-restart. Incompatible with --source-block-log")
@@ -442,6 +447,23 @@ func parseNodeFlags(args []string) flags {
 	fs.Parse(args)
 	f.targetBlock = uint32(target)
 	f.maxBlocks = uint32(max)
+	for _, w := range strings.Split(f.initWitnessesRaw, ",") {
+		if w = strings.TrimSpace(w); w != "" {
+			f.initWitnesses = append(f.initWitnesses, w)
+		}
+	}
+	// Apply the chain-ID override BEFORE anything signs or handshakes.
+	if f.chainID != "" {
+		h, err := hex.DecodeString(f.chainID)
+		if err != nil || len(h) != 32 {
+			fmt.Fprintf(os.Stderr, "gopherd node: --chain-id must be 64 hex chars, got %q\n", f.chainID)
+			os.Exit(2)
+		}
+		var id network.Hash32
+		copy(id[:], h)
+		applyChainIDOverride(id)
+		fmt.Fprintf(os.Stderr, "gopherd node: chain ID overridden to %s\n", id.Hex())
+	}
 	// Default the state backend based on whether the caller is doing a
 	// verify-against run. Verify-against runs throw away state on
 	// completion (the only output that matters is the byte-for-byte
@@ -725,7 +747,7 @@ func newApp(cfg flags) (*app, error) {
 		loadedFromSnapshot = true
 	}
 	if !loadedFromSnapshot {
-		if err := genesis.Apply(stateDB); err != nil {
+		if err := genesis.ApplyForNetwork(stateDB, cfg.initWitnesses); err != nil {
 			// Apply tolerates an already-bootstrapped dir.
 			_ = err
 		}
