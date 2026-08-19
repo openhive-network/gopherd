@@ -175,13 +175,45 @@ which takes hours and 149 GB of log.
 
 ## Testnet
 
-A `-tags testnet` build joins a hived testnet rather than running a chain of its
-own. `scripts/testnet-up` brings up a mixed network (2 hived + 1 gopherd, five
-witnesses, all producing) and `scripts/testnet-status` verifies they agree.
+A `-tags testnet` build joins a **hived** testnet rather than running a chain of
+its own.
+
+```sh
+scripts/testnet-up          # 2 hived + 1 gopherd, 5 witnesses, all producing
+scripts/testnet-status      # block-ID agreement + who produced what
+scripts/testnet-state-diff  # chain STATE comparison (see the warning below)
+scripts/testnet-down        # stop everything, keep the data dirs
+```
+
+Testnet-only subcommands (they refuse to run on a mainnet build):
+
+| Command | Purpose |
+|---|---|
+| `testnet-bootstrap --witnesses=a,b` | vest and vote as initminer so the init witnesses get elected — a fresh testnet gives them no votes, so without this only `initminer` ever produces |
+| `testnet-bots` | load generator: a pool of accounts submitting random operations across 40 of the 51 operation types |
+
+`testnet-bots` flags worth knowing:
+
+```sh
+--bots=6 --duration=3m --tps=8   # size, length and aggregate rate
+--seed=NAME                      # deterministic accounts, keys and op choices
+--setup-only                     # create and fund the accounts, then stop
+--only-ops=transfer,vote         # restrict the workload
+--endpoint=http://127.0.0.1:8751 # submit through this node
+```
+
+`--only-ops` matters more than it looks: a mixed workload cannot be compared
+per-operation against hived, because the cost and the state effects depend on
+which operations ran. Isolating one operation class is how several RC defects
+were separated from each other. `--seed` makes a run that trips a bug replay
+exactly.
 
 Read `docs/testnet.md` before changing consensus code — in particular, block-ID
 agreement does **not** prove state agreement, and every consensus bug found
-during testnet bring-up was invisible to a block-ID comparison.
+during testnet bring-up was invisible to a block-ID comparison. Run
+`scripts/testnet-state-diff`, and run `testnet-bots` before believing a change
+is safe: submitting real traffic found bugs that replaying existing blocks
+never could, because replay never exercises the submission path.
 
 ## Block production
 
@@ -279,6 +311,8 @@ scripts/               — live-head runner, checkpoint + parity tooling
 | `snapshot-diff a.jsonl b.jsonl` | report missing/extra/changed objects between dumps |
 | `validate-blocklog <block_log>` | re-derive every merkle root and block ID |
 | `compare-blocklog <ref> <other>` | byte-compare two block_logs |
+| `testnet-bootstrap` | elect the genesis witnesses (testnet build only) |
+| `testnet-bots` | random-operation load generator (testnet build only) |
 
 The `state-jsonl` → `snapshot-diff` pair is the workhorse for consensus
 debugging: dump both implementations at the same block and diff.
