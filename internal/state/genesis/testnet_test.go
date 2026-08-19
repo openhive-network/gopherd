@@ -173,6 +173,39 @@ func TestInitWitnessesAreRegistered(t *testing.T) {
 
 // TestFeedHistorySeeded — testnet starts with a 1:1 price feed (mainnet has
 // none until witnesses publish). virtual_supply depends on it immediately.
+// TestGenesisScheduleDefaultsMatchHived pins witness_schedule_object's C++
+// struct defaults (witness_objects.hpp:191-194). These are literals in hived,
+// not computed values.
+//
+// witness_pay_normalization_factor is the one that bites: it divides the
+// witness reward, which process_funds has already multiplied by
+// HIVE_MAX_WITNESSES. Left at 0, gopherd's divide-by-zero guard pays the
+// UNWEIGHTED slice — 234 sat at block 1 instead of 234*21/25 = 196. That 38-sat
+// overpayment lands in the vesting fund, permanently shifting the VESTS price,
+// and was the ENTIRE measured divergence from hived (+1558 sat by the time a
+// large transfer_to_vesting had amplified it).
+func TestGenesisScheduleDefaultsMatchHived(t *testing.T) {
+	s := applyForTest(t, nil)
+	ws, err := objects.GetWitnessSchedule(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name string
+		got  uint32
+		want uint32
+	}{
+		{"elected_weight", uint32(ws.ElectedWeight), 1},
+		{"miner_weight", uint32(ws.MinerWeight), 1},
+		{"timeshare_weight", uint32(ws.TimeshareWeight), 5},
+		{"witness_pay_normalization_factor", ws.WitnessPayNormalizationFactor, 25},
+	} {
+		if c.got != c.want {
+			t.Errorf("%s = %d, want hived's struct default %d", c.name, c.got, c.want)
+		}
+	}
+}
+
 func TestFeedHistorySeeded(t *testing.T) {
 	s := applyForTest(t, nil)
 	h, err := objects.GetFeedHistory(s)
