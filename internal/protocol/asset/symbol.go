@@ -52,10 +52,12 @@ const (
 // Legacy 4-byte detection magic (low 32 bits of the 8-byte serialization).
 // Any 4-byte read matching one of these means a legacy asset follows; the
 // caller must consume 4 more bytes to complete the 8-byte legacy frame.
-const (
-	legacyHiveLow4  uint32 = 0x4554_5303 // 0x03 'S' 'T' 'E' (low) of "STEEM\0\0" + 3
-	legacyHbdLow4   uint32 = 0x4442_5303 // 0x03 'S' 'B' 'D'
-	legacyVestsLow4 uint32 = 0x5345_5606 // 0x06 'V' 'E' 'S'
+// Derived from the per-network legacy names (see legacy_names_*.go): mainnet
+// uses STEEM/SBD, testnet TESTS/TBD. VESTS is the same on both.
+var (
+	legacyHiveLow4  = legacyLow4(3, legacyHiveName)
+	legacyHbdLow4   = legacyLow4(3, legacyHbdName)
+	legacyVestsLow4 = legacyLow4(6, "VESTS")
 )
 
 // Symbol is an asset_symbol_type — either a well-known legacy symbol
@@ -131,9 +133,9 @@ func AppendSymbol(dst []byte, s Symbol) []byte {
 	if s.WasLegacyEncoded {
 		switch s.Num {
 		case HiveSymbol:
-			return append(dst, 0x03, 'S', 'T', 'E', 'E', 'M', 0x00, 0x00)
+			return append(dst, legacySymBytes(3, legacyHiveName)...)
 		case HbdSymbol:
-			return append(dst, 0x03, 'S', 'B', 'D', 0x00, 0x00, 0x00, 0x00)
+			return append(dst, legacySymBytes(3, legacyHbdName)...)
 		case VestsSymbol:
 			return append(dst, 0x06, 'V', 'E', 'S', 'T', 'S', 0x00, 0x00)
 		}
@@ -147,9 +149,9 @@ func AppendSymbol(dst []byte, s Symbol) []byte {
 func MarshalLegacy(dst []byte, s Symbol) ([]byte, error) {
 	switch s.Num {
 	case HiveSymbol:
-		return append(dst, 0x03, 'S', 'T', 'E', 'E', 'M', 0x00, 0x00), nil
+		return append(dst, legacySymBytes(3, legacyHiveName)...), nil
 	case HbdSymbol:
-		return append(dst, 0x03, 'S', 'B', 'D', 0x00, 0x00, 0x00, 0x00), nil
+		return append(dst, legacySymBytes(3, legacyHbdName)...), nil
 	case VestsSymbol:
 		return append(dst, 0x06, 'V', 'E', 'S', 'T', 'S', 0x00, 0x00), nil
 	}
