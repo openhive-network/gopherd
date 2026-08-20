@@ -1,6 +1,7 @@
 package objects
 
 import (
+	"gopherd/internal/protocol/hardfork"
 	"math/big"
 
 	"gopherd/internal/protocol/asset"
@@ -162,7 +163,21 @@ func AdjustHBDBalanceInto(s *state.Session, a *Account, blockTime uint32, delta 
 		// gate flips true one block too early. Use `>` to match the
 		// off-by-one semantics that hardfork.SetForBlock(N).Has(HF25)
 		// also obeys (per hardfork_test.go).
-		hf25Active := dgpo.HeadBlockNumber > hf25LiquidHbdDisabledBlock
+		// Ask the hardfork table rather than comparing against a hardcoded
+		// MAINNET block number. The two are identical on mainnet
+		// (hf25LiquidHbdDisabledBlock == MainnetActivationBlock[HF25], and
+		// SetForBlock uses the same strict `>` so the activation-block
+		// off-by-one is preserved), but the raw comparison was catastrophically
+		// wrong on a testnet: at head ~190 it read 190 > 55,235,767 as false,
+		// concluded HF25 had not happened, and paid interest on LIQUID HBD for
+		// a chain already at HF28.
+		//
+		// initminer holds 7e9 HBD with HBDSecondsLastUpdate at 0, so the first
+		// touch accrued ~56.7 YEARS of interest: 7e9 * 10% * 56.7 = 39.67e9,
+		// which is exactly the 39,669,719,696 satoshi by which gopherd's HBD
+		// supply exceeded hived's. Block ids matched throughout, so only a
+		// state comparison could see it.
+		hf25Active := hardfork.SetForBlock(dgpo.HeadBlockNumber).Has(hardfork.HF25)
 		if !hf25Active {
 			elapsed := blockTime - a.HBDSecondsLastUpdate
 			a.HBDSeconds = uint128AddProduct(a.HBDSeconds, a.HBDBalance, elapsed)
