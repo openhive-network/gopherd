@@ -89,6 +89,15 @@ func runTestnetBots(args []string) error {
 			return fmt.Errorf("--only-ops matched no generators")
 		}
 	}
+	// An explicit --only-ops selection overrides the zero default weight, so
+	// opt-in-only generators can still be exercised deliberately.
+	if *onlyOps != "" {
+		for i := range active {
+			if active[i].weight == 0 {
+				active[i].weight = 4
+			}
+		}
+	}
 	totalWeight := 0
 	for _, g := range active {
 		totalWeight += g.weight
