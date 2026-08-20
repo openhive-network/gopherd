@@ -40,6 +40,17 @@ func runTestnetBots(args []string) error {
 	if *count < 2 {
 		return fmt.Errorf("need at least 2 bots so they have someone to transact with")
 	}
+	// The seed becomes part of every account name, and Hive account names are
+	// RFC 1035 labels: lowercase letters, digits and hyphens only. An
+	// underscore makes every account_create fail with "not valid. Please follow
+	// the RFC 1035 rules", the whole setup aborts, and a soak using such a seed
+	// silently generates NO traffic while still reporting clean state
+	// comparisons round after round. Fail loudly here instead.
+	for _, r := range *seed {
+		if !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9') && r != '-' {
+			return fmt.Errorf("--seed %q contains %q: account names allow only [a-z0-9-] (RFC 1035), and the seed is part of every bot's name", *seed, r)
+		}
+	}
 
 	w := &world{endpoint: *endpoint, stats: map[string]*opStat{}}
 	for _, s := range strings.Split(*witnesses, ",") {
