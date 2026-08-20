@@ -327,7 +327,19 @@ var generators = []generator{
 		}
 		return []op.Operation{op.AccountWitnessProxy{Account: acct(b.name), Proxy: acct(proxy)}}
 	}},
-	{"witness_update", 4, func(b *bot, w *world, r *rand.Rand) []op.Operation {
+	// weight 0: OPT-IN ONLY, via --only-ops=witness_update.
+	//
+	// Registering a witness is a legitimate operation, but Hive hands every
+	// REGISTERED witness timeshare slots whether or not anyone voted for it.
+	// No node on the testnet holds a bot's block-signing key, so each slot a
+	// bot wins is simply MISSED. With bots registering continuously the
+	// schedule fills with producers that cannot produce, block production
+	// collapses, and every measurement taken against that chain is worthless —
+	// a soak "ran" 25 rounds against a chain pinned at head 59 before this was
+	// noticed.
+	//
+	// feed_publish depends on isWitness and so is effectively opt-in with it.
+	{"witness_update", 0, func(b *bot, w *world, r *rand.Rand) []op.Operation {
 		b.isWitness = true
 		return []op.Operation{op.WitnessUpdate{Owner: acct(b.name),
 			URL: "https://gopherd.test/" + b.name, BlockSigningKey: b.pub,
