@@ -92,6 +92,11 @@ type Producer struct {
 
 // Plugin holds the witness daemon state.
 type Plugin struct {
+	// productionEnabled latches true once the chain has caught up to wall
+	// clock. Mirrors hived's _production_enabled: a witness must never build on
+	// a stale tip, or it forks itself off and its peers ban it.
+	productionEnabled bool
+
 	Chain     *chain.Database
 	State     *state.Database
 	Producers []Producer
@@ -1042,10 +1047,37 @@ func (p *Plugin) maybeProduceBlock() error {
 	}
 	now := uint32(time.Now().Unix())
 	nextSlotTime := dgpo.Time + 3
+
+	// REAL production must not start until we have caught up.
+	//
+	// hived gates this explicitly (witness_plugin.cpp:325): production stays
+	// disabled, returning not_synced, until get_slot_time(1) >= now, and
+	// latches on once that holds. gopherd did the OPPOSITE below -- when the
+	// head was over an hour stale it jumped the slot to wall-clock and produced
+	// immediately -- so a witness starting behind builds on a stale tip. Its
+	// peers then answer every offer with
+	//
+	//     "You offered us a block that we reject as invalid"
+	//
+	// and drop the connection, which also stops it ever catching up: on the
+	// testnet gopherd sat at head 3 while the chain ran to 92, and only
+	// disabling --produce let it sync at all. That is a fork hazard, not a
+	// testnet quirk.
+	if !p.productionEnabled {
+		if nextSlotTime >= now {
+			p.productionEnabled = true
+		} else if !p.DryRun {
+			p.logEvery(10*time.Second,
+				"not producing: still catching up (head %d is %ds behind wall clock)",
+				dgpo.HeadBlockNumber, now-nextSlotTime)
+			return nil
+		}
+	}
+
 	if nextSlotTime+3600 < now {
-		// More than an hour stale (fresh testnet, restart after pause):
-		// jump to the CURRENT wall-clock 3-second boundary so the
-		// witness immediately produces instead of waiting for the future.
+		// DRY RUN ONLY: jump to the current wall-clock boundary so the pipeline
+		// can still be measured against a stale head. Never reached for real
+		// production, which has already returned above.
 		nextSlotTime = (now / 3) * 3
 	}
 	if nextSlotTime > now {
