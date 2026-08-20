@@ -352,21 +352,49 @@ func (d *Delegate) handleFetchBlockchainItemIDs(p *node.Peer, body []byte) {
 	if myHead == 0 {
 		myHead, _ = d.chain.HeadBlock()
 	}
-	if myHead > peerHeadNum {
-		// Walk forward from peerHeadNum+1 until we run out of cached
-		// blocks or hit MaxBlocksPerInv.
-		for n := peerHeadNum + 1; n <= myHead && len(hashes) < d.cfg.MaxBlocksPerInv; n++ {
-			id, ok := d.chain.RecentBlockIDForNum(n)
-			if !ok {
-				break
-			}
-			hashes = append(hashes, proto.ItemHash(id))
+	// The reply MUST BEGIN AT THE FORK POINT, not after it.
+	//
+	// hived requires the first id to be one of the entries the requester sent
+	// in its synopsis (node.cpp:2794 "we expect a response building off one of
+	// the blocks we sent"), or block 1 when the synopsis was empty
+	// (node.cpp:2778). Starting at peerHeadNum+1 makes the first id one the
+	// requester has never seen, so hived answers every request with
+	//
+	//     "You gave an invalid response to my request for sync blocks"
+	//
+	// and drops the connection. A gopherd node serving that path is unusable as
+	// a sync source: on the testnet it sat at head 3 with invRx=0, dropped by
+	// both peers, while the chain ran on to block 68 without it.
+	startNum := peerHeadNum
+	if len(msg.BlockchainSynopsis) == 0 {
+		// Empty synopsis means "send me everything"; hived demands the list
+		// start at block 1.
+		startNum = 1
+	} else if peerHeadID != (block.ID{}) {
+		// Lead with the common ancestor itself so the requester can anchor the
+		// range against a block it already holds.
+		hashes = append(hashes, proto.ItemHash(peerHeadID))
+		startNum = peerHeadNum + 1
+	} else {
+		startNum = peerHeadNum + 1
+	}
+	for n := startNum; n <= myHead && len(hashes) < d.cfg.MaxBlocksPerInv; n++ {
+		id, ok := d.chain.RecentBlockIDForNum(n)
+		if !ok {
+			break
 		}
+		hashes = append(hashes, proto.ItemHash(id))
 	}
 
+	// remaining counts blocks beyond what this reply carries. The anchor entry
+	// is not a new block, so it must not inflate the count.
+	delivered := uint32(len(hashes))
+	if len(msg.BlockchainSynopsis) != 0 && peerHeadID != (block.ID{}) && delivered > 0 {
+		delivered--
+	}
 	remaining := uint32(0)
-	if myHead > peerHeadNum+uint32(len(hashes)) {
-		remaining = myHead - peerHeadNum - uint32(len(hashes))
+	if myHead > peerHeadNum+delivered {
+		remaining = myHead - peerHeadNum - delivered
 	}
 	reply := proto.BlockchainItemIDsInventoryMessage{
 		TotalRemainingItemCount: remaining,

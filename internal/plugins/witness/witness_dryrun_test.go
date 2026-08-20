@@ -342,6 +342,12 @@ func TestProductionDoesNotApplyLocally(t *testing.T) {
 	rec := &recordingPublisher{}
 	p := New(cdb, db, []Producer{prod})
 	p.Publisher = rec // DryRun stays false: this is the REAL production path
+	// This fixture's head is genesis-era, which the catch-up gate correctly
+	// refuses to produce on (a witness must never build on a stale tip). The
+	// gate is not what this test covers -- it checks that a produced block is
+	// handed to the publisher rather than applied locally -- so opt in
+	// explicitly, exactly as a caught-up node would have latched it.
+	p.productionEnabled = true
 
 	before, err := objects.GetDGPO(state.NewSession(db))
 	if err != nil {
