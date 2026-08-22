@@ -3,6 +3,7 @@ package fcraw
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"unsafe"
 )
@@ -286,3 +287,27 @@ func (r *Reader) ReadTimePointSec() (uint32, error) { return r.ReadUint32() }
 
 // ReadTimePoint reads an 8-byte uint64 LE microseconds.
 func (r *Reader) ReadTimePoint() (uint64, error) { return r.ReadUint64() }
+
+// CheckCount validates a wire-declared element count against the bytes that
+// actually remain, before the caller allocates for it.
+//
+// Length-prefixed decoders read a varuint count and then allocate a slice of
+// that size. The count is attacker-controlled and independent of how much data
+// follows: a ~10-byte message can declare 4,294,967,295 items. At 20 bytes per
+// element that is an 85 GB allocation, so a single tiny packet from any peer
+// killed the node before it read a single element. The message-size cap does
+// not help, because the elements never have to be present.
+//
+// elemSize is the MINIMUM encoded size of one element. A count larger than
+// Remaining()/elemSize cannot possibly be satisfied by the input, so it is
+// malformed by construction and is rejected without allocating.
+func (r *Reader) CheckCount(count uint32, elemSize int) error {
+	if elemSize <= 0 {
+		return fmt.Errorf("fcraw: invalid element size %d", elemSize)
+	}
+	if max := uint64(r.Remaining()) / uint64(elemSize); uint64(count) > max {
+		return fmt.Errorf("fcraw: declared %d elements but only %d bytes remain (max %d)",
+			count, r.Remaining(), max)
+	}
+	return nil
+}

@@ -368,6 +368,9 @@ func (m *AddressMessage) Unmarshal(src []byte) error {
 	if err != nil {
 		return fmt.Errorf("address_message.count: %w", err)
 	}
+	if err := r.CheckCount(count, 8); err != nil {
+		return fmt.Errorf("address_message: %w", err)
+	}
 	m.Addresses = make([]AddressInfo, count)
 	for i := range m.Addresses {
 		if m.Addresses[i], err = ReadAddressInfo(r); err != nil {

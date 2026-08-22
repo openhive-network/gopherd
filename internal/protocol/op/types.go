@@ -44,6 +44,9 @@ func readPubKeySlice(r *fcraw.Reader, label string) ([]crypto.PublicKey, error) 
 	if err != nil {
 		return nil, fmt.Errorf("%s count: %w", label, err)
 	}
+	if err := r.CheckCount(count, 33); err != nil {
+		return nil, fmt.Errorf("%s: %w", label, err)
+	}
 	out := make([]crypto.PublicKey, count)
 	for i := range out {
 		if err := r.ReadInto(out[i][:]); err != nil {

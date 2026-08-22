@@ -1675,6 +1675,16 @@ func bytesEqual(a, b []byte) bool {
 // key still exercises the pipeline, and the dry run's self-verification will
 // report the mismatch rather than silently passing.
 func loadWitnessKeys(path string) ([]witness.Producer, error) {
+	// This file holds the private keys that sign blocks. Keys are deliberately
+	// not accepted as flags because command lines are visible in ps — but that
+	// only moves the exposure to the file, so check that the file itself is not
+	// readable by anyone else. A leaked signing key lets an attacker produce
+	// blocks as this witness.
+	if fi, serr := os.Stat(path); serr == nil {
+		if mode := fi.Mode().Perm(); mode&0o077 != 0 {
+			fmt.Fprintf(os.Stderr, "gopherd: WARNING - witness key file %s is mode %04o, readable by group/other. These are BLOCK-SIGNING PRIVATE KEYS; run: chmod 600 %s\n", path, mode, path)
+		}
+	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("witness-keys: %w", err)
