@@ -32,10 +32,32 @@ func (s *Server) registerListsAPI() {
 	s.reg.Register("database_api.find_proposals", s.mFindProposals(false))
 }
 
-// rangeTable scans every row of a table's primary index, passing the serialized
-// OBJECT value (not the key) to fn. Return false to stop.
+// maxRowsExamined bounds how many rows one API call may walk.
+//
+// These handlers have no secondary index, so a filtered query (by account, by
+// key) scans the primary index and discards non-matches. Callers stop once they
+// have enough RESULTS, but a filter matching nothing examines the ENTIRE table
+// — millions of rows on mainnet — for a request that costs the caller one line
+// of JSON. Repeating it is a remote denial of service.
+//
+// The cap bounds worst-case work per call. It is a mitigation, not a fix: a
+// query whose matches all sit beyond the cap now returns fewer results than it
+// should. The real fix is a secondary index per lookup key, which is what hived
+// has and why it can answer these without scanning.
+const maxRowsExamined = 200_000
+
+// rangeTable scans a table's primary index, passing the serialized OBJECT value
+// (not the key) to fn. Return false to stop. Stops after maxRowsExamined rows
+// regardless, so an unmatched filter cannot walk the whole table.
 func rangeTable(sess *state.Session, table state.TableID, fn func(value []byte) bool) {
-	_ = sess.Range(table, state.PrimaryIndex, nil, func(_, value []byte) (bool, error) { return fn(value), nil })
+	examined := 0
+	_ = sess.Range(table, state.PrimaryIndex, nil, func(_, value []byte) (bool, error) {
+		examined++
+		if examined > maxRowsExamined {
+			return false, nil
+		}
+		return fn(value), nil
+	})
 }
 
 // firstStringParam pulls a single account name from ["name"] or {"account":"name"}.

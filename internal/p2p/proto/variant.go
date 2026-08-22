@@ -298,6 +298,10 @@ func ReadVariant(r *fcraw.Reader) (Variant, error) {
 		if err != nil {
 			return v, fmt.Errorf("variant array count: %w", err)
 		}
+		// A Variant is at least one byte (its type tag).
+		if err := r.CheckCount(count, 1); err != nil {
+			return v, fmt.Errorf("variant array: %w", err)
+		}
 		v.Arr = make([]Variant, count)
 		for i := range v.Arr {
 			e, err := ReadVariant(r)

@@ -133,6 +133,9 @@ func readSignedTransactionImpl(r *fcraw.Reader, skipSigs bool) (ReadResult, erro
 			return res, fmt.Errorf("tx.signatures(skip): %w", err)
 		}
 	} else {
+		if err := r.CheckCount(count, SignatureSize); err != nil {
+			return res, fmt.Errorf("tx.signatures: %w", err)
+		}
 		res.SignedTx.Signatures = make([][SignatureSize]byte, count)
 		for i := range res.SignedTx.Signatures {
 			if err := r.ReadInto(res.SignedTx.Signatures[i][:]); err != nil {

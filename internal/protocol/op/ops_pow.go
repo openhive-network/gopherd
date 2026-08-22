@@ -206,6 +206,9 @@ func readEquihashProof(r *fcraw.Reader) (EquihashProof, error) {
 	if err != nil {
 		return p, fmt.Errorf("equihash.inputs count: %w", err)
 	}
+	if err := r.CheckCount(count, 4); err != nil {
+		return p, fmt.Errorf("equihash.inputs: %w", err)
+	}
 	p.Inputs = make([]uint32, count)
 	for i := range p.Inputs {
 		if p.Inputs[i], err = r.ReadUint32(); err != nil {

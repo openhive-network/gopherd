@@ -43,6 +43,9 @@ func (m *ItemIDsInventoryMessage) Unmarshal(src []byte) error {
 	if err != nil {
 		return fmt.Errorf("item_ids_inventory.count: %w", err)
 	}
+	if err := r.CheckCount(count, 20); err != nil {
+		return fmt.Errorf("item_ids: %w", err)
+	}
 	m.ItemHashesAvailable = make([]ItemHash, count)
 	for i := range m.ItemHashesAvailable {
 		if err := r.ReadInto(m.ItemHashesAvailable[i][:]); err != nil {
@@ -101,6 +104,9 @@ func (m *BlockchainItemIDsInventoryMessage) Unmarshal(src []byte) error {
 	if err != nil {
 		return fmt.Errorf("blockchain_item_ids_inventory.count: %w", err)
 	}
+	if err := r.CheckCount(count, 20); err != nil {
+		return fmt.Errorf("item_ids: %w", err)
+	}
 	m.ItemHashesAvailable = make([]ItemHash, count)
 	for i := range m.ItemHashesAvailable {
 		if err := r.ReadInto(m.ItemHashesAvailable[i][:]); err != nil {
@@ -151,6 +157,9 @@ func (m *FetchBlockchainItemIDsMessage) Unmarshal(src []byte) error {
 	if err != nil {
 		return fmt.Errorf("fetch_blockchain_item_ids.count: %w", err)
 	}
+	if err := r.CheckCount(count, 20); err != nil {
+		return fmt.Errorf("synopsis: %w", err)
+	}
 	m.BlockchainSynopsis = make([]ItemHash, count)
 	for i := range m.BlockchainSynopsis {
 		if err := r.ReadInto(m.BlockchainSynopsis[i][:]); err != nil {
@@ -199,6 +208,9 @@ func (m *FetchItemsMessage) Unmarshal(src []byte) error {
 	count, err := r.ReadVarUint()
 	if err != nil {
 		return fmt.Errorf("fetch_items.count: %w", err)
+	}
+	if err := r.CheckCount(count, 20); err != nil {
+		return fmt.Errorf("items_to_fetch: %w", err)
 	}
 	m.ItemsToFetch = make([]ItemHash, count)
 	for i := range m.ItemsToFetch {
