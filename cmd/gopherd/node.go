@@ -75,6 +75,11 @@ import (
 // Overridable via GHIVE_RESUME_MARKER_INTERVAL (used by tests).
 var resumeMarkerInterval uint32 = 50000
 
+// defaultMaxPeers mirrors hived's GRAPHENE_NET_DEFAULT_MAX_CONNECTIONS (200):
+// "if we have maximum_number_of_connections or more, we will refuse any
+// inbound connections".
+const defaultMaxPeers = 200
+
 func init() {
 	if v := config.Env("GOPHERD_RESUME_MARKER_INTERVAL"); v != "" {
 		if n, err := strconv.ParseUint(v, 10, 32); err == nil && n > 0 {
@@ -369,6 +374,12 @@ type flags struct {
 	// maxOutboundPeers caps active outbound peer count. 0 = p2pnode
 	// default (32). Bigger value = more parallel block fetches.
 	maxOutboundPeers int
+	// maxPeers caps TOTAL connections. Without it the cap in
+	// p2pnode.handleNewConn is inert (it is gated on MaxPeers > 0), so a
+	// listening node accepted UNLIMITED inbound connections -- each one a file
+	// descriptor, a pair of goroutines and a receive buffer. Any peer could
+	// exhaust the process.
+	maxPeers int
 	// maxConcurrentDials caps in-flight dial attempts. 0 = p2pnode
 	// default (24).
 	maxConcurrentDials int
@@ -432,6 +443,7 @@ func parseNodeFlags(args []string) flags {
 	fs.IntVar(&f.commitBatch, "commit-batch", 100, "blocks per pebble Apply (1 = legacy per-block; >1 batches)")
 	fs.BoolVar(&f.commitBatchFsync, "commit-batch-fsync", true, "fsync each batch boundary (default true)")
 	fs.IntVar(&f.maxOutboundPeers, "max-outbound-peers", 0, "max active outbound P2P peers (0 = default 32)")
+	fs.IntVar(&f.maxPeers, "max-peers", defaultMaxPeers, "max TOTAL P2P connections (inbound + outbound); inbound is refused at the cap. 0 disables the cap, which leaves the node open to connection-exhaustion")
 	fs.IntVar(&f.maxConcurrentDials, "max-concurrent-dials", 0, "max in-flight dial attempts (0 = default 24)")
 	fs.BoolVar(&f.logAdaptiveBatch, "log-adaptive-batch", false, "log one trace per per-peer FetchBatch decision (peer X batch=N rate=Y bps)")
 	fs.BoolVar(&f.p2pServe, "p2p-serve", false, "advertise inventory + serve blocks to peers (default false = passive fetch-only; enable ONLY for a known-correct node that keeps up in real time)")
@@ -1280,6 +1292,7 @@ func (a *app) run() error {
 		Endpoint:           a.cfg.listenEndpoint,
 		SeedNodes:          seeds,
 		UserAgent:          "gopherd/0.1.0",
+		MaxPeers:           a.cfg.maxPeers,
 		MaxOutboundPeers:   a.cfg.maxOutboundPeers,
 		MaxConcurrentDials: a.cfg.maxConcurrentDials,
 	}, a.chain, nil)
