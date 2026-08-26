@@ -7,31 +7,27 @@ import (
 	"gopherd/internal/api/jsonrpc"
 )
 
-// expensiveUnboundedMethods are the read methods that scan a whole store under
-// the ApplyBlock read lock with no secondary index — each is O(store size) per
-// call, so a remote caller can stall block application (a DoS) when the API is
-// bound to a non-loopback address. They stay enabled on loopback (trusted local
-// use) and are refused on a public endpoint until a by-key/by-account index
-// lands (see project_api_security_review / feedback_indexes_at_head_not_replay).
+// expensiveUnboundedMethods are the read methods that still scan a whole store
+// under the ApplyBlock read lock with no usable index — each is O(store size)
+// per call, so a remote caller can stall block application (a DoS) when the API
+// is bound to a non-loopback address. They stay enabled on loopback (trusted
+// local use) and are refused on a public endpoint.
 //
-// Keep this list in sync with the registrations in account_by_key_api.go,
-// lists_api.go and rc_api.go.
+// Most of the original list has been retired: the account-filtered lookups now
+// seek their account's key prefix, and get_key_references answers from the
+// public-key index (see objects/key_lookup.go). What remains are the two cases
+// where the account is genuinely not part of the key:
+//
+//   - get_savings_withdraw_to — savings_withdraw is keyed (from, request_id),
+//     so the RECIPIENT is not a prefix. Needs a by-to index.
+//   - get_open_orders — LimitOrderStore is a typed in-memory store keyed
+//     (owner, order_id) in a Go MAP, which cannot be prefix-scanned. Needs a
+//     by-owner index inside the store, which is on the hot trading path.
+//
+// Keep this list in sync with the registrations in lists_api.go.
 var expensiveUnboundedMethods = []string{
-	// account_by_key: scans all ~1.2M accounts + a per-account authority walk.
-	"account_by_key_api.get_key_references",
-	"condenser_api.get_key_references",
-	// lists_api: whole-table scans filtered by account in Go (no by-account index).
-	"condenser_api.get_conversion_requests",
-	"condenser_api.get_collateralized_conversion_requests",
-	"condenser_api.get_vesting_delegations",
-	"condenser_api.get_savings_withdraw_from",
 	"condenser_api.get_savings_withdraw_to",
-	"condenser_api.find_recurrent_transfers",
 	"condenser_api.get_open_orders",
-	"condenser_api.get_owner_history",
-	// rc_api: whole-table scan (name-keyed table has no by-from index).
-	"rc_api.list_rc_direct_delegations",
-	"condenser_api.list_rc_direct_delegations",
 }
 
 // RestrictForPublicEndpoint disables the expensive unbounded-scan methods,

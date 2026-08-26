@@ -1,6 +1,9 @@
 package state
 
-import "encoding/binary"
+import (
+	"bytes"
+	"encoding/binary"
+)
 
 // Order-preserving encoders for state index keys.
 //
@@ -49,6 +52,15 @@ func AppendAccountName(dst []byte, name string) []byte {
 	var buf [AccountNameKeyLen]byte
 	copy(buf[:], name)
 	return append(dst, buf[:]...)
+}
+
+// DecodeAccountName reverses AppendAccountName, dropping the zero padding.
+// It reads exactly the first AccountNameKeyLen bytes of b.
+func DecodeAccountName(b []byte) string {
+	if len(b) > AccountNameKeyLen {
+		b = b[:AccountNameKeyLen]
+	}
+	return string(bytes.TrimRight(b, "\x00"))
 }
 
 // AppendTimePointSec appends a time_point_sec as 4 big-endian bytes.

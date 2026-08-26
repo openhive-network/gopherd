@@ -199,7 +199,10 @@ func (s *Server) mListRCDirectDelegations(condenserArgs, legacy bool) jsonrpc.Ha
 		}
 		var found []dele
 		err := s.chain.WithReadSession(func(sess *state.Session) error {
-			rangeTable(sess, objects.RCDirectDelegationTable, func(value []byte) bool {
+			// rc_direct_delegation is keyed (from, to), so the delegator is an
+			// exact key prefix — visit only this account's rows instead of the
+			// whole table.
+			rangeTableByAccount(sess, objects.RCDirectDelegationTable, from, func(value []byte) bool {
 				d, e := objects.ReadRCDirectDelegation(value)
 				if e != nil {
 					return true
