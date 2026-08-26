@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 
+	"gopherd/internal/crypto"
 	"gopherd/internal/fcraw"
 	"gopherd/internal/protocol/auth"
 	"gopherd/internal/state"
@@ -74,7 +75,17 @@ func ReadAccountAuthority(src []byte) (AccountAuthority, error) {
 	return a, nil
 }
 
+// PutAccountAuthority stores the authority row AND maintains the by-key
+// index (see key_lookup.go). Maintaining it here rather than at the ~15 call
+// sites means no caller can forget it. The extra read of the previous row is
+// what lets us retire keys that were just revoked; authority writes only happen
+// on account create/update/recover/pow, so this is not a hot path.
 func PutAccountAuthority(s *state.Session, a *AccountAuthority) {
+	var oldKeys map[crypto.PublicKey]struct{}
+	if prev, err := GetAccountAuthority(s, a.Account); err == nil {
+		oldKeys = authorityKeySet(&prev)
+	}
+	reindexKeys(s, a.Account, oldKeys, authorityKeySet(a))
 	s.Put(AccountAuthorityTable, state.PrimaryIndex,
 		accountAuthorityKey(a.Account), AppendAccountAuthority(nil, a))
 }
@@ -92,5 +103,8 @@ func HasAccountAuthority(s *state.Session, account auth.AccountName) (bool, erro
 }
 
 func DeleteAccountAuthority(s *state.Session, account auth.AccountName) {
+	if prev, err := GetAccountAuthority(s, account); err == nil {
+		reindexKeys(s, account, authorityKeySet(&prev), nil)
+	}
 	s.Delete(AccountAuthorityTable, state.PrimaryIndex, accountAuthorityKey(account))
 }

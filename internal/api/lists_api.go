@@ -49,6 +49,8 @@ const maxRowsExamined = 200_000
 // rangeTable scans a table's primary index, passing the serialized OBJECT value
 // (not the key) to fn. Return false to stop. Stops after maxRowsExamined rows
 // regardless, so an unmatched filter cannot walk the whole table.
+//
+// Prefer rangeTableByAccount for any per-account lookup: this walks everything.
 func rangeTable(sess *state.Session, table state.TableID, fn func(value []byte) bool) {
 	examined := 0
 	_ = sess.Range(table, state.PrimaryIndex, nil, func(_, value []byte) (bool, error) {
@@ -56,6 +58,33 @@ func rangeTable(sess *state.Session, table state.TableID, fn func(value []byte) 
 		if examined > maxRowsExamined {
 			return false, nil
 		}
+		return fn(value), nil
+	})
+}
+
+// rangeTableByAccount visits only the rows belonging to one account.
+//
+// These tables are all keyed account-first -- vesting_delegation is
+// (delegator, delegatee), savings_withdraw is (from, request_id),
+// recurrent_transfer is (from, to, pair), convert_request is (owner,
+// request_id), owner_authority_history is (account, time), rc_direct_delegation
+// is (from, to) -- and AppendAccountName writes a FIXED-WIDTH zero-padded
+// field, so the account is an exact key prefix and "alice" can never match
+// "alicebob".
+//
+// The handlers used to scan the entire primary index and discard non-matches.
+// A filter matching nothing therefore examined every row in the table --
+// millions on mainnet -- for a request costing the caller one line of JSON, and
+// it could be repeated at will. maxRowsExamined bounded the damage but silently
+// truncated results whose matches lay beyond the cap. A prefix scan removes
+// both problems: the work is proportional to the rows actually returned, so no
+// cap is needed and no result is lost.
+func rangeTableByAccount(sess *state.Session, table state.TableID, account string, fn func(value []byte) bool) {
+	if account == "" {
+		return
+	}
+	prefix := state.AppendAccountName(nil, account)
+	_ = sess.Range(table, state.PrimaryIndex, prefix, func(_, value []byte) (bool, error) {
 		return fn(value), nil
 	})
 }
@@ -89,7 +118,7 @@ func (s *Server) mGetConversionRequests(legacy bool) jsonrpc.Handler {
 		acct := firstStringParam(params)
 		out := []map[string]interface{}{}
 		_ = s.chain.WithReadSession(func(sess *state.Session) error {
-			rangeTable(sess, objects.ConvertRequestTable, func(body []byte) bool {
+			rangeTableByAccount(sess, objects.ConvertRequestTable, acct, func(body []byte) bool {
 				if cr, err := objects.ReadConvertRequest(body); err == nil && string(cr.Owner) == acct {
 					out = append(out, map[string]interface{}{
 						"id": 0, "requestid": cr.RequestID, "owner": string(cr.Owner),
@@ -110,7 +139,11 @@ func (s *Server) mGetCollateralizedConversionRequests(legacy bool) jsonrpc.Handl
 		acct := firstStringParam(params)
 		out := []map[string]interface{}{}
 		_ = s.chain.WithReadSession(func(sess *state.Session) error {
-			return objects.RangeAllCollateralizedConvert(sess, func(cr objects.CollateralizedConvert) bool {
+			rangeTableByAccount(sess, objects.CollateralizedConvertTable, acct, func(body []byte) bool {
+				cr, err := objects.ReadCollateralizedConvert(body)
+				if err != nil {
+					return true
+				}
 				if string(cr.Owner) == acct {
 					out = append(out, map[string]interface{}{
 						"id": 0, "requestid": cr.RequestID, "owner": string(cr.Owner),
@@ -121,6 +154,7 @@ func (s *Server) mGetCollateralizedConversionRequests(legacy bool) jsonrpc.Handl
 				}
 				return true
 			})
+			return nil
 		})
 		return out, nil
 	}
@@ -131,7 +165,7 @@ func (s *Server) mGetVestingDelegations(legacy bool) jsonrpc.Handler {
 		acct := firstStringParam(params)
 		out := []map[string]interface{}{}
 		_ = s.chain.WithReadSession(func(sess *state.Session) error {
-			rangeTable(sess, objects.VestingDelegationTable, func(body []byte) bool {
+			rangeTableByAccount(sess, objects.VestingDelegationTable, acct, func(body []byte) bool {
 				if vd, err := objects.ReadVestingDelegation(body); err == nil && string(vd.Delegator) == acct {
 					out = append(out, map[string]interface{}{
 						"id": 0, "delegator": string(vd.Delegator), "delegatee": string(vd.Delegatee),
@@ -152,7 +186,18 @@ func (s *Server) mGetSavingsWithdraw(legacy, byFrom bool) jsonrpc.Handler {
 		acct := firstStringParam(params)
 		out := []map[string]interface{}{}
 		_ = s.chain.WithReadSession(func(sess *state.Session) error {
-			rangeTable(sess, objects.SavingsWithdrawTable, func(body []byte) bool {
+			// savings_withdraw is keyed (from, request_id), so only the BY-FROM
+			// query can use the account as a key prefix. The by-TO query has no
+			// index on the recipient and still has to scan; it keeps the
+			// examined-rows cap, and needs a by-to index to be made exact.
+			visit := func(fn func(body []byte) bool) {
+				if byFrom {
+					rangeTableByAccount(sess, objects.SavingsWithdrawTable, acct, fn)
+					return
+				}
+				rangeTable(sess, objects.SavingsWithdrawTable, fn)
+			}
+			visit(func(body []byte) bool {
 				sw, err := objects.ReadSavingsWithdraw(body)
 				if err != nil {
 					return true
@@ -178,7 +223,7 @@ func (s *Server) mFindRecurrentTransfers(legacy bool) jsonrpc.Handler {
 		acct := firstStringParam(params) // condenser: from account
 		out := []map[string]interface{}{}
 		_ = s.chain.WithReadSession(func(sess *state.Session) error {
-			rangeTable(sess, objects.RecurrentTransferTable, func(body []byte) bool {
+			rangeTableByAccount(sess, objects.RecurrentTransferTable, acct, func(body []byte) bool {
 				if rt, err := objects.ReadRecurrentTransfer(body); err == nil && string(rt.From) == acct {
 					out = append(out, map[string]interface{}{
 						"id": 0, "from": string(rt.From), "to": string(rt.To), "memo": rt.Memo,
@@ -257,7 +302,7 @@ func (s *Server) mGetOwnerHistory() jsonrpc.Handler {
 		acct := firstStringParam(params)
 		out := []map[string]interface{}{}
 		_ = s.chain.WithReadSession(func(sess *state.Session) error {
-			rangeTable(sess, objects.OwnerAuthorityHistoryTable, func(body []byte) bool {
+			rangeTableByAccount(sess, objects.OwnerAuthorityHistoryTable, acct, func(body []byte) bool {
 				if h, err := objects.ReadOwnerAuthorityHistory(body); err == nil && string(h.Account) == acct {
 					out = append(out, map[string]interface{}{
 						"id": 0, "account": string(h.Account),

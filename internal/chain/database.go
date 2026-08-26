@@ -1613,3 +1613,31 @@ func (d *Database) SetOwnerAuthHistoryStartBlock(n uint32) {
 	defer d.applyMu.Unlock()
 	d.ownerAuthHistoryStartBlock = n
 }
+
+// EnsureKeyLookupIndex builds the public-key -> accounts index if it is
+// missing, returning the number of authority rows indexed (0 if it already
+// existed). It is safe to call on every startup.
+//
+// The index is maintained incrementally by PutAccountAuthority, but state
+// created before the index shipped -- any existing replay output or snapshot --
+// has no rows, and a partially populated index returns silently INCOMPLETE
+// answers rather than merely slow ones. So nodes that serve
+// account_by_key_api.get_key_references backfill it once at startup, under the
+// apply lock so it cannot race block application.
+func (d *Database) EnsureKeyLookupIndex() (int, error) {
+	var (
+		n   int
+		err error
+	)
+	d.WithApplyLock(func() {
+		s := state.NewSession(d.state)
+		if objects.HasKeyLookupIndex(s) {
+			return
+		}
+		if n, err = objects.RebuildKeyLookupIndex(s); err != nil {
+			return
+		}
+		err = s.Commit(true)
+	})
+	return n, err
+}

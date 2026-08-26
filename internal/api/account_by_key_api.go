@@ -6,7 +6,6 @@ import (
 
 	"gopherd/internal/api/jsonrpc"
 	"gopherd/internal/crypto"
-	"gopherd/internal/protocol/auth"
 	"gopherd/internal/state"
 	"gopherd/internal/state/objects"
 )
@@ -29,33 +28,25 @@ func (s *Server) mGetKeyReferences(named bool) jsonrpc.Handler {
 			return nil, err
 		}
 		refs := make([][]string, len(keys))
-		want := make(map[string]int, len(keys))
-		for i, k := range keys {
-			want[k] = i
+		for i := range keys {
 			refs[i] = []string{}
 		}
-		add := func(key, name string, seen map[int]bool) {
-			if idx, ok := want[key]; ok && !seen[idx] {
-				refs[idx] = append(refs[idx], name)
-				seen[idx] = true
-			}
-		}
+		// One indexed seek per requested key. This used to walk every account
+		// and load every authority row under the apply read lock -- ~2M
+		// accounts on mainnet -- which let one cheap RPC stall block
+		// application. Unparseable keys simply match nothing, as before.
 		_ = s.chain.WithReadSession(func(sess *state.Session) error {
-			return objects.RangeAccounts(sess, func(a *objects.Account) (bool, error) {
-				name := string(a.Name)
-				seen := map[int]bool{}
-				add(crypto.PublicKey(a.MemoKey).String(), name, seen)
-				au, err := objects.GetAccountAuthority(sess, a.Name)
+			for i, k := range keys {
+				pk, err := crypto.DecodePublicKey(k)
 				if err != nil {
-					return true, nil
+					continue
 				}
-				for _, kas := range [][]auth.KeyAuth{au.Owner.KeyAuths, au.Active.KeyAuths, au.Posting.KeyAuths} {
-					for _, ka := range kas {
-						add(ka.Key.String(), name, seen)
-					}
-				}
-				return true, nil
-			})
+				objects.RangeAccountsByKey(sess, pk, func(name string) bool {
+					refs[i] = append(refs[i], name)
+					return true
+				})
+			}
+			return nil
 		})
 		if named {
 			return map[string]interface{}{"accounts": refs}, nil

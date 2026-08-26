@@ -1236,6 +1236,16 @@ func (a *app) run() error {
 		}()
 	}
 	if a.cfg.apiEndpoint != "" {
+		// get_key_references answers from a public-key index. State replayed or
+		// snapshotted before that index existed carries no rows, and a
+		// half-populated index answers WRONG rather than slow, so backfill it
+		// once before the API accepts traffic.
+		start := time.Now()
+		if n, err := a.chain.EnsureKeyLookupIndex(); err != nil {
+			a.logger.printf("WARN api: key-lookup index build failed: %v", err)
+		} else if n > 0 {
+			a.logger.printf("api: built key-lookup index over %d authorities in %s", n, time.Since(start).Round(time.Millisecond))
+		}
 		apiSrv := api.New(a.chain)
 		// On a non-loopback (public) endpoint, disable the unbounded-scan
 		// methods so a remote caller can't stall block application with an
