@@ -1641,3 +1641,26 @@ func (d *Database) EnsureKeyLookupIndex() (int, error) {
 	})
 	return n, err
 }
+
+// EnsureSavingsWithdrawByToIndex builds the savings-withdraw by-recipient index
+// if it is missing, returning the number of rows indexed (0 if it already
+// existed). Same rationale as EnsureKeyLookupIndex: the index is maintained
+// incrementally, but state predating it has no rows and would make
+// get_savings_withdraw_to return silently incomplete answers.
+func (d *Database) EnsureSavingsWithdrawByToIndex() (int, error) {
+	var (
+		n   int
+		err error
+	)
+	d.WithApplyLock(func() {
+		s := state.NewSession(d.state)
+		if objects.HasSavingsWithdrawByToIndex(s) {
+			return
+		}
+		if n, err = objects.RebuildSavingsWithdrawByToIndex(s); err != nil {
+			return
+		}
+		err = s.Commit(true)
+	})
+	return n, err
+}

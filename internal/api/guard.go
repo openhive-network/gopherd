@@ -16,17 +16,14 @@ import (
 // Most of the original list has been retired: the account-filtered lookups now
 // seek their account's key prefix, and get_key_references answers from the
 // public-key index (see objects/key_lookup.go). What remains are the two cases
-// where the account is genuinely not part of the key:
+// where the account is genuinely not usable as a key prefix:
 //
-//   - get_savings_withdraw_to — savings_withdraw is keyed (from, request_id),
-//     so the RECIPIENT is not a prefix. Needs a by-to index.
 //   - get_open_orders — LimitOrderStore is a typed in-memory store keyed
 //     (owner, order_id) in a Go MAP, which cannot be prefix-scanned. Needs a
 //     by-owner index inside the store, which is on the hot trading path.
 //
 // Keep this list in sync with the registrations in lists_api.go.
 var expensiveUnboundedMethods = []string{
-	"condenser_api.get_savings_withdraw_to",
 	"condenser_api.get_open_orders",
 }
 

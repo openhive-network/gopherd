@@ -186,33 +186,29 @@ func (s *Server) mGetSavingsWithdraw(legacy, byFrom bool) jsonrpc.Handler {
 		acct := firstStringParam(params)
 		out := []map[string]interface{}{}
 		_ = s.chain.WithReadSession(func(sess *state.Session) error {
-			// savings_withdraw is keyed (from, request_id), so only the BY-FROM
-			// query can use the account as a key prefix. The by-TO query has no
-			// index on the recipient and still has to scan; it keeps the
-			// examined-rows cap, and needs a by-to index to be made exact.
-			visit := func(fn func(body []byte) bool) {
-				if byFrom {
-					rangeTableByAccount(sess, objects.SavingsWithdrawTable, acct, fn)
-					return
-				}
-				rangeTable(sess, objects.SavingsWithdrawTable, fn)
-			}
-			visit(func(body []byte) bool {
-				sw, err := objects.ReadSavingsWithdraw(body)
-				if err != nil {
-					return true
-				}
-				match := (byFrom && string(sw.From) == acct) || (!byFrom && string(sw.To) == acct)
-				if match {
-					out = append(out, map[string]interface{}{
-						"id": 0, "from": string(sw.From), "to": string(sw.To), "memo": sw.Memo,
-						"request_id": sw.RequestID, "amount": symAsset(sw.Amount, sw.Symbol, legacy),
-						"complete": timeString(sw.Complete),
-					})
-				}
+			// Two different indexes: the primary key is (from, request_id), so
+			// the by-FROM query seeks the account prefix directly, while the
+			// by-TO query must go through the by-recipient index. Applying the
+			// from-prefix to a by-to query silently returns nothing.
+			emit := func(sw objects.SavingsWithdraw) bool {
+				out = append(out, map[string]interface{}{
+					"id": 0, "from": string(sw.From), "to": string(sw.To), "memo": sw.Memo,
+					"request_id": sw.RequestID, "amount": symAsset(sw.Amount, sw.Symbol, legacy),
+					"complete": timeString(sw.Complete),
+				})
 				return true
-			})
-			return nil
+			}
+			if byFrom {
+				rangeTableByAccount(sess, objects.SavingsWithdrawTable, acct, func(body []byte) bool {
+					sw, err := objects.ReadSavingsWithdraw(body)
+					if err != nil {
+						return true
+					}
+					return emit(sw)
+				})
+				return nil
+			}
+			return objects.RangeSavingsWithdrawTo(sess, acct, emit)
 		})
 		return out, nil
 	}
