@@ -1246,6 +1246,12 @@ func (a *app) run() error {
 		} else if n > 0 {
 			a.logger.printf("api: built key-lookup index over %d authorities in %s", n, time.Since(start).Round(time.Millisecond))
 		}
+		start = time.Now()
+		if n, err := a.chain.EnsureSavingsWithdrawByToIndex(); err != nil {
+			a.logger.printf("WARN api: savings by-recipient index build failed: %v", err)
+		} else if n > 0 {
+			a.logger.printf("api: built savings by-recipient index over %d rows in %s", n, time.Since(start).Round(time.Millisecond))
+		}
 		apiSrv := api.New(a.chain)
 		// On a non-loopback (public) endpoint, disable the unbounded-scan
 		// methods so a remote caller can't stall block application with an

@@ -1,6 +1,7 @@
 package objects
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 
@@ -29,8 +30,22 @@ const SavingsWithdrawTable state.TableID = 7
 // Key: [complete_BE_4][from_padded_16][request_id_BE_4].
 const SavingsWithdrawByCompleteIndex state.IndexID = 1
 
+// SavingsWithdrawByToIndex indexes the RECIPIENT. The primary key is
+// (from, request_id), so get_savings_withdraw_to had no way to find an
+// account's incoming withdrawals except by scanning the whole table under the
+// apply read lock. A savings withdrawal's recipient is fixed at creation --
+// no operation rewrites it -- so, like the by-complete index, entries only
+// need adding at Put and removing at Delete.
+const SavingsWithdrawByToIndex state.IndexID = 2
+
 func savingsWithdrawKey(from auth.AccountName, requestID uint32) []byte {
 	out := state.AppendAccountName(nil, from)
+	return state.AppendUint32BE(out, requestID)
+}
+
+func savingsWithdrawByToKey(to, from auth.AccountName, requestID uint32) []byte {
+	out := state.AppendAccountName(nil, to)
+	out = state.AppendAccountName(out, from)
 	return state.AppendUint32BE(out, requestID)
 }
 
@@ -89,6 +104,7 @@ func ReadSavingsWithdraw(src []byte) (SavingsWithdraw, error) {
 func PutSavingsWithdraw(s *state.Session, w *SavingsWithdraw) {
 	s.Put(SavingsWithdrawTable, state.PrimaryIndex, savingsWithdrawKey(w.From, w.RequestID), AppendSavingsWithdraw(nil, w))
 	s.Put(SavingsWithdrawTable, SavingsWithdrawByCompleteIndex, savingsWithdrawByCompleteKey(w.Complete, w.From, w.RequestID), nil)
+	s.Put(SavingsWithdrawTable, SavingsWithdrawByToIndex, savingsWithdrawByToKey(w.To, w.From, w.RequestID), nil)
 	if w.Complete != 0 {
 		s.NudgeExpHint(SavingsWithdrawTable, SavingsWithdrawByCompleteIndex, w.Complete)
 	}
@@ -148,4 +164,56 @@ func DeleteSavingsWithdraw(s *state.Session, from auth.AccountName, requestID ui
 func DeleteSavingsWithdrawFull(s *state.Session, w *SavingsWithdraw) {
 	s.Delete(SavingsWithdrawTable, state.PrimaryIndex, savingsWithdrawKey(w.From, w.RequestID))
 	s.Delete(SavingsWithdrawTable, SavingsWithdrawByCompleteIndex, savingsWithdrawByCompleteKey(w.Complete, w.From, w.RequestID))
+	s.Delete(SavingsWithdrawTable, SavingsWithdrawByToIndex, savingsWithdrawByToKey(w.To, w.From, w.RequestID))
+}
+
+// RangeSavingsWithdrawTo visits the withdrawals PAYABLE TO account, via the
+// by-recipient index.
+func RangeSavingsWithdrawTo(s *state.Session, account string, fn func(w SavingsWithdraw) bool) error {
+	if account == "" {
+		return nil
+	}
+	prefix := state.AppendAccountName(nil, account)
+	return s.Range(SavingsWithdrawTable, SavingsWithdrawByToIndex, prefix, func(k, _ []byte) (bool, error) {
+		// The index row carries no value; recover the row from its primary key
+		// components, which the index key embeds after the recipient.
+		rest := k[state.AccountNameKeyLen:]
+		from := auth.AccountName(state.DecodeAccountName(rest))
+		reqID := binary.BigEndian.Uint32(rest[state.AccountNameKeyLen:])
+		w, err := GetSavingsWithdraw(s, from, reqID)
+		if err != nil {
+			return true, nil
+		}
+		return fn(w), nil
+	})
+}
+
+// HasSavingsWithdrawByToIndex reports whether the by-recipient index holds any
+// rows, so startup can tell "not built yet" from "built and empty".
+func HasSavingsWithdrawByToIndex(s *state.Session) bool {
+	found := false
+	_ = s.Range(SavingsWithdrawTable, SavingsWithdrawByToIndex, nil, func([]byte, []byte) (bool, error) {
+		found = true
+		return false, nil
+	})
+	return found
+}
+
+// RebuildSavingsWithdrawByToIndex recomputes the by-recipient index from the
+// primary rows, returning the number indexed. Needed for state that predates
+// the index, where a missing row makes get_savings_withdraw_to answer WRONG
+// rather than merely slow.
+func RebuildSavingsWithdrawByToIndex(s *state.Session) (int, error) {
+	n := 0
+	err := s.Range(SavingsWithdrawTable, state.PrimaryIndex, nil, func(_, value []byte) (bool, error) {
+		w, err := ReadSavingsWithdraw(value)
+		if err != nil {
+			return false, err
+		}
+		s.Put(SavingsWithdrawTable, SavingsWithdrawByToIndex,
+			savingsWithdrawByToKey(w.To, w.From, w.RequestID), nil)
+		n++
+		return true, nil
+	})
+	return n, err
 }

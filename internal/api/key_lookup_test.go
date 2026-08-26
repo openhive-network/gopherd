@@ -244,3 +244,113 @@ func BenchmarkKeyReferences(b *testing.B) {
 		}
 	})
 }
+
+// TestSavingsWithdrawByToIndex covers the by-recipient index: lookups by
+// recipient, removal when the withdrawal completes, and the backfill for state
+// that predates the index.
+func TestSavingsWithdrawByToIndex(t *testing.T) {
+	db, err := state.Open(t.TempDir(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := genesis.Apply(db); err != nil {
+		t.Fatal(err)
+	}
+
+	sess := state.NewSession(db)
+	// Two senders paying carol, plus an unrelated row that must never appear.
+	rows := []objects.SavingsWithdraw{
+		{From: auth.AccountName("alice"), RequestID: 1, To: auth.AccountName("carol"), Amount: 10, Complete: 100},
+		{From: auth.AccountName("bob"), RequestID: 2, To: auth.AccountName("carol"), Amount: 20, Complete: 200},
+		{From: auth.AccountName("alice"), RequestID: 3, To: auth.AccountName("dave"), Amount: 30, Complete: 300},
+	}
+	for i := range rows {
+		objects.PutSavingsWithdraw(sess, &rows[i])
+	}
+	if err := sess.Commit(false); err != nil {
+		t.Fatal(err)
+	}
+	c := chain.New(db)
+	srv := New(c)
+
+	toRows := func(t *testing.T, acct string) []interface{} {
+		t.Helper()
+		resp := call(t, srv, "condenser_api.get_savings_withdraw_to", `["`+acct+`"]`)
+		if resp.Error != nil {
+			t.Fatalf("get_savings_withdraw_to: %v", resp.Error)
+		}
+		var out []interface{}
+		b, _ := json.Marshal(resp.Result)
+		if err := json.Unmarshal(b, &out); err != nil {
+			t.Fatalf("get_savings_withdraw_to: %v (%s)", err, b)
+		}
+		return out
+	}
+
+	if got := toRows(t, "carol"); len(got) != 2 {
+		t.Errorf("carol: got %d incoming withdrawals, want 2: %v", len(got), got)
+	}
+	if got := toRows(t, "dave"); len(got) != 1 {
+		t.Errorf("dave: got %d, want 1: %v", len(got), got)
+	}
+
+	// Completing bob's withdrawal must retire its index row.
+	del := state.NewSession(db)
+	objects.DeleteSavingsWithdrawFull(del, &rows[1])
+	if err := del.Commit(false); err != nil {
+		t.Fatal(err)
+	}
+	if got := toRows(t, "carol"); len(got) != 1 {
+		t.Errorf("after completion: carol got %d, want 1: %v", len(got), got)
+	}
+	// Assert on the INDEX itself, not just the handler. The handler re-reads
+	// the primary row and skips rows that are gone, so it would still answer
+	// correctly over a stale index -- only a direct count catches a leaked row.
+	if n := countIndexRows(t, db, objects.SavingsWithdrawByToIndex); n != 2 {
+		t.Errorf("by-to index holds %d rows after completion, want 2 (a stale row leaked)", n)
+	}
+
+	// Backfill: wipe the index to simulate pre-index state.
+	wipe := state.NewSession(db)
+	var idx [][]byte
+	_ = wipe.Range(objects.SavingsWithdrawTable, objects.SavingsWithdrawByToIndex, nil,
+		func(k, _ []byte) (bool, error) {
+			idx = append(idx, append([]byte(nil), k...))
+			return true, nil
+		})
+	if len(idx) == 0 {
+		t.Fatal("expected by-to index rows to wipe")
+	}
+	for _, k := range idx {
+		wipe.Delete(objects.SavingsWithdrawTable, objects.SavingsWithdrawByToIndex, k)
+	}
+	if err := wipe.Commit(false); err != nil {
+		t.Fatal(err)
+	}
+	if got := toRows(t, "carol"); len(got) != 0 {
+		t.Fatalf("index was not actually wiped: %v", got)
+	}
+
+	if n, err := c.EnsureSavingsWithdrawByToIndex(); err != nil || n == 0 {
+		t.Fatalf("EnsureSavingsWithdrawByToIndex: n=%d err=%v", n, err)
+	}
+	if got := toRows(t, "carol"); len(got) != 1 {
+		t.Errorf("after backfill: carol got %d, want 1: %v", len(got), got)
+	}
+	if got := toRows(t, "dave"); len(got) != 1 {
+		t.Errorf("after backfill: dave got %d, want 1: %v", len(got), got)
+	}
+}
+
+// countIndexRows counts rows in one secondary index of the savings table.
+func countIndexRows(t *testing.T, db *state.Database, index state.IndexID) int {
+	t.Helper()
+	n := 0
+	s := state.NewSession(db)
+	_ = s.Range(objects.SavingsWithdrawTable, index, nil, func([]byte, []byte) (bool, error) {
+		n++
+		return true, nil
+	})
+	return n
+}
