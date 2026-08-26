@@ -1240,11 +1240,16 @@ func (a *app) run() error {
 		// snapshotted before that index existed carries no rows, and a
 		// half-populated index answers WRONG rather than slow, so backfill it
 		// once before the API accepts traffic.
+		//
+		// ONE-TIME per pre-index snapshot: measured at 52s for mainnet's 2.6M
+		// authorities, during which the apply lock is held. That is paid while
+		// the node is still far behind the tip, and once built the index lives
+		// in normal state, so it is carried by any snapshot taken afterwards.
 		start := time.Now()
 		if n, err := a.chain.EnsureKeyLookupIndex(); err != nil {
 			a.logger.printf("WARN api: key-lookup index build failed: %v", err)
 		} else if n > 0 {
-			a.logger.printf("api: built key-lookup index over %d authorities in %s", n, time.Since(start).Round(time.Millisecond))
+			a.logger.printf("api: built key-lookup index over %d authorities in %s (one-time; carried by later snapshots)", n, time.Since(start).Round(time.Millisecond))
 		}
 		start = time.Now()
 		if n, err := a.chain.EnsureSavingsWithdrawByToIndex(); err != nil {
