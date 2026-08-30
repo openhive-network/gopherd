@@ -71,8 +71,8 @@ const rcMaxNegativePercent int64 = 10
 //   - Mutates payer Account (RCManaCurrent / RCManaLastUpdate).
 //   - No-op if Operations is empty or the tx pays no cost (the C++
 //     subsidized path).
-func applyRCForTx(s *state.Session, stx *tx.SignedTransaction, blockNum, blockTime uint32, txSize int64, enforce bool) error {
-	if !hardfork.SetForBlock(blockNum).Has(hardfork.HF20) {
+func applyRCForTx(s *state.Session, stx *tx.SignedTransaction, blockNum, blockTime uint32, txSize int64, enforce bool, hf hardfork.Set) error {
+	if !hf.Has(hardfork.HF20) {
 		return nil
 	}
 	if len(stx.Operations) == 0 {
@@ -115,8 +115,25 @@ func applyRCForTx(s *state.Session, stx *tx.SignedTransaction, blockNum, blockTi
 	// 4. Charge the payer's manabar.
 	payer := PayerOf(stx.Operations[0])
 	if payer == "" {
-		// Tx with no resource user — C++ asserts plugin_exception. We
-		// silently no-op for compat with the existing replay path.
+		// hived HF29 (6dc8d6fd8, rc_utility.cpp:507) promoted this from a
+		// NOTIFYALERT to an assertion:
+		//
+		//   FC_ASSERT( !db.is_in_control() && !db.has_hardfork( ..._RC_IS_CONSENSUS ),
+		//     "Tried to execute transaction with no resource user" );
+		//
+		// DELIBERATE DEVIATION: hived also throws when merely in control, and
+		// we do not. PayerOf is a tag switch, so ANY operation whose tag it
+		// does not map returns "" and is currently charged nothing — the
+		// assertion would therefore fire on our own coverage gaps, not just on
+		// genuinely payer-less transactions, and `enforce` is true during block
+		// assembly. Turning it on there could silently drop valid traffic from
+		// our blocks, which this node has a measured history of. Auditing
+		// PayerOf against hived's resource-user mapping is its own task; until
+		// then the hardfork half is correct and inert, and the in-control half
+		// waits for that audit.
+		if hf.Has(hardfork.HF29) {
+			return fmt.Errorf("%w: transaction with no resource user", ErrInsufficientRC)
+		}
 		return nil
 	}
 	if cost <= 0 {
@@ -130,7 +147,25 @@ func applyRCForTx(s *state.Session, stx *tx.SignedTransaction, blockNum, blockTi
 	maxMana := a.MaximumRC()
 	minMana := -(maxMana * rcMaxNegativePercent / 100)
 	hasMana := a.RCManaCurrent >= cost
-	if !hasMana && enforce {
+	// HF29 RC_IS_CONSENSUS (hived cbd08b3ce, rc_utility.cpp:567):
+	//
+	//   if( db.is_in_control() || db.is_reapplying_one_tx()
+	//       || db.has_hardfork( HIVE_HARDFORK_1_29_RC_IS_CONSENSUS ) )
+	//
+	// Until HF29, running out of RC is enforced only where hived is in
+	// control — at admission and block production — and is merely logged
+	// while PROCESSING a block, so a block containing an underfunded
+	// transaction still applies. `enforce` is gopherd's equivalent of those
+	// first two conditions. HF29 promotes the check to consensus: every node
+	// must then reject such a transaction, in a block or not.
+	//
+	// The gate is deliberately NOT hf29Rule-shaped. This TIGHTENS validation,
+	// so it would be safe to add an InControl half — but hived's `enforce`
+	// equivalents are already exactly that half, and duplicating them here
+	// would enforce RC during historical replay, where a block legitimately
+	// may contain a transaction the producer accepted under looser accounting.
+	// Replay leaves enforce=false and HF29 inactive, so history is untouched.
+	if !hasMana && (enforce || hf.Has(hardfork.HF29)) {
 		return fmt.Errorf("%w: account %q has %d RC, needs %d RC",
 			ErrInsufficientRC, payer, a.RCManaCurrent, cost)
 	}
@@ -201,9 +236,12 @@ func ResetRCPendingDataForBlockForTest(s *state.Session) {
 	resetRCPendingDataForBlock(s)
 }
 
-// ApplyRCForTxForTest exposes applyRCForTx.
-func ApplyRCForTxForTest(s *state.Session, stx *tx.SignedTransaction, blockNum, blockTime uint32, txSize int64, enforce bool) error {
-	return applyRCForTx(s, stx, blockNum, blockTime, txSize, enforce)
+// ApplyRCForTxForTest exposes applyRCForTx. The hardfork Set is a parameter
+// rather than derived from blockNum so a test can exercise HF29 RC_IS_CONSENSUS,
+// which is otherwise unreachable: HF29 has no activation block, so no blockNum
+// can ever produce a Set containing it.
+func ApplyRCForTxForTest(s *state.Session, stx *tx.SignedTransaction, blockNum, blockTime uint32, txSize int64, enforce bool, hf hardfork.Set) error {
+	return applyRCForTx(s, stx, blockNum, blockTime, txSize, enforce, hf)
 }
 
 // resetRCDifferentialForTx is the pre-apply tx hook (HF20+). Clears the

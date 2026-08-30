@@ -107,12 +107,21 @@ func TestRecurrentTransferValidate(t *testing.T) {
 		t.Fatal("expected self-transfer to fail")
 	}
 
-	t.Log("--- Executions < 2")
-	bad = good
-	bad.Executions = 1
-	if err := bad.Validate(); err == nil {
-		t.Fatal("expected executions=1 to fail")
+	// Tracks the C++ case, which HF29 rewrote (operation_tests.cpp:9684-9689):
+	//   " --- executions equal to 1 is valid at protocol level"
+	//   " --- executions equal to 0 is invalid"
+	// The >= 2 floor moved into the evaluator, which is the only layer that
+	// knows whether the op creates a schedule (floor 2) or modifies one
+	// (floor 1 once HF29 is active).
+	t.Log("--- Executions equal to 1 is valid at protocol level")
+	ok1 := good
+	ok1.Executions = 1
+	if err := ok1.Validate(); err != nil {
+		t.Fatalf("executions=1 must validate; the >= 2 floor belongs to the evaluator now: %v", err)
 	}
+
+	t.Log("--- Executions equal to 0 is invalid")
+	bad = good
 	bad.Executions = 0
 	if err := bad.Validate(); err == nil {
 		t.Fatal("expected executions=0 to fail")

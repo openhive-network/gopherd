@@ -191,8 +191,8 @@ func (d *Database) applyTxSerial(
 		}
 	}
 	// HF20+: charge RC for the whole transaction.
-	if hardfork.SetForBlock(blockNum).Has(hardfork.HF20) && len(signed.Operations) > 0 {
-		if rcErr := applyRCForTx(session, signed, blockNum, hdrTimestamp, int64(signedLen), opts.EnforceRC); rcErr != nil {
+	if hf := hardfork.SetForBlock(blockNum); hf.Has(hardfork.HF20) && len(signed.Operations) > 0 {
+		if rcErr := applyRCForTx(session, signed, blockNum, hdrTimestamp, int64(signedLen), opts.EnforceRC, hf); rcErr != nil {
 			return rcErr
 		}
 	}

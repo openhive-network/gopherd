@@ -1008,9 +1008,9 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 			//      at HIVE_RC_MAX_NEGATIVE_PERCENT).
 			//   5. Enforce insufficient-RC error when EnforceRC is on (live
 			//      sync); replay leaves it false and lets mana go negative.
-			if !txFailed && hardfork.SetForBlock(blockNum).Has(hardfork.HF20) && len(txRes.SignedTx.Operations) > 0 {
+			if !txFailed && hf.Has(hardfork.HF20) && len(txRes.SignedTx.Operations) > 0 {
 				rcErr := applyRCForTx(session, &txRes.SignedTx, blockNum, hdr.Timestamp,
-					int64(txRes.SignedEnd-txRes.UnsignedStart), opts.EnforceRC)
+					int64(txRes.SignedEnd-txRes.UnsignedStart), opts.EnforceRC, hf)
 				if rcErr != nil {
 					txFailed = true
 					failOp = "tx-insufficient-rc"
