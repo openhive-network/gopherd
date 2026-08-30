@@ -23,8 +23,24 @@ package hardfork
 // FUTURE hardfork; such a chain would activate mid-run and gopherd would be
 // early. Driving activation off the hardfork_property_object instead of a table
 // would cover that case and is the more general fix.
+// UNSCHEDULED hardforks are deliberately EXCLUDED from the zeroing. A fork
+// still in development (MainnetActivationBlock == NeverActivates) has no
+// agreed activation point, so switching it on from block 1 would make gopherd
+// enforce rules its hived testnet peers do not — the mirror image of the bug
+// this file exists to fix, and a consensus split rather than a silent state
+// drift. hived guards the same case from the other side: HIVE_HARDFORK_1_29's
+// default time is year 2100 precisely "so HF29 never auto-activates on
+// testnets that don't explicitly schedule it", and a mainnet build does not
+// register it at all.
+//
+// Testing an unscheduled fork therefore takes a deliberate act — give it a
+// real activation block — which is the point. Interop with a stock hived
+// testnet keeps working meanwhile.
 func init() {
 	for i := ID(1); i <= NumHardforks; i++ {
+		if MainnetActivationBlock[i] == NeverActivates {
+			continue
+		}
 		MainnetActivationBlock[i] = 0
 	}
 }

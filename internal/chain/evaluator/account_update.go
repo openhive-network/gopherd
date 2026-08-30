@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 
+	"gopherd/internal/protocol/auth"
 	"gopherd/internal/protocol/hardfork"
 	"gopherd/internal/protocol/op"
 	"gopherd/internal/state"
@@ -83,6 +84,14 @@ func (accountUpdateEvaluator) Apply(ctx *Context, opArg op.Op) error {
 			return fmt.Errorf("%w: account=%q", ErrAccountNotFound, au.Account)
 		}
 		return err
+	}
+	// HF29 FIX_OPEN_AUTHORITY (hive_evaluator_account.cpp:308-314). Placed
+	// ahead of the accounts-exist checks to match hived's ordering, so a
+	// rejection reports the same reason theirs does when both would fail.
+	if hf29Rule(ctx, hardfork.HF29) {
+		if err := validateAccountUpdateAuthorities(au.Account, au.Owner, au.Active, au.Posting); err != nil {
+			return err
+		}
 	}
 	// hived: each rotated authority's account_auths must reference real
 	// accounts (libraries/chain/hive_evaluator_account.cpp:318).
@@ -200,6 +209,14 @@ func (accountUpdate2Evaluator) Apply(ctx *Context, opArg op.Op) error {
 		}
 		return err
 	}
+	// HF29 FIX_OPEN_AUTHORITY (hive_evaluator_account.cpp:308-314). Placed
+	// ahead of the accounts-exist checks to match hived's ordering, so a
+	// rejection reports the same reason theirs does when both would fail.
+	if hf29Rule(ctx, hardfork.HF29) {
+		if err := validateAccountUpdateAuthorities(au.Account, au.Owner, au.Active, au.Posting); err != nil {
+			return err
+		}
+	}
 	if au.MemoKey != nil {
 		a.MemoKey = *au.MemoKey
 	}
@@ -264,4 +281,28 @@ func (c *Context) ownerAuthHistoryStart() uint32 {
 		return c.OwnerAuthHistoryStartBlock
 	}
 	return OwnerAuthHistoryDefaultStartBlock
+}
+
+// validateAccountUpdateAuthorities applies the HF29 open-authority rule to
+// whichever of the three roles an account_update[2] actually carries. hived
+// spells the three calls out at each site; a helper keeps account_update and
+// account_update2 from drifting apart, which is how the two evaluators
+// acquired their other differences.
+func validateAccountUpdateAuthorities(account auth.AccountName, owner, active, posting *auth.Authority) error {
+	if owner != nil {
+		if err := validateAccountUpdateAuthority(*owner, string(account), "owner"); err != nil {
+			return err
+		}
+	}
+	if active != nil {
+		if err := validateAccountUpdateAuthority(*active, string(account), "active"); err != nil {
+			return err
+		}
+	}
+	if posting != nil {
+		if err := validateAccountUpdateAuthority(*posting, string(account), "posting"); err != nil {
+			return err
+		}
+	}
+	return nil
 }

@@ -11,7 +11,10 @@
 //	if hf.Has(HF20)
 package hardfork
 
-import "sync/atomic"
+import (
+	"math"
+	"sync/atomic"
+)
 
 // ID identifies a Hive hardfork. The integer value matches the ordinal used
 // throughout the C++ code (HF1 == 1, ... HF28 == 28).
@@ -50,10 +53,33 @@ const (
 	HF26 ID = 26
 	HF27 ID = 27
 	HF28 ID = 28
+	HF29 ID = 29
 )
 
 // NumHardforks is the count of named hardforks excluding HF0 (genesis).
-const NumHardforks = 28
+const NumHardforks = 29
+
+// NeverActivates marks a hardfork that is DEFINED but not yet SCHEDULED.
+//
+// SetForBlock activates HFn when `blockNum > MainnetActivationBlock[n]`, and
+// blockNum is a uint32, so a MaxUint32 entry can never be exceeded — the fork
+// stays inactive on every chain until a real activation point is filled in.
+//
+// This mirrors what hived does for an in-progress hardfork, by two mechanisms
+// at once. First, HIVE_HARDFORK_1_29_DEFAULT_TIME is 4102444800 (2100-01-01):
+// "Far-future default so HF29 never auto-activates on testnets that don't
+// explicitly schedule it" (libraries/protocol/hardfork.d/1_29.hf). Second,
+// database_hardfork.cpp registers HF29 in _hardfork_versions only under
+// #ifdef USE_ALTERNATE_CHAIN_ID, so a mainnet build does not know it at all.
+// Note that HIVE_HARDFORK_1_29_BLOCK (150000000) is NOT an activation point:
+// the *_BLOCK macros are informational and referenced nowhere in hived's
+// consensus code, and 150000000 is a round-number placeholder.
+//
+// Consequence for the evaluators: every HF29 rule below is reachable today
+// ONLY through the `ctx.InControl` half of its gate — i.e. when admitting a
+// new transaction at the head, never when replaying history. That is exactly
+// hived's `_db.is_in_control() || _db.has_hardfork( ... )` shape.
+const NeverActivates uint32 = math.MaxUint32
 
 // MainnetActivationBlock maps hardfork ID to the mainnet block number at which
 // that hardfork activates. HF0 is implicit (block 1 / genesis). Source:
@@ -90,6 +116,9 @@ var MainnetActivationBlock = [NumHardforks + 1]uint32{
 	// HF28 activated Nov 19, 2025 13:00 UTC (time 1763557200). Exact
 	// mainnet block from C++ hardfork_block.hpp: HIVE_HARDFORK_1_28_BLOCK.
 	HF28: 101319928,
+	// HF29 is in development and has no activation point yet. See
+	// NeverActivates — do NOT substitute HIVE_HARDFORK_1_29_BLOCK here.
+	HF29: NeverActivates,
 }
 
 // Set is a bitmap of activated hardforks. The zero value has only HF0 active
@@ -184,11 +213,14 @@ var MainnetActivationTime = [NumHardforks + 1]uint32{
 	HF26: 1665489600,
 	HF27: 1666612800,
 	HF28: 1763557200, // Wed Nov 19 2025 13:00:00 UTC (next_hf_time() in database.cpp)
+	// HIVE_HARDFORK_1_29_DEFAULT_TIME — 2100-01-01T00:00:00Z, hived's
+	// "never auto-activate" sentinel for an unscheduled hardfork.
+	HF29: 4102444800,
 }
 
 // PackedVersion returns the C++ hardfork_version v_num for an HF id.
 // hardfork_version( major, minor ) packs as (major<<24) | (minor<<16).
-// HF0..HF23 have major=0; HF24..HF28 have major=1 with minor=id.
+// HF0..HF23 have major=0; HF24..HF29 have major=1 with minor=id.
 func PackedVersion(id ID) uint32 {
 	if id == HF0 {
 		return 0

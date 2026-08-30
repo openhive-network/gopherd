@@ -216,16 +216,33 @@ func applyLimitOrderCreate(ctx *Context, owner string, orderID uint32, amountToS
 	if expiration <= ctx.HeadBlockTime {
 		return ErrLimitOrderExpired
 	}
-	if amountToSell.Symbol.Num != asset.HiveSymbol && amountToSell.Symbol.Num != asset.HbdSymbol {
-		return fmt.Errorf("%w: amount_to_sell must be HIVE or HBD", ErrUnsupportedSymbol)
-	}
-	// Defense-in-depth: hive_operations.cpp:601 + 620 require both legs of
-	// a limit order to be in the HIVE/HBD market. The canonical replay
-	// path doesn't run op.Validate(), so we re-enforce here. Without this,
-	// a malformed sell_price.quote.symbol would silently drop the credit
-	// in fillLimitOrder's HIVE/HBD switch.
-	if sellPrice.Quote.Symbol.Num != asset.HiveSymbol && sellPrice.Quote.Symbol.Num != asset.HbdSymbol {
-		return fmt.Errorf("%w: sell_price.quote must be HIVE or HBD", ErrUnsupportedSymbol)
+	// Both legs must be in the HIVE:HBD market (hive_operations.cpp:601+620
+	// in validate(); re-checked in the evaluator because the canonical replay
+	// path does not run op.Validate()). Without it a malformed
+	// sell_price.quote.symbol silently drops the credit in fillLimitOrder's
+	// HIVE/HBD switch.
+	//
+	// HF29 FIX_LIMIT_ORDER_ASSETS (hive_evaluator_transfer.cpp:540-546 and
+	// :578-584) is what makes this a CONSENSUS rule. Until then hived checks
+	// it only when in control, so a block carrying an order for a nonexistent
+	// asset is accepted by every replaying/syncing hived node. We used to
+	// enforce it unconditionally, which is strictly stricter than the network:
+	// such a block would have wedged us off the chain while hived followed it.
+	// That is the same failure class as the HF28 redundant-signature wall —
+	// enforcing a rule hived does not — and it is invisible to replay testing,
+	// because a rule no historical block violates looks identical to a rule
+	// that is correctly gated.
+	//
+	// Combined with the base/quote symbol invariants asserted above
+	// (amount_to_sell == price.base and amount_to_sell != price.quote), the
+	// two checks below are equivalent to hived's explicit pair form.
+	if hf29Rule(ctx, hardfork.HF29) {
+		if amountToSell.Symbol.Num != asset.HiveSymbol && amountToSell.Symbol.Num != asset.HbdSymbol {
+			return fmt.Errorf("%w: amount_to_sell must be HIVE or HBD", ErrUnsupportedSymbol)
+		}
+		if sellPrice.Quote.Symbol.Num != asset.HiveSymbol && sellPrice.Quote.Symbol.Num != asset.HbdSymbol {
+			return fmt.Errorf("%w: sell_price.quote must be HIVE or HBD", ErrUnsupportedSymbol)
+		}
 	}
 
 	a, err := objects.GetAccount(ctx.DB, owner)
