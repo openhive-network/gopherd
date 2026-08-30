@@ -652,8 +652,21 @@ func (o RecurrentTransfer) Validate() error {
 	if o.From == o.To {
 		return errors.New("recurrent_transfer: cannot transfer to self")
 	}
-	if o.Executions < 2 {
-		return errors.New("recurrent_transfer.executions: must be at least 2")
+	// hive_operations.cpp:820 — validate() rejects only executions == 0.
+	//
+	// The >= 2 floor used to live here and was moved into the evaluator by
+	// hived commit 8d435f016 as part of HF29 ALLOW_MODIFY_LAST_RECURRENT_TRANSFER
+	// (issue #786). The move is UNCONDITIONAL, not hardfork-gated, because
+	// validate() has no access to hardfork state — or to whether the operation
+	// creates or modifies a schedule, which is what decides the real minimum
+	// (2 to create, 1 to modify an existing one once HF29 is active).
+	//
+	// Leaving the floor here would have made the HF29 relaxation unreachable:
+	// mempool admission runs op.Validate(), so a legitimate post-HF29 modify
+	// with executions == 1 would be refused before any evaluator saw it. The
+	// create path's floor is enforced in the evaluator and is covered there.
+	if o.Executions < 1 {
+		return errors.New("recurrent_transfer.executions: must be at least 1")
 	}
 	return nil
 }

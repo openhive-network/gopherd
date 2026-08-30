@@ -270,6 +270,22 @@ func applyLimitOrderCreate(ctx *Context, owner string, orderID uint32, amountToS
 			return fmt.Errorf("%w: %q has %d HBD, sell %d", ErrInsufficientBalance, owner, a.HBDBalance, amountToSell.Amount)
 		}
 		objects.AdjustHBDBalance(ctx.DB, &a, ctx.HeadBlockTime, -amountToSell.Amount)
+	default:
+		// UNCONDITIONAL, and it must stay that way. hived reaches this case
+		// through adjust_balance, which asserts on anything that is not HIVE
+		// or HBD (database.cpp:3189, `FC_ASSERT( delta.symbol.asset_num ==
+		// HIVE_ASSET_NUM_HBD ) && "liquid", "invalid symbol"`), so an order
+		// selling a nonexistent asset has ALWAYS been rejected — pre-HF29
+		// included, just later in the evaluator than HF29's market check.
+		//
+		// Without this arm the switch silently matched nothing: no balance was
+		// deducted and the order was still created, minting an order out of
+		// thin air. That was latent while the HIVE/HBD market check above was
+		// unconditional; gating that check on HF29 to match hived is what would
+		// have exposed it. The HF29 check is an EARLIER, clearer rejection of
+		// something already refused here — not the only thing refusing it.
+		return fmt.Errorf("%w: amount_to_sell must be HIVE or HBD, got symbol %d",
+			ErrUnsupportedSymbol, amountToSell.Symbol.Num)
 	}
 
 	if has, err := objects.HasLimitOrder(ctx.DB, owner, lookupOrderID); err != nil {

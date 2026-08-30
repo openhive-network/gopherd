@@ -318,3 +318,64 @@ func TestHF29RecurrentTransferGateIsHardforkOnly(t *testing.T) {
 		}
 	})
 }
+
+// TestLimitOrderBogusAssetRejectedUnconditionally guards the invariant that
+// HF29's market check is an EARLIER rejection, not the ONLY one.
+//
+// hived refuses an order selling a nonexistent asset through adjust_balance,
+// which asserts on any symbol that is not HIVE or HBD (database.cpp:3189).
+// That path is UNCONDITIONAL — pre-HF29 included. gopherd's equivalent is the
+// default arm of the balance-deduction switch.
+//
+// This matters because gating the market check on HF29 (which is what hived
+// does) removes the other guard. Without the default arm the switch matched
+// nothing: no balance was deducted and the order was still created. So the
+// case that must never regress is specifically "not in control, HF29 inactive"
+// — the replay configuration, where the market check is correctly closed.
+func TestLimitOrderBogusAssetRejectedUnconditionally(t *testing.T) {
+	vests := asset.Asset{Amount: 100, Symbol: asset.Symbol{Num: asset.VestsSymbol}}
+	hbdRecv := asset.Asset{Amount: 100, Symbol: asset.Symbol{Num: asset.HbdSymbol}}
+
+	for _, tc := range []struct {
+		name      string
+		inControl bool
+		hf        hardfork.Set
+	}{
+		{"replaying pre-HF29 (market check closed)", false, preHF29Set()},
+		{"at admission", true, preHF29Set()},
+		{"after the fork", false, hf29Set()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, err := state.Open(t.TempDir(), 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			sess := state.NewSession(db)
+			objects.PutAccount(sess, &objects.Account{Name: "alice", Balance: 1_000_000, HBDBalance: 1_000_000})
+			if err := sess.Commit(false); err != nil {
+				t.Fatal(err)
+			}
+			s := state.NewSession(db)
+
+			ctx := &Context{DB: s, InControl: tc.inControl, Hardforks: tc.hf, HeadBlockTime: 100_000}
+			err = Apply(ctx, op.LimitOrderCreate{
+				Owner: "alice", OrderID: 1,
+				AmountToSell: vests, MinToReceive: hbdRecv,
+				Expiration: 200_000,
+			})
+			if err == nil {
+				t.Fatal("order selling VESTS was ACCEPTED; hived refuses it via adjust_balance's symbol assert, and accepting it here creates an order with no balance deducted")
+			}
+
+			// And nothing was persisted.
+			if has, _ := objects.HasLimitOrder(s, "alice", 1); has {
+				t.Error("a rejected order was still written to state")
+			}
+			a, _ := objects.GetAccount(s, "alice")
+			if a.Balance != 1_000_000 || a.HBDBalance != 1_000_000 {
+				t.Errorf("balances moved on a rejected order: hive=%d hbd=%d", a.Balance, a.HBDBalance)
+			}
+		})
+	}
+}

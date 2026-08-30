@@ -358,9 +358,18 @@ func TestRecurrentTransferValidate(t *testing.T) {
 	bad = good
 	bad.To = bad.From
 	expectErr(t, "to == from", bad.Validate())
+	// executions == 1 is VALID at the validate() layer: hived moved the >= 2
+	// floor into the evaluator for HF29 (issue #786), because only the
+	// evaluator knows whether the op creates a schedule (floor 2) or modifies
+	// an existing one (floor 1 once HF29 is active). Asserting rejection here
+	// would pin the pre-HF29 behaviour and make the relaxation unreachable
+	// through mempool admission, which calls Validate().
+	ok1 := good
+	ok1.Executions = 1
+	expectOK(t, "one execution is a validate()-level pass", ok1.Validate())
 	bad = good
-	bad.Executions = 1
-	expectErr(t, "fewer than 2 executions", bad.Validate())
+	bad.Executions = 0
+	expectErr(t, "zero executions", bad.Validate())
 }
 
 // ---- Pow / Pow2 ------------------------------------------------------
