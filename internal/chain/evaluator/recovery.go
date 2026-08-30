@@ -112,6 +112,22 @@ func (requestAccountRecoveryEvaluator) Apply(ctx *Context, opArg op.Op) error {
 				top, rr.AccountToRecover, rr.RecoveryAccount)
 		}
 	}
+	// HF29 FIX_ENFORCEMENT_OF_AUTHORITY_SIZE_ON_RECOVERY_REQUEST
+	// (hive_evaluator_account.cpp:531-537).
+	//
+	// hived has always size-checked the authority on the NEW-request path,
+	// but an update to an ALREADY-PENDING request skipped the check, so the
+	// membership limit could be circumvented by requesting twice. HF29 hoists
+	// validate_auth_size above the new-vs-update branch so both are covered.
+	// C++ tracks that with a `checked_size` flag purely to avoid validating
+	// the same authority twice; here the check is unconditional-within-the-
+	// gate and there is only one call site, so no flag is needed.
+	if hf29Rule(ctx, hardfork.HF29) {
+		if err := validateAuthSize(rr.NewOwnerAuthority, "request_account_recovery.new_owner_authority"); err != nil {
+			return err
+		}
+	}
+
 	// 3-branch shape (hive_evaluator_account.cpp:499-527):
 	// (a) new_owner_authority is "impossible" (weight_threshold 0) →
 	//     cancel the pending request if one exists.

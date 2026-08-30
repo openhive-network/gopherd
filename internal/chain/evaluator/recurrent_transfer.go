@@ -120,10 +120,18 @@ func (recurrentTransferEvaluator) Apply(ctx *Context, opArg op.Op) error {
 
 	if hasExisting && rt.Amount.Amount == 0 {
 		// Delete. Pre-HF29 nodes reject executions < 2 on this path too
-		// (HF29 = HIVE_HARDFORK_1_29_ALLOW_MODIFY_LAST_RECURRENT_TRANSFER;
-		// not in our hardfork table yet — unconditional until the replay
-		// window approaches HF29).
-		if rt.Executions < 2 {
+		// (hive_evaluator_transfer.cpp:989-997).
+		//
+		// NOTE the gate: this rule and the modify one below are checked on
+		// the HARDFORK ALONE, with no ctx.InControl half, and that asymmetry
+		// against the other three HF29 rules is deliberate on hived's part.
+		// The others TIGHTEN validation, so applying them early at the head
+		// only refuses transactions the network is about to refuse anyway.
+		// This one RELAXES it. Accepting executions == 1 before HF29 actually
+		// activates would mean admitting and relaying transactions every
+		// other node still rejects — we would build blocks the network orphans.
+		// A loosening rule must wait for the fork; a tightening rule need not.
+		if !ctx.Hardforks.Has(hardfork.HF29) && rt.Executions < 2 {
 			return fmt.Errorf("recurrent_transfer: executions must be at least 2 when deleting (pre-HF29)")
 		}
 		objects.DeleteRecurrentTransfer(ctx.DB, rt.From, rt.To, pairID)
@@ -146,8 +154,15 @@ func (recurrentTransferEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		if rt.Executions < 2 {
 			return fmt.Errorf("recurrent_transfer: executions must be at least 2 on create")
 		}
-	} else if rt.Executions < 2 {
-		// Modify path: pre-HF29 requires at least 2 executions.
+	} else if !ctx.Hardforks.Has(hardfork.HF29) && rt.Executions < 2 {
+		// Modify path (hive_evaluator_transfer.cpp:1005-1017). HF29
+		// ALLOW_MODIFY_LAST_RECURRENT_TRANSFER (issue #786) lets executions
+		// drop to 1 so the final payment of an existing schedule can still
+		// have its amount or memo changed. Before HF29 that was refused
+		// because a fresh 1-execution transfer fires immediately and deletes
+		// itself; on an EXISTING schedule that reasoning does not hold, which
+		// is why only the create path keeps the >= 2 floor after HF29. Gated
+		// on the hardfork alone — see the delete path above for why.
 		return fmt.Errorf("recurrent_transfer: executions must be at least 2 when modifying (pre-HF29)")
 	}
 

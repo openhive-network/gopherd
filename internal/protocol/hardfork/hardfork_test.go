@@ -58,12 +58,48 @@ func TestSetForBlock(t *testing.T) {
 		t.Fatalf("HighestActive at HF20 activation+1: got %d, want %d", at20Next.HighestActive(), HF20)
 	}
 
-	// Far in the future: all 28 hardforks active.
+	// Far in the future: every SCHEDULED hardfork is active. Unscheduled ones
+	// (MainnetActivationBlock == NeverActivates) must stay off — that is the
+	// whole point of the sentinel, so assert both halves rather than looping
+	// blindly over the range.
 	far := SetForBlock(1_000_000_000)
 	for i := ID(0); i <= NumHardforks; i++ {
-		if !far.Has(i) {
-			t.Fatalf("HF%d must be active at far-future block", i)
+		scheduled := MainnetActivationBlock[i] != NeverActivates
+		if scheduled && !far.Has(i) {
+			t.Fatalf("HF%d is scheduled (block %d) but inactive at a far-future block", i, MainnetActivationBlock[i])
 		}
+		if !scheduled && far.Has(i) {
+			t.Fatalf("HF%d is UNSCHEDULED but reported active — an in-development fork must never self-activate", i)
+		}
+	}
+}
+
+// TestUnscheduledHardforksNeverActivate pins the requirement that a hardfork
+// still in development cannot switch itself on. HF29 is defined so its rules
+// can be written and tested, but it has no activation point, and enforcing its
+// consensus changes on a chain whose other nodes have not adopted them would
+// fork us off the network.
+//
+// The sentinel is checked at the extreme of the block space rather than at some
+// large-but-arbitrary height: SetForBlock compares `blockNum > activation` on
+// uint32s, so MaxUint32 is the only value no block number can ever exceed.
+func TestUnscheduledHardforksNeverActivate(t *testing.T) {
+	if MainnetActivationBlock[HF29] != NeverActivates {
+		t.Fatalf("HF29 has an activation block (%d) — if it is genuinely scheduled, update this test and MainnetActivationTime together",
+			MainnetActivationBlock[HF29])
+	}
+	for _, blockNum := range []uint32{0, 1, 101_319_929, 150_000_000, 1_000_000_000, ^uint32(0)} {
+		if SetForBlock(blockNum).Has(HF29) {
+			t.Errorf("HF29 active at block %d; it has no activation point", blockNum)
+		}
+	}
+	// HF28 stays reachable — the sentinel must not disturb its neighbour, and
+	// a bug that switched every fork off would otherwise pass the loop above.
+	if !SetForBlock(101_319_929).Has(HF28) {
+		t.Error("HF28 must be active at its activation block + 1")
+	}
+	if got := SetForBlock(^uint32(0)).HighestActive(); got != HF28 {
+		t.Errorf("HighestActive at max block = HF%d, want HF28 (the newest SCHEDULED fork)", got)
 	}
 }
 
