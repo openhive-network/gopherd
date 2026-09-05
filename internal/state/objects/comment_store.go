@@ -1090,14 +1090,43 @@ func (s *CommentStore) Count() int { return len(s.primary) + s.coldTotal }
 
 var commentStoreSnapshotMagic = [4]byte{'C', 'M', 'N', 'T'}
 
-const commentStoreSnapshotVersion uint32 = 1
+// Version 2 terminates the record stream with a zero-length record instead of
+// trusting a record COUNT in the header.
+//
+// v1 wrote `len(s.primary) + s.coldTotal` as an exact contract, and coldTotal
+// is not a row count: every cold write does `s.cold.bset(key, blob)` followed
+// by an unconditional `s.coldTotal++`, but bset is an UPSERT. A comment that is
+// evicted, promoted back to resident, and evicted again overwrites its existing
+// row — no new row, one extra tick. rangePrimaryByOffset streams distinct ROWS,
+// so the header over-counted by exactly the number of duplicate evictions and
+// the loader hit EOF partway through. Measured on mainnet 2026-09-05: a
+// shutdown snapshot at block 109235509 declared 135,610,353 records and held
+// 135,595,979 — 14,374 short (~0.01%). The save reported success, exited 0 and
+// renamed .tmp to final; the corruption only surfaced at the next boot.
+//
+// Under v2 the file is self-describing: the stream ends where the writer says
+// it ends, so no counter drift can make a written snapshot unloadable. The
+// header still carries counts, but only as PRESIZE HINTS — being wrong costs
+// map rehashing, never correctness.
+//
+// v1 snapshots still load through the exact-count path.
+const commentStoreSnapshotVersion uint32 = 2
+
+// commentStoreSnapshotVersionCounted is the legacy format whose record stream
+// is delimited by the header count rather than a terminator.
+const commentStoreSnapshotVersionCounted uint32 = 1
 
 // MarshalSnapshot serializes the primary comment map to w. The
 // (author, permlink) pair is the implicit primary key — we don't need
 // to write a separate key because the record itself carries them.
-// Format:
+// Format (v2):
 //
-//	magic | version | count | (varuint(rec) | AppendComment(rec))*
+//	magic | version | residentHint | coldHint |
+//	  (varuint(len(rec)) | AppendComment(rec))* | varuint(0)
+//
+// The trailing zero-length record terminates the stream; both counts are
+// presize hints. v1 was `magic | version | count | rec*` with count as an
+// exact contract — see commentStoreSnapshotVersion for why that broke.
 //
 // Entries emitted in (author, permlink) ascending order.
 func (s *CommentStore) MarshalSnapshot(w io.Writer) error {
@@ -1112,13 +1141,22 @@ func (s *CommentStore) MarshalSnapshot(w io.Writer) error {
 	if SnapshotForceSelfContained {
 		durableCold = false // stream cold rows into the file → portable snapshot
 	}
-	var hdr [8]byte
+	// v2 header: version | residentField | coldHint. Both counts are PRESIZE
+	// HINTS — the stream's real end is the terminator written below, so a hint
+	// that is stale or drifted costs map rehashing and nothing else. This is
+	// the whole point of the format bump; see commentStoreSnapshotVersion.
+	var hdr [12]byte
 	binary.LittleEndian.PutUint32(hdr[0:4], commentStoreSnapshotVersion)
-	countField := uint32(len(s.primary) + s.coldTotal)
+	residentField := uint32(len(s.primary))
 	if durableCold {
-		countField = uint32(len(s.primary)) | snapColdDurableFlag
+		residentField |= snapColdDurableFlag
 	}
-	binary.LittleEndian.PutUint32(hdr[4:8], countField)
+	binary.LittleEndian.PutUint32(hdr[4:8], residentField)
+	coldHint := uint32(0)
+	if !durableCold && s.cold != nil {
+		coldHint = uint32(s.coldTotal)
+	}
+	binary.LittleEndian.PutUint32(hdr[8:12], coldHint)
 	if _, err := w.Write(hdr[:]); err != nil {
 		return err
 	}
@@ -1137,11 +1175,25 @@ func (s *CommentStore) MarshalSnapshot(w io.Writer) error {
 		recBuf []byte
 	)
 	writeRec := func(rec []byte) error {
+		if len(rec) == 0 {
+			// A zero-length record is the end-of-stream terminator, so emitting
+			// one as data would truncate the snapshot at that point. AppendComment
+			// always writes at least the author/permlink, so this is unreachable —
+			// it is here because the failure it guards against is silent.
+			return fmt.Errorf("comment_store: refusing to write a zero-length record (aliases the end-of-stream terminator)")
+		}
 		n := binary.PutUvarint(varBuf[:], uint64(len(rec)))
 		if _, err := w.Write(varBuf[:n]); err != nil {
 			return err
 		}
 		_, err := w.Write(rec)
+		return err
+	}
+	// writeTerminator marks the true end of the record stream. Every return
+	// path below must go through it.
+	writeTerminator := func() error {
+		n := binary.PutUvarint(varBuf[:], 0)
+		_, err := w.Write(varBuf[:n])
 		return err
 	}
 
@@ -1154,7 +1206,7 @@ func (s *CommentStore) MarshalSnapshot(w io.Writer) error {
 				return err
 			}
 		}
-		return nil
+		return writeTerminator()
 	}
 
 	// Two tiers, written back-to-back (NOT merge-sorted). The resident set is
@@ -1184,7 +1236,10 @@ func (s *CommentStore) MarshalSnapshot(w io.Writer) error {
 	if streamErr != nil {
 		return streamErr
 	}
-	return rerr
+	if rerr != nil {
+		return rerr
+	}
+	return writeTerminator()
 }
 
 // UnmarshalSnapshot rebuilds the primary map AND the byRoot secondary
@@ -1203,12 +1258,24 @@ func (s *CommentStore) UnmarshalSnapshot(r io.Reader) error {
 		return fmt.Errorf("comment_store: read header: %w", err)
 	}
 	ver := binary.LittleEndian.Uint32(hdr[0:4])
-	if ver != commentStoreSnapshotVersion {
+	if ver != commentStoreSnapshotVersion && ver != commentStoreSnapshotVersionCounted {
 		return fmt.Errorf("comment_store: unsupported version %d", ver)
 	}
 	countField := binary.LittleEndian.Uint32(hdr[4:8])
 	durableSnap := countField&snapColdDurableFlag != 0
 	count := countField &^ snapColdDurableFlag
+	// v2 ends the stream with a terminator; its counts are presize hints only.
+	// v1 has no terminator and `count` is the exact record contract.
+	terminated := ver == commentStoreSnapshotVersion
+	if terminated {
+		var coldHintBuf [4]byte
+		if _, err := io.ReadFull(br, coldHintBuf[:]); err != nil {
+			return fmt.Errorf("comment_store: read cold hint: %w", err)
+		}
+		// count is the resident hint; add the cold hint so the presizing below
+		// (which expects a both-tiers total, as v1's count was) stays right.
+		count += binary.LittleEndian.Uint32(coldHintBuf[:])
+	}
 	var durableD durableColdTier
 	if durableSnap {
 		// The snapshot omitted the cold rows; they must still be present in a
@@ -1253,10 +1320,16 @@ func (s *CommentStore) UnmarshalSnapshot(r io.Reader) error {
 		}
 	}
 	var recScratch []byte
-	for i := uint32(0); i < count; i++ {
+	for i := uint32(0); ; i++ {
+		if !terminated && i >= count {
+			break // v1: the header count delimits the stream
+		}
 		recLen, err := binary.ReadUvarint(br)
 		if err != nil {
 			return fmt.Errorf("comment_store: read rec len[%d]: %w", i, err)
+		}
+		if terminated && recLen == 0 {
+			break // v2: end-of-stream terminator
 		}
 		if uint64(cap(recScratch)) < recLen {
 			recScratch = make([]byte, recLen+recLen/2)

@@ -31,7 +31,20 @@ func snapshotRecordSetsEqual(t *testing.T, a, b []byte) bool {
 
 func snapshotRecords(t *testing.T, buf []byte) ([][]byte, bool) {
 	t.Helper()
-	const headerLen = 12 // magic(4) + version(4) + count(4)
+	// Header length is format-dependent, and this helper is shared across
+	// stores: the vote store is still magic(4)+version(4)+count(4), while the
+	// comment store's v2 adds a cold hint. Hardcoding one length silently
+	// mis-parses the other (it reads the first record's length prefix as data),
+	// which is how this helper broke the vote tests once.
+	const baseHeader = 12 // magic(4) + version(4) + count(4)
+	if len(buf) < baseHeader {
+		return nil, false
+	}
+	headerLen := baseHeader
+	if [4]byte(buf[0:4]) == commentStoreSnapshotMagic &&
+		binary.LittleEndian.Uint32(buf[4:8]) == commentStoreSnapshotVersion {
+		headerLen = 16 // + coldHint(4)
+	}
 	if len(buf) < headerLen {
 		return nil, false
 	}
@@ -41,6 +54,9 @@ func snapshotRecords(t *testing.T, buf []byte) ([][]byte, bool) {
 		l, n := binary.Uvarint(buf[p:])
 		if n <= 0 || p+n+int(l) > len(buf) {
 			return nil, false
+		}
+		if l == 0 {
+			break // end-of-stream terminator
 		}
 		out = append(out, buf[p+n:p+n+int(l)])
 		p += n + int(l)
