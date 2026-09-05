@@ -24,16 +24,21 @@ import (
 // The protocol-level state machine is what's under test.
 func TestLateJoinerCatchesUp(t *testing.T) {
 	// --- Set up node A: holder of blocks 1..10. ---
+	//
+	// A's blocks carry LIVE timestamps because A is the sync SOURCE here, and
+	// handleFetchBlockchainItemIDs refuses to hand out block ids while
+	// isCatchingUp() — a node behind the tip cannot promise to still hold the
+	// bodies for the ids it lists (the 200-entry ring is ~3 s of history at
+	// catch-up rates). These blocks used to be zero-padded, which meant
+	// blockTimestamp()==0 and isCatchingUp()==true, i.e. A modelled a node that
+	// must NOT serve. Same reason TestINVPropagation seeds live blocks into B.
 	chainA := newStubChain()
+	now := uint32(time.Now().Unix())
 	for n := uint32(1); n <= 10; n++ {
-		// Synthetic raw block: [block_num as 4 BE bytes][padding to 80 bytes]
-		// — enough that BlockMessage's len-vs-id check passes.
-		raw := make([]byte, 80)
-		raw[0] = byte(n >> 24)
-		raw[1] = byte(n >> 16)
-		raw[2] = byte(n >> 8)
-		raw[3] = byte(n)
-		chainA.seed(n, raw)
+		// Synthetic raw block: [block_num as 4 BE bytes][ts at offset 20]
+		// [padding to 80 bytes] — enough that BlockMessage's len-vs-id check
+		// passes.
+		chainA.seed(n, syntheticBlock(n, now))
 	}
 
 	// Pre-bind to discover an addr.

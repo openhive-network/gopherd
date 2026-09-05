@@ -301,6 +301,41 @@ func (d *Delegate) handleFetchBlockchainItemIDs(p *node.Peer, body []byte) {
 	if !d.cfg.Serve {
 		return
 	}
+	// CATCH-UP GATE. Never hand out block IDs while we are behind the tip.
+	//
+	// Every ID in the reply below is read out of the RecentBlocks ring, so each
+	// one is genuinely held AT THE INSTANT WE ANSWER. That is not the same as
+	// being able to serve the body when the peer's fetch_items comes back one
+	// round trip later, and the difference is entirely a function of how fast we
+	// are applying:
+	//
+	//   at the tip   3 s/block   -> 200-entry ring = ~10 minutes of history
+	//   catching up  ~70 blk/s   -> 200-entry ring = ~2.9 SECONDS of history
+	//
+	// RecentBlockCacheSize is a count, so its retention in SECONDS collapses by
+	// the ratio of catch-up rate to tip rate (~200x). Worse, MaxBlocksPerInv is
+	// also 200: the list we hand out is the WHOLE ring, so the oldest ID in it
+	// is evicted after one more applied block (~14 ms), long before the peer can
+	// ask for it. handleFetchItems then correctly answers item_not_available,
+	// and hived's on_item_not_available_message (node.cpp:3159) disconnects us:
+	//
+	//     "You are missing a sync item you claim to have, your database is
+	//      probably corrupted. Try --rebuild-index."
+	//
+	// Measured on mainnet 2026-09-05 while catching up with --no-block-log:
+	// 4 peers dropped us with exactly that. hived never hits this because it
+	// serves sync items from the block log; with --no-block-log the ring is our
+	// ENTIRE serving capacity, so a ring miss is terminal rather than slow.
+	//
+	// broadcastInv already refuses to PUSH inventory while behind (loops.go,
+	// isCatchingUp) — without this the node declined to push and then served the
+	// same unservable IDs when PULLED. Answering nothing is the established
+	// behaviour for a node that cannot serve (the !cfg.Serve gate above returns
+	// silently too): the peer simply asks another peer.
+	if d.isCatchingUp() {
+		d.syncIDsRefusedCatchup.Add(1)
+		return
+	}
 	var msg proto.FetchBlockchainItemIDsMessage
 	if err := msg.Unmarshal(body); err != nil {
 		d.logf("fetch_blockchain_item_ids decode: %v", err)
