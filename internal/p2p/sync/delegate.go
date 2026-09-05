@@ -426,6 +426,14 @@ type Delegate struct {
 	// observable signal that the gate is doing its job and self-clearing.
 	invIgnoredCatchup atomic.Uint64
 
+	// syncIDsRefusedCatchup counts fetch_blockchain_item_ids requests refused by
+	// handleFetchBlockchainItemIDs's catch-up gate. Like invIgnoredCatchup it
+	// climbs while we are behind and flatlines at the tip; unlike it, a nonzero
+	// value means we DECLINED to be a sync source rather than that we ignored
+	// someone else's advert. Nonzero at a steady tip would mean the gate is
+	// misfiring and we are refusing peers we could actually serve.
+	syncIDsRefusedCatchup atomic.Uint64
+
 	// compressed-block accounting. compressedReceived counts every
 	// compressed_block_message that decoded cleanly (regardless of whether
 	// it was a duplicate of an already-applied block). compressedDecompressed
@@ -1158,6 +1166,12 @@ type Stats struct {
 	// climbing once we reach the live tip.
 	InvIgnoredCatchup uint64
 
+	// SyncIDsRefusedCatchup is the cumulative count of fetch_blockchain_item_ids
+	// requests refused because we were behind the tip and could not have served
+	// the bodies we would have listed. Climbing while catching up is the gate
+	// working; nonzero growth at a steady tip is a bug.
+	SyncIDsRefusedCatchup uint64
+
 	// TipStallKicks is the cumulative count of tip-stall re-seeds (head stuck
 	// with nothing in flight while at the tip). 0 on a healthy live node;
 	// climbing means blocks are being dropped at head+1 and we are sawtoothing.
@@ -1221,6 +1235,7 @@ func (d *Delegate) Stats() Stats {
 		DistinctOutstanding:    distinct,
 		GlobalInflight:         inflight,
 		InvIgnoredCatchup:      d.invIgnoredCatchup.Load(),
+		SyncIDsRefusedCatchup:  d.syncIDsRefusedCatchup.Load(),
 		TipStallKicks:          d.tipStallKicks.Load(),
 		InvReceived:            d.invReceived.Load(),
 		TipSyncHandshakes:      d.tipSyncHandshakes.Load(),
