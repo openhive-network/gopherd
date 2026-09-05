@@ -24,17 +24,16 @@ import (
 // increment not backed by a distinct row leaves the header ahead of the stream
 // and the loader hits EOF partway through.
 //
-// The precise drift source in the 109235509 save is NOT established. The
-// obvious candidate — evict, promote back, evict again — is refuted: that path
-// pairs its decrement correctly and does not drift (verified while writing this
-// test). That uncertainty is the argument FOR the v2 format rather than for
-// repairing the counter: v2 ends the stream with a terminator and demotes the
-// counts to presize hints, so a drifted counter costs map rehashing instead of
-// producing an unloadable file, whatever the cause turns out to be.
+// The specific source for the 109235509 save is RE-FREEZING over a cold dir
+// that is ahead of the snapshot — see
+// TestColdTotalDriftsWhenColdDirIsAheadOfSnapshot, which reproduces it at
+// 1 drift per re-freeze. (The obvious candidate, evict/promote/evict, is
+// refuted: it pairs its decrement correctly.)
 //
-// The test therefore injects the drift directly rather than pantomiming a
-// mechanism we have not proven. That is the exact condition v2 promises to
-// survive, and it holds no matter which increment site is at fault.
+// This test deliberately does NOT depend on that. It injects the drift
+// directly, because what v2 guarantees is a property of the FORMAT — a header
+// count that overstates the stream must not make the file unloadable — and that
+// has to hold for drift sources nobody has found yet, not just the one we did.
 func TestSnapshotSurvivesColdTotalDrift(t *testing.T) {
 	cold, err := openColdKV("")
 	if err != nil {
@@ -180,4 +179,76 @@ func TestSnapshotV1StillLoads(t *testing.T) {
 	if cs2.Count() != len(recs) {
 		t.Fatalf("v1 load recovered %d comments, want %d", cs2.Count(), len(recs))
 	}
+}
+
+// TestColdTotalDriftsWhenColdDirIsAheadOfSnapshot identifies the drift source
+// behind the block-109235509 snapshot (see TestSnapshotSurvivesColdTotalDrift,
+// which deliberately does not depend on knowing it).
+//
+// The node runs GOPHERD_COLD_REUSE=1 against a cold dir that the PREVIOUS run
+// advanced past the snapshot being loaded: cold2 held rows for comments frozen
+// up to 109,547,208 while we reloaded a snapshot at 108,951,302 and re-applied
+// forward. Every comment that froze again in that replayed window ALREADY had
+// a cold row, so its eviction bset() overwrote in place — no new row, but an
+// unconditional coldTotal++. The counter therefore counts re-freezes, and the
+// snapshot header inherits the error.
+//
+// This models that directly: evict a comment, drop the resident-side
+// bookkeeping as a snapshot reload would, then evict it again with the row
+// still on disk.
+func TestColdTotalDriftsWhenColdDirIsAheadOfSnapshot(t *testing.T) {
+	cold, err := openColdKV("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cold.Close()
+	_, cs := commentFixture(t, cold)
+
+	if !cs.Evict("replyer-a", "re-post") {
+		t.Fatal("evict failed")
+	}
+	rowsOnDisk := countColdPrimaryRows(cs)
+	if rowsOnDisk != 1 {
+		t.Fatalf("expected 1 cold row after evict, got %d", rowsOnDisk)
+	}
+
+	// A snapshot reload rebuilds the resident set from the file; the cold dir
+	// keeps its rows. Re-put the comment resident so it can be evicted again,
+	// exactly as the replayed window does.
+	sBack := state.NewSession(openTempDB(t))
+	csBack := EnsureCommentStore(sBack)
+	csBack.SetColdTier(cold)
+	PutComment(sBack, &Comment{
+		Author: auth.AccountName("replyer-a"), Permlink: "re-post",
+		RootAuthor: auth.AccountName("root1"), RootPermlink: "post",
+		NetRshares: 10, WasPaid: true,
+	})
+	if err := sBack.Commit(false); err != nil {
+		t.Fatal(err)
+	}
+	before := csBack.coldTotal
+	if !csBack.Evict("replyer-a", "re-post") {
+		t.Fatal("re-evict failed")
+	}
+
+	rowsAfter := countColdPrimaryRows(csBack)
+	drift := (csBack.coldTotal - before) - (rowsAfter - rowsOnDisk)
+	if drift == 0 {
+		t.Fatalf("no drift reproduced: coldTotal +%d, rows +%d",
+			csBack.coldTotal-before, rowsAfter-rowsOnDisk)
+	}
+	t.Logf("REPRODUCED: re-freezing a comment whose cold row already exists "+
+		"advanced coldTotal by %d while adding %d rows (drift %d per re-freeze)",
+		csBack.coldTotal-before, rowsAfter-rowsOnDisk, drift)
+}
+
+// countColdPrimaryRows counts distinct primary rows actually present in the
+// cold tier — the quantity MarshalSnapshot streams, as opposed to coldTotal.
+func countColdPrimaryRows(cs *CommentStore) int {
+	n := 0
+	_ = cs.cold.rangePrimaryByOffset(tableKey(coldTableCommentPrimary, nil), func(v []byte) bool {
+		n++
+		return true
+	})
+	return n
 }
