@@ -69,20 +69,32 @@ import (
 	"gopherd/internal/blocklog"
 	"gopherd/internal/fcraw"
 	"gopherd/internal/protocol/block"
+	"gopherd/internal/protocol/hardfork"
 	"gopherd/internal/protocol/network"
 	"gopherd/internal/protocol/op"
 	"gopherd/internal/protocol/tx"
 )
 
-// Mirrors internal/chain/evaluator/witness.go — kept as literals because this
-// is a diagnostic, and a copy that drifts is louder than an import cycle.
+// Mirrors internal/chain/evaluator/witness.go's
+// update_governance_vote_expiration_ts.
+//
+// govFirstExpireTimestamp is DERIVED, not written down. It was a literal here
+// first, and the literal was wrong by 7200 seconds — which translates every
+// pre-HF25 account's expiry by 2400 slots and quietly changes where clumps
+// land relative to post-HF25 accounts. Deriving it from the same hardfork
+// table the evaluator uses is the only version that cannot drift.
 const (
 	govVoteExpirationPeriodSec     uint32 = 365 * 24 * 60 * 60
-	govFirstExpireTimestamp        uint32 = 1656590400 // HARDFORK_1_25_FIRST_GOVERNANCE_VOTE_EXPIRE_TIMESTAMP
 	govMaxOldExpireShiftSec        uint32 = govVoteExpirationPeriodSec / 2
 	govBlockIntervalSec            uint32 = 3
 	govHF21ProposalsActivationHint uint32 = 35_921_786
 )
+
+// govFirstExpireTimestamp is HARDFORK_1_25_FIRST_GOVERNANCE_VOTE_EXPIRE_TIMESTAMP:
+// the earliest expiration anyone can hold post-HF25, and the anchor the
+// pre-HF25 redistribution hangs off. Taken from the shared hardfork table, not
+// copied.
+var govFirstExpireTimestamp = hardfork.MainnetActivationTime[hardfork.HF25] + govVoteExpirationPeriodSec
 
 func govExpirationFor(voteTime uint32) uint32 {
 	e := voteTime + govVoteExpirationPeriodSec
