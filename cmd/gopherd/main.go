@@ -50,6 +50,8 @@ Commands:
   scan-ops <block_log> <from> <to> [account]       decoded op scan (TSV)
   scan-producers <block_log> <from> <to>           block producers per block
   govexp-scan <block_log> <to> <out.json>          last governance action per account
+  govsweep-scan <block_log> <from> <to>            can a governance sweep exceed
+                                         HIVE_GLOBAL_REMOVE_THRESHOLD?
   snapshot-repair-vst / snapshot-repair-govexp     snapshot state surgeons
   snapshot-repair-rcadj <snap> <adj.json>          write hived's rc_adjustment
                                          into a snapshot (see rcadjrepair.go)
@@ -85,6 +87,8 @@ func main() {
 		os.Exit(cmdSnapshotRepairRCAdj(os.Args[2:]))
 	case "snapshot-repair-govexp":
 		os.Exit(cmdSnapshotRepairGovexp(os.Args[2:]))
+	case "govsweep-scan":
+		os.Exit(cmdGovSweepScan(os.Args[2:]))
 	case "govexp-scan":
 		os.Exit(cmdGovexpScan(os.Args[2:]))
 	case "scan-producers":
