@@ -230,3 +230,20 @@ func PackedVersion(id ID) uint32 {
 	}
 	return (uint32(1) << 24) | (uint32(id) << 16)
 }
+
+// ActivationTime returns the canonical activation timestamp for a hardfork,
+// or 0 for an id outside the table.
+//
+// This is the value a witness puts in a hardfork_version_vote, so it has to
+// agree with what the peers' binaries would vote. On mainnet it does by
+// construction. On a testnet it agrees for a STOCK chain — hived's
+// get_hf_time(n, default) falls back to the same defaults this table holds,
+// including HF29's year-2100 sentinel — but NOT for a testnet launched with
+// explicit hf_times, which is the same limitation hardfork_testnet.go records
+// for activation blocks.
+func ActivationTime(id ID) uint32 {
+	if id < 0 || int(id) >= len(MainnetActivationTime) {
+		return 0
+	}
+	return MainnetActivationTime[id]
+}

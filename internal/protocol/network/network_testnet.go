@@ -60,4 +60,13 @@ const GlobalRemoveThreshold int16 = 20
 // (config.hpp:69 at 1.29.0-rc2). The testnet definition is a release ahead of
 // mainnet's: hived bumped it to 1.29.0 while deliberately leaving mainnet at
 // 1.28.7.
-const BlockchainVersion = "1.29.0"
+//
+// Two consumers, one source of truth: database_api.get_version reports the
+// string, and a produced block header carries the packed v_num in its version
+// extension (which is what sets the witness's running_version). They are
+// derived from the same triple so they cannot drift.
+const (
+	BlockchainVersionMajor    = 1
+	BlockchainVersionHardfork = 29
+	BlockchainVersionRevision = 0
+)
