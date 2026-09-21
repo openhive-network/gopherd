@@ -56,6 +56,11 @@ func processDeclineVotingRights(s *state.Session, blockTime, blockNum uint32, d 
 		})
 
 	hf := hardfork.SetForBlock(blockNum)
+	// Same shared budget as the governance sweep in hived: both run under one
+	// remove_guard per block. Metered, not enforced — see
+	// GovernanceRemovalStats.
+	removed := 0
+	defer func() { noteGovernanceRemovals(removed) }()
 	for _, p := range ready {
 		req, err := objects.GetDeclineVotingRightsRequest(s, p.account)
 		if err != nil {
@@ -66,7 +71,7 @@ func processDeclineVotingRights(s *state.Session, blockTime, blockNum uint32, d 
 			// HF28: drop any DHF proposal votes the account has cast.
 			// Mirrors database_dhf.cpp:223 (remove_proposal_votes).
 			if hf.Has(hardfork.HF28) {
-				clearProposalVotesForVoter(s, p.account)
+				removed += clearProposalVotesForVoter(s, p.account)
 			}
 			// nullify_proxied_witness_votes: subtract the account's full
 			// propagation (direct + proxied_vsf_votes[*]) from each

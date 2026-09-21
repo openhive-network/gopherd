@@ -29,6 +29,7 @@ import (
 	"gopherd/internal/blocklog"
 	"gopherd/internal/chain"
 	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/protocol/network"
 	"gopherd/internal/state"
 	"gopherd/internal/state/genesis"
 	"gopherd/internal/state/objects"
@@ -649,6 +650,17 @@ func cmdReplay(args []string) int {
 	// assertion would be safe to enable. A clean replay must report 0.
 	if n := objects.RCStaleMaxCount(); n > 0 {
 		fmt.Printf("rc stale max:   %d  (HF29 RC_IS_CONSENSUS would REJECT these blocks)\n", n)
+	}
+	// hived caps the per-block governance sweeps at HIVE_GLOBAL_REMOVE_THRESHOLD
+	// proposal-vote removals and defers the rest to the next block; gopherd
+	// clears every due account at once. over>0 means the two genuinely disagree
+	// about which block an account's votes were cleared in.
+	if over, maxPer := chain.GovernanceRemovalStats(); over > 0 {
+		fmt.Printf("govsweep budget: %d blocks over the %d-object limit (max %d in one block) — gopherd and hived DIVERGE here\n",
+			over, network.GlobalRemoveThreshold, maxPer)
+	} else if maxPer > 0 {
+		fmt.Printf("govsweep budget: OK (max %d proposal votes in one block, limit %d)\n",
+			maxPer, network.GlobalRemoveThreshold)
 	}
 	fmt.Printf("elapsed:        %s\n", dur.Round(time.Millisecond))
 	if applied > 0 {
