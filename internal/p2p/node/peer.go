@@ -355,15 +355,18 @@ func (p *Peer) run(ctx context.Context, delegate Delegate) {
 			// advert path needs it to decide whether this peer understands
 			// block-id inventory (see coreProtocolVersion). A hello we cannot
 			// parse leaves it 0, which callers treat as "withhold".
+			parsedVersion := false
 			if typeTag == proto.HelloMessageType {
 				var hm proto.HelloMessage
 				if err := hm.Unmarshal(body); err == nil {
 					p.coreProtocolVersion.Store(hm.CoreProtocolVersion)
+					parsedVersion = true
 				}
 			} else {
 				var lhm proto.LegacyHelloMessage
 				if err := lhm.Unmarshal(body); err == nil {
 					p.coreProtocolVersion.Store(lhm.CoreProtocolVersion)
+					parsedVersion = true
 				}
 			}
 			// Minimum protocol version (hived eb556e22d). Checked once the
@@ -371,7 +374,16 @@ func (p *Peer) run(ctx context.Context, delegate Delegate) {
 			// peer below the floor never reaches Active. hived sends the
 			// rejection and then disconnects; a peer that cannot parse 5019
 			// is by definition one we are refusing anyway.
-			if v := p.coreProtocolVersion.Load(); v < proto.MinimumProtocolVersion {
+			//
+			// Enforced ONLY on a hello we actually decoded. An undecodable
+			// hello leaves the version at 0, which is below any floor — and
+			// turning our own parser's gaps into disconnects is how a node
+			// sheds every peer whose hello carries one field we mis-handle.
+			// The existing lenient treatment (version 0 means "unknown", so
+			// withhold block-id adverts) still covers that case; hived
+			// rejects an unparsable hello through invalid_hello_message,
+			// which is a separate check we do not have.
+			if v := p.coreProtocolVersion.Load(); parsedVersion && v < proto.MinimumProtocolVersion {
 				p.rejectTooOld(v)
 				err := fmt.Errorf("peer protocol version %d is below the minimum %d",
 					v, proto.MinimumProtocolVersion)

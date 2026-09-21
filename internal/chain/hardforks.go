@@ -484,10 +484,26 @@ func bumpHardforkPropertyObject(s *state.Session, id hardfork.ID) {
 	objects.PutHardforkPropertyObject(s, &hpo)
 }
 
-// removeProposalVotesForRevokedAccounts walks the proposal_vote table
-// and removes every entry whose voter has VoteRevoked = true. Mirrors
-// database::remove_proposal_votes_for_accounts_without_voting_rights
-// triggered at HF28.
+// removeProposalVotesForRevokedAccounts walks the proposal_vote table and
+// removes every entry whose voter has VoteRevoked = true, at the HF28
+// boundary.
+//
+// PARTIAL vs database::remove_proposal_votes_for_accounts_without_voting_rights
+// (database_dhf.cpp:147), which does NOT delete anything directly. hived
+// instead creates (or re-dates) a decline_voting_rights_request for each such
+// account with effective_date = head_block_time(), so the deletion happens
+// through process_decline_voting_rights in the same block — and therefore
+// under that function's shared remove_guard, and alongside the rest of the
+// decline: nullify_proxied_witness_votes, clear_witness_votes, proxy clearing,
+// and the proxy_cleared / declined_voting_rights virtual operations.
+//
+// What gopherd skips is mostly redundant: these accounts already declined, so
+// their witness votes and proxy were cleared when that decline was processed,
+// and we do not emit either virtual operation anyway. What it does NOT
+// reproduce is the removal budget — this runs unbounded at a single block,
+// where hived would spread it across blocks via process_decline_voting_rights'
+// own remove_guard. Same gap as the governance sweeps, same reason it is not
+// closed yet (see GovernanceRemovalStats in governance_votes.go).
 func removeProposalVotesForRevokedAccounts(s *state.Session) {
 	type pair struct {
 		proposalID int64

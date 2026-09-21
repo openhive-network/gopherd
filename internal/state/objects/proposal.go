@@ -31,14 +31,13 @@ type Proposal struct {
 
 // ProposalMaintenanceCleanupSec is HIVE_PROPOSAL_MAINTENANCE_CLEANUP — one
 // day. proposal_object::get_end_date_with_delay() adds it to end_date, and
-// that DELAYED date is what the by_end_date index orders on: a proposal stays
-// "alive" for a day past its end so the corner cases around expiry have room.
+// that DELAYED date is what hived's by_end_date index orders on: a proposal
+// stays "alive" for a day past its end so the corner cases around expiry have
+// room. The two users of the delay are the removal sweep's boundary and the
+// end_date a budget-limited removal pulls a proposal back to, both of which
+// work in raw end dates, so there is no get_end_date_with_delay() helper here
+// to go stale.
 const ProposalMaintenanceCleanupSec uint32 = 60 * 60 * 24
-
-// EndDateWithDelay mirrors proposal_object::get_end_date_with_delay().
-func (p *Proposal) EndDateWithDelay() uint32 {
-	return p.EndDate + ProposalMaintenanceCleanupSec
-}
 
 // ProposalVote (proposalID, voter) edge.
 type ProposalVote struct {
@@ -227,10 +226,15 @@ func HasProposalVote(s *state.Session, id int64, voter auth.AccountName) (bool, 
 	return s.Has(ProposalVoteTable, state.PrimaryIndex, proposalVoteKey(id, voter))
 }
 
-// DeleteAllProposalVotesForProposal removes every ProposalVote row attached
-// to `id`, with no removal budget. Kept as the unbudgeted form of
-// RemoveProposalVotesForProposal for callers that are not subject to
-// HIVE_GLOBAL_REMOVE_THRESHOLD.
-func DeleteAllProposalVotesForProposal(s *state.Session, id int64) {
-	RemoveProposalVotesForProposal(s, id, NewRemoveGuard(-1))
+// DeleteProposalRemovedIndexEntry drops one entry from ProposalRemovedIndex
+// without touching the proposal row.
+//
+// Only the removal sweep needs it, and only to repair itself: an index entry
+// whose proposal row is gone can never be cleared by the normal path (which
+// starts by loading that row), so it would be rescanned on every block for the
+// life of the node, and the sweep's early exit would never fire. Entries like
+// that should be impossible — DeleteProposalFull always removes both — which
+// is exactly why the sweep should not loop forever if one appears.
+func DeleteProposalRemovedIndexEntry(s *state.Session, endDate uint32, id int64) {
+	s.Delete(ProposalTable, ProposalRemovedIndex, proposalByEndDateKey(endDate, id))
 }

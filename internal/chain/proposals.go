@@ -335,7 +335,11 @@ func removeOldProposals(s *state.Session, blockTime uint32) {
 	maxEndDate := blockTime - objects.ProposalMaintenanceCleanupSec
 
 	// Collect before mutating: Range shares one pooled iterator per session.
-	var due []int64
+	type flagged struct {
+		endDate uint32
+		id      int64
+	}
+	var due []flagged
 	_ = s.Range(objects.ProposalTable, objects.ProposalRemovedIndex, nil,
 		func(key, _ []byte) (bool, error) {
 			endDate, id, ok := objects.ProposalIDFromEndDateKey(key)
@@ -345,7 +349,7 @@ func removeOldProposals(s *state.Session, blockTime uint32) {
 			if endDate > maxEndDate {
 				return false, nil // index is end-date ordered; nothing later qualifies
 			}
-			due = append(due, id)
+			due = append(due, flagged{endDate: endDate, id: id})
 			return true, nil
 		})
 	if len(due) == 0 {
@@ -353,12 +357,19 @@ func removeOldProposals(s *state.Session, blockTime uint32) {
 	}
 
 	guard := objects.NewRemoveGuard(network.GlobalRemoveThreshold)
-	for _, id := range due {
+	for _, f := range due {
+		// hived checks the guard AFTER processing each proposal and breaks;
+		// checking before the next one is the same sequence, and it keeps the
+		// unlimited case (a negative budget is never Done) intact.
 		if guard.Done() {
 			break
 		}
-		p, err := objects.GetProposal(s, id)
+		p, err := objects.GetProposal(s, f.id)
 		if err != nil {
+			// The row is gone but the index entry survived. Nothing can ever
+			// clear it through the normal path, so it would be rescanned every
+			// block forever and hold the early exit open. Drop it here.
+			objects.DeleteProposalRemovedIndexEntry(s, f.endDate, f.id)
 			continue
 		}
 		objects.RemoveProposalWithVotes(s, &p, guard)
