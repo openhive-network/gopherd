@@ -55,3 +55,9 @@ func SetChainID(h Hash32) {
 // (config.hpp:96 on the IS_TEST_NET branch). Ten times smaller than mainnet's,
 // which is what makes the threshold reachable in hived's own proposal tests.
 const GlobalRemoveThreshold int16 = 20
+
+// BlockchainVersion mirrors HIVE_BLOCKCHAIN_VERSION under IS_TEST_NET
+// (config.hpp:69 at 1.29.0-rc2). The testnet definition is a release ahead of
+// mainnet's: hived bumped it to 1.29.0 while deliberately leaving mainnet at
+// 1.28.7.
+const BlockchainVersion = "1.29.0"

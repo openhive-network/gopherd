@@ -37,3 +37,15 @@ var OldChainID = Hash32{}
 // which only the debug plugin ever changes, so a constant is faithful for any
 // chain gopherd replays. A negative value would mean "no limit".
 const GlobalRemoveThreshold int16 = 200
+
+// BlockchainVersion mirrors HIVE_BLOCKCHAIN_VERSION for the live network
+// (config.hpp:139 at 1.29.0-rc2). hived defines it in THREE places — mainnet,
+// testnet and mirrornet — and 1.29 bumped only mainnet, to 1.28.7 (commit
+// dab219074, the release carrying the p2p fork-tolerance fixes); the testnet
+// definition went to 1.29.0 separately.
+//
+// It is what database_api.get_version reports, and in hived it is also the
+// witness's reported running_version. gopherd does not vote a version in the
+// block header yet (buildBlockParts writes empty extensions), so here it is
+// the API answer only.
+const BlockchainVersion = "1.28.7"

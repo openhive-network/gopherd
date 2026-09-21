@@ -6,6 +6,7 @@ import (
 
 	"gopherd/internal/api/jsonrpc"
 	"gopherd/internal/protocol/asset"
+	"gopherd/internal/protocol/network"
 	"gopherd/internal/state"
 	"gopherd/internal/state/objects"
 )
@@ -227,7 +228,7 @@ func (s *Server) mGetDGPO(legacy bool) jsonrpc.Handler {
 func (s *Server) mGetVersion() jsonrpc.Handler {
 	return func(_ context.Context, _ json.RawMessage) (interface{}, error) {
 		return map[string]interface{}{
-			"blockchain_version": "1.27.0",
+			"blockchain_version": network.BlockchainVersion,
 			"hive_revision":      "gopherd",
 			"fc_revision":        "gopherd",
 			"chain_id":           networkChainIDHex(),
