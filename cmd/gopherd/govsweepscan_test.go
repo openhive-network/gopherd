@@ -1,10 +1,31 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	"gopherd/internal/protocol/hardfork"
+)
 
 // The simulation is what the verdict rests on, so its arithmetic is pinned
 // here rather than trusted. A scan that under-counts reports "no divergence"
 // for a chain that has one, which is the expensive direction to be wrong in.
+
+// TestGovAnchorMatchesTheHardforkTable is the test that should have existed
+// first. The original only checked govExpirationFor against govFirstExpireTimestamp
+// — the tool's formula against the tool's own constant — so it passed happily
+// while that constant was wrong by 7200 seconds, translating every pre-HF25
+// account's expiry by 2400 slots. Self-consistency is not correctness.
+func TestGovAnchorMatchesTheHardforkTable(t *testing.T) {
+	want := hardfork.MainnetActivationTime[hardfork.HF25] + govVoteExpirationPeriodSec
+	if govFirstExpireTimestamp != want {
+		t.Fatalf("anchor: got %d, want %d (HF25 time + one year)", govFirstExpireTimestamp, want)
+	}
+	// And the table itself must still say what the evaluator assumes.
+	const hf25Time = 1625061600 // HIVE_HARDFORK_1_25_TIME, hardfork.d/1_25.hf:10
+	if got := hardfork.MainnetActivationTime[hardfork.HF25]; got != hf25Time {
+		t.Errorf("HF25 activation time: got %d, want %d", got, hf25Time)
+	}
+}
 
 func TestGovExpirationMatchesEvaluator(t *testing.T) {
 	// Post-HF25 action: plain one-year offset, no redistribution.
