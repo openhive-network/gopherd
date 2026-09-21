@@ -365,6 +365,13 @@ func cmdGovSweepScan(args []string) int {
 
 	const workers = 12
 
+	// Where per-shard checkpoints live. Derived from the output path so a run
+	// that names an output file gets resumability for free.
+	ckpt := ""
+	if len(args) >= 4 {
+		ckpt = args[3]
+	}
+
 	// One line per 500k blocks per worker is too noisy; aggregate instead and
 	// print a single overall percentage at a steady cadence.
 	var progMu sync.Mutex
@@ -413,7 +420,27 @@ func cmdGovSweepScan(args []string) int {
 		wg.Add(1)
 		go func(w int, lo, hi uint32) {
 			defer wg.Done()
+			// Resume: a shard already on disk for this exact range is reused.
+			// The first full run died at 98% with ten of twelve workers
+			// finished and nothing written, because the dump only happened
+			// after the merge. Eighty minutes of reading should not be
+			// forfeit because the last worker was interrupted.
+			if ckpt != "" {
+				if ev, ok := govLoadShard(ckpt, w, lo, hi); ok {
+					shards[w] = ev
+					progMu.Lock()
+					perWorker[w] = hi - lo + 1
+					progMu.Unlock()
+					fmt.Fprintf(os.Stderr, "worker %d [%d..%d] RESUMED events=%d\n", w, lo, hi, len(ev))
+					return
+				}
+			}
 			shards[w] = govScanShard(path, lo, hi, w, reportProgress)
+			if ckpt != "" {
+				if err := govSaveShard(ckpt, w, lo, hi, shards[w]); err != nil {
+					fmt.Fprintf(os.Stderr, "worker %d: could not checkpoint: %v\n", w, err)
+				}
+			}
 			fmt.Fprintf(os.Stderr, "worker %d [%d..%d] DONE events=%d\n", w, lo, hi, len(shards[w]))
 		}(w, lo, hi)
 	}
@@ -451,6 +478,31 @@ type govEventDump struct {
 	Account   string
 	Proposal  int64
 	Approve   bool
+}
+
+// govShardPath names one worker's checkpoint. The range is in the name so a
+// re-run with different bounds cannot silently reuse the wrong events.
+func govShardPath(base string, w int, lo, hi uint32) string {
+	return fmt.Sprintf("%s.shard%02d-%d-%d", base, w, lo, hi)
+}
+
+func govSaveShard(base string, w int, lo, hi uint32, events []govEvent) error {
+	// Write-then-rename: a checkpoint interrupted mid-write would otherwise be
+	// resumed as a truncated shard, which is worse than no shard at all —
+	// silently missing events look exactly like a chain with fewer votes.
+	tmp := govShardPath(base, w, lo, hi) + ".tmp"
+	if err := govSaveEvents(tmp, events, lo, hi); err != nil {
+		return err
+	}
+	return os.Rename(tmp, govShardPath(base, w, lo, hi))
+}
+
+func govLoadShard(base string, w int, lo, hi uint32) ([]govEvent, bool) {
+	ev, from, to, err := govLoadEvents(govShardPath(base, w, lo, hi))
+	if err != nil || from != lo || to != hi {
+		return nil, false
+	}
+	return ev, true
 }
 
 func govSaveEvents(path string, events []govEvent, from, to uint32) error {
