@@ -172,6 +172,15 @@ const (
 	ItemTypeBlockCompressed = uint32(CompressedBlockMessageType) // 1002
 )
 
+// MinimumProtocolVersion mirrors GRAPHENE_NET_MINIMUM_PROTOCOL_VERSION
+// (hive 1.29.0-rc2, commit eb556e22d). Until that commit no floor was ever
+// enforced: core_protocol_version was read for feature detection only, so a
+// nonconforming peer reporting nothing walked through every compatibility
+// check. 106 shipped in the steem era and every client since reports 107, so
+// the floor costs nothing and closes the "reports 0, gets treated as a peer"
+// hole.
+const MinimumProtocolVersion uint32 = 106
+
 // AdvertiseBlocksByBlockIDVersion is the graphene core_protocol_version at
 // which inventory identifies blocks by BLOCK ID rather than by the legacy
 // block_message hash (hived config.hpp:

@@ -180,6 +180,10 @@ type Peer struct {
 	// version and only advertise to peers that speak the same identity scheme.
 	coreProtocolVersion atomic.Uint32
 
+	// userAgent is OUR agent string, carried so the handshake can fill in a
+	// connection_rejected_message without reaching back into the node.
+	userAgent string
+
 	mu              sync.Mutex
 	lastHeartbeatRX time.Time
 
@@ -199,10 +203,11 @@ type Peer struct {
 // HelloMessage on every outbound dial — mirroring hived's send_hello_message
 // which always emits both forms so older peers that don't recognize 5018
 // can still complete the handshake on 5006.
-func newPeer(c *transport.Conn, dir Direction, helloBuilder, legacyHelloBuilder func(c *transport.Conn) ([]byte, error)) *Peer {
+func newPeer(c *transport.Conn, dir Direction, userAgent string, helloBuilder, legacyHelloBuilder func(c *transport.Conn) ([]byte, error)) *Peer {
 	p := &Peer{
 		conn:             c,
 		direction:        dir,
+		userAgent:        userAgent,
 		buildHello:       helloBuilder,
 		buildLegacyHello: legacyHelloBuilder,
 		doneCh:           make(chan struct{}),
@@ -360,6 +365,22 @@ func (p *Peer) run(ctx context.Context, delegate Delegate) {
 				if err := lhm.Unmarshal(body); err == nil {
 					p.coreProtocolVersion.Store(lhm.CoreProtocolVersion)
 				}
+			}
+			// Minimum protocol version (hived eb556e22d). Checked once the
+			// version is recorded and before we accept the connection, so a
+			// peer below the floor never reaches Active. hived sends the
+			// rejection and then disconnects; a peer that cannot parse 5019
+			// is by definition one we are refusing anyway.
+			if v := p.coreProtocolVersion.Load(); v < proto.MinimumProtocolVersion {
+				p.rejectTooOld(v)
+				err := fmt.Errorf("peer protocol version %d is below the minimum %d",
+					v, proto.MinimumProtocolVersion)
+				p.tracef("REJECTING: %v", err)
+				p.close(err)
+				if delegate != nil {
+					delegate.OnPeerDisconnected(p, err)
+				}
+				return
 			}
 			// Inbound peer sent its hello after we sent ours. Accept it.
 			// Hived sends both 5018 and 5006 on every dial; the second
@@ -686,4 +707,31 @@ func readVarUint(b []byte) (uint64, int, error) {
 		}
 	}
 	return 0, 0, fmt.Errorf("varint truncated")
+}
+
+// rejectTooOld sends the connection_rejected_message hived sends before
+// dropping a peer whose protocol version is below the floor. Best effort: the
+// connection is closed immediately afterwards either way, and a peer too old
+// to parse 5019 is one we are refusing regardless.
+//
+// The legacy 5008 form is not sent. hived picks between them by whether the
+// peer identified as IPv6-aware, and a peer below version 106 predates both
+// branches of that choice; it also predates every client still on the network.
+func (p *Peer) rejectTooOld(reported uint32) {
+	rej := proto.ConnectionRejectedMessage{
+		UserAgent:           p.userAgent,
+		CoreProtocolVersion: proto.CoreProtocolVersion,
+		ReasonCode:          proto.RejectClientTooOld,
+		ReasonString: fmt.Sprintf(
+			"Your p2p protocol version (%d) is older than the minimum this node accepts (%d), please upgrade",
+			reported, proto.MinimumProtocolVersion),
+	}
+	if ap, err := netip.ParseAddrPort(p.conn.RemoteAddr().String()); err == nil {
+		rej.RemoteEndpoint = proto.Endpoint{Addr: ap}
+	}
+	body, err := rej.Marshal()
+	if err != nil {
+		return
+	}
+	_ = p.Send(proto.ConnectionRejectedMessageType, body)
 }
