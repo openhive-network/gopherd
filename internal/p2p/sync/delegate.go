@@ -416,8 +416,12 @@ type Delegate struct {
 
 	// dropCounters track soft load-shedding events; exposed for
 	// observability + tests.
-	droppedQueueFull     atomic.Uint64
-	droppedReorder       atomic.Uint64
+	droppedQueueFull atomic.Uint64
+	droppedReorder   atomic.Uint64
+	// blocksHeld / blocksRefusedFuture come from the inbound timestamp
+	// window (early_block.go).
+	blocksHeld           atomic.Uint64
+	blocksRefusedFuture  atomic.Uint64
 	inhibitedFetches     atomic.Uint64
 	outstandingThrottled atomic.Uint64
 	// invIgnoredCatchup counts item_ids_inventory_message adverts dropped by
@@ -563,7 +567,13 @@ type Delegate struct {
 	headBlockHint atomic.Uint32
 
 	stopCh chan struct{}
-	wg     sync.WaitGroup
+
+	// earlyBlocks is the inbound timestamp window (see early_block.go). A
+	// hold runs on the receiving goroutine, never on the single apply
+	// goroutine: holding there would block exactly the block we are waiting
+	// to let through first, which is the entire point of the hold.
+	earlyBlocks *earlyBlockGate
+	wg          sync.WaitGroup
 }
 
 // peerState tracks the per-peer dedup + outstanding-fetch sets.
@@ -882,6 +892,7 @@ func newWithChain(cfg Config, c Chain) *Delegate {
 		txSigCache:      newTxSigCache(),
 		inflight:        make(map[block.ID]inflightEntry, 8192),
 	}
+	d.earlyBlocks = newEarlyBlockGate(d.stopCh)
 	if lo := config.Env("GOPHERD_TRACE_LO"); lo != "" {
 		if v, err := strconv.ParseUint(lo, 10, 32); err == nil {
 			d.traceLo = uint32(v)
@@ -1151,6 +1162,13 @@ type Stats struct {
 	TxAccepted   uint64
 	TxRejected   uint64
 	MempoolDepth int
+	// BlocksHeld / BlocksRefusedFuture report the inbound timestamp window.
+	// Both read 0 on a healthy network: a hold means some producer's clock is
+	// more than a second fast, and a refusal means a block claimed a
+	// timestamp more than 5s ahead of ours (or arrived while every hold slot
+	// was occupied, which only happens under a flood).
+	BlocksHeld          uint64
+	BlocksRefusedFuture uint64
 	// TxInvOffered / TxFetched bracket the step before admission — see the
 	// delegate fields for why all four are needed to localise a fault.
 	TxInvOffered uint64
@@ -1249,6 +1267,8 @@ func (d *Delegate) Stats() Stats {
 		TxServed:               d.txServed.Load(),
 		TxRelayed:              d.txRelayed.Load(),
 		MempoolDepth:           mempoolDepth,
+		BlocksHeld:             d.blocksHeld.Load(),
+		BlocksRefusedFuture:    d.blocksRefusedFuture.Load(),
 	}
 }
 
