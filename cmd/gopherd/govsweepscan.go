@@ -54,6 +54,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"time"
 
 	"gopherd/internal/blocklog"
 	"gopherd/internal/fcraw"
@@ -100,12 +101,18 @@ type govEvent struct {
 	approve  bool
 }
 
-func govScanShard(path string, from, to uint32) []govEvent {
+func govScanShard(path string, from, to uint32, worker int, progress func(worker int, done, total uint32)) []govEvent {
 	r, err := blocklog.Open(path)
 	if err != nil {
 		panic(err)
 	}
 	defer r.Close()
+
+	total := to - from + 1
+	// The full range is ~80 minutes of block-log reading. Without this the run
+	// prints nothing at all until every worker finishes, which is
+	// indistinguishable from a hang.
+	const progressEvery = 500_000
 
 	var out []govEvent
 	// Evaluators stamp with head_block_time(), which during transaction
@@ -122,6 +129,9 @@ func govScanShard(path string, from, to uint32) []govEvent {
 	}
 
 	for n := from; n <= to; n++ {
+		if progress != nil && (n-from)%progressEvery == 0 && n != from {
+			progress(worker, n-from, total)
+		}
 		raw, err := r.Block(n)
 		if err != nil {
 			continue
@@ -275,6 +285,36 @@ func cmdGovSweepScan(args []string) int {
 	}
 
 	const workers = 12
+
+	// One line per 500k blocks per worker is too noisy; aggregate instead and
+	// print a single overall percentage at a steady cadence.
+	var progMu sync.Mutex
+	perWorker := make([]uint32, workers)
+	start := time.Now()
+	lastPrint := start
+	reportProgress := func(w int, done, wtotal uint32) {
+		progMu.Lock()
+		defer progMu.Unlock()
+		perWorker[w] = done
+		if time.Since(lastPrint) < 15*time.Second {
+			return
+		}
+		lastPrint = time.Now()
+		var sum uint32
+		for _, v := range perWorker {
+			sum += v
+		}
+		span := to - from + 1
+		pct := float64(sum) / float64(span) * 100
+		elapsed := time.Since(start)
+		eta := "?"
+		if pct > 0.5 {
+			eta = time.Duration(float64(elapsed) * (100 - pct) / pct).Round(time.Second).String()
+		}
+		fmt.Fprintf(os.Stderr, "scanned %d/%d blocks (%.1f%%) elapsed=%s eta=%s\n",
+			sum, span, pct, elapsed.Round(time.Second), eta)
+	}
+
 	span := to - from + 1
 	shard := span / workers
 	if shard == 0 {
@@ -294,8 +334,8 @@ func cmdGovSweepScan(args []string) int {
 		wg.Add(1)
 		go func(w int, lo, hi uint32) {
 			defer wg.Done()
-			shards[w] = govScanShard(path, lo, hi)
-			fmt.Fprintf(os.Stderr, "worker %d [%d..%d] events=%d\n", w, lo, hi, len(shards[w]))
+			shards[w] = govScanShard(path, lo, hi, w, reportProgress)
+			fmt.Fprintf(os.Stderr, "worker %d [%d..%d] DONE events=%d\n", w, lo, hi, len(shards[w]))
 		}(w, lo, hi)
 	}
 	wg.Wait()
