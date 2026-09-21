@@ -19,6 +19,25 @@ type Proposal struct {
 	Subject    string
 	Permlink   string
 	TotalVotes int64 // sum of voter vesting_shares
+	// Removed mirrors proposal_object::removed. A remove_proposal_operation
+	// that runs out of its per-operation removal budget cannot erase every
+	// proposal it names; the ones left over are FLAGGED instead, with
+	// end_date pulled back so they stop being funded, and the regular
+	// per-block sweep (RemoveOldProposals) finishes the job later.
+	// dhf_evaluator.cpp:255 — the flag is what HF29's
+	// VALIDATE_ALL_PROPOSAL_IDS treats as "doesn't exist".
+	Removed bool
+}
+
+// ProposalMaintenanceCleanupSec is HIVE_PROPOSAL_MAINTENANCE_CLEANUP — one
+// day. proposal_object::get_end_date_with_delay() adds it to end_date, and
+// that DELAYED date is what the by_end_date index orders on: a proposal stays
+// "alive" for a day past its end so the corner cases around expiry have room.
+const ProposalMaintenanceCleanupSec uint32 = 60 * 60 * 24
+
+// EndDateWithDelay mirrors proposal_object::get_end_date_with_delay().
+func (p *Proposal) EndDateWithDelay() uint32 {
+	return p.EndDate + ProposalMaintenanceCleanupSec
 }
 
 // ProposalVote (proposalID, voter) edge.
@@ -34,6 +53,15 @@ const (
 	// per-block process_proposals hook iterates this index to retire
 	// any proposal whose end_date has passed.
 	ProposalByEndDateIndex state.IndexID = 1
+	// ProposalRemovedIndex holds exactly the proposals whose Removed flag is
+	// set, keyed the same way as ProposalByEndDateIndex so iteration order is
+	// identical. hived has no such index: dhf_processor::remove_proposals
+	// walks by_end_date and skips every proposal that is not flagged. That
+	// walk is O(all expired proposals) on EVERY block, which hived can afford
+	// with an in-memory multi_index and gopherd cannot afford against the
+	// state layer. Restricting the scan to the flagged rows visits the same
+	// proposals in the same order and skips only the no-ops.
+	ProposalRemovedIndex state.IndexID = 2
 )
 
 func proposalKey(id int64) []byte {
@@ -59,6 +87,14 @@ func AppendProposal(dst []byte, p *Proposal) []byte {
 	dst = fcraw.AppendVarUint(dst, uint32(len(p.Permlink)))
 	dst = append(dst, p.Permlink...)
 	dst = appendI64LE(dst, p.TotalVotes)
+	// Appended LAST, and read back only if there are bytes left, so rows
+	// written before the field existed still decode (as Removed=false, which
+	// is what they were: nothing could flag a proposal before this).
+	if p.Removed {
+		dst = append(dst, 1)
+	} else {
+		dst = append(dst, 0)
+	}
 	return dst
 }
 
@@ -94,14 +130,42 @@ func ReadProposal(src []byte) (Proposal, error) {
 		return p, err
 	}
 	if !r.AtEnd() {
+		var flag uint8
+		if flag, err = r.ReadUint8(); err != nil {
+			return p, err
+		}
+		p.Removed = flag != 0
+	}
+	if !r.AtEnd() {
 		return p, errors.New("proposal: trailing bytes")
 	}
 	return p, nil
 }
 
+// proposalByEndDateKey keys on the RAW end_date, where hived's by_end_date
+// composite key uses get_end_date_with_delay() (end_date + one day). Adding a
+// constant to every key would reorder nothing, and it would change an
+// encoding that snapshots on disk already use — so the delay is applied where
+// it actually matters, at the boundary comparison in the sweep, not here.
 func proposalByEndDateKey(endDate uint32, id int64) []byte {
 	out := state.AppendUint32BE(nil, endDate)
 	return state.AppendInt64BE(out, id)
+}
+
+// ProposalIDFromEndDateKey decodes a key produced by proposalByEndDateKey:
+// 4 bytes of big-endian end_date followed by the sign-flipped big-endian id.
+func ProposalIDFromEndDateKey(key []byte) (endDate uint32, id int64, ok bool) {
+	if len(key) < 12 {
+		return 0, 0, false
+	}
+	for i := 0; i < 4; i++ {
+		endDate = endDate<<8 | uint32(key[i])
+	}
+	var u uint64
+	for i := 4; i < 12; i++ {
+		u = u<<8 | uint64(key[i])
+	}
+	return endDate, int64(u ^ (1 << 63)), true
 }
 
 // PutProposal stores p AND maintains the by-end-date secondary index.
@@ -110,6 +174,21 @@ func proposalByEndDateKey(endDate uint32, id int64) []byte {
 func PutProposal(s *state.Session, p *Proposal) {
 	s.Put(ProposalTable, state.PrimaryIndex, proposalKey(p.ID), AppendProposal(nil, p))
 	s.Put(ProposalTable, ProposalByEndDateIndex, proposalByEndDateKey(p.EndDate, p.ID), nil)
+	if p.Removed {
+		s.Put(ProposalTable, ProposalRemovedIndex, proposalByEndDateKey(p.EndDate, p.ID), nil)
+	}
+}
+
+// ReplaceProposal stores next after dropping the secondary-index entries that
+// belong to prev. Use it for any update that moves EndDate or sets Removed;
+// PutProposal alone would leave the old index entry behind, pointing at a
+// proposal that no longer sorts there.
+func ReplaceProposal(s *state.Session, prev, next *Proposal) {
+	s.Delete(ProposalTable, ProposalByEndDateIndex, proposalByEndDateKey(prev.EndDate, prev.ID))
+	if prev.Removed {
+		s.Delete(ProposalTable, ProposalRemovedIndex, proposalByEndDateKey(prev.EndDate, prev.ID))
+	}
+	PutProposal(s, next)
 }
 
 // DeleteProposalFull removes both the primary row and the by-end-date
@@ -117,6 +196,7 @@ func PutProposal(s *state.Session, p *Proposal) {
 func DeleteProposalFull(s *state.Session, p *Proposal) {
 	s.Delete(ProposalTable, state.PrimaryIndex, proposalKey(p.ID))
 	s.Delete(ProposalTable, ProposalByEndDateIndex, proposalByEndDateKey(p.EndDate, p.ID))
+	s.Delete(ProposalTable, ProposalRemovedIndex, proposalByEndDateKey(p.EndDate, p.ID))
 }
 
 func GetProposal(s *state.Session, id int64) (Proposal, error) {
@@ -147,32 +227,10 @@ func HasProposalVote(s *state.Session, id int64, voter auth.AccountName) (bool, 
 	return s.Has(ProposalVoteTable, state.PrimaryIndex, proposalVoteKey(id, voter))
 }
 
-// DeleteAllProposalVotesForProposal removes every ProposalVote row
-// attached to `id`. Mirrors the C++ database_dhf.cpp::on_proposal_remove
-// cascade: the proposal_vote_idx is iterated by proposal_id and each
-// row erased. The proposal_vote primary key encoding is
-// (int64BE(id), account_name) so an 8-byte prefix Range yields exactly
-// the voter rows for `id`.
+// DeleteAllProposalVotesForProposal removes every ProposalVote row attached
+// to `id`, with no removal budget. Kept as the unbudgeted form of
+// RemoveProposalVotesForProposal for callers that are not subject to
+// HIVE_GLOBAL_REMOVE_THRESHOLD.
 func DeleteAllProposalVotesForProposal(s *state.Session, id int64) {
-	prefix := state.AppendInt64BE(nil, id)
-	// Two-pass: collect the voter sub-keys first so the mutation of the
-	// overlay during deletion doesn't disturb the iterator.
-	var voters []auth.AccountName
-	_ = s.Range(ProposalVoteTable, state.PrimaryIndex, prefix,
-		func(body, _ []byte) (bool, error) {
-			// body layout: [int64BE id (8)][account_name (16, NUL padded)]
-			if len(body) < 8+state.AccountNameKeyLen {
-				return true, nil
-			}
-			nameBytes := body[8 : 8+state.AccountNameKeyLen]
-			n := state.AccountNameKeyLen
-			for n > 0 && nameBytes[n-1] == 0 {
-				n--
-			}
-			voters = append(voters, auth.AccountName(string(nameBytes[:n])))
-			return true, nil
-		})
-	for _, v := range voters {
-		DeleteProposalVote(s, id, v)
-	}
+	RemoveProposalVotesForProposal(s, id, NewRemoveGuard(-1))
 }

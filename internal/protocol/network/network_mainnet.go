@@ -29,3 +29,11 @@ var ChainID = MustHexHash32(chainIDHex)
 
 // OldChainID is the chain ID used for signing pre-HF24. It is the all-zero hash.
 var OldChainID = Hash32{}
+
+// GlobalRemoveThreshold mirrors HIVE_GLOBAL_REMOVE_THRESHOLD
+// (libraries/protocol/include/hive/protocol/config.hpp:174 on the live-network
+// branch). It bounds how many state objects a single removal pass may erase;
+// hived stores it in dynamic_global_property_object::current_remove_threshold,
+// which only the debug plugin ever changes, so a constant is faithful for any
+// chain gopherd replays. A negative value would mean "no limit".
+const GlobalRemoveThreshold int16 = 200

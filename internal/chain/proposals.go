@@ -7,6 +7,7 @@ import (
 
 	"gopherd/internal/protocol/asset"
 	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/protocol/network"
 	"gopherd/internal/state"
 	"gopherd/internal/state/objects"
 )
@@ -66,6 +67,10 @@ func processProposals(s *state.Session, blockTime uint32, blockNum uint32) {
 	if !hf.Has(hardfork.HF21) {
 		return
 	}
+	// dhf_processor::run() is remove_old_proposals → record_funding →
+	// convert_funds → make_payments, and only the last two are gated on the
+	// maintenance period: the removal sweep runs on EVERY block.
+	removeOldProposals(s, blockTime)
 	// Daily HIVE→HBD treasury conversion (HF24+) runs first; matches
 	// the C++ order: convert_funds() → make_payments() inside
 	// sps_processor::run().
@@ -305,6 +310,61 @@ func processProposals(s *state.Session, blockTime uint32, blockNum uint32) {
 // where dgpo.next_daily_maintenance_time starts at genesis_time + 1d
 // from feed_history bootstrap). On subsequent ticks, we advance by
 // 1 day and convert.
+
+// removeOldProposals mirrors dhf_processor::remove_proposals
+// (libraries/chain/util/dhf_processor.cpp:44), which runs once per block.
+//
+// Expired proposals are deliberately NOT swept: they stay in state so
+// list_proposals can still report them. The only thing this erases is what a
+// remove_proposal_operation flagged after running out of its removal budget —
+// normally nothing at all, occasionally the tail of a proposal whose vote
+// count ran past HIVE_GLOBAL_REMOVE_THRESHOLD, spread over as many blocks as
+// it takes at 200 objects each.
+//
+// hived reaches those rows by walking by_end_date over every proposal whose
+// DELAYED end date has passed and skipping the ones that are not flagged.
+// gopherd walks an index that holds only the flagged ones, which visits the
+// same proposals in the same order at a fraction of the cost — the skipped
+// entries are no-ops in hived too.
+func removeOldProposals(s *state.Session, blockTime uint32) {
+	// upper_bound(head_time) on get_end_date_with_delay(): a proposal is in
+	// range once end_date + HIVE_PROPOSAL_MAINTENANCE_CLEANUP <= head_time.
+	if blockTime < objects.ProposalMaintenanceCleanupSec {
+		return
+	}
+	maxEndDate := blockTime - objects.ProposalMaintenanceCleanupSec
+
+	// Collect before mutating: Range shares one pooled iterator per session.
+	var due []int64
+	_ = s.Range(objects.ProposalTable, objects.ProposalRemovedIndex, nil,
+		func(key, _ []byte) (bool, error) {
+			endDate, id, ok := objects.ProposalIDFromEndDateKey(key)
+			if !ok {
+				return true, nil
+			}
+			if endDate > maxEndDate {
+				return false, nil // index is end-date ordered; nothing later qualifies
+			}
+			due = append(due, id)
+			return true, nil
+		})
+	if len(due) == 0 {
+		return
+	}
+
+	guard := objects.NewRemoveGuard(network.GlobalRemoveThreshold)
+	for _, id := range due {
+		if guard.Done() {
+			break
+		}
+		p, err := objects.GetProposal(s, id)
+		if err != nil {
+			continue
+		}
+		objects.RemoveProposalWithVotes(s, &p, guard)
+	}
+}
+
 func convertProposalFunds(s *state.Session, blockTime uint32, hf hardfork.Set) {
 	if !hf.Has(hardfork.HF24) {
 		return
