@@ -46,13 +46,23 @@ package main
 // verdict is a prompt to check whether the accounts in that slot had declined
 // voting rights first.
 //
-// Usage: gopherd govsweep-scan <block_log> <from_block> <to_block>
+// Usage: gopherd govsweep-scan <block_log> <from_block> <to_block> [events.gob]
+//
+// Extraction costs ~80 minutes over the full range and the simulation costs
+// seconds, so the optional fourth argument writes the extracted events out.
+// Re-running the analysis against a dumped file takes no I/O at all — which
+// matters because the simulation is the part that gets revised as more of
+// hived's behaviour is modelled, and re-reading 380GB to change one line of
+// arithmetic is a bad trade. Pass the .gob path in place of the block log to
+// re-simulate.
 
 import (
+	"encoding/gob"
 	"fmt"
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -178,7 +188,22 @@ type govSweepResult struct {
 	overBudget  int
 	slotsSeen   int
 	votersSeen  int
+	// maxPerWindow is the largest total across any run of govMergeWindowSlots
+	// CONSECUTIVE slots. Slots are only one block each while the chain never
+	// misses one; every missed block makes the next block cover the skipped
+	// slot too, so its sweep faces both slots' accounts at once. A verdict
+	// that only looked at single slots would under-count exactly when the
+	// chain is unhealthy, which is when a clump is most likely.
+	maxPerWindow     int
+	maxWindowEndTime uint32
+	overBudgetWindow int
 }
+
+// govMergeWindowSlots is how many consecutive slots one block is assumed to be
+// able to absorb — 20 slots is a full minute of missed blocks, far beyond any
+// normal run of misses. If even that window stays under the budget, no
+// realistic outage can push a sweep over it.
+const govMergeWindowSlots = 20
 
 // govSimulate replays the events in block order and reports the largest number
 // of proposal votes a single sweep would have had to remove.
@@ -241,6 +266,7 @@ func govSimulate(events []govEvent, limit int) govSweepResult {
 	}
 
 	res := govSweepResult{slotsSeen: len(slots), votersSeen: voters}
+	ordered := make([]uint32, 0, len(slots))
 	for slot, b := range slots {
 		if b.voteCount > limit {
 			res.overBudget++
@@ -250,13 +276,48 @@ func govSimulate(events []govEvent, limit int) govSweepResult {
 			res.maxSlotTime = slot * govBlockIntervalSec
 			res.maxAccounts = b.accounts
 		}
+		ordered = append(ordered, slot)
+	}
+
+	// Sliding window over CONSECUTIVE slot numbers, so a run of missed blocks
+	// merging several slots into one sweep is accounted for. Gaps in the slot
+	// numbering are real gaps in time, not adjacency, so the window is keyed
+	// on slot number rather than on position in this list.
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i] < ordered[j] })
+	lo := 0
+	running := 0
+	for hi := 0; hi < len(ordered); hi++ {
+		running += slots[ordered[hi]].voteCount
+		for ordered[hi]-ordered[lo] >= govMergeWindowSlots {
+			running -= slots[ordered[lo]].voteCount
+			lo++
+		}
+		if running > limit {
+			res.overBudgetWindow++
+		}
+		if running > res.maxPerWindow {
+			res.maxPerWindow = running
+			res.maxWindowEndTime = ordered[hi] * govBlockIntervalSec
+		}
 	}
 	return res
 }
 
 func cmdGovSweepScan(args []string) int {
+	// Re-simulate from a previously dumped event file: one argument, and it
+	// ends in .gob.
+	if len(args) == 1 && strings.HasSuffix(args[0], ".gob") {
+		events, from, to, err := govLoadEvents(args[0])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "govsweep-scan: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(os.Stderr, "loaded %d events from %s\n", len(events), args[0])
+		return govReport(events, from, to)
+	}
 	if len(args) < 3 {
-		fmt.Fprintln(os.Stderr, "usage: gopherd govsweep-scan <block_log> <from_block> <to_block>")
+		fmt.Fprintln(os.Stderr, "usage: gopherd govsweep-scan <block_log> <from_block> <to_block> [events.gob]")
+		fmt.Fprintln(os.Stderr, "       gopherd govsweep-scan <events.gob>")
 		return 2
 	}
 	path := args[0]
@@ -349,6 +410,62 @@ func cmdGovSweepScan(args []string) int {
 	// the same block, and the vote set is order-sensitive.
 	sort.SliceStable(events, func(i, j int) bool { return events[i].block < events[j].block })
 
+	if len(args) >= 4 {
+		if err := govSaveEvents(args[3], events, from, to); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not write %s: %v\n", args[3], err)
+		} else {
+			fmt.Fprintf(os.Stderr, "wrote %d events to %s\n", len(events), args[3])
+		}
+	}
+	return govReport(events, from, to)
+}
+
+// govEventFile is the dumped form. Exported fields because gob ignores
+// unexported ones, which would silently write empty events.
+type govEventFile struct {
+	From, To uint32
+	Events   []govEventDump
+}
+
+type govEventDump struct {
+	Block, Ts uint32
+	Kind      uint8
+	Account   string
+	Proposal  int64
+	Approve   bool
+}
+
+func govSaveEvents(path string, events []govEvent, from, to uint32) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	out := govEventFile{From: from, To: to, Events: make([]govEventDump, len(events))}
+	for i, e := range events {
+		out.Events[i] = govEventDump{e.block, e.ts, uint8(e.kind), e.account, e.proposal, e.approve}
+	}
+	return gob.NewEncoder(f).Encode(&out)
+}
+
+func govLoadEvents(path string) ([]govEvent, uint32, uint32, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	defer f.Close()
+	var in govEventFile
+	if err := gob.NewDecoder(f).Decode(&in); err != nil {
+		return nil, 0, 0, err
+	}
+	events := make([]govEvent, len(in.Events))
+	for i, e := range in.Events {
+		events[i] = govEvent{e.Block, e.Ts, govEventKind(e.Kind), e.Account, e.Proposal, e.Approve}
+	}
+	return events, in.From, in.To, nil
+}
+
+func govReport(events []govEvent, from, to uint32) int {
 	limit := int(network.GlobalRemoveThreshold)
 	res := govSimulate(events, limit)
 
@@ -360,12 +477,18 @@ func cmdGovSweepScan(args []string) int {
 	fmt.Printf("budget:           %d objects per sweep\n", limit)
 	fmt.Printf("busiest slot:     %d proposal votes across %d accounts (expiry ts %d)\n",
 		res.maxPerSlot, res.maxAccounts, res.maxSlotTime)
-	if res.overBudget > 0 {
-		fmt.Printf("VERDICT: %d slots exceed the budget — gopherd and hived DIVERGE on those blocks;\n"+
-			"         the account-id ordering work is required before this can be enforced.\n", res.overBudget)
+	fmt.Printf("busiest %d-slot window: %d proposal votes (ending ts %d)\n",
+		govMergeWindowSlots, res.maxPerWindow, res.maxWindowEndTime)
+	if res.overBudget > 0 || res.overBudgetWindow > 0 {
+		fmt.Printf("VERDICT: %d slots and %d %d-slot windows exceed the budget — gopherd and hived\n"+
+			"         DIVERGE on those blocks; the account-id ordering work is required\n"+
+			"         before the budget can be enforced.\n",
+			res.overBudget, res.overBudgetWindow, govMergeWindowSlots)
 		return 1
 	}
-	fmt.Printf("VERDICT: no slot reaches the budget. The guard would never have fired,\n" +
-		"         so gopherd's unbudgeted sweep has matched hived over this range.\n")
+	fmt.Printf("VERDICT: no slot reaches the budget, and neither does any %d-slot window —\n"+
+		"         so not even a full minute of missed blocks merging sweeps together\n"+
+		"         would reach it. The guard would never have fired, and gopherd's\n"+
+		"         unbudgeted sweep has matched hived over this range.\n", govMergeWindowSlots)
 	return 0
 }

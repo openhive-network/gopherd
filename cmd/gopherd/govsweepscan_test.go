@@ -138,3 +138,69 @@ func TestGovSimulateAtBudgetIsNotOver(t *testing.T) {
 		t.Errorf("exactly at the budget must not be flagged: got %d", res.overBudget)
 	}
 }
+
+// TestGovSimulateMergesConsecutiveSlots covers the missed-block case. Slots
+// are one block each only while the chain never misses one; every missed block
+// makes the next block cover the skipped slot too, so its sweep faces both
+// slots' accounts at once. A verdict built on single slots alone would
+// under-count exactly when the chain is unhealthy — which is when a clump is
+// most likely.
+func TestGovSimulateMergesConsecutiveSlots(t *testing.T) {
+	base := uint32(1700000000)
+	// Two accounts whose expirations land in ADJACENT slots, 150 votes each.
+	// Neither slot alone reaches the budget; one missed block between them
+	// puts all 300 in front of a single sweep.
+	var events []govEvent
+	add := func(account string, actionTs uint32, votes int) {
+		for i := 0; i < votes; i++ {
+			events = append(events, govEvent{
+				block: 1, ts: actionTs, kind: govEvtProposalVote,
+				account: account, proposal: int64(i), approve: true,
+			})
+		}
+	}
+	add("alice", base, 150)
+	// One slot later: the expiration is a pure offset of the action time, so
+	// shifting the action by one slot shifts the expiry by one slot.
+	add("bob", base+govBlockIntervalSec, 150)
+
+	res := govSimulate(events, 200)
+	if res.maxPerSlot != 150 {
+		t.Fatalf("single-slot max: got %d, want 150", res.maxPerSlot)
+	}
+	if res.overBudget != 0 {
+		t.Errorf("neither slot alone exceeds the budget, got %d over", res.overBudget)
+	}
+	if res.maxPerWindow != 300 {
+		t.Errorf("merged window: got %d, want 300 — adjacent slots must be summed", res.maxPerWindow)
+	}
+	if res.overBudgetWindow == 0 {
+		t.Error("300 across two adjacent slots exceeds 200 and must be flagged")
+	}
+}
+
+// TestGovSimulateWindowRespectsRealGaps — the window slides over slot NUMBERS,
+// not over list positions. Two clumps a year apart are never swept together,
+// and summing them would invent a divergence.
+func TestGovSimulateWindowRespectsRealGaps(t *testing.T) {
+	base := uint32(1700000000)
+	var events []govEvent
+	add := func(account string, actionTs uint32, votes int) {
+		for i := 0; i < votes; i++ {
+			events = append(events, govEvent{
+				block: 1, ts: actionTs, kind: govEvtProposalVote,
+				account: account, proposal: int64(i), approve: true,
+			})
+		}
+	}
+	add("alice", base, 150)
+	add("bob", base+govMergeWindowSlots*govBlockIntervalSec*100, 150)
+
+	res := govSimulate(events, 200)
+	if res.maxPerWindow != 150 {
+		t.Errorf("far-apart clumps were summed: window max %d, want 150", res.maxPerWindow)
+	}
+	if res.overBudgetWindow != 0 {
+		t.Errorf("no window should be over budget, got %d", res.overBudgetWindow)
+	}
+}
