@@ -53,3 +53,42 @@ func sha256OfString(s string) Hash32 {
 	sum := sha256.Sum256([]byte(s))
 	return Hash32(sum)
 }
+
+// BlockchainVersionNum is HIVE_BLOCKCHAIN_VERSION packed the way
+// hive::protocol::version stores it: (major << 24) | (hardfork << 16) |
+// revision, with revision occupying the low SIXTEEN bits
+// (libraries/protocol/include/hive/protocol/version.hpp:30).
+//
+// This is the value a produced block carries in its version header extension,
+// and applying that extension is what sets the producing witness's
+// running_version.
+const BlockchainVersionNum uint32 = uint32(BlockchainVersionMajor)<<24 |
+	uint32(BlockchainVersionHardfork)<<16 |
+	uint32(BlockchainVersionRevision)
+
+// BlockchainVersion is the human-readable form database_api.get_version
+// reports, e.g. "1.28.7".
+var BlockchainVersion = FormatVersion(BlockchainVersionNum)
+
+// FormatVersion renders a packed v_num as hived's version::operator string()
+// does: major.hardfork.revision, with revision taken from the low 16 bits.
+//
+// Note the field widths — major and hardfork are one byte each, revision is
+// two. Reading revision as a single byte silently renders 1.28.7 as "28.0.7".
+func FormatVersion(v uint32) string {
+	return itoa(v>>24&0xFF) + "." + itoa(v>>16&0xFF) + "." + itoa(v&0xFFFF)
+}
+
+func itoa(v uint32) string {
+	if v == 0 {
+		return "0"
+	}
+	var buf [10]byte
+	i := len(buf)
+	for v > 0 {
+		i--
+		buf[i] = byte('0' + v%10)
+		v /= 10
+	}
+	return string(buf[i:])
+}

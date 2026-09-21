@@ -30,6 +30,8 @@ import (
 	"gopherd/internal/fcraw"
 	"gopherd/internal/protocol/auth"
 	"gopherd/internal/protocol/block"
+	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/protocol/network"
 	"gopherd/internal/protocol/op"
 	"gopherd/internal/protocol/tx"
 	"gopherd/internal/state"
@@ -1401,39 +1403,105 @@ func (p *Plugin) maxTxBytes(_ objects.DynamicGlobalProperty) int {
 	return max - blockOverheadBytes
 }
 
+// headerVersionExtensions mirrors block_producer::adjust_hardfork_version_vote
+// (libraries/plugins/witness/block_producer.cpp:87). A produced block carries
+// the producing witness's version position in its header, and applying those
+// extensions on the receiving side is what WRITES that position into the
+// witness record (see chain.processHeaderExtensions).
+//
+// Two independent entries, each emitted only when the chain's record of this
+// witness disagrees with what this binary would say:
+//
+//  1. version — HIVE_BLOCKCHAIN_VERSION, when witness.running_version differs.
+//     This is the one that matters for liveness: validate_block rejects a
+//     block whose producer's running_version is below current_hardfork_version,
+//     and a witness that has NEVER produced has 0. Without this extension
+//     gopherd could not bootstrap a new witness past HF5 — its own blocks
+//     would be rejected, by us and by the network.
+//
+//  2. hardfork_version_vote — the fork this binary is willing to move to, or
+//     a walk-back when the witness is recorded as voting for something this
+//     binary does not know about. The majority of these votes is what actually
+//     schedules a hardfork, so emitting a vote for a fork we cannot apply
+//     would help activate one we then fail to follow.
+//
+// Returns nil when the chain already agrees on both, which is the steady state
+// — hived likewise emits an empty extensions set for almost every block.
+func (p *Plugin) headerVersionExtensions(s *state.Session, witnessName string) []block.HeaderExtension {
+	w, err := objects.GetWitness(s, auth.AccountName(witnessName))
+	if err != nil {
+		return nil
+	}
+	hpo, err := objects.GetHardforkPropertyObject(s)
+	if err != nil {
+		return nil
+	}
+
+	var exts []block.HeaderExtension
+
+	if w.RunningVersion != network.BlockchainVersionNum {
+		exts = append(exts, block.HeaderExtension{
+			Tag:     block.HeaderExtVersion,
+			Version: network.BlockchainVersionNum,
+		})
+	}
+
+	// hived compares hardfork_version values, and hardfork_version is a
+	// version with the revision forced to zero — so the blockchain version
+	// participates here with its revision masked off. Comparing the raw
+	// v_num instead would make 1.28.7 look "newer" than hardfork 1.28 and
+	// vote for a fork that does not exist.
+	binaryHF := network.BlockchainVersionNum &^ 0xFFFF
+
+	switch {
+	case hpo.CurrentHardforkVersion < binaryHF:
+		// This binary knows a fork the chain has not applied yet. Vote for
+		// the NEXT one after the last applied, not for the binary's own
+		// version: they differ whenever more than one fork is pending.
+		next := hardfork.ID(hpo.LastHardfork + 1)
+		if int(next) > hardfork.NumHardforks {
+			break
+		}
+		wantVer := hardfork.PackedVersion(next)
+		wantTime := hardfork.ActivationTime(next)
+		if w.HardforkVersionVote != wantVer || w.HardforkTimeVote != wantTime {
+			exts = append(exts, block.HeaderExtension{
+				Tag:                 block.HeaderExtHardforkVersionVote,
+				HardforkVersion:     wantVer,
+				HardforkVersionTime: wantTime,
+			})
+		}
+	case hpo.CurrentHardforkVersion == binaryHF && w.HardforkVersionVote > binaryHF:
+		// The chain is at this binary's newest fork, yet this witness is on
+		// record voting for a LATER one — a vote left behind by a newer
+		// binary that used to produce for it. Walk it back to the applied
+		// fork: a vote we cannot honour is worse than no vote.
+		exts = append(exts, block.HeaderExtension{
+			Tag:                 block.HeaderExtHardforkVersionVote,
+			HardforkVersion:     hardfork.PackedVersion(hardfork.ID(hpo.LastHardfork)),
+			HardforkVersionTime: hardfork.ActivationTime(hardfork.ID(hpo.LastHardfork)),
+		})
+	}
+
+	return exts
+}
+
 func (p *Plugin) buildBlockParts(prod *Producer, dgpo objects.DynamicGlobalProperty, blockTime uint32) ([]byte, int, error) {
 	if blockTime == 0 || prod == nil {
 		return nil, 0, errors.New("buildBlock: invalid args")
 	}
-	// MISSING: the header version extensions.
-	//
-	// `[]byte{0}` is an EMPTY extensions set. hived's
-	// block_producer::adjust_hardfork_version_vote (block_producer.cpp:87)
-	// inserts up to two block_header_extensions into every block it produces:
-	//
-	//   1. HIVE_BLOCKCHAIN_VERSION, whenever witness.running_version differs
-	//      from the binary's version. Applying that extension is what SETS
-	//      running_version on the witness object.
-	//   2. a hardfork_version_vote, whenever the witness's recorded vote does
-	//      not match what this binary would vote for.
-	//
-	// gopherd produces neither, with two consequences. A witness that only
-	// ever produces through gopherd keeps whatever running_version its last
-	// hived-produced block left behind, forever. And a witness that has NEVER
-	// produced has running_version 0, which our own validate_block rejects
-	// (validate_block.go: "running_version < current_hardfork_version") — so
-	// gopherd cannot bootstrap a brand-new witness on a chain past HF5, and
-	// the blocks it produced would be rejected by the network too.
-	//
-	// It has not bitten on mainnet because the witness we produce as was long
-	// since running hived. Fixing it needs the extension encoding plus
-	// witness.hardfork_version_vote / hardfork_time_vote in state, and it is
-	// consensus-shaped: the version majority drives hardfork activation.
+	// Version extensions, per block_producer::adjust_hardfork_version_vote.
+	// Empty (the bare 0x00 marker) in the steady state, which is almost every
+	// block — see headerVersionExtensions for what puts an entry in.
+	var exts []block.HeaderExtension
+	if p.State != nil {
+		exts = p.headerVersionExtensions(state.NewSession(p.State), string(prod.Account))
+	}
 	hdr := block.Header{
 		Previous:   dgpo.HeadBlockID,
 		Timestamp:  blockTime,
 		Witness:    prod.Account,
-		Extensions: []byte{0},
+		Extensions: block.AppendHeaderExtensions(nil, exts),
 	}
 
 	// Age out transactions the chain can no longer accept before selecting, so

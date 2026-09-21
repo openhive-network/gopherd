@@ -3,6 +3,7 @@ package block
 import (
 	"crypto/sha256"
 	"fmt"
+	"sort"
 
 	"gopherd/internal/fcraw"
 )
@@ -98,6 +99,71 @@ func ParseHeaderExtensions(raw []byte) ([]HeaderExtension, error) {
 		out = append(out, ext)
 	}
 	return out, nil
+}
+
+// AppendHeaderExtensions encodes exts as a block_header_extensions field:
+// a varint count followed by one varint tag + fixed-size body per entry.
+//
+// hived's extensions member is a flat_set< block_header_extensions >, i.e.
+// SORTED and DEDUPED, and static_variant orders by tag before value. Callers
+// build the set in whatever order the rules read best, so sorting and
+// deduping happens here — emitting them out of order would produce a header
+// that round-trips through our own parser but differs byte-for-byte from the
+// one hived would have signed for the same content.
+//
+// An empty set encodes as the single 0x00 byte every extension-less block on
+// the chain carries.
+func AppendHeaderExtensions(dst []byte, exts []HeaderExtension) []byte {
+	if len(exts) == 0 {
+		return append(dst, 0)
+	}
+	sorted := make([]HeaderExtension, len(exts))
+	copy(sorted, exts)
+	sort.Slice(sorted, func(i, j int) bool { return headerExtLess(sorted[i], sorted[j]) })
+	// Dedupe adjacent equals, which is what flat_set::insert would have done.
+	out := sorted[:1]
+	for _, e := range sorted[1:] {
+		if e != out[len(out)-1] {
+			out = append(out, e)
+		}
+	}
+
+	dst = fcraw.AppendVarUint(dst, uint32(len(out)))
+	for _, e := range out {
+		dst = fcraw.AppendVarUint(dst, uint32(e.Tag))
+		switch e.Tag {
+		case HeaderExtVoid:
+			// no body
+		case HeaderExtVersion:
+			dst = appendU32LE(dst, e.Version)
+		case HeaderExtHardforkVersionVote:
+			dst = appendU32LE(dst, e.HardforkVersion)
+			dst = appendU32LE(dst, e.HardforkVersionTime)
+		}
+	}
+	return dst
+}
+
+// headerExtLess orders entries the way std::less over a static_variant does:
+// by tag, then by the variant's own value.
+func headerExtLess(a, b HeaderExtension) bool {
+	if a.Tag != b.Tag {
+		return a.Tag < b.Tag
+	}
+	switch a.Tag {
+	case HeaderExtVersion:
+		return a.Version < b.Version
+	case HeaderExtHardforkVersionVote:
+		if a.HardforkVersion != b.HardforkVersion {
+			return a.HardforkVersion < b.HardforkVersion
+		}
+		return a.HardforkVersionTime < b.HardforkVersionTime
+	}
+	return false
+}
+
+func appendU32LE(dst []byte, v uint32) []byte {
+	return append(dst, byte(v), byte(v>>8), byte(v>>16), byte(v>>24))
 }
 
 // SignatureSize is the on-wire size of a witness signature

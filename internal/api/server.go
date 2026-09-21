@@ -88,8 +88,14 @@ func itoa64(v int64) string { return strconv.FormatInt(v, 10) }
 // networkChainIDHex returns the active build's chain_id in hex.
 func networkChainIDHex() string { return network.ChainID.Hex() }
 
-// versionString renders a packed hived version_type (low 3 bytes = a.b.c) as
-// "a.b.c".
+// versionString renders a packed hive::protocol::version as "major.hardfork.revision".
+//
+// The layout is (major << 24) | (hardfork << 16) | revision, with revision in
+// the low SIXTEEN bits (version.hpp:30). This used to shift by 16/8/0 and mask
+// every field to one byte, which dropped the major byte entirely and split
+// revision in half: a witness running 1.28.7 (0x011C0007) was reported as
+// "28.0.7", and running_version / hardfork_version_vote / majority_version all
+// go through here.
 func versionString(v uint32) string {
-	return itoa((v>>16)&0xff) + "." + itoa((v>>8)&0xff) + "." + itoa(v&0xff)
+	return network.FormatVersion(v)
 }

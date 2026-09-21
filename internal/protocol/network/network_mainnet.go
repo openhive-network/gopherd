@@ -44,8 +44,12 @@ const GlobalRemoveThreshold int16 = 200
 // dab219074, the release carrying the p2p fork-tolerance fixes); the testnet
 // definition went to 1.29.0 separately.
 //
-// It is what database_api.get_version reports, and in hived it is also the
-// witness's reported running_version. gopherd does not vote a version in the
-// block header yet (buildBlockParts writes empty extensions), so here it is
-// the API answer only.
-const BlockchainVersion = "1.28.7"
+// Two consumers, one source of truth: database_api.get_version reports the
+// string, and a produced block header carries the packed v_num in its version
+// extension (which is what sets the witness's running_version). They are
+// derived from the same triple so they cannot drift.
+const (
+	BlockchainVersionMajor    = 1
+	BlockchainVersionHardfork = 28
+	BlockchainVersionRevision = 7
+)
