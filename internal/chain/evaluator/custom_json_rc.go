@@ -2,6 +2,7 @@ package evaluator
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"math/bits"
@@ -83,6 +84,31 @@ func applyRCCustomJSON(ctx *Context, cj op.CustomJSON) error {
 // rcRegenSeconds — HIVE_RC_REGEN_TIME, 5 days. Mirrors C++.
 const rcRegenSeconds uint32 = 5 * 24 * 60 * 60 // 432000
 
+// ErrRCOverflow is returned when delegate_rc arithmetic would overflow int64.
+var ErrRCOverflow = errors.New("delegate_rc: RC amount overflow")
+
+// safeAddRC adds two RC quantities the way hived does. hived carries these
+// through fc::safe<int64_t> (share_type), which THROWS on overflow; Go's int64
+// wraps silently (hive commit 8cb83d0e3 extended the same hardening to
+// update_account_after_rc_delegation).
+//
+// This is not theoretical. delegate_rc applies one max_rc to up to 100
+// delegatees, so a large max_rc makes the running delta_total wrap NEGATIVE —
+// and a negative total sails through the "does the delegator have enough RC"
+// check. hived rejects such a transaction, which is why no block contains one
+// and replay is unaffected; the cost of wrapping is at the head, where we
+// would admit and then build a block on a transaction every other node
+// refuses. Same shape as the custom-op cap that produced a 579-tx block the
+// network threw away: enforce on PRODUCE what the network enforces on RECEIVE.
+func safeAddRC(a, b int64) (int64, error) {
+	sum := a + b
+	// Overflow iff the operands share a sign and the result differs from it.
+	if (a > 0 && b > 0 && sum < 0) || (a < 0 && b < 0 && sum >= 0) {
+		return 0, fmt.Errorf("%w: %d + %d", ErrRCOverflow, a, b)
+	}
+	return sum, nil
+}
+
 // maxAccountsPerDelegationOp — HIVE_RC_MAX_ACCOUNTS_PER_DELEGATION_OP.
 const maxAccountsPerDelegationOp = 100
 
@@ -119,34 +145,7 @@ func maximumRC(a *objects.Account, onlyDelegable bool) int64 {
 //	current = sat_add(current, regen), clamped to max
 //	last_update = now
 func regenerateRCMana(a *objects.Account, now uint32) {
-	maxMana := a.LastMaxRC
-	if maxMana < 0 {
-		maxMana = 0
-	}
-	if a.RCManaCurrent >= maxMana {
-		a.RCManaCurrent = maxMana
-		a.RCManaLastUpdate = now
-		return
-	}
-	if now <= a.RCManaLastUpdate {
-		return
-	}
-	dt := now - a.RCManaLastUpdate
-	// skip_cap_regen=true (RC path) — do NOT cap dt to regen_time.
-	// 128-bit intermediate to avoid overflow.
-	regen := mul128Div64(uint64(maxMana), uint64(dt), uint64(rcRegenSeconds))
-	if regen > uint64(1<<63-1) {
-		regen = uint64(1<<63 - 1)
-	}
-	nc := a.RCManaCurrent + int64(regen)
-	if nc < a.RCManaCurrent { // overflow guard
-		nc = int64(1<<63 - 1)
-	}
-	if nc > maxMana {
-		nc = maxMana
-	}
-	a.RCManaCurrent = nc
-	a.RCManaLastUpdate = now
+	objects.RegenerateRCMana(a, now)
 }
 
 // mul128Div64 computes (a * b) / c with a 128-bit intermediate via
@@ -376,8 +375,18 @@ func applyDelegateRC(ctx *Context, cj op.CustomJSON, args json.RawMessage) error
 			}
 		}
 		// update_account_after_rc_delegation: mutate to's mana, last_max_rc, received_rc.
-		to.DelegatedRCIn += delta
-		to.RCManaCurrent += delta
+		// received_rc and current_mana are share_type in hived — overflow throws
+		// rather than wrapping.
+		newIn, err := safeAddRC(to.DelegatedRCIn, delta)
+		if err != nil {
+			return err
+		}
+		to.DelegatedRCIn = newIn
+		newMana, err := safeAddRC(to.RCManaCurrent, delta)
+		if err != nil {
+			return err
+		}
+		to.RCManaCurrent = newMana
 		if to.RCManaCurrent < 0 {
 			to.RCManaCurrent = 0
 		}
@@ -388,7 +397,11 @@ func applyDelegateRC(ctx *Context, cj op.CustomJSON, args json.RawMessage) error
 		to.LastMaxRC = toMax
 		objects.PutAccount(ctx.DB, to)
 
-		deltaTotal += delta
+		newTotal, err := safeAddRC(deltaTotal, delta)
+		if err != nil {
+			return err
+		}
+		deltaTotal = newTotal
 	}
 
 	// 7. After-the-fact delta_total check — enforced only InControl.
@@ -420,7 +433,11 @@ func applyDelegateRC(ctx *Context, cj op.CustomJSON, args json.RawMessage) error
 			from.RCManaCurrent = 0
 		}
 	}
-	from.DelegatedRCOut += deltaTotal
+	newOut, err := safeAddRC(from.DelegatedRCOut, deltaTotal)
+	if err != nil {
+		return err
+	}
+	from.DelegatedRCOut = newOut
 	if from.DelegatedRCOut < 0 {
 		from.DelegatedRCOut = 0
 	}

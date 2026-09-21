@@ -1,6 +1,9 @@
 package objects
 
-import "math/bits"
+import (
+	"math/bits"
+	"sync/atomic"
+)
 
 // RCRegenTimeSec — HIVE_RC_REGEN_TIME = 5 days. Mirrors libraries/
 // protocol/include/hive/protocol/config.hpp:481.
@@ -148,12 +151,39 @@ func UseMana(current, cost, minMana int64) int64 {
 // writing the account back via PutAccount.
 func RegenerateRCMana(a *Account, now uint32) {
 	maxRC := a.MaximumRC()
+	// hived warns here and, once HF29 lands, throws:
+	//
+	//   FC_ASSERT( mbparams.max_mana == account.last_max_rc || !has_hardfork(
+	//     HIVE_HARDFORK_1_29_RC_IS_CONSENSUS ), "Account ${a} max RC changed
+	//     from ${old} to ${new} without triggering an op" )
+	//
+	// The condition means an operation changed an account's VESTS (or its RC
+	// delegations) without updating last_max_rc — a bug in the RC bookkeeping,
+	// not in the block. gopherd quietly REPAIRS it below by assigning maxRC,
+	// which is why nothing here has ever surfaced. Count it instead, so the
+	// replay evidence hived's own FC_TODO asks for ("needs to be checked with
+	// replay") can actually be gathered before the assertion is turned on.
+	if a.LastMaxRC != maxRC && a.LastMaxRC != 0 {
+		rcStaleMaxCount.Add(1)
+	}
 	params := ManabarParams{MaxMana: maxRC, RegenTime: RCRegenTimeSec}
 	newMana, newUpdate := RegenerateMana(a.RCManaCurrent, a.RCManaLastUpdate, params, now, true)
 	a.RCManaCurrent = newMana
 	a.RCManaLastUpdate = newUpdate
 	a.LastMaxRC = maxRC
 }
+
+// rcStaleMaxCount counts how often an account reached RegenerateRCMana with a
+// last_max_rc that disagreed with its freshly computed maximum.
+//
+// LastMaxRC == 0 is excluded: that is an account the RC bookkeeping has not
+// touched yet (pre-HF20 history, or a freshly created one), not a stale value.
+var rcStaleMaxCount atomic.Uint64
+
+// RCStaleMaxCount reports that counter. A non-zero value on a clean replay is
+// the signal that HF29's RC_IS_CONSENSUS assertion would WEDGE this node once
+// the fork activates, and names the work that has to happen first.
+func RCStaleMaxCount() uint64 { return rcStaleMaxCount.Load() }
 
 // InitRCManabar primes the manabar on a freshly created account.
 // At creation a new account has zero VESTS, so max_rc = 0 and

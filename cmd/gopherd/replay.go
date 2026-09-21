@@ -642,6 +642,14 @@ func cmdReplay(args []string) int {
 		fmt.Printf("parallel:       %d txs applied speculatively, %d re-executed serially\n", pa, pr)
 	}
 	fmt.Printf("block errors:   %d\n", errCount)
+	// hived's RC code warns (NOTIFYALERT) whenever an account's stored
+	// last_max_rc disagrees with its computed maximum, and HF29's
+	// RC_IS_CONSENSUS turns that warning into a throw. gopherd repairs the
+	// value silently, so this count is the only way to know whether the
+	// assertion would be safe to enable. A clean replay must report 0.
+	if n := objects.RCStaleMaxCount(); n > 0 {
+		fmt.Printf("rc stale max:   %d  (HF29 RC_IS_CONSENSUS would REJECT these blocks)\n", n)
+	}
 	fmt.Printf("elapsed:        %s\n", dur.Round(time.Millisecond))
 	if applied > 0 {
 		fmt.Printf("rate:           %.0f blocks/s\n", float64(applied)/dur.Seconds())
