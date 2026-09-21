@@ -1405,6 +1405,30 @@ func (p *Plugin) buildBlockParts(prod *Producer, dgpo objects.DynamicGlobalPrope
 	if blockTime == 0 || prod == nil {
 		return nil, 0, errors.New("buildBlock: invalid args")
 	}
+	// MISSING: the header version extensions.
+	//
+	// `[]byte{0}` is an EMPTY extensions set. hived's
+	// block_producer::adjust_hardfork_version_vote (block_producer.cpp:87)
+	// inserts up to two block_header_extensions into every block it produces:
+	//
+	//   1. HIVE_BLOCKCHAIN_VERSION, whenever witness.running_version differs
+	//      from the binary's version. Applying that extension is what SETS
+	//      running_version on the witness object.
+	//   2. a hardfork_version_vote, whenever the witness's recorded vote does
+	//      not match what this binary would vote for.
+	//
+	// gopherd produces neither, with two consequences. A witness that only
+	// ever produces through gopherd keeps whatever running_version its last
+	// hived-produced block left behind, forever. And a witness that has NEVER
+	// produced has running_version 0, which our own validate_block rejects
+	// (validate_block.go: "running_version < current_hardfork_version") — so
+	// gopherd cannot bootstrap a brand-new witness on a chain past HF5, and
+	// the blocks it produced would be rejected by the network too.
+	//
+	// It has not bitten on mainnet because the witness we produce as was long
+	// since running hived. Fixing it needs the extension encoding plus
+	// witness.hardfork_version_vote / hardfork_time_vote in state, and it is
+	// consensus-shaped: the version majority drives hardfork activation.
 	hdr := block.Header{
 		Previous:   dgpo.HeadBlockID,
 		Timestamp:  blockTime,

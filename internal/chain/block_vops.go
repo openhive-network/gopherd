@@ -16,6 +16,21 @@ import (
 // ported. This struct is intentionally lightweight — a tagged union
 // over the few vops the test suite needs to observe. Buffer is cleared
 // at the top of every ApplyBlock and exposed via LastBlockVOps().
+//
+// MISSING, and worth knowing before chasing an upstream change that touches
+// one: every other virtual operation. author_reward, curation_reward,
+// comment_reward, producer_reward, fill_vesting_withdraw, interest,
+// fill_convert_request, expired_account_notification,
+// declined_voting_rights, effective_comment_vote, hardfork — none are
+// emitted. So a hived commit that only alters a virtual operation's PAYLOAD
+// is a no-op here: hive e3b8a39d5, for instance, changed
+// author_reward_operation's curators_vesting_payout from a single conversion
+// at the post-payout price to the exact sum actually paid, and there is
+// nothing in gopherd for it to change.
+//
+// This is not a small gap. It is what a HAF-style block+vop stream needs, and
+// closing it means a real push_virtual_operation with hived's exact emission
+// ORDER, not just the payloads.
 type BlockVOpKind uint8
 
 const (

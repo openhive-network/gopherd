@@ -33,6 +33,34 @@ func hf29Rule(ctx *Context, id hardfork.ID) bool {
 	return ctx.InControl || ctx.Hardforks.Has(id)
 }
 
+// Where the five HF29 rules live, and what is still MISSING.
+//
+//	ALLOW_MODIFY_LAST_RECURRENT_TRANSFER  recurrent_transfer.go  (HF-only gate)
+//	FIX_ENFORCEMENT_OF_AUTHORITY_SIZE_…   recovery.go
+//	FIX_LIMIT_ORDER_ASSETS                limit_order.go
+//	VALIDATE_ALL_PROPOSAL_IDS             dhf.go                 (HF-only gate)
+//	RC_IS_CONSENSUS                       chain/rc_phase5.go     (partial)
+//
+// RC_IS_CONSENSUS is the partial one. hive commit 6dc8d6fd8 promotes FOUR
+// things to assertions under it, and only two are here:
+//
+//	PORTED  "not enough RC" refuses the transaction        (rc_phase5.go)
+//	PORTED  transaction with no resource user              (rc_phase5.go)
+//	MISSING "max RC changed without triggering an op"      (manabar.go)
+//	MISSING "account not regenerated prior to VEST/RC change"
+//
+// The two missing ones assert on gopherd's OWN bookkeeping rather than on
+// anything in a block, and hived's source carries an FC_TODO saying they need
+// to be checked against a replay before going unconditional. gopherd's
+// RegenerateRCMana silently REPAIRS the first condition, so it has never been
+// observed here; enabling a throw we have never measured would be a wedge
+// waiting for the fork to land. objects.RCStaleMaxCount() counts it instead,
+// and the replay summary prints it — see the comment on RegenerateRCMana.
+// FIX_OPEN_AUTHORITY, below, is NOT an upstream HF29 rule: it exists only on
+// howo's fix/586-erased-authority-test branch (hived 741d7326f) and is absent
+// from 1.29.0-rc2. It is kept because the behaviour is right, not because the
+// fork defines it.
+
 // ErrOpenAuthority is returned when an account_update[2] tries to install an
 // authority nobody can ever satisfy.
 var ErrOpenAuthority = errors.New("cannot set an open authority")

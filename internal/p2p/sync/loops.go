@@ -630,10 +630,7 @@ func (d *Delegate) applyLoop() {
 			// `snailmen09`. Tying block-sig validation to the same
 			// 5-minute staleness gate matches hived's behavior; once at
 			// the live tip the gate clears and apply is strict again.
-			historical := false
-			if ts := blockTimestamp(job.rawBlock); ts != 0 && uint32(time.Now().Unix())-ts > 5*60 {
-				historical = true
-			}
+			historical := isHistoricalBlock(blockTimestamp(job.rawBlock))
 			// Historical catch-up also needs to tolerate per-op apply
 			// failures: the canonical mainnet block_log carries txs
 			// that hived's replay path skips because
@@ -717,10 +714,7 @@ func (d *Delegate) applyLoop() {
 		if d.cfg.LogWorkTiming {
 			applyStart = time.Now()
 		}
-		historical := false
-		if ts := blockTimestamp(job.rawBlock); ts != 0 && uint32(time.Now().Unix())-ts > 5*60 {
-			historical = true
-		}
+		historical := isHistoricalBlock(blockTimestamp(job.rawBlock))
 		outcome, err := d.chain.PushLiveBlock(job.rawBlock, job.blockNum, chain.ApplyOptions{
 			Sync:                      false,
 			SkipTransactionSignatures: historical,
@@ -938,6 +932,40 @@ func (d *Delegate) isCatchingUp() bool {
 // layout is: prev_id(20) + timestamp(4) + witness(varuint+ascii) +
 // transaction_merkle_root(20) + extensions(...) + sig(65). Timestamp
 // sits at byte offset 20.
+// historicalAgeSeconds is how far behind the local clock a block's timestamp
+// has to be before it counts as historical catch-up rather than live traffic.
+const historicalAgeSeconds = 5 * 60
+
+// blockAgeSeconds returns how many seconds OLD a block's timestamp is,
+// SIGNED: negative means the block claims a time in the future.
+//
+// The sign matters more than it looks. The obvious spelling,
+//
+//	uint32(time.Now().Unix()) - ts > 5*60
+//
+// wraps for any future timestamp — one second ahead produces 4294967295 — so
+// every future-dated block was classified as historical catch-up. That is not
+// a cosmetic mislabel: the historical flag turns OFF block-signature checking,
+// transaction-signature checking and per-op failure strictness, so any peer
+// could have had a forged block applied unverified simply by dating it one
+// second ahead. Signatures are skipped for blocks we are REPLAYING, never for
+// blocks arriving at the tip, and a future-dated block is the opposite of old.
+//
+// A zero timestamp (unparsable header) returns 0 — neither old nor future —
+// so the apply path stays strict and produces the real decode error.
+func blockAgeSeconds(ts uint32) int64 {
+	if ts == 0 {
+		return 0
+	}
+	return time.Now().Unix() - int64(ts)
+}
+
+// isHistoricalBlock reports whether a block is old enough to be treated as
+// catch-up rather than live traffic.
+func isHistoricalBlock(ts uint32) bool {
+	return blockAgeSeconds(ts) > historicalAgeSeconds
+}
+
 func blockTimestamp(rawBlock []byte) uint32 {
 	if len(rawBlock) < 24 {
 		return 0

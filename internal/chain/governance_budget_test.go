@@ -12,12 +12,12 @@ import (
 // TestClearProposalVotesForVoterCountsRemovals pins the counter the governance
 // sweeps meter against hived's remove_guard.
 //
-// hived runs remove_expired_governance_votes and process_decline_voting_rights
-// under ONE remove_guard( HIVE_GLOBAL_REMOVE_THRESHOLD ) per block, counting
-// proposal_vote removals, and defers an account (and every later one) to the
-// next block when it runs out. gopherd clears every due account at once, which
-// is consensus-visible whenever the budget is actually reached: witness votes
-// would be cleared a block earlier than hived clears them.
+// remove_expired_governance_votes and process_decline_voting_rights each open
+// their own remove_guard( HIVE_GLOBAL_REMOVE_THRESHOLD ), counting
+// proposal_vote removals, and defer an account (and every later one) to a
+// later block when it runs out. gopherd clears every due account at once,
+// which is consensus-visible whenever the budget is actually reached: witness
+// votes would be cleared a block earlier than hived clears them.
 //
 // The port is blocked on account ids (hived's iteration order is
 // (expiration_ts, account_id), and gopherd has no ids), so the budget is
@@ -74,7 +74,7 @@ func TestNoteGovernanceRemovalsFlagsOverBudget(t *testing.T) {
 		t.Errorf("%d removals is exactly the budget and must not be flagged", limit)
 	}
 	if after, _ := GovernanceRemovalStats(); after != beforeOver {
-		t.Error("at-or-under-budget blocks must not increment the over-budget count")
+		t.Error("at-or-under-budget sweeps must not increment the over-budget count")
 	}
 
 	if !noteGovernanceRemovals(limit + 1) {

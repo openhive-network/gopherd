@@ -792,7 +792,7 @@ func (d *Delegate) handleBlockBytes(p *node.Peer, signedBlockBytes []byte, bid b
 	// fires; only the recovery itself is gated.
 	var txKeys [][]crypto.PublicKey
 	ts := blockTimestamp(signedBlockBytes)
-	if ts == 0 || uint32(time.Now().Unix())-ts <= 5*60 {
+	if !isHistoricalBlock(ts) {
 		txKeys = recoverTxKeysCached(signedBlockBytes, bid.Num(), d.txSigCache, bid)
 	}
 

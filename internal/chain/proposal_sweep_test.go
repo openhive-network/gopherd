@@ -96,6 +96,30 @@ func TestRemoveOldProposalsSweep(t *testing.T) {
 		}
 	})
 
+	t.Run("an orphaned index entry is repaired, not rescanned forever", func(t *testing.T) {
+		s := open(t)
+		// Index entry with no proposal row behind it. Impossible through the
+		// normal paths (DeleteProposalFull clears both), but if one ever
+		// appears the sweep must not keep finding it every block — it would
+		// hold the early exit open for the life of the node.
+		objects.PutProposal(s, &objects.Proposal{
+			ID: 4, Creator: "alice", Receiver: "alice",
+			StartDate: sweepHeadTime - 100_000,
+			EndDate:   sweepHeadTime - objects.ProposalMaintenanceCleanupSec,
+			Removed:   true,
+		})
+		objects.DeleteProposal(s, 4) // primary row only — index entry survives
+
+		removeOldProposals(s, sweepHeadTime)
+
+		found := false
+		_ = s.Range(objects.ProposalTable, objects.ProposalRemovedIndex, nil,
+			func(_, _ []byte) (bool, error) { found = true; return false, nil })
+		if found {
+			t.Error("orphaned index entry survived the sweep; it would be rescanned every block")
+		}
+	})
+
 	t.Run("a flagged proposal not yet past the cleanup delay waits", func(t *testing.T) {
 		s := open(t)
 		// end_date in the future: get_end_date_with_delay() is past head time,

@@ -184,12 +184,14 @@ func clearProposalVotesForVoter(s *state.Session, voter string) int {
 
 // Governance-sweep removal budget, NOT yet enforced.
 //
-// hived runs remove_expired_governance_votes and process_decline_voting_rights
-// under one remove_guard( HIVE_GLOBAL_REMOVE_THRESHOLD ) shared across every
-// account the block touches, counting proposal_vote removals. When an
-// account's votes exhaust it, hived processes NOTHING further for that account
-// -- no witness-vote clearing, no proxy clearing, no expiration bump -- and
-// BREAKS, deferring that account and all later ones to the next block
+// remove_expired_governance_votes and process_decline_voting_rights each open
+// their OWN remove_guard( HIVE_GLOBAL_REMOVE_THRESHOLD ) — two independent
+// budgets per block, not one shared between them (database.cpp:3501 and
+// database_dhf.cpp:218) — and within a function the budget is shared across
+// every account it touches, counting proposal_vote removals. When an account's
+// votes exhaust it, hived processes NOTHING further for that account -- no
+// witness-vote clearing, no proxy clearing, no expiration bump -- and BREAKS,
+// deferring that account and all later ones to the next block
 // (database.cpp:3522). gopherd clears every due account in one block.
 //
 // That difference is consensus-visible: clearing an account's witness votes a
@@ -213,9 +215,10 @@ var (
 	govSweepMaxPerBlock atomic.Uint64
 )
 
-// noteGovernanceRemovals records one block's proposal-vote removals from the
-// governance sweeps and reports whether they exceeded what hived would allow
-// in a single block.
+// noteGovernanceRemovals records ONE sweep's proposal-vote removals and reports
+// whether they exceeded that sweep's budget. Called separately by each sweep,
+// because hived gives each its own guard; summing them would invent a shared
+// budget that does not exist and report divergence where there is none.
 func noteGovernanceRemovals(removed int) bool {
 	if removed <= 0 {
 		return false
@@ -233,9 +236,9 @@ func noteGovernanceRemovals(removed int) bool {
 	return false
 }
 
-// GovernanceRemovalStats reports how many blocks removed more proposal votes
-// in the governance sweeps than hived's remove_guard would have allowed in one
-// block, and the largest single-block count seen.
+// GovernanceRemovalStats reports how many SWEEPS removed more proposal votes
+// than hived's remove_guard would have allowed them, and the largest count a
+// single sweep reached.
 //
 // A non-zero first value means gopherd and hived genuinely disagree about
 // which block an account's governance votes were cleared in, and the ordering

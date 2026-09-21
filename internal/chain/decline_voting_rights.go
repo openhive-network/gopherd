@@ -56,9 +56,11 @@ func processDeclineVotingRights(s *state.Session, blockTime, blockNum uint32, d 
 		})
 
 	hf := hardfork.SetForBlock(blockNum)
-	// Same shared budget as the governance sweep in hived: both run under one
-	// remove_guard per block. Metered, not enforced — see
-	// GovernanceRemovalStats.
+	// hived opens a remove_guard( HIVE_GLOBAL_REMOVE_THRESHOLD ) here
+	// (database_dhf.cpp:218), separate from the one the governance-expiry
+	// sweep opens, and stops processing accounts once it is spent. Metered,
+	// not enforced — see GovernanceRemovalStats in governance_votes.go for
+	// why it cannot be enforced correctly yet.
 	removed := 0
 	defer func() { noteGovernanceRemovals(removed) }()
 	for _, p := range ready {
