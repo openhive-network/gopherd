@@ -1494,7 +1494,17 @@ func (p *Plugin) buildBlockParts(prod *Producer, dgpo objects.DynamicGlobalPrope
 	// Empty (the bare 0x00 marker) in the steady state, which is almost every
 	// block — see headerVersionExtensions for what puts an entry in.
 	var exts []block.HeaderExtension
-	if p.State != nil {
+	if p.Chain != nil {
+		// Through the chain accessor, not a bare state.NewSession: this read
+		// decides what the block we are about to sign says about our version
+		// position, and applyMu is what makes it consistent against the single
+		// ApplyBlock writer. Two small keyed reads, so the RLock is held for
+		// microseconds — not the kind of scan that stalls the applier.
+		_ = p.Chain.WithReadSession(func(s *state.Session) error {
+			exts = p.headerVersionExtensions(s, string(prod.Account))
+			return nil
+		})
+	} else if p.State != nil {
 		exts = p.headerVersionExtensions(state.NewSession(p.State), string(prod.Account))
 	}
 	hdr := block.Header{
