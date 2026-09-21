@@ -601,7 +601,7 @@ func (n *Node) handleNewConn(c *transport.Conn, dir Direction, dialEndpoint stri
 		}
 	}
 
-	peer := newPeer(c, dir, n.buildHelloPayload, n.buildLegacyHelloPayload)
+	peer := newPeer(c, dir, n.cfg.UserAgent, n.buildHelloPayload, n.buildLegacyHelloPayload)
 	info := &peerInfo{endpoint: dialEndpoint, dir: dir}
 	n.mu.Lock()
 	// Shutdown race: Stop() closes the peers it can SEE, then waits on the
