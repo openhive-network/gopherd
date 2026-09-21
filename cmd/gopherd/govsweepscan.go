@@ -122,7 +122,13 @@ func govScanShard(path string, from, to uint32, worker int, progress func(worker
 	// The full range is ~80 minutes of block-log reading. Without this the run
 	// prints nothing at all until every worker finishes, which is
 	// indistinguishable from a hang.
-	const progressEvery = 500_000
+	//
+	// Small enough that the FIRST line appears within a minute: at ~1.2k
+	// blocks/s per worker, a 500k stride would have held the first report back
+	// six minutes, which is most of the way to "is this thing alive?" again.
+	// The 15s throttle in the aggregator is what keeps the volume down, so
+	// there is no reason for the stride to do it as well.
+	const progressEvery = 50_000
 
 	var out []govEvent
 	// Evaluators stamp with head_block_time(), which during transaction
