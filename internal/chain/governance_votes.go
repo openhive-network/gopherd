@@ -3,9 +3,11 @@ package chain
 import (
 	"math"
 	"sort"
+	"sync/atomic"
 
 	"gopherd/internal/protocol/auth"
 	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/protocol/network"
 	"gopherd/internal/state"
 	"gopherd/internal/state/objects"
 )
@@ -95,6 +97,8 @@ func removeExpiredGovernanceVotes(s *state.Session, blockTime, blockNum uint32, 
 		}
 	}
 
+	removed := 0
+	defer func() { noteGovernanceRemovals(removed) }()
 	for _, e := range due {
 		a, err := objects.GetAccount(s, e.name)
 		if err != nil {
@@ -111,7 +115,7 @@ func removeExpiredGovernanceVotes(s *state.Session, blockTime, blockNum uint32, 
 			}
 		}
 		objects.NullifyProxiedWitnessVotes(s, &a, directPower)
-		clearProposalVotesForVoter(s, e.name)
+		removed += clearProposalVotesForVoter(s, e.name)
 		// Drop direct witness votes. Pass 0 because Nullify above
 		// already removed the propagation-array contribution for the
 		// chain-walk's witnesses.
@@ -140,10 +144,13 @@ func removeExpiredGovernanceVotes(s *state.Session, blockTime, blockNum uint32, 
 }
 
 // clearProposalVotesForVoter walks all proposal_vote rows by the named
-// voter and removes them. The proposal_vote table is keyed
-// (proposalID, voter); we scan the entire table since there's no
-// by-voter secondary index.
-func clearProposalVotesForVoter(s *state.Session, voter string) {
+// voter and removes them, returning how many it removed. The proposal_vote
+// table is keyed (proposalID, voter); we scan the entire table since there's
+// no by-voter secondary index.
+//
+// The count is what the governance sweeps meter against
+// HIVE_GLOBAL_REMOVE_THRESHOLD — see governanceRemovalBudgetExceeded.
+func clearProposalVotesForVoter(s *state.Session, voter string) int {
 	type pair struct {
 		proposalID int64
 		voter      string
@@ -172,4 +179,68 @@ func clearProposalVotesForVoter(s *state.Session, voter string) {
 	for _, p := range toDelete {
 		objects.DeleteProposalVote(s, p.proposalID, p.voter)
 	}
+	return len(toDelete)
+}
+
+// Governance-sweep removal budget, NOT yet enforced.
+//
+// hived runs remove_expired_governance_votes and process_decline_voting_rights
+// under one remove_guard( HIVE_GLOBAL_REMOVE_THRESHOLD ) shared across every
+// account the block touches, counting proposal_vote removals. When an
+// account's votes exhaust it, hived processes NOTHING further for that account
+// -- no witness-vote clearing, no proxy clearing, no expiration bump -- and
+// BREAKS, deferring that account and all later ones to the next block
+// (database.cpp:3522). gopherd clears every due account in one block.
+//
+// That difference is consensus-visible: clearing an account's witness votes a
+// block earlier than hived moves witness vote totals, which moves the
+// schedule. It has evidently never bitten on mainnet through the live head --
+// we would be rejecting blocks -- because the budget only counts PROPOSAL
+// votes, and the accounts expiring in any one block rarely hold 200 of them
+// between them.
+//
+// It is not ported yet because it cannot be ported correctly: hived iterates
+// by_governance_vote_expiration_ts, whose tie-break is account_id, and gopherd
+// has no account ids (the chainbase account-id refactor is still a plan). With
+// name ordering the budget would defer a DIFFERENT set of accounts than hived
+// does, which is worse than deferring none -- today's divergence needs the
+// budget to be reached at all, that one would compound every block.
+//
+// So: measure first. These counters say whether the budget is ever reached,
+// which is the evidence needed before the ordering work can be justified.
+var (
+	govSweepOverBudget  atomic.Uint64
+	govSweepMaxPerBlock atomic.Uint64
+)
+
+// noteGovernanceRemovals records one block's proposal-vote removals from the
+// governance sweeps and reports whether they exceeded what hived would allow
+// in a single block.
+func noteGovernanceRemovals(removed int) bool {
+	if removed <= 0 {
+		return false
+	}
+	for {
+		cur := govSweepMaxPerBlock.Load()
+		if uint64(removed) <= cur || govSweepMaxPerBlock.CompareAndSwap(cur, uint64(removed)) {
+			break
+		}
+	}
+	if removed > int(network.GlobalRemoveThreshold) {
+		govSweepOverBudget.Add(1)
+		return true
+	}
+	return false
+}
+
+// GovernanceRemovalStats reports how many blocks removed more proposal votes
+// in the governance sweeps than hived's remove_guard would have allowed in one
+// block, and the largest single-block count seen.
+//
+// A non-zero first value means gopherd and hived genuinely disagree about
+// which block an account's governance votes were cleared in, and the ordering
+// work above has to happen. Zero across a full replay means the budget is
+// unreachable in practice on this chain.
+func GovernanceRemovalStats() (blocksOverBudget, maxPerBlock uint64) {
+	return govSweepOverBudget.Load(), govSweepMaxPerBlock.Load()
 }
