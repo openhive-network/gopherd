@@ -791,8 +791,24 @@ func (d *Delegate) handleBlockBytes(p *node.Peer, signedBlockBytes []byte, bid b
 	// receive goroutine during a long catch-up. Cache lookup still
 	// fires; only the recovery itself is gated.
 	var txKeys [][]crypto.PublicKey
-	if ts := blockTimestamp(signedBlockBytes); ts == 0 || uint32(time.Now().Unix())-ts <= 5*60 {
+	ts := blockTimestamp(signedBlockBytes)
+	if ts == 0 || uint32(time.Now().Unix())-ts <= 5*60 {
 		txKeys = recoverTxKeysCached(signedBlockBytes, bid.Num(), d.txSigCache, bid)
+	}
+
+	// Inbound timestamp window (chain_plugin::check_time_in_block). Runs on
+	// THIS goroutine, which is the receiving one, so a hold leaves the apply
+	// loop free to take the preceding witness's block if it turns up — that
+	// ordering is the whole reason hived holds rather than applying. Placed
+	// after the signature pre-recovery so a held block is ready to apply the
+	// instant its slot arrives.
+	switch d.earlyBlocks.check(ts) {
+	case blockRefused:
+		d.blocksRefusedFuture.Add(1)
+		d.logf("refusing block %d: timestamp %d is too far ahead of the local clock", bid.Num(), ts)
+		return
+	case blockHeld:
+		d.blocksHeld.Add(1)
 	}
 
 	job := applyJob{
