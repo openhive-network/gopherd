@@ -7,6 +7,10 @@ package main
 //   sum_of_account_hbd + treasury_hbd + reward_fund_hbd  == current_hbd_supply
 //   sum_of_account_vesting_shares                         == total_vesting_shares
 //
+// plus one that is not about supply at all:
+//
+//   account.last_max_rc == account.get_maximum_rc()   (for RC-touched accounts)
+//
 // hived runs validate_invariants() at every block during dev builds. We
 // can run it against a snapshot to spot accounting bugs.
 //
@@ -50,6 +54,21 @@ func cmdValidateState(args []string) int {
 	var sumRewardHive, sumRewardHBD, sumRewardVests int64
 	accounts := 0
 
+	// last_max_rc is a CACHE of get_maximum_rc(), maintained by every
+	// operation that moves an account's vesting or RC delegations. hived warns
+	// when the two disagree ("max RC changed without triggering an op") and
+	// HF29's RC_IS_CONSENSUS turns that warning into a throw — so a snapshot
+	// with any mismatch is a snapshot on which that assertion would wedge the
+	// node the moment the fork activates. gopherd's RegenerateRCMana repairs
+	// the value silently, which is why this has to be looked for rather than
+	// waited for. Accounts with last_max_rc == 0 are excluded: those are
+	// untouched by the RC subsystem (pre-HF20 history, freshly created), not
+	// stale.
+	rcMismatch := 0
+	rcChecked := 0
+	var rcWorst int64
+	rcWorstName := ""
+
 	_ = s.Range(objects.AccountTable, state.PrimaryIndex, nil,
 		func(_, value []byte) (bool, error) {
 			a, err := objects.ReadAccount(value)
@@ -65,6 +84,16 @@ func cmdValidateState(args []string) int {
 			sumRewardHBD += a.RewardHBD
 			sumRewardVests += a.RewardVests
 			accounts++
+			if d, ok := rcCacheDrift(&a); ok {
+				rcChecked++
+				if d != 0 {
+					rcMismatch++
+					if abs64(d) > abs64(rcWorst) {
+						rcWorst = d
+						rcWorstName = string(a.Name)
+					}
+				}
+			}
 			return true, nil
 		})
 
@@ -125,8 +154,42 @@ func cmdValidateState(args []string) int {
 		fmt.Println("VESTS invariant: OK")
 	}
 
-	if hiveDiff != 0 || hbdDiff != 0 || vestDiff != 0 {
+	fmt.Printf("\n[RC]\n")
+	fmt.Printf("accounts with last_max_rc set: %d\n", rcChecked)
+	if rcMismatch != 0 {
+		fmt.Printf("last_max_rc != get_maximum_rc(): %d accounts\n", rcMismatch)
+		fmt.Printf("worst drift:                  %+d on %q\n", rcWorst, rcWorstName)
+		fmt.Println("RC invariant: FAIL — HF29's RC_IS_CONSENSUS assertion would reject blocks on this state")
+	} else {
+		fmt.Println("RC invariant: OK — HF29's RC_IS_CONSENSUS assertion would hold here")
+	}
+
+	if hiveDiff != 0 || hbdDiff != 0 || vestDiff != 0 || rcMismatch != 0 {
 		return 1
 	}
 	return 0
+}
+
+func abs64(v int64) int64 {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
+// rcCacheDrift reports how far an account's cached last_max_rc has drifted
+// from the maximum its current VESTS and RC delegations imply, and whether
+// the account is subject to the check at all.
+//
+// last_max_rc == 0 means the RC subsystem has never touched this account —
+// pre-HF20 history, or one created and never funded — which is not the same
+// as a stale cache and must not be counted as one. Every other account is
+// checked: hived asserts the two are equal once HF29's RC_IS_CONSENSUS is
+// active, and drift there is a bug in whichever operation moved the VESTS
+// without restamping the cache.
+func rcCacheDrift(a *objects.Account) (drift int64, checked bool) {
+	if a.LastMaxRC == 0 {
+		return 0, false
+	}
+	return a.MaximumRC() - a.LastMaxRC, true
 }
