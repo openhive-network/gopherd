@@ -35,6 +35,17 @@ package main
 // apart, so every account expiring inside one slot is swept by the same block;
 // the largest per-slot total is the largest per-block removal count.
 //
+// Where it deliberately OVER-counts, and why that is the right direction. Two
+// other paths also erase proposal votes, and neither is modelled:
+// process_decline_voting_rights (HF28+), and the one-shot sweep over accounts
+// without voting rights at the HF28 boundary. An account cleared by either
+// keeps its votes here, so its expiry slot is credited with removals that
+// would already have happened. That inflates the count, which can only turn a
+// clean chain into a reported divergence — never the reverse. So a "no slot
+// reaches the budget" verdict is sound as it stands, while an over-budget
+// verdict is a prompt to check whether the accounts in that slot had declined
+// voting rights first.
+//
 // Usage: gopherd govsweep-scan <block_log> <from_block> <to_block>
 
 import (
