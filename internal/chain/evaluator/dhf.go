@@ -6,6 +6,7 @@ import (
 
 	"gopherd/internal/protocol/asset"
 	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/protocol/network"
 	"gopherd/internal/protocol/op"
 	"gopherd/internal/state"
 	"gopherd/internal/state/objects"
@@ -228,6 +229,26 @@ func (updateProposalVotesEvaluator) Apply(ctx *Context, opArg op.Op) error {
 
 type removeProposalEvaluator struct{}
 
+// Apply mirrors remove_proposal_evaluator::do_apply
+// (libraries/chain/dhf_evaluator.cpp:213, hive 1.29.0-rc2).
+//
+// Removal is BUDGETED. Erasing a well-supported proposal means erasing every
+// proposal_vote row attached to it, and mainnet proposals routinely carry
+// thousands; hived caps the whole operation at HIVE_GLOBAL_REMOVE_THRESHOLD
+// (200 objects, 20 on testnet) and FLAGS whatever it could not erase, pulling
+// end_date back a day so the proposal stops being funded immediately. The
+// per-block sweep in removeOldProposals finishes the job.
+//
+// gopherd used to erase everything in one go, unbudgeted. That is invisible in
+// replay — the end state converges once the sweep catches up — but it made us
+// STRICTER than hived at the head: past the budget hived skips the ownership
+// check, so a block carrying a remove_proposal that names someone else's
+// proposal after a vote-heavy one of its own is accepted by the network and
+// would have wedged us. Same class as the HF28 redundant-signature wall.
+//
+// HF29's VALIDATE_ALL_PROPOSAL_IDS closes both halves of that leniency: a
+// flagged proposal counts as nonexistent, and the ownership check applies to
+// every id whether or not the budget survived.
 func (removeProposalEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	if opArg.Tag != op.TagRemoveProposal {
 		return fmt.Errorf("removeProposalEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
@@ -239,13 +260,22 @@ func (removeProposalEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	if err := rp.Validate(); err != nil {
 		return err
 	}
+
+	// head_time - HIVE_PROPOSAL_MAINTENANCE_CLEANUP exactly cancels the day
+	// get_end_date_with_delay() adds, putting the flagged proposal at the top
+	// of the sweep's range on this very block instead of a day from now. It
+	// also puts end_date in the past, which is what actually stops the
+	// proposal being funded in the meantime.
+	newEndDate := ctx.HeadBlockTime - objects.ProposalMaintenanceCleanupSec
+	guard := objects.NewRemoveGuard(network.GlobalRemoveThreshold)
+	validateAll := ctx.Hardforks.Has(hardfork.HF29)
+
 	for _, id := range rp.ProposalIDs {
 		p, err := objects.GetProposal(ctx.DB, id)
 		if err != nil {
 			if err == state.ErrNotFound {
-				// HIVE_HARDFORK_1_28_DONT_TRY_REMOVE_NONEXISTENT_PROPOSAL
-				// (dhf_helper.cpp): HF28+ asserts on a missing proposal id;
-				// pre-HF28 silently skips it (continue).
+				// HIVE_HARDFORK_1_28_DONT_TRY_REMOVE_NONEXISTENT_PROPOSAL:
+				// HF28+ asserts on a missing proposal id; pre-HF28 skips it.
 				if ctx.Hardforks.Has(hardfork.HF28) {
 					return fmt.Errorf("%w: id=%d", ErrProposalNotFound, id)
 				}
@@ -253,16 +283,27 @@ func (removeProposalEvaluator) Apply(ctx *Context, opArg op.Op) error {
 			}
 			return err
 		}
-		if p.Creator != rp.ProposalOwner {
-			return fmt.Errorf("%w: id=%d", ErrProposalNotOwnedByYou, id)
+		// HF29: a proposal already flagged for removal is treated as gone,
+		// so naming it again is the same error as naming a stranger's id.
+		if validateAll && p.Removed {
+			return fmt.Errorf("%w: id=%d (already flagged for removal)", ErrProposalNotFound, id)
 		}
-		// C++ on_proposal_remove (database_dhf.cpp) cascades the delete
-		// to every ProposalVote row for the removed proposal_id. The
-		// proposal_vote primary key is (int64BE(id), account_name), so a
-		// prefix Range over the id half enumerates exactly the voter
-		// rows attached to this proposal.
-		objects.DeleteAllProposalVotesForProposal(ctx.DB, id)
-		objects.DeleteProposalFull(ctx.DB, &p)
+		// Pre-HF29 the ownership check is skipped once the budget is spent —
+		// an accident of the old two-loop shape that HF29 turns into a rule.
+		// Do not "fix" it early: history contains blocks that rely on it.
+		if validateAll || !guard.Done() {
+			if p.Creator != rp.ProposalOwner {
+				return fmt.Errorf("%w: id=%d", ErrProposalNotOwnedByYou, id)
+			}
+		}
+		// Try the real removal first; flag only what the budget could not
+		// reach, and only once (an id already flagged stays as it is).
+		if !objects.RemoveProposalWithVotes(ctx.DB, &p, guard) && !p.Removed {
+			next := p
+			next.Removed = true
+			next.EndDate = newEndDate
+			objects.ReplaceProposal(ctx.DB, &p, &next)
+		}
 	}
 	return nil
 }

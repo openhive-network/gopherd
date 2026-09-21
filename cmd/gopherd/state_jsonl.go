@@ -408,6 +408,7 @@ func cmdStateJSONL(args []string) int {
 			Subject:    p.Subject,
 			Permlink:   p.Permlink,
 			TotalVotes: p.TotalVotes,
+			Removed:    p.Removed,
 		})
 		return true, nil
 	})
@@ -536,6 +537,11 @@ type proposalRow struct {
 	Subject    string `json:"subject"`
 	Permlink   string `json:"permlink"`
 	TotalVotes int64  `json:"total_votes"`
+	// omitempty so the common case (nothing flagged) keeps the dump
+	// byte-identical to what it produced before the field existed, while a
+	// proposal left flagged by a budget-limited removal becomes visible to
+	// the state diff instead of silently matching.
+	Removed bool `json:"removed,omitempty"`
 }
 
 type commentRow struct {

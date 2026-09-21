@@ -50,3 +50,8 @@ func SetChainID(h Hash32) {
 	ChainID = h
 	OldChainID = h
 }
+
+// GlobalRemoveThreshold mirrors HIVE_GLOBAL_REMOVE_THRESHOLD
+// (config.hpp:96 on the IS_TEST_NET branch). Ten times smaller than mainnet's,
+// which is what makes the threshold reachable in hived's own proposal tests.
+const GlobalRemoveThreshold int16 = 20
