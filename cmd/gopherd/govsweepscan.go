@@ -206,6 +206,15 @@ type govSweepResult struct {
 	overBudget  int
 	slotsSeen   int
 	votersSeen  int
+	// Over-budget slots, split by whether the scanned range had already
+	// reached them. An expiry is (last governance action + one year), so a
+	// recent action produces an expiry up to a year beyond the chain's head:
+	// the sweep for it has NOT happened yet. A clean replay to head is
+	// therefore entirely consistent with slots that will blow the budget
+	// later, and conflating the two turns "will diverge" into the much
+	// stronger and wrong "has diverged".
+	offenders []govOffender
+	lastTs    uint32
 	// maxPerWindow is the largest total across any run of govMergeWindowSlots
 	// CONSECUTIVE slots. Slots are only one block each while the chain never
 	// misses one; every missed block makes the next block cover the skipped
@@ -215,6 +224,16 @@ type govSweepResult struct {
 	maxPerWindow     int
 	maxWindowEndTime uint32
 	overBudgetWindow int
+}
+
+// govOffender is one slot whose sweep would exceed the budget.
+type govOffender struct {
+	slotTime  uint32
+	votes     int
+	accounts  int
+	inThePast bool // the scanned range reached this slot
+	worst     string
+	worstN    int
 }
 
 // govMergeWindowSlots is how many consecutive slots one block is assumed to be
@@ -261,6 +280,11 @@ func govSimulate(events []govEvent, limit int) govSweepResult {
 	type bucket struct {
 		voteCount int
 		accounts  int
+		// The single biggest holder in the slot. When one account alone
+		// exceeds the budget, the divergence needs no clump at all, and
+		// naming it is what makes the finding actionable.
+		worst  string
+		worstN int
 	}
 	slots := make(map[uint32]*bucket, 1<<16)
 	voters := 0
@@ -281,13 +305,34 @@ func govSimulate(events []govEvent, limit int) govSweepResult {
 		}
 		b.voteCount += len(set)
 		b.accounts++
+		if len(set) > b.worstN {
+			b.worstN = len(set)
+			b.worst = account
+		}
 	}
 
-	res := govSweepResult{slotsSeen: len(slots), votersSeen: voters}
+	// The latest action timestamp the scan saw stands in for where the range
+	// ends in chain time.
+	var lastTs uint32
+	for _, e := range events {
+		if e.ts > lastTs {
+			lastTs = e.ts
+		}
+	}
+
+	res := govSweepResult{slotsSeen: len(slots), votersSeen: voters, lastTs: lastTs}
 	ordered := make([]uint32, 0, len(slots))
 	for slot, b := range slots {
 		if b.voteCount > limit {
 			res.overBudget++
+			res.offenders = append(res.offenders, govOffender{
+				slotTime:  slot * govBlockIntervalSec,
+				votes:     b.voteCount,
+				accounts:  b.accounts,
+				inThePast: slot*govBlockIntervalSec <= lastTs,
+				worst:     b.worst,
+				worstN:    b.worstN,
+			})
 		}
 		if b.voteCount > res.maxPerSlot {
 			res.maxPerSlot = b.voteCount
@@ -561,10 +606,34 @@ func govReport(events []govEvent, from, to uint32) int {
 	fmt.Printf("busiest %d-slot window: %d proposal votes (ending ts %d)\n",
 		govMergeWindowSlots, res.maxPerWindow, res.maxWindowEndTime)
 	if res.overBudget > 0 || res.overBudgetWindow > 0 {
-		fmt.Printf("VERDICT: %d slots and %d %d-slot windows exceed the budget — gopherd and hived\n"+
-			"         DIVERGE on those blocks; the account-id ordering work is required\n"+
-			"         before the budget can be enforced.\n",
-			res.overBudget, res.overBudgetWindow, govMergeWindowSlots)
+		sort.Slice(res.offenders, func(i, j int) bool { return res.offenders[i].slotTime < res.offenders[j].slotTime })
+		past, future := 0, 0
+		fmt.Printf("\nover-budget slots (%d):\n", len(res.offenders))
+		for _, o := range res.offenders {
+			when := "UPCOMING"
+			if o.inThePast {
+				when = "ALREADY SWEPT"
+				past++
+			} else {
+				future++
+			}
+			fmt.Printf("  ts=%d (%s) votes=%d accounts=%d biggest=%q(%d) [%s]\n",
+				o.slotTime, time.Unix(int64(o.slotTime), 0).UTC().Format("2006-01-02 15:04:05"),
+				o.votes, o.accounts, o.worst, o.worstN, when)
+		}
+		fmt.Printf("\nrange ends at ts %d (%s)\n", res.lastTs,
+			time.Unix(int64(res.lastTs), 0).UTC().Format("2006-01-02 15:04:05"))
+		if past > 0 {
+			fmt.Printf("VERDICT: %d over-budget slots are ALREADY PAST — gopherd and hived have\n"+
+				"         DIVERGED on those blocks, and %d more are upcoming. The account-id\n"+
+				"         ordering work is required, and the past ones need explaining.\n", past, future)
+		} else {
+			fmt.Printf("VERDICT: %d over-budget slots, ALL of them still UPCOMING (an expiry is the\n"+
+				"         last governance action plus a year, so recent actions land beyond head).\n"+
+				"         Nothing has diverged yet, which is consistent with a clean replay — but\n"+
+				"         the guard WILL fire at those slots, so the account-id ordering work has\n"+
+				"         a deadline rather than being purely hypothetical.\n", future)
+		}
 		return 1
 	}
 	fmt.Printf("VERDICT: no slot reaches the budget, and neither does any %d-slot window —\n"+
