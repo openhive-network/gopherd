@@ -591,7 +591,32 @@ func govLoadEvents(path string) ([]govEvent, uint32, uint32, error) {
 	return events, in.From, in.To, nil
 }
 
+// govReport prints the verdict. GOPHERD_GOVSWEEP_DUMP_REMOVALS=1 instead lists
+// the blocks carrying remove_proposal ops, which is how a replay window gets
+// TARGETED at the code under test: the removal evaluator only runs when such an
+// op appears, and they are rare enough that a window picked by round numbers
+// can easily contain none — a paired replay over that window would compare two
+// runs that never executed the changed path and call it a pass.
 func govReport(events []govEvent, from, to uint32) int {
+	if os.Getenv("GOPHERD_GOVSWEEP_DUMP_REMOVALS") != "" {
+		counts := map[uint32]int{}
+		for _, e := range events {
+			if e.kind == govEvtProposalRemoved {
+				counts[e.block]++
+			}
+		}
+		blocks := make([]uint32, 0, len(counts))
+		for b := range counts {
+			blocks = append(blocks, b)
+		}
+		sort.Slice(blocks, func(i, j int) bool { return blocks[i] < blocks[j] })
+		fmt.Printf("remove_proposal ops in %d blocks:\n", len(blocks))
+		for _, b := range blocks {
+			fmt.Printf("  block %d  ids=%d\n", b, counts[b])
+		}
+		return 0
+	}
+
 	limit := int(network.GlobalRemoveThreshold)
 	res := govSimulate(events, limit)
 
