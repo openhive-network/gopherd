@@ -14,6 +14,16 @@
 # proposals, votes, remove_proposal and the new removal sweep are all live from
 # the first block applied.
 #
+# Invariants are CHECKED but not allowed to stop the run, which looks wrong
+# until you try it: /home/martin/gosnap35930/block-35930000 carries a
+# pre-existing HBD imbalance of +878 satoshi, and it fails on the very FIRST
+# block applied with the same delta — so it is in the snapshot, not in the
+# replay. Letting it abort means the comparison can never run at all. Instead
+# both sides log it, and the INVARIANT lines are part of the diff: if the
+# change under test altered conservation, the two sides would report DIFFERENT
+# deltas. A shared pre-existing delta is exactly what a clean result looks
+# like here.
+#
 # Usage: scripts/paired-dhf-replay <base_binary> <head_binary> <snapshot_dir> <count> [outdir]
 set -euo pipefail
 
@@ -63,6 +73,7 @@ run_one() {
       --cold-dir "$OUT/$name.cold" \
       --comment-resident-cap "$RESIDENT_CAP" \
       --check-invariants 100000 \
+      --check-invariants-stop=false \
       --progress-every 250000 \
       --shutdown-snapshot-dir "$OUT/$name.snap" \
       "$BLOCKLOG" 2>&1 | tee "$OUT/$name.log" | tail -30
@@ -87,7 +98,9 @@ echo "=== summary diff (base vs head) ==="
 # an elapsed line differing is meaningless; a head block, an op count or an
 # invariant result differing is the whole point.
 for f in base head; do
-  grep -E "blocks applied|ops applied|ops skipped|block errors|head block|dgpo time|dgpo witness|status|rc stale max|govsweep budget" \
+  # INVARIANT lines are included deliberately — see the header. They must match
+  # between the two sides; a differing delta is the signal, a shared one is not.
+  grep -E "blocks applied|ops applied|ops skipped|block errors|head block|dgpo time|dgpo witness|status|rc stale max|govsweep budget|INVARIANT" \
     "$OUT/$f.log" > "$OUT/$f.summary" || true
 done
 if diff -u "$OUT/base.summary" "$OUT/head.summary"; then
