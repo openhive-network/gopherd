@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# scripts/paired-dhf-replay — replay the same post-HF21 window twice, once with
+# a baseline binary and once with the current one, and diff the results.
+#
+# Why paired rather than a single "does it pass" run. The DHF changes (the
+# proposal removal budget, the per-block sweep, the HF29 gates) only do
+# anything from HF21 onward, and a clean single run proves only that the chain
+# still applies — not that it applies the SAME way. Block ids do not commit to
+# state, so two binaries can agree on every id and disagree on the state behind
+# it; that is how three consensus bugs hid during the testnet work. Diffing two
+# runs of the same window is what catches a silent change.
+#
+# The window starts at a snapshot taken just after HF21 (35,921,786), so
+# proposals, votes, remove_proposal and the new removal sweep are all live from
+# the first block applied.
+#
+# Usage: scripts/paired-dhf-replay <base_binary> <head_binary> <snapshot_dir> <count> [outdir]
+set -euo pipefail
+
+BASE=${1:?base binary}
+HEAD=${2:?head binary}
+SNAP=${3:?snapshot dir}
+COUNT=${4:?block count}
+OUT=${5:-/home/martin/paired-dhf}
+
+BLOCKLOG=${BLOCKLOG:-/home/martin/blocklog-full/block_log}
+MEMMAX=${MEMMAX:-15G}
+
+mkdir -p "$OUT"
+
+# Disk guard: a replay that fills the disk corrupts whatever it was writing.
+AVAIL=$(df --output=avail -BG /home/martin | tail -1 | tr -dc '0-9')
+if [ "$AVAIL" -lt 50 ]; then
+  echo "refusing to start: only ${AVAIL}G free on /home/martin" >&2
+  exit 1
+fi
+
+run_one() {
+  local name=$1 bin=$2
+  echo "=== $name ($(md5sum "$bin" | cut -c1-12)) ==="
+  # Each side gets its OWN state dir and cold dir. Sharing either would let the
+  # first run's state leak into the second, which is the one way this
+  # comparison can quietly prove nothing.
+  rm -rf "$OUT/$name.state" "$OUT/$name.cold"
+  mkdir -p "$OUT/$name.state" "$OUT/$name.cold"
+  systemd-run --user --scope -q -p MemoryMax="$MEMMAX" -p MemorySwapMax=0 \
+    "$bin" replay \
+      --load-snapshot "$SNAP" \
+      --count "$COUNT" \
+      --data-dir "$OUT/$name.state" \
+      --cold-dir "$OUT/$name.cold" \
+      --comment-resident-cap 4000000 \
+      --check-invariants 100000 \
+      --progress-every 250000 \
+      --shutdown-snapshot-dir "$OUT/$name.snap" \
+      "$BLOCKLOG" 2>&1 | tee "$OUT/$name.log" | tail -30
+}
+
+run_one base "$BASE"
+run_one head "$HEAD"
+
+echo
+echo "=== summary diff (base vs head) ==="
+# Compare the parts of the summary that describe STATE, not timing. A rate or
+# an elapsed line differing is meaningless; a head block, an op count or an
+# invariant result differing is the whole point.
+for f in base head; do
+  grep -E "blocks applied|ops applied|ops skipped|block errors|head block|dgpo time|dgpo witness|status|rc stale max|govsweep budget" \
+    "$OUT/$f.log" > "$OUT/$f.summary" || true
+done
+if diff -u "$OUT/base.summary" "$OUT/head.summary"; then
+  echo "SUMMARIES IDENTICAL"
+else
+  echo "SUMMARIES DIFFER — investigate before trusting the change"
+  exit 1
+fi
