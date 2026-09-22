@@ -89,6 +89,17 @@ func AppendProposal(dst []byte, p *Proposal) []byte {
 	// Appended LAST, and read back only if there are bytes left, so rows
 	// written before the field existed still decode (as Removed=false, which
 	// is what they were: nothing could flag a proposal before this).
+	//
+	// That compatibility runs ONE WAY, and the cost is concrete: a snapshot
+	// written by this code cannot be read by a binary that predates the field.
+	// Measured — replaying a fresh 35.93M snapshot with a pre-change binary
+	// fails on the first proposal it touches:
+	//
+	//   update_proposal_votes: proposal: trailing bytes
+	//
+	// So a snapshot is a one-way upgrade, and a paired old-vs-new comparison
+	// has to run on an anchor written BEFORE the field existed. Worth knowing
+	// before planning a rollback or an A/B against an old build.
 	if p.Removed {
 		dst = append(dst, 1)
 	} else {
