@@ -14,6 +14,14 @@
 # proposals, votes, remove_proposal and the new removal sweep are all live from
 # the first block applied.
 #
+# Pick the COUNT from where the ops actually are, not from a round number.
+# `GOPHERD_GOVSWEEP_DUMP_REMOVALS=1 gopherd govsweep-scan <events.gob>` lists
+# every block carrying a remove_proposal op: there are 66 in the whole
+# post-HF21 chain. The removal evaluator only runs when one appears, so a
+# window chosen for its size can easily contain none — and a paired replay
+# over that window compares two runs that never executed the changed path and
+# calls it a pass. 200000 blocks from this snapshot covers five of them.
+#
 # Invariants are CHECKED but not allowed to stop the run, which looks wrong
 # until you try it: /home/martin/gosnap35930/block-35930000 carries a
 # pre-existing HBD imbalance of +878 satoshi, and it fails on the very FIRST
@@ -42,11 +50,18 @@ BLOCKLOG=${BLOCKLOG:-/home/martin/blocklog-full/block_log}
 # "Killed", so it is worth naming here rather than rediscovering.
 #
 # 27G leaves the OS ~4G on a 31G box. Nothing else heavy may run alongside this.
-MEMMAX=${MEMMAX:-27G}
+# 22G, not 27G: a 27G cap on a 31G box was OOM-killed (exit 137) 170k blocks
+# into the replay — not during the load — and left the machine with zero
+# available memory, which is enough pressure for a supervisor to start reaping
+# other processes. Headroom is part of the configuration, not slack.
+MEMMAX=${MEMMAX:-22G}
 # Comments held in RAM; the rest spill to the cold tier. 4M is the value that
 # avoids the EvictFrozen thrash seen with 1M in the high-volume era. Both sides
 # use the same value, so it cannot skew the comparison.
-RESIDENT_CAP=${RESIDENT_CAP:-4000000}
+# 1.5M rather than 4M. The 4M figure avoids EvictFrozen thrash in the
+# high-volume era (58M+); at 36M there are far fewer live comments, so holding
+# 4M of them is paying the peak cost for a window that does not need it.
+RESIDENT_CAP=${RESIDENT_CAP:-1500000}
 
 mkdir -p "$OUT"
 
@@ -84,9 +99,13 @@ run_one() {
 # this trap explains what happened instead of leaving a bare "Killed".
 trap 'rc=$?; if [ $rc -ne 0 ]; then
   echo;
-  echo "ABORTED (exit $rc). If the last line of a *.log is a snapshot-load"
-  echo "progress line, the run was OOM-killed: raise MEMMAX (currently $MEMMAX)"
-  echo "or lower RESIDENT_CAP (currently $RESIDENT_CAP)."
+  if [ $rc -eq 137 ]; then
+    echo "OOM-KILLED (exit 137) with MEMMAX=$MEMMAX RESIDENT_CAP=$RESIDENT_CAP."
+    echo "Lower RESIDENT_CAP first: raising MEMMAX past the box'"'"'s headroom"
+    echo "starves everything else and invites a supervisor to reap it."
+  else
+    echo "ABORTED (exit $rc). Check the tail of $OUT/*.log."
+  fi
 fi' EXIT
 
 run_one base "$BASE"
