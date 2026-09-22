@@ -24,7 +24,19 @@ COUNT=${4:?block count}
 OUT=${5:-/home/martin/paired-dhf}
 
 BLOCKLOG=${BLOCKLOG:-/home/martin/blocklog-full/block_log}
-MEMMAX=${MEMMAX:-15G}
+
+# The 35.93M snapshot carries a 20.3GB comment_store, and --comment-resident-cap
+# keeps millions of comments in RAM on top of that. A 15G cap (the figure the
+# replay-safety habit uses for genesis-anchored runs) gets the loader OOM-killed
+# at 98% of the comment_store — which looks like a hang followed by a bare
+# "Killed", so it is worth naming here rather than rediscovering.
+#
+# 27G leaves the OS ~4G on a 31G box. Nothing else heavy may run alongside this.
+MEMMAX=${MEMMAX:-27G}
+# Comments held in RAM; the rest spill to the cold tier. 4M is the value that
+# avoids the EvictFrozen thrash seen with 1M in the high-volume era. Both sides
+# use the same value, so it cannot skew the comparison.
+RESIDENT_CAP=${RESIDENT_CAP:-4000000}
 
 mkdir -p "$OUT"
 
@@ -49,12 +61,22 @@ run_one() {
       --count "$COUNT" \
       --data-dir "$OUT/$name.state" \
       --cold-dir "$OUT/$name.cold" \
-      --comment-resident-cap 4000000 \
+      --comment-resident-cap "$RESIDENT_CAP" \
       --check-invariants 100000 \
       --progress-every 250000 \
       --shutdown-snapshot-dir "$OUT/$name.snap" \
       "$BLOCKLOG" 2>&1 | tee "$OUT/$name.log" | tail -30
 }
+
+# A killed run must not fall through to the diff: two truncated logs compare
+# equal and would read as a pass. set -e plus pipefail aborts the script, and
+# this trap explains what happened instead of leaving a bare "Killed".
+trap 'rc=$?; if [ $rc -ne 0 ]; then
+  echo;
+  echo "ABORTED (exit $rc). If the last line of a *.log is a snapshot-load"
+  echo "progress line, the run was OOM-killed: raise MEMMAX (currently $MEMMAX)"
+  echo "or lower RESIDENT_CAP (currently $RESIDENT_CAP)."
+fi' EXIT
 
 run_one base "$BASE"
 run_one head "$HEAD"
