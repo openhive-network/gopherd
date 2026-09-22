@@ -363,7 +363,18 @@ func cmdGovSweepScan(args []string) int {
 			from, govHF21ProposalsActivationHint)
 	}
 
-	const workers = 12
+	// More shards than cores on purpose. A shard is only checkpointed when it
+	// FINISHES, so shard size sets how much work an interrupt can destroy:
+	// with 12 shards over 72M blocks the first checkpoint lands more than an
+	// hour in, which is exactly when the first full run died having written
+	// nothing. Smaller shards checkpoint sooner and more often, and since
+	// workers are I/O bound the extra concurrency costs nothing.
+	workers := 48
+	if n := os.Getenv("GOPHERD_GOVSWEEP_SHARDS"); n != "" {
+		if v, err := strconv.Atoi(n); err == nil && v > 0 {
+			workers = v
+		}
+	}
 
 	// Where per-shard checkpoints live. Derived from the output path so a run
 	// that names an output file gets resumability for free.
@@ -402,7 +413,7 @@ func cmdGovSweepScan(args []string) int {
 	}
 
 	span := to - from + 1
-	shard := span / workers
+	shard := span / uint32(workers)
 	if shard == 0 {
 		shard = span
 	}
