@@ -54,7 +54,15 @@ BLOCKLOG=${BLOCKLOG:-/home/martin/blocklog-full/block_log}
 # into the replay — not during the load — and left the machine with zero
 # available memory, which is enough pressure for a supervisor to start reaping
 # other processes. Headroom is part of the configuration, not slack.
-MEMMAX=${MEMMAX:-22G}
+MEMMAX=${MEMMAX:-25G}
+# The Go soft limit, set BELOW MemoryMax on purpose. Without it the GC has no
+# idea a cgroup cap exists: it grows the heap on its own pacing and the cgroup
+# kills the process. 22G with a 1.5M resident cap still died this way, at the
+# same block as 27G with 4M — which is what finally ruled the resident cap out
+# as the driver. The snapshot loader holds the whole 20.8GB comment_store
+# regardless of the cap, so the heap starts near the limit and only GC pressure
+# keeps it there.
+MEMLIMITGIB=${MEMLIMITGIB:-20}
 # Comments held in RAM; the rest spill to the cold tier. 4M is the value that
 # avoids the EvictFrozen thrash seen with 1M in the high-volume era. Both sides
 # use the same value, so it cannot skew the comparison.
@@ -87,6 +95,7 @@ run_one() {
       --data-dir "$OUT/$name.state" \
       --cold-dir "$OUT/$name.cold" \
       --comment-resident-cap "$RESIDENT_CAP" \
+      --mem-limit-gib "$MEMLIMITGIB" \
       --check-invariants 100000 \
       --check-invariants-stop=false \
       --progress-every 250000 \
@@ -100,9 +109,10 @@ run_one() {
 trap 'rc=$?; if [ $rc -ne 0 ]; then
   echo;
   if [ $rc -eq 137 ]; then
-    echo "OOM-KILLED (exit 137) with MEMMAX=$MEMMAX RESIDENT_CAP=$RESIDENT_CAP."
-    echo "Lower RESIDENT_CAP first: raising MEMMAX past the box'"'"'s headroom"
-    echo "starves everything else and invites a supervisor to reap it."
+    echo "OOM-KILLED (exit 137) with MEMMAX=$MEMMAX MEMLIMITGIB=$MEMLIMITGIB"
+    echo "RESIDENT_CAP=$RESIDENT_CAP. Lower MEMLIMITGIB first — it is the only"
+    echo "one of the three the Go GC actually reacts to. Raising MEMMAX past"
+    echo "the box'"'"'s headroom starves everything else and invites a reap."
   else
     echo "ABORTED (exit $rc). Check the tail of $OUT/*.log."
   fi
@@ -116,15 +126,30 @@ echo "=== summary diff (base vs head) ==="
 # Compare the parts of the summary that describe STATE, not timing. A rate or
 # an elapsed line differing is meaningless; a head block, an op count or an
 # invariant result differing is the whole point.
+# STATE lines must match. INVARIANT lines are in here deliberately (see the
+# header): a differing delta would mean the change altered conservation, while
+# a shared pre-existing one is what clean looks like.
+STATE_RE="blocks applied|ops applied|ops skipped|block errors|head block|dgpo time|dgpo witness|status|INVARIANT"
+# DIAGNOSTIC lines are reported, never compared. A counter added by the newer
+# binary is absent from the older one by construction, so diffing them reports
+# a difference for every new measurement — which is how a working harness
+# starts crying wolf and stops being read.
+DIAG_RE="rc stale max|govsweep budget"
+
 for f in base head; do
-  # INVARIANT lines are included deliberately — see the header. They must match
-  # between the two sides; a differing delta is the signal, a shared one is not.
-  grep -E "blocks applied|ops applied|ops skipped|block errors|head block|dgpo time|dgpo witness|status|rc stale max|govsweep budget|INVARIANT" \
-    "$OUT/$f.log" > "$OUT/$f.summary" || true
+  grep -E "$STATE_RE" "$OUT/$f.log" > "$OUT/$f.summary" || true
+  grep -E "$DIAG_RE" "$OUT/$f.log" > "$OUT/$f.diag" || true
 done
+
+echo "--- diagnostics (reported, not compared) ---"
+for f in base head; do
+  if [ -s "$OUT/$f.diag" ]; then sed "s/^/  $f: /" "$OUT/$f.diag"; else echo "  $f: (none)"; fi
+done
+echo
+
 if diff -u "$OUT/base.summary" "$OUT/head.summary"; then
-  echo "SUMMARIES IDENTICAL"
+  echo "STATE IDENTICAL — the change did not alter what the chain computed"
 else
-  echo "SUMMARIES DIFFER — investigate before trusting the change"
+  echo "STATE DIFFERS — investigate before trusting the change"
   exit 1
 fi
