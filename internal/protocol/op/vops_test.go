@@ -100,6 +100,14 @@ func TestRecurrentTransferPairIDExtension(t *testing.T) {
 // until a consumer decodes the stream.
 func TestVirtualOpsCarryTheirTag(t *testing.T) {
 	ops := []Operation{
+		FillOrder{},
+		FillCollateralizedConvertRequest{}, CollateralizedConvertImmediateConversion{},
+		EffectiveCommentVote{}, IneffectiveDeleteComment{},
+		AccountCreated{}, TransferToVestingCompleted{}, PowReward{},
+		VestingSharesSplit{}, ChangedRecoveryAccount{}, DelayedVoting{},
+		DhfFunding{}, DhfConversion{}, ConsolidateTreasuryBalance{},
+		HardforkHive{}, HardforkHiveRestore{},
+		EscrowApproved{}, EscrowRejected{}, SystemWarning{},
 		ProducerReward{},
 		ProxyCleared{},
 		DeclinedVotingRights{},
@@ -141,8 +149,15 @@ func TestVirtualOpsCarryTheirTag(t *testing.T) {
 			t.Errorf("%T: encoded tag byte = %v, want %d", o, encoded[:1], tag)
 		}
 	}
-	if len(ops) != 24 {
-		t.Errorf("wired %d virtual ops; update this count deliberately so the "+
-			"remaining 19 stay visible", len(ops))
+	// All 43. The tag range is contiguous and fully covered, so any future
+	// addition to hived's static_variant shows up here as a gap rather than
+	// as a silently-misnumbered stream.
+	if len(ops) != 43 {
+		t.Errorf("defined %d virtual ops, want all 43", len(ops))
+	}
+	for tag := TagFirstVirtual; tag < TagLastVirtual; tag++ {
+		if !seen[tag] {
+			t.Errorf("tag %d has no Operation implementation", tag)
+		}
 	}
 }

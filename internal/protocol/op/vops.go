@@ -491,3 +491,328 @@ func RecurrentTransferPairIDExtension(pairID uint8) []byte {
 	out = fcraw.AppendVarUint(out, 1)
 	return append(out, pairID)
 }
+
+// ---- the remaining virtual ops -------------------------------------------
+//
+// Field order below is the FC_REFLECT order in every case. Where a struct's
+// C++ constructor takes its arguments in a different order — as
+// failed_recurrent_transfer's does — the reflect order is the one on the wire.
+
+// FillOrder — a limit order matching. Emitted once per match, naming both
+// sides: `current` is the incoming order, `open` the resting one.
+type FillOrder struct {
+	CurrentOwner   auth.AccountName
+	CurrentOrderID uint32
+	CurrentPays    asset.Asset
+	OpenOwner      auth.AccountName
+	OpenOrderID    uint32
+	OpenPays       asset.Asset
+}
+
+func (FillOrder) OpTag() Tag { return TagFillOrder }
+func (o FillOrder) AppendFCBody(dst []byte) []byte {
+	dst = appendString(dst, o.CurrentOwner)
+	dst = appendVopU32(dst, o.CurrentOrderID)
+	dst = asset.AppendAsset(dst, o.CurrentPays)
+	dst = appendString(dst, o.OpenOwner)
+	dst = appendVopU32(dst, o.OpenOrderID)
+	return asset.AppendAsset(dst, o.OpenPays)
+}
+
+// EffectiveCommentVote — what a vote actually counted for, after the curation
+// curve and the rshares cap. PendingPayout is the comment's projected payout
+// at this moment, not a settled amount.
+type EffectiveCommentVote struct {
+	Voter           auth.AccountName
+	Author          auth.AccountName
+	Permlink        string
+	Weight          uint64
+	Rshares         int64
+	TotalVoteWeight uint64
+	PendingPayout   asset.Asset
+}
+
+func (EffectiveCommentVote) OpTag() Tag { return TagEffectiveCommentVote }
+func (o EffectiveCommentVote) AppendFCBody(dst []byte) []byte {
+	dst = appendString(dst, o.Voter)
+	dst = appendString(dst, o.Author)
+	dst = appendString(dst, o.Permlink)
+	dst = appendVopU64(dst, o.Weight)
+	dst = appendVopI64(dst, o.Rshares)
+	dst = appendVopU64(dst, o.TotalVoteWeight)
+	return asset.AppendAsset(dst, o.PendingPayout)
+}
+
+// IneffectiveDeleteComment — a delete_comment that could not take effect.
+type IneffectiveDeleteComment struct {
+	Author   auth.AccountName
+	Permlink string
+}
+
+func (IneffectiveDeleteComment) OpTag() Tag { return TagIneffectiveDeleteComment }
+func (o IneffectiveDeleteComment) AppendFCBody(dst []byte) []byte {
+	dst = appendString(dst, o.Author)
+	return appendString(dst, o.Permlink)
+}
+
+// AccountCreated — a new account, with whatever VESTS it started with.
+type AccountCreated struct {
+	NewAccountName       auth.AccountName
+	Creator              auth.AccountName
+	InitialVestingShares asset.Asset
+	InitialDelegation    asset.Asset
+}
+
+func (AccountCreated) OpTag() Tag { return TagAccountCreated }
+func (o AccountCreated) AppendFCBody(dst []byte) []byte {
+	dst = appendString(dst, o.NewAccountName)
+	dst = appendString(dst, o.Creator)
+	dst = asset.AppendAsset(dst, o.InitialVestingShares)
+	return asset.AppendAsset(dst, o.InitialDelegation)
+}
+
+// TransferToVestingCompleted — a power-up settling, naming both the HIVE spent
+// and the VESTS received.
+type TransferToVestingCompleted struct {
+	FromAccount           auth.AccountName
+	ToAccount             auth.AccountName
+	HiveVested            asset.Asset
+	VestingSharesReceived asset.Asset
+}
+
+func (TransferToVestingCompleted) OpTag() Tag { return TagTransferToVestingCompleted }
+func (o TransferToVestingCompleted) AppendFCBody(dst []byte) []byte {
+	dst = appendString(dst, o.FromAccount)
+	dst = appendString(dst, o.ToAccount)
+	dst = asset.AppendAsset(dst, o.HiveVested)
+	return asset.AppendAsset(dst, o.VestingSharesReceived)
+}
+
+// PowReward — a mining reward.
+type PowReward struct {
+	Worker auth.AccountName
+	Reward asset.Asset
+}
+
+func (PowReward) OpTag() Tag { return TagPowReward }
+func (o PowReward) AppendFCBody(dst []byte) []byte {
+	dst = appendString(dst, o.Worker)
+	return asset.AppendAsset(dst, o.Reward)
+}
+
+// VestingSharesSplit — the HF1 VESTS redenomination, emitted per account.
+type VestingSharesSplit struct {
+	Owner                    auth.AccountName
+	VestingSharesBeforeSplit asset.Asset
+	VestingSharesAfterSplit  asset.Asset
+}
+
+func (VestingSharesSplit) OpTag() Tag { return TagVestingSharesSplit }
+func (o VestingSharesSplit) AppendFCBody(dst []byte) []byte {
+	dst = appendString(dst, o.Owner)
+	dst = asset.AppendAsset(dst, o.VestingSharesBeforeSplit)
+	return asset.AppendAsset(dst, o.VestingSharesAfterSplit)
+}
+
+// ChangedRecoveryAccount — a recovery-account change taking effect after its
+// 30-day delay.
+type ChangedRecoveryAccount struct {
+	Account            auth.AccountName
+	OldRecoveryAccount auth.AccountName
+	NewRecoveryAccount auth.AccountName
+}
+
+func (ChangedRecoveryAccount) OpTag() Tag { return TagChangedRecoveryAccount }
+func (o ChangedRecoveryAccount) AppendFCBody(dst []byte) []byte {
+	dst = appendString(dst, o.Account)
+	dst = appendString(dst, o.OldRecoveryAccount)
+	return appendString(dst, o.NewRecoveryAccount)
+}
+
+// DelayedVoting — VESTS entering or leaving the delayed-voting pool (HF24+).
+type DelayedVoting struct {
+	Voter auth.AccountName
+	Votes uint64
+}
+
+func (DelayedVoting) OpTag() Tag { return TagDelayedVoting }
+func (o DelayedVoting) AppendFCBody(dst []byte) []byte {
+	dst = appendString(dst, o.Voter)
+	return appendVopU64(dst, o.Votes)
+}
+
+// DhfFunding — HBD moved into the treasury for the interval.
+type DhfFunding struct {
+	Treasury        auth.AccountName
+	AdditionalFunds asset.Asset
+}
+
+func (DhfFunding) OpTag() Tag { return TagDhfFunding }
+func (o DhfFunding) AppendFCBody(dst []byte) []byte {
+	dst = appendString(dst, o.Treasury)
+	return asset.AppendAsset(dst, o.AdditionalFunds)
+}
+
+// DhfConversion — the treasury's daily HIVE→HBD conversion (HF24+).
+type DhfConversion struct {
+	Treasury     auth.AccountName
+	HiveAmountIn asset.Asset
+	HbdAmountOut asset.Asset
+}
+
+func (DhfConversion) OpTag() Tag { return TagDhfConversion }
+func (o DhfConversion) AppendFCBody(dst []byte) []byte {
+	dst = appendString(dst, o.Treasury)
+	dst = asset.AppendAsset(dst, o.HiveAmountIn)
+	return asset.AppendAsset(dst, o.HbdAmountOut)
+}
+
+// ConsolidateTreasuryBalance — the HF24 move of the old treasury's balances.
+type ConsolidateTreasuryBalance struct {
+	TotalMoved []asset.Asset
+}
+
+func (ConsolidateTreasuryBalance) OpTag() Tag { return TagConsolidateTreasuryBalance }
+func (o ConsolidateTreasuryBalance) AppendFCBody(dst []byte) []byte {
+	dst = fcraw.AppendVarUint(dst, uint32(len(o.TotalMoved)))
+	for _, a := range o.TotalMoved {
+		dst = asset.AppendAsset(dst, a)
+	}
+	return dst
+}
+
+// HardforkHive — the HF23 confiscation, per affected account.
+type HardforkHive struct {
+	Account               auth.AccountName
+	Treasury              auth.AccountName
+	OtherAffectedAccounts []auth.AccountName
+	HbdTransferred        asset.Asset
+	HiveTransferred       asset.Asset
+	VestsConverted        asset.Asset
+	TotalHiveFromVests    asset.Asset
+}
+
+func (HardforkHive) OpTag() Tag { return TagHardforkHive }
+func (o HardforkHive) AppendFCBody(dst []byte) []byte {
+	dst = appendString(dst, o.Account)
+	dst = appendString(dst, o.Treasury)
+	dst = fcraw.AppendVarUint(dst, uint32(len(o.OtherAffectedAccounts)))
+	for _, a := range o.OtherAffectedAccounts {
+		dst = appendString(dst, a)
+	}
+	dst = asset.AppendAsset(dst, o.HbdTransferred)
+	dst = asset.AppendAsset(dst, o.HiveTransferred)
+	dst = asset.AppendAsset(dst, o.VestsConverted)
+	return asset.AppendAsset(dst, o.TotalHiveFromVests)
+}
+
+// HardforkHiveRestore — the HF24 return of confiscated funds.
+type HardforkHiveRestore struct {
+	Account         auth.AccountName
+	Treasury        auth.AccountName
+	HbdTransferred  asset.Asset
+	HiveTransferred asset.Asset
+}
+
+func (HardforkHiveRestore) OpTag() Tag { return TagHardforkHiveRestore }
+func (o HardforkHiveRestore) AppendFCBody(dst []byte) []byte {
+	dst = appendString(dst, o.Account)
+	dst = appendString(dst, o.Treasury)
+	dst = asset.AppendAsset(dst, o.HbdTransferred)
+	return asset.AppendAsset(dst, o.HiveTransferred)
+}
+
+// FillCollateralizedConvertRequest — a collateralized convert maturing, with
+// whatever collateral was not needed returned.
+type FillCollateralizedConvertRequest struct {
+	Owner            auth.AccountName
+	RequestID        uint32
+	AmountIn         asset.Asset
+	AmountOut        asset.Asset
+	ExcessCollateral asset.Asset
+}
+
+func (FillCollateralizedConvertRequest) OpTag() Tag {
+	return TagFillCollateralizedConvertRequest
+}
+func (o FillCollateralizedConvertRequest) AppendFCBody(dst []byte) []byte {
+	dst = appendString(dst, o.Owner)
+	dst = appendVopU32(dst, o.RequestID)
+	dst = asset.AppendAsset(dst, o.AmountIn)
+	dst = asset.AppendAsset(dst, o.AmountOut)
+	return asset.AppendAsset(dst, o.ExcessCollateral)
+}
+
+// CollateralizedConvertImmediateConversion — the HBD handed over up front when
+// a collateralized convert is created.
+type CollateralizedConvertImmediateConversion struct {
+	Owner     auth.AccountName
+	RequestID uint32
+	HbdOut    asset.Asset
+}
+
+func (CollateralizedConvertImmediateConversion) OpTag() Tag {
+	return TagCollateralizedConvertImmediateConversion
+}
+func (o CollateralizedConvertImmediateConversion) AppendFCBody(dst []byte) []byte {
+	dst = appendString(dst, o.Owner)
+	dst = appendVopU32(dst, o.RequestID)
+	return asset.AppendAsset(dst, o.HbdOut)
+}
+
+// EscrowApproved — both agent and recipient having approved; the fee is paid.
+type EscrowApproved struct {
+	From     auth.AccountName
+	To       auth.AccountName
+	Agent    auth.AccountName
+	EscrowID uint32
+	Fee      asset.Asset
+}
+
+func (EscrowApproved) OpTag() Tag { return TagEscrowApproved }
+func (o EscrowApproved) AppendFCBody(dst []byte) []byte {
+	dst = appendString(dst, o.From)
+	dst = appendString(dst, o.To)
+	dst = appendString(dst, o.Agent)
+	dst = appendVopU32(dst, o.EscrowID)
+	return asset.AppendAsset(dst, o.Fee)
+}
+
+// EscrowRejected — an escrow refused or expired unapproved; everything goes
+// back, which is why this one names the amounts and EscrowApproved does not.
+type EscrowRejected struct {
+	From       auth.AccountName
+	To         auth.AccountName
+	Agent      auth.AccountName
+	EscrowID   uint32
+	HbdAmount  asset.Asset
+	HiveAmount asset.Asset
+	Fee        asset.Asset
+}
+
+func (EscrowRejected) OpTag() Tag { return TagEscrowRejected }
+func (o EscrowRejected) AppendFCBody(dst []byte) []byte {
+	dst = appendString(dst, o.From)
+	dst = appendString(dst, o.To)
+	dst = appendString(dst, o.Agent)
+	dst = appendVopU32(dst, o.EscrowID)
+	dst = asset.AppendAsset(dst, o.HbdAmount)
+	dst = asset.AppendAsset(dst, o.HiveAmount)
+	return asset.AppendAsset(dst, o.Fee)
+}
+
+// SystemWarning — a node-level notice carried in the stream (used for the RC
+// and block-size warnings hived surfaces).
+type SystemWarning struct {
+	Message string
+}
+
+func (SystemWarning) OpTag() Tag { return TagSystemWarning }
+func (o SystemWarning) AppendFCBody(dst []byte) []byte {
+	return appendString(dst, o.Message)
+}
+
+func appendVopU64(dst []byte, v uint64) []byte {
+	return append(dst, byte(v), byte(v>>8), byte(v>>16), byte(v>>24),
+		byte(v>>32), byte(v>>40), byte(v>>48), byte(v>>56))
+}
