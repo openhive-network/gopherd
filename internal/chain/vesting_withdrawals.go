@@ -235,6 +235,29 @@ func processOneWithdrawal(s *state.Session, accountName string, scheduledTime, b
 			dgpo.HeadBlockNumber, accountName, toWithdraw, depositedVests, toConvertToHive, convertedHive,
 			a.VestingShares, a.VestingWithdrawRate, a.ToWithdraw, a.Withdrawn)
 	}
+	// hived regenerates the payer's RC mana BEFORE the vests move
+	// (database_vesting.cpp:252-253) and only then calls
+	// update_account_after_vest_change. The order is the whole point: the
+	// regeneration has to be computed against the OLD ceiling, because after
+	// the power-down chunk leaves, the ceiling is lower and the same elapsed
+	// time would credit less mana.
+	//
+	// gopherd had no regeneration here at all, which is 99.2% of the
+	// "not regenerated prior to VEST change" hits hived warns about — 119,093
+	// of 120,083 over 100k blocks, all from this one site.
+	//
+	// The clock is blockTime, not scheduledTime. hived passes
+	// head_block_time() to both calls; scheduledTime is the schedule entry's
+	// own timestamp, which is only <= blockTime — a withdrawal due at
+	// 12:00:01 is filled by the block at 12:00:03. Regenerating "as of" a
+	// moment already past would credit less mana than hived, and
+	// RegenerateMana's `now <= lastUpdate` guard can make it a no-op or move
+	// the stamp backwards. The paired call below now uses the same clock,
+	// which it must: if the two disagree the refresh sees a manabar stamped
+	// at a different instant and counts as un-regenerated regardless.
+	if hfWithdraw.Has(hardfork.HF20) {
+		objects.RegenerateRCMana(&a, blockTime)
+	}
 	a.VestingShares -= toWithdraw
 	a.Balance += convertedHive
 	a.Withdrawn += toWithdraw
@@ -298,7 +321,7 @@ func processOneWithdrawal(s *state.Session, accountName string, scheduledTime, b
 	// update_after_vest_change(from_account, fill_new_mana=true,
 	// check_for_rc_delegation_overflow=true).
 	if dgpoNow, _ := objects.GetDGPO(s); hardfork.SetForBlock(dgpoNow.HeadBlockNumber).Has(hardfork.HF20) {
-		handleVestingWithdrawalRCImpact(s, &a, scheduledTime)
+		handleVestingWithdrawalRCImpact(s, &a, blockTime)
 	}
 	objects.PutAccount(s, &a)
 
@@ -374,6 +397,12 @@ func processWithdrawRoutes(s *state.Session, fromAccount string, toWithdraw int6
 					dgpoT.HeadBlockNumber, fromAccount, route.To, route.Percent, route.AutoVest, toDeposit)
 			}
 			if autoVest {
+				// database_vesting.cpp:199-200 — regenerate the RECIPIENT
+				// before their vests change, for the same reason as the payer
+				// above: the regeneration belongs to the old ceiling.
+				if dgpoRegen, _ := objects.GetDGPO(s); hardfork.SetForBlock(dgpoRegen.HeadBlockNumber).Has(hardfork.HF20) {
+					objects.RegenerateRCMana(&to, now)
+				}
 				to.VestingShares += toDeposit
 				objects.PutAccount(s, &to)
 				// C++ database_vesting.cpp:208-217 — auto_vest deposit
