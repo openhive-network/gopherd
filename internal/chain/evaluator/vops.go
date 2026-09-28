@@ -94,3 +94,82 @@ func (c *Context) EmitEffectiveCommentVote(voter, author, permlink string, weigh
 		TotalVoteWeight: totalVoteWeight,
 	})
 }
+
+// AccountCreatedVOp mirrors hived's account_created_operation. It is the op
+// that tells a consumer an account now exists and what it started with, so
+// every creation path pushes one — account_create, account_create_with_
+// delegation, create_claimed_account and the two pow paths.
+//
+// InitialVestingShares is only non-zero on the paths that actually vested
+// the fee: from HF20 the creation fee is burned to the null account instead
+// (hive_evaluator_account.cpp:208-212), and create_claimed_account pays no
+// fee at all, so zero there is the true value rather than a missing one.
+type AccountCreatedVOp struct {
+	NewAccountName       string
+	Creator              string
+	InitialVestingShares int64 // VESTS satoshi
+	InitialDelegation    int64 // VESTS satoshi
+}
+
+// TransferToVestingCompletedVOp mirrors hived's
+// transfer_to_vesting_completed_operation. hived emits it unconditionally
+// and says why in a comment at hive_evaluator_transfer.cpp:334: the VESTS
+// balance moved immediately, independent of whatever delayed_voting does to
+// the voting power afterwards. So it must not be gated on the delayed-voting
+// branch, nor skipped when the vest conversion rounds to zero.
+type TransferToVestingCompletedVOp struct {
+	FromAccount           string
+	ToAccount             string
+	HiveVested            int64 // HIVE satoshi
+	VestingSharesReceived int64 // VESTS satoshi
+}
+
+// PowRewardVOp mirrors hived's pow_reward_operation. The reward's CURRENCY
+// changes with the chain's age: liquid HIVE before HIVE_START_MINER_VOTING_
+// BLOCK, VESTS after (hive_evaluator.cpp:485-494). RewardIsVests says which,
+// because an op carrying VESTS labelled HIVE is off by the share price.
+//
+// The worker is the witness that INCLUDED the proof of work
+// (dgp.current_witness), not the miner who solved it.
+type PowRewardVOp struct {
+	Worker        string
+	Reward        int64
+	RewardIsVests bool
+}
+
+// EmitAccountCreated is a convenience that pushes the vop through
+// ctx.EmitVOp if non-nil.
+func (c *Context) EmitAccountCreated(newAccount, creator string, initialVestingShares, initialDelegation int64) {
+	if c.EmitVOp == nil {
+		return
+	}
+	c.EmitVOp(AccountCreatedVOp{
+		NewAccountName:       newAccount,
+		Creator:              creator,
+		InitialVestingShares: initialVestingShares,
+		InitialDelegation:    initialDelegation,
+	})
+}
+
+// EmitTransferToVestingCompleted is a convenience that pushes the vop
+// through ctx.EmitVOp if non-nil.
+func (c *Context) EmitTransferToVestingCompleted(from, to string, hiveVested, vestingSharesReceived int64) {
+	if c.EmitVOp == nil {
+		return
+	}
+	c.EmitVOp(TransferToVestingCompletedVOp{
+		FromAccount:           from,
+		ToAccount:             to,
+		HiveVested:            hiveVested,
+		VestingSharesReceived: vestingSharesReceived,
+	})
+}
+
+// EmitPowReward is a convenience that pushes the vop through ctx.EmitVOp
+// if non-nil.
+func (c *Context) EmitPowReward(worker string, reward int64, isVests bool) {
+	if c.EmitVOp == nil {
+		return
+	}
+	c.EmitVOp(PowRewardVOp{Worker: worker, Reward: reward, RewardIsVests: isVests})
+}

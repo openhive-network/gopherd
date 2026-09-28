@@ -178,6 +178,9 @@ func (createClaimedAccountEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		LastOwnerUpdate:     0,
 		PreviousOwnerUpdate: 0,
 	})
+	// A claimed account pays no fee, so both starting amounts are zero by
+	// construction (hive_evaluator_account.cpp:509).
+	ctx.EmitAccountCreated(string(cc.NewAccountName), string(cc.Creator), 0, 0)
 	return nil
 }
 
@@ -275,9 +278,12 @@ func (accountCreateWithDelegationEvaluator) Apply(ctx *Context, opArg op.Op) err
 	// Convert the fee to starter VESTS for the new account, matching
 	// hived's account_create_with_delegation_evaluator (libraries/chain/
 	// hive_evaluator.cpp) which calls db.create_vesting2 on the fee.
+	initialVestingShares := int64(0)
 	if ac.Fee.Amount > 0 {
-		if _, err := CreateVesting(ctx.DB, ac.NewAccountName, ac.Fee.Amount, false); err != nil {
-			return err
+		var verr error
+		initialVestingShares, verr = CreateVesting(ctx.DB, ac.NewAccountName, ac.Fee.Amount, false)
+		if verr != nil {
+			return verr
 		}
 	}
 	// hive_evaluator_account.cpp:268 — record the vesting_delegation
@@ -311,6 +317,7 @@ func (accountCreateWithDelegationEvaluator) Apply(ctx *Context, opArg op.Op) err
 			objects.PutAccount(ctx.DB, &creator)
 		}
 	}
+	ctx.EmitAccountCreated(string(ac.NewAccountName), string(ac.Creator), initialVestingShares, ac.Delegation.Amount)
 	return nil
 }
 

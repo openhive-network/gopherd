@@ -228,6 +228,10 @@ func payPowReward(ctx *Context) error {
 	dgpo.TotalVestingFundHive += newVesting
 	objects.PutDGPO(ctx.DB, &dgpo)
 
+	// The reward's CURRENCY changes with the chain's age, and the vop has to
+	// say which: liquid HIVE before HIVE_START_MINER_VOTING_BLOCK, VESTS
+	// after (hive_evaluator.cpp:485-494). Reporting the VESTS figure under
+	// the HIVE symbol would be off by the whole share price.
 	if ctx.BlockNum < startMinerVotingBlockPow {
 		w, err := objects.GetAccount(ctx.DB, witnessName)
 		if err != nil {
@@ -235,10 +239,13 @@ func payPowReward(ctx *Context) error {
 		}
 		w.Balance += pay
 		objects.PutAccount(ctx.DB, &w)
+		ctx.EmitPowReward(string(witnessName), pay, false)
 	} else {
-		if _, err := CreateVesting(ctx.DB, witnessName, pay, false); err != nil {
+		vests, err := CreateVesting(ctx.DB, witnessName, pay, false)
+		if err != nil {
 			return err
 		}
+		ctx.EmitPowReward(string(witnessName), vests, true)
 	}
 	return nil
 }
@@ -308,6 +315,11 @@ func ensureMinerAccountForPow(ctx *Context, worker string, payReward bool, props
 			},
 			LastOwnerUpdate: ctx.HeadBlockTime,
 		})
+		// A PoW-mined account has no separate creator — hived names the
+		// account itself (hive_evaluator.cpp:429 and :571). It starts with
+		// nothing; the mining reward goes to the witness that included the
+		// work, not to this account.
+		ctx.EmitAccountCreated(string(worker), string(worker), 0, 0)
 	}
 	// Register the worker as a witness if missing — hived's pow_apply
 	// calls db.create<witness_object>(...) on first pow from this
