@@ -659,6 +659,20 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 				adjustSupplyHive(s, p, -share)
 				adjustSupplyHbd(s, p, hbdPayout)
 			})
+			// The treasury leg pays HBD outright, and hived sets
+			// payout_must_be_claimed = FALSE here even under HF17+
+			// (database_comment.cpp:257) — the treasury has no reward balance
+			// to claim from, so the op must not tell a consumer to wait for a
+			// claim that will never come.
+			d.pushVOp(op.CommentBenefactorReward{
+				Benefactor:          b.Account,
+				Author:              c.Author,
+				Permlink:            c.Permlink,
+				HbdPayout:           vopHbd(hbdPayout),
+				HivePayout:          vopHive(0),
+				VestingPayout:       vopVests(0),
+				PayoutMustBeClaimed: false,
+			})
 			totalBeneficiary += share
 			continue
 		}
@@ -682,12 +696,15 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 		// HF17+ routes author/beneficiary payouts through reward_* fields
 		// that the user later moves to liquid via claim_reward_balance.
 		toReward := hfBene.Has(hardfork.HF17)
+		beneHbdPaid, beneHivePaid := int64(0), int64(0)
 		if hbdSlice > 0 {
-			payCreateHbd(s, &bAcct, blockTime, hbdSlice, toReward)
+			beneHbdPaid, beneHivePaid = payCreateHbd(s, &bAcct, blockTime, hbdSlice, toReward)
 			objects.PutAccount(s, &bAcct)
 		}
+		beneVests := int64(0)
 		if vestingSlice > 0 {
 			benevests, err := CreateVesting_via_chain(s, b.Account, vestingSlice, toReward)
+			beneVests = benevests
 			if err != nil {
 				ghiveDiff("GHIVEDIFF CREATE-VESTING-FAIL site=comment_cashout.beneficiary block=%d author=%s permlink=%s beneficiary=%s amount=%d err=%v\n",
 					blockNum, c.Author, c.Permlink, b.Account, vestingSlice, err)
@@ -696,6 +713,18 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 					blockNum, c.Author, c.Permlink, b.Account, vestingSlice, benevests)
 			}
 		}
+		// Pre-HF20 the whole slice is VESTS and both money legs read zero;
+		// that is the correct payload, not a missing one.
+		d.pushVOp(op.CommentBenefactorReward{
+			Benefactor:          b.Account,
+			Author:              c.Author,
+			Permlink:            c.Permlink,
+			HbdPayout:           vopHbd(beneHbdPaid),
+			HivePayout:          vopHive(beneHivePaid),
+			VestingPayout:       vopVests(beneVests),
+			PayoutMustBeClaimed: toReward,
+		})
+
 		if traceAccount(string(b.Account)) {
 			ghiveDiff("GHIVEDIFF CASHOUT-BENEFICIARY block=%d author=%s permlink=%s beneficiary=%s weight=%d author_pool=%d share=%d hbd_slice=%d vesting_slice=%d percent_hbd=%d\n",
 				blockNum, c.Author, c.Permlink, b.Account, b.Weight, authorPool, share, hbdSlice, vestingSlice, c.PercentHbd)
