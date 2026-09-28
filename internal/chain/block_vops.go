@@ -116,6 +116,18 @@ func (d *Database) emitVOpClosure() func(any) {
 					Symbol: asset.Symbol{Num: asset.HbdSymbol},
 				},
 			})
+		case evaluator.EffectiveCommentVoteVOp:
+			d.pushVOp(op.EffectiveCommentVote{
+				Voter:           auth.AccountName(p.Voter),
+				Author:          auth.AccountName(p.Author),
+				Permlink:        p.Permlink,
+				Weight:          p.Weight,
+				Rshares:         p.Rshares,
+				TotalVoteWeight: p.TotalVoteWeight,
+				// Always zero from a consensus node — see the note on
+				// evaluator.EffectiveCommentVoteVOp.
+				PendingPayout: vopHbd(0),
+			})
 		case evaluator.ProxyClearedVOp:
 			d.pushVOp(op.ProxyCleared{
 				Account: auth.AccountName(p.Account),
