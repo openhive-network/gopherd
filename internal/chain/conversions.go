@@ -6,6 +6,7 @@ import (
 	"gopherd/internal/chain/evaluator"
 	"gopherd/internal/protocol/asset"
 	"gopherd/internal/protocol/auth"
+	"gopherd/internal/protocol/op"
 	"gopherd/internal/state"
 	"gopherd/internal/state/objects"
 )
@@ -22,7 +23,7 @@ import (
 // (current_median_history.amount == 0); that's the case before the
 // chain has accumulated HIVE_MIN_FEEDS valid feeds (~block 933,600 in
 // real Hive history).
-func processConversions(s *state.Session, blockTime uint32, hooks *blockHookScratch) {
+func processConversions(s *state.Session, blockTime uint32, hooks *blockHookScratch, d *Database) {
 	store := objects.EnsureConvertRequestStore(s)
 	fh, err := objects.GetFeedHistory(s)
 	if err != nil {
@@ -69,6 +70,16 @@ func processConversions(s *state.Session, blockTime uint32, hooks *blockHookScra
 				a.Balance += hiveAmount
 				objects.PutAccount(s, &a)
 			}
+		}
+		if d != nil {
+			// hived pushes fill_convert_request_operation as the request
+			// settles, naming both sides of the conversion.
+			d.pushVOp(op.FillConvertRequest{
+				Owner:     auth.AccountName(p.owner),
+				RequestID: p.requestID,
+				AmountIn:  asset.Asset{Amount: req.Amount, Symbol: asset.Symbol{Num: asset.HbdSymbol}},
+				AmountOut: asset.Asset{Amount: hiveAmount, Symbol: asset.Symbol{Num: asset.HiveSymbol}},
+			})
 		}
 		netHive += hiveAmount
 		netHbd -= req.Amount
