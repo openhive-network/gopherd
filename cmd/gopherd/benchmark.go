@@ -71,6 +71,10 @@ func cmdBenchmark(args []string) int {
 	}
 
 	cdb := chain.New(stateDB)
+	// Match the replay default. This tool exists to track replay throughput,
+	// and a benchmark measuring a configuration replay does not use reports a
+	// number nobody can act on.
+	cdb.SetVOpEmission(false)
 	opts := chain.ApplyOptions{
 		Sync:                      false,
 		SkipUnknownOps:            false,

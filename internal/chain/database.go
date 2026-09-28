@@ -201,22 +201,57 @@ type Database struct {
 	// ApplyBlock; mutated inside the tx loop by enforceCustomOpBlockLimit.
 	customOpCountByAccount map[auth.AccountName]uint8
 
-	// vops is the per-block virtual-operation buffer used to surface
-	// fill_recurrent_transfer / failed_recurrent_transfer vops to tests
-	// (the Go chain doesn't have a full virtual-op pipeline yet — see
-	// block_vops.go). Reset at the top of every ApplyBlock; readers grab
-	// it via LastBlockVOps() under the applyMu RLock.
+	// vops is the per-block virtual-operation buffer (see block_vops.go).
+	// Reset at the top of every ApplyBlock; readers grab it via
+	// LastBlockVOps() under the applyMu RLock.
 	vops []op.Operation
+	// vopsOff suppresses the buffer entirely. The stream is observational —
+	// a paired replay over 100k blocks proved state is bit-identical with it
+	// on or off — but building it costs ~7% of replay throughput, most of it
+	// on the vote path where effective_comment_vote fires once per vote. A
+	// bulk replay has no consumer for any of it, so it pays nothing.
+	//
+	// The polarity is deliberate: zero value = EMITTING. Forgetting to turn
+	// it off costs throughput in a batch job; forgetting to turn it on would
+	// silently serve an empty stream to a consumer that cannot tell the
+	// difference between "no vops" and "vops disabled".
+	vopsOff bool
+	// vopEmit is the cached evaluator callback. nil when vopsOff, which is
+	// what lets the evaluator-side Emit* helpers return before constructing
+	// a payload at all rather than building one for pushVOp to drop.
+	vopEmit func(any)
 }
+
+// SetVOpEmission turns the per-block virtual-op stream on or off. Emission is
+// ON by default; a bulk replay turns it off because nothing reads it there.
+// Call before applying blocks.
+func (d *Database) SetVOpEmission(on bool) {
+	d.vopsOff = !on
+	if on {
+		d.vopEmit = d.newVOpEmitter()
+	} else {
+		d.vopEmit = nil
+		d.vops = nil
+	}
+}
+
+// VOpEmissionEnabled reports whether the stream is being built. Hot paths that
+// would otherwise construct a payload per iteration — one curation_reward per
+// curator paid — check this first, because the argument to pushVOp escapes to
+// the heap whether or not pushVOp keeps it.
+func (d *Database) VOpEmissionEnabled() bool { return !d.vopsOff }
 
 // New wraps an opened state.Database for block application.
 func New(s *state.Database) *Database {
-	return &Database{
+	d := &Database{
 		state:                  s,
 		session:                state.NewSession(s),
 		lcbCache:               make(map[string]uint32, 32),
 		customOpCountByAccount: make(map[auth.AccountName]uint8, 8),
 	}
+	// Emission on by default — see the vopsOff field for why that polarity.
+	d.vopEmit = d.newVOpEmitter()
+	return d
 }
 
 // State returns the underlying state.Database.
@@ -792,7 +827,7 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 		BlockTime:                  hdr.Timestamp,
 		HeadBlockTime:              headBlockTime,
 		Witness:                    hdr.Witness,
-		EmitVOp:                    d.emitVOpClosure(),
+		EmitVOp:                    d.vopEmit,
 		InControl:                  opts.InControl,
 	}
 

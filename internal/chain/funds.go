@@ -528,9 +528,15 @@ func processFundsHF16(s *state.Session, dgpo *objects.DynamicGlobalProperty, blo
 // the first 30 days after genesis, which is why hived types the field as a
 // bare asset rather than a VEST_asset.
 func emitProducerReward(d *Database, witnessName string, amount int64, asVests bool) {
-	if d == nil || amount == 0 {
+	if d == nil {
 		return
 	}
+	// No amount gate. hived pushes producer_reward unconditionally on the
+	// post-HF16 path (database.cpp:1819) — a zero is a fact about the block,
+	// not a reason to stay silent, and a consumer cannot tell a suppressed op
+	// from a block that produced none. The guard also hid every producer
+	// reward in the test fixture, where the share price can convert the pay
+	// to zero VESTS.
 	sym := asset.Symbol{Num: asset.VestsSymbol}
 	if !asVests {
 		sym = asset.Symbol{Num: asset.HiveSymbol}

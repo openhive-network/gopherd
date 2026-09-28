@@ -79,6 +79,9 @@ func (d *Database) LastBlockVOpsEncoded() [][]byte {
 // pushVOp appends a virtual op to the per-block buffer. Caller must hold the
 // write lock (ApplyBlock holds it for the entire block).
 func (d *Database) pushVOp(v op.Operation) {
+	if d.vopsOff {
+		return
+	}
 	d.vops = append(d.vops, v)
 }
 
@@ -110,10 +113,10 @@ func CountVOps(vops []op.Operation, tag op.Tag) int {
 	return n
 }
 
-// emitVOpClosure returns the function the evaluator package's Context invokes
+// newVOpEmitter returns the function the evaluator package's Context invokes
 // when an op wants to push a virtual op. The evaluator package cannot import
 // chain, so it hands over its own payload types and this translates them.
-func (d *Database) emitVOpClosure() func(any) {
+func (d *Database) newVOpEmitter() func(any) {
 	return func(payload any) {
 		switch p := payload.(type) {
 		case evaluator.ProposalFeeVOp:
