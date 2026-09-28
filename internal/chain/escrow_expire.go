@@ -1,6 +1,7 @@
 package chain
 
 import (
+	"gopherd/internal/protocol/op"
 	"gopherd/internal/state"
 	"gopherd/internal/state/objects"
 )
@@ -13,7 +14,7 @@ import (
 // Approved escrows skip the expiration path — they remain pending until
 // the escrow_expiration deadline (handled by escrow_dispute /
 // escrow_release).
-func expireEscrowRatifications(s *state.Session, blockTime uint32) {
+func expireEscrowRatifications(s *state.Session, blockTime uint32, d *Database) {
 	if hint, ok := s.GetExpHint(objects.EscrowTable, objects.EscrowByRatificationIndex); ok && hint > blockTime {
 		return
 	}
@@ -70,6 +71,18 @@ func expireEscrowRatifications(s *state.Session, blockTime uint32) {
 			objects.AdjustHBDBalance(s, &from, blockTime, hbdRefund)
 			objects.PutAccount(s, &from)
 		}
+		// hived's remove_escrow emits escrow_rejected on this path
+		// (database_market.cpp:100). The ratification deadline passing is a
+		// rejection by default: nobody approved, so the funds go home.
+		d.pushVOp(op.EscrowRejected{
+			From:       esc.From,
+			To:         esc.To,
+			Agent:      esc.Agent,
+			EscrowID:   esc.EscrowID,
+			HbdAmount:  vopHbd(esc.HBDAmount),
+			HiveAmount: vopHive(esc.HiveAmount),
+			Fee:        escrowFeeAsset(esc.PendingFee, esc.PendingFeeIsHBD),
+		})
 		objects.DeleteEscrowFull(s, &esc)
 	}
 	if nextExp == 0 {

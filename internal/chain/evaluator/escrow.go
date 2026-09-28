@@ -189,22 +189,33 @@ func (escrowApproveEvaluator) Apply(ctx *Context, opArg op.Op) error {
 			objects.AdjustHBDBalance(ctx.DB, &from, ctx.HeadBlockTime, esc.HBDAmount)
 		}
 		objects.PutAccount(ctx.DB, &from)
+		ctx.EmitEscrowRejected(string(esc.From), string(esc.To), string(esc.Agent), esc.EscrowID,
+			esc.HBDAmount, esc.HiveAmount, esc.PendingFee, esc.PendingFeeIsHBD)
 		objects.DeleteEscrowFull(ctx.DB, &esc)
 		return nil
 	}
 	// On full approval (both flags set) the agent collects the fee in
 	// whichever asset symbol was locked at escrow_transfer time.
-	if esc.ToApproved && esc.AgentApproved && esc.PendingFee > 0 {
-		agent, err := objects.GetAccount(ctx.DB, esc.Agent)
-		if err == nil {
-			if esc.PendingFeeIsHBD {
-				objects.AdjustHBDBalance(ctx.DB, &agent, ctx.HeadBlockTime, esc.PendingFee)
-			} else {
-				agent.Balance += esc.PendingFee
+	if esc.ToApproved && esc.AgentApproved {
+		releasedFee := esc.PendingFee
+		if releasedFee > 0 {
+			agent, err := objects.GetAccount(ctx.DB, esc.Agent)
+			if err == nil {
+				if esc.PendingFeeIsHBD {
+					objects.AdjustHBDBalance(ctx.DB, &agent, ctx.HeadBlockTime, releasedFee)
+				} else {
+					agent.Balance += releasedFee
+				}
+				objects.PutAccount(ctx.DB, &agent)
 			}
-			objects.PutAccount(ctx.DB, &agent)
+			esc.PendingFee = 0
 		}
-		esc.PendingFee = 0
+		// Not gated on a non-zero fee: hived pushes this whenever both
+		// parties have ratified (hive_evaluator_transfer.cpp:167-177). The
+		// op reports that the escrow went ACTIVE, and a zero-fee escrow
+		// going active is as much news as any other.
+		ctx.EmitEscrowApproved(string(esc.From), string(esc.To), string(esc.Agent), esc.EscrowID,
+			releasedFee, esc.PendingFeeIsHBD)
 	}
 	objects.PutEscrow(ctx.DB, &esc)
 	return nil

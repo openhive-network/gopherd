@@ -265,6 +265,12 @@ func clearAccount(s *state.Session, name string) error {
 		})
 		return true, nil
 	})
+	// NO escrow_rejected vop here, deliberately. hived reaches this through
+	// remove_pending_escrows, the one remove_escrow call site that passes
+	// emit_rejected_vop = false (database_market.cpp:114). Nobody rejected
+	// these escrows — the account is being cleared, and the funds land in
+	// the account only to be swept to the treasury moments later. Emitting
+	// the op would tell a consumer the originator got their money back.
 	for _, ep := range escrows {
 		account.Balance += ep.hive
 		account.HBDBalance += ep.hbd

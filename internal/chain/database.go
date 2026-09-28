@@ -1291,7 +1291,7 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	payLiquidityReward(session, blockNum, hdr.Timestamp)
 	updateVirtualSupply(session, blockNum)
 	processAccountRecovery(session, hdr.Timestamp)
-	expireEscrowRatifications(session, hdr.Timestamp)
+	expireEscrowRatifications(session, hdr.Timestamp, d)
 	processDeclineVotingRights(session, hdr.Timestamp, blockNum, d)
 	processProposals(session, hdr.Timestamp, blockNum, d)
 	processDelayedVoting(session, hdr.Timestamp, blockNum)

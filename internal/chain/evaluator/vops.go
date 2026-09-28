@@ -173,3 +173,63 @@ func (c *Context) EmitPowReward(worker string, reward int64, isVests bool) {
 	}
 	c.EmitVOp(PowRewardVOp{Worker: worker, Reward: reward, RewardIsVests: isVests})
 }
+
+// EscrowApprovedVOp mirrors hived's escrow_approved_operation, pushed the
+// moment BOTH the recipient and the agent have ratified and the agent's fee
+// is released (hive_evaluator_transfer.cpp:175).
+//
+// hived does not gate it on a non-zero fee — the op reports that the escrow
+// became active, and a zero-fee escrow becoming active is exactly as much
+// news as any other.
+type EscrowApprovedVOp struct {
+	From     string
+	To       string
+	Agent    string
+	EscrowID uint32
+	Fee      int64
+	FeeIsHBD bool
+}
+
+// EscrowRejectedVOp mirrors hived's escrow_rejected_operation. It reports
+// every asset returned to the originator: the HBD, the HIVE and the agent
+// fee, which may itself be denominated in either currency — hence FeeIsHBD.
+//
+// hived emits it from remove_escrow on two of three call sites. The third,
+// remove_pending_escrows, passes emit_rejected_vop = false: that is the
+// HF23 account clear, where the escrow is not being rejected by anyone and
+// the funds are on their way to the treasury rather than back to the
+// originator. See the corresponding silence in hardfork_accounts.go.
+type EscrowRejectedVOp struct {
+	From       string
+	To         string
+	Agent      string
+	EscrowID   uint32
+	HbdAmount  int64
+	HiveAmount int64
+	Fee        int64
+	FeeIsHBD   bool
+}
+
+// EmitEscrowApproved is a convenience that pushes the vop through
+// ctx.EmitVOp if non-nil.
+func (c *Context) EmitEscrowApproved(from, to, agent string, escrowID uint32, fee int64, feeIsHBD bool) {
+	if c.EmitVOp == nil {
+		return
+	}
+	c.EmitVOp(EscrowApprovedVOp{
+		From: from, To: to, Agent: agent,
+		EscrowID: escrowID, Fee: fee, FeeIsHBD: feeIsHBD,
+	})
+}
+
+// EmitEscrowRejected is a convenience that pushes the vop through
+// ctx.EmitVOp if non-nil.
+func (c *Context) EmitEscrowRejected(from, to, agent string, escrowID uint32, hbd, hive, fee int64, feeIsHBD bool) {
+	if c.EmitVOp == nil {
+		return
+	}
+	c.EmitVOp(EscrowRejectedVOp{
+		From: from, To: to, Agent: agent, EscrowID: escrowID,
+		HbdAmount: hbd, HiveAmount: hive, Fee: fee, FeeIsHBD: feeIsHBD,
+	})
+}
