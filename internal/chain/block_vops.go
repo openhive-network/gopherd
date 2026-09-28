@@ -124,3 +124,21 @@ func (d *Database) emitVOpClosure() func(any) {
 		}
 	}
 }
+
+// Asset constructors for vop payloads. hived's vops carry typed assets
+// (HIVE_asset / HBD_asset / VEST_asset) so the symbol is never in doubt at
+// the call site; Go's asset.Asset is one type for all three, and a payload
+// built with the wrong symbol still encodes and still decodes — it is simply
+// wrong. Naming the symbol once here keeps every emission site from
+// repeating the literal and getting it wrong in one place.
+func vopHive(amount int64) asset.Asset {
+	return asset.Asset{Amount: amount, Symbol: asset.Symbol{Num: asset.HiveSymbol}}
+}
+
+func vopHbd(amount int64) asset.Asset {
+	return asset.Asset{Amount: amount, Symbol: asset.Symbol{Num: asset.HbdSymbol}}
+}
+
+func vopVests(amount int64) asset.Asset {
+	return asset.Asset{Amount: amount, Symbol: asset.Symbol{Num: asset.VestsSymbol}}
+}
