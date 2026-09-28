@@ -206,7 +206,7 @@ type Database struct {
 	// (the Go chain doesn't have a full virtual-op pipeline yet — see
 	// block_vops.go). Reset at the top of every ApplyBlock; readers grab
 	// it via LastBlockVOps() under the applyMu RLock.
-	vops []BlockVOp
+	vops []op.Operation
 }
 
 // New wraps an opened state.Database for block application.
@@ -719,7 +719,7 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	// No-op on mainnet, where block 1 predates HF1 (see
 	// TestGenesisHardforksNoOpOnMainnet).
 	if blockNum == 1 {
-		applyGenesisHardforks(session, hdr.Timestamp)
+		applyGenesisHardforks(session, hdr.Timestamp, d)
 	}
 	hf := hardfork.SetForBlock(blockNum)
 	// hived's head_block_time() during transactions returns dgpo.time,
@@ -1112,7 +1112,7 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	// `head_block_num() != 0` guard; mirror that with `blockNum > 1`.
 	slotForBlock := slotNumForBlockTime(headBlockTime, hdr.Timestamp)
 	if blockNum > 1 && slotForBlock > 1 {
-		updateWitnessMissedBlocks(session, hdr.Witness, slotForBlock-1, hf, blockNum)
+		updateWitnessMissedBlocks(session, hdr.Witness, slotForBlock-1, hf, blockNum, d)
 	}
 	hdrID := block.ConstructID(rawBlock[:hdrLen], blockNum)
 	objects.MutateDGPO(session, func(p *objects.DynamicGlobalProperty) {
@@ -1183,7 +1183,7 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 			consolidateTreasuryBalance(session, hdr.Timestamp)
 		}
 	}
-	processProducerReward(session, hdr.Witness, blockNum)
+	processProducerReward(session, hdr.Witness, blockNum, d)
 	if envGhivediff != "" {
 		// Per-block dump in the HF7-cascade-divergence window. Trace
 		// fires AFTER processProducerReward but BEFORE processFunds —
@@ -1235,7 +1235,7 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 			}
 		}
 	}
-	processFunds(session, blockNum, hdr.Witness)
+	processFunds(session, blockNum, hdr.Witness, d)
 	if envGhivediff != "" {
 		switch blockNum {
 		case 100000, 500000, 1000000, 1500000, 2000000, 2500000, 2700000, 2800000, 2850000, 2880000, 2885000, 2889000, 2889020, 2890000, 2891000, 2892000, 2893000, 2894000, 2895000, 2896000, 2896500, 2896680, 2896682, 2897000, 2897356, 2897358, 2897500, 2897700, 2897750, 2897769, 2897770:
@@ -1297,7 +1297,7 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	processDelayedVoting(session, hdr.Timestamp, blockNum)
 	removeExpiredGovernanceVotes(session, hdr.Timestamp, blockNum, d)
 	processRecurrentTransfers(session, hdr.Timestamp, blockNum, d)
-	processHardforks(session, blockNum, hdr.Timestamp)
+	processHardforks(session, blockNum, hdr.Timestamp, d)
 
 	{
 		dgpoRef, _ := objects.GetDGPORef(session)
@@ -1546,7 +1546,7 @@ const hiveWitnessShutdownThresholdBlocks uint32 = 28800
 // total_missed counter, and HF14-HF20 zeroes their BlockSigningKey if
 // their last_confirmed is too far behind head — which causes the next
 // witness-schedule rebuild to drop them from the active set entirely.
-func updateWitnessMissedBlocks(s *state.Session, blockWitness auth.AccountName, missedBlocks uint32, hf hardfork.Set, blockNum uint32) {
+func updateWitnessMissedBlocks(s *state.Session, blockWitness auth.AccountName, missedBlocks uint32, hf hardfork.Set, blockNum uint32, d *Database) {
 	if missedBlocks == 0 {
 		return
 	}
@@ -1573,7 +1573,19 @@ func updateWitnessMissedBlocks(s *state.Session, blockWitness auth.AccountName, 
 		if hf.Has(hardfork.HF14) && !hf.Has(hardfork.HF20) {
 			if blockNum-w.LastConfirmedBlockNum > hiveWitnessShutdownThresholdBlocks {
 				w.BlockSigningKey = [33]byte{}
+				// shutdown_witness comes BEFORE producer_missed for the same
+				// witness — hived emits both inside one modify(), in that
+				// order (database_witness.cpp:299-302). A consumer replaying
+				// the stream sees the key cleared and then the miss, which is
+				// the causal order.
+				if d != nil {
+					d.pushVOp(op.ShutdownWitness{Owner: missedName})
+				}
 			}
+		}
+		if d != nil {
+			// Emitted for EVERY missed witness, shutdown or not.
+			d.pushVOp(op.ProducerMissed{Producer: missedName})
 		}
 		objects.PutWitness(s, &w)
 	}

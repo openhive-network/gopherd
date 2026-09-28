@@ -241,28 +241,24 @@ func TestProposalObjectApplyFeeIncrease(t *testing.T) {
 
 	// 4) proposal_fee virtual op was emitted with matching fields.
 	vops := f.Chain.LastBlockVOps()
-	var found *chain.BlockVOp
-	for i := range vops {
-		if vops[i].Kind == chain.BlockVOpProposalFee {
-			found = &vops[i]
-			break
-		}
-	}
-	if found == nil {
+	v := chain.FindVOp(vops, op.TagProposalFee)
+	if v == nil {
 		t.Fatalf("expected proposal_fee vop; got %+v", vops)
 	}
+	feeVOp := v.(op.ProposalFee)
+	found := &feeVOp
 	if string(found.Creator) != creator {
 		t.Errorf("vop.Creator: got %q, want %q", string(found.Creator), creator)
 	}
 	if string(found.Treasury) != treasuryName {
 		t.Errorf("vop.Treasury: got %q, want %q", string(found.Treasury), treasuryName)
 	}
-	if found.Fee != fee {
-		t.Errorf("vop.Fee: got %d, want %d", found.Fee, fee)
+	if found.Fee.Amount != fee {
+		t.Errorf("vop.Fee: got %d, want %d", found.Fee.Amount, fee)
 	}
 
 	// 5) the stored proposal has all the expected fields.
-	p, err := objects.GetProposal(state.NewSession(f.State), found.ProposalID)
+	p, err := objects.GetProposal(state.NewSession(f.State), int64(found.ProposalID))
 	if err != nil {
 		t.Fatalf("GetProposal(%d): %v", found.ProposalID, err)
 	}

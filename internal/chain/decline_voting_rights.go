@@ -4,6 +4,7 @@ import (
 	"gopherd/internal/protocol/auth"
 	"gopherd/internal/protocol/hardfork"
 	"gopherd/internal/protocol/network"
+	"gopherd/internal/protocol/op"
 	"gopherd/internal/state"
 	"gopherd/internal/state/objects"
 )
@@ -120,11 +121,16 @@ func processDeclineVotingRights(s *state.Session, blockTime, blockNum uint32, d 
 			// Mirrors libraries/chain/database_dhf.cpp:225 (push_virtual_operation
 			// of proxy_cleared_operation in process_decline_voting_rights).
 			if d != nil && oldProxy != "" {
-				d.pushVOp(BlockVOp{
-					Kind:    BlockVOpProxyCleared,
+				d.pushVOp(op.ProxyCleared{
 					Account: auth.AccountName(p.account),
 					Proxy:   auth.AccountName(oldProxy),
 				})
+			}
+			if d != nil {
+				// hived pushes declined_voting_rights_operation right after
+				// the optional proxy_cleared, before the account is modified
+				// (database_dhf.cpp:232).
+				d.pushVOp(op.DeclinedVotingRights{Account: auth.AccountName(p.account)})
 			}
 		}
 		objects.DeleteDeclineVotingRightsRequestFull(s, &req)

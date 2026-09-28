@@ -50,10 +50,8 @@ func TestProxyClearedOperationBasic(t *testing.T) {
 	if string(f.Account_("bob").Proxy) != "alice" {
 		t.Fatalf("bob.Proxy = %q, want alice", f.Account_("bob").Proxy)
 	}
-	for _, v := range f.Chain.LastBlockVOps() {
-		if v.Kind == chain.BlockVOpProxyCleared {
-			t.Fatalf("setting first proxy should NOT emit proxy_cleared vop; got %+v", v)
-		}
+	if n := chain.CountVOps(f.Chain.LastBlockVOps(), op.TagProxyCleared); n != 0 {
+		t.Fatalf("setting first proxy should NOT emit proxy_cleared vop; got %d", n)
 	}
 
 	// --- Sub-block 2: bob clears proxy (proxy=""). bob.Proxy was alice;
@@ -125,15 +123,14 @@ func TestProxyClearedOperationBasic(t *testing.T) {
 	}
 }
 
-// findProxyClearedVOp returns the first BlockVOpProxyCleared entry in
-// `vops`, or nil if none. Other vop kinds (fill_recurrent_transfer,
-// proposal_fee, etc.) are skipped — we only assert on proxy_cleared
-// semantics here.
-func findProxyClearedVOp(vops []chain.BlockVOp) *chain.BlockVOp {
-	for i := range vops {
-		if vops[i].Kind == chain.BlockVOpProxyCleared {
-			return &vops[i]
-		}
+// findProxyClearedVOp returns the first proxy_cleared op in the block's
+// virtual-op stream, or nil. Other vops (producer_reward, hardfork,
+// fill_recurrent_transfer, …) are skipped — this asserts proxy_cleared
+// semantics only.
+func findProxyClearedVOp(vops []op.Operation) *op.ProxyCleared {
+	if v := chain.FindVOp(vops, op.TagProxyCleared); v != nil {
+		pc := v.(op.ProxyCleared)
+		return &pc
 	}
 	return nil
 }

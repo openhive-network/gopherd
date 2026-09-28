@@ -1,8 +1,10 @@
 package chain
 
 import (
+	"gopherd/internal/protocol/asset"
 	"gopherd/internal/protocol/auth"
 	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/protocol/op"
 	"gopherd/internal/state"
 	"gopherd/internal/state/objects"
 )
@@ -181,7 +183,7 @@ func percentRewardCompound(virtualSupply, aprPercent int64, multiplyConstant uin
 // pays the witness's inflation slice as VESTS in one step; calling
 // this would double-credit. Mirrors hived's database.cpp where
 // get_producer_reward only runs in the pre-HF16 branch.
-func processProducerReward(s *state.Session, witnessName string, blockNum uint32) {
+func processProducerReward(s *state.Session, witnessName string, blockNum uint32, d *Database) {
 	if witnessName == "" {
 		return
 	}
@@ -227,7 +229,9 @@ func processProducerReward(s *state.Session, witnessName string, blockNum uint32
 	if asVests {
 		// CreateVesting moves `pay` HIVE into the vesting fund, computes
 		// VESTS at the dynamic price, and credits the witness.
-		if _, err := CreateVesting_via_chain(s, witnessName, pay, false); err != nil {
+		if vests, err := CreateVesting_via_chain(s, witnessName, pay, false); err == nil {
+			emitProducerReward(d, witnessName, vests, true)
+		} else if err != nil {
 			return
 		}
 	} else {
@@ -260,7 +264,7 @@ func processProducerReward(s *state.Session, witnessName string, blockNum uint32
 // processProducerReward, so we only contribute content_reward +
 // vesting_reward here. This keeps the supply ledger consistent with
 // hived's per-block delta.
-func processFunds(s *state.Session, blockNum uint32, witnessName string) {
+func processFunds(s *state.Session, blockNum uint32, witnessName string, d *Database) {
 	hf := hardfork.SetForBlock(blockNum)
 	if hf.Has(hardfork.HF16) {
 		// HF16+ branches off into processFundsHF16, which still uses
@@ -271,7 +275,7 @@ func processFunds(s *state.Session, blockNum uint32, witnessName string) {
 		if err != nil && err != state.ErrNotFound {
 			return
 		}
-		processFundsHF16(s, &dgpo, blockNum, witnessName)
+		processFundsHF16(s, &dgpo, blockNum, witnessName, d)
 		return
 	}
 	// Pre-HF16 path: rewards computed off virtual_supply (HIVE + HBD-as-HIVE
@@ -333,7 +337,7 @@ const (
 // (timeshare/miner/elected) since the witness schedule object is not
 // modeled — we just apply the content/vesting/proposal/witness split
 // directly.
-func processFundsHF16(s *state.Session, dgpo *objects.DynamicGlobalProperty, blockNum uint32, witnessName string) {
+func processFundsHF16(s *state.Session, dgpo *objects.DynamicGlobalProperty, blockNum uint32, witnessName string, d *Database) {
 	const blocksPerYear int64 = 365 * 24 * 60 * 60 / 3
 	rate := inflationStartBP - int64(blockNum)/inflationNarrowing
 	if rate < inflationStopBP {
@@ -497,7 +501,14 @@ func processFundsHF16(s *state.Session, dgpo *objects.DynamicGlobalProperty, blo
 	// path (we skip processProducerReward in that branch). The witness
 	// is the producer of THIS block (passed in via witnessName).
 	if witnessReward > 0 && witnessName != "" {
-		if _, err := CreateVesting_via_chain(s, witnessName, witnessReward, false); err != nil {
+		if vests, err := CreateVesting_via_chain(s, witnessName, witnessReward, false); err == nil {
+			// hived pushes producer_reward_operation here with the VESTS the
+			// witness actually received, not the HIVE that bought them
+			// (database.cpp, process_funds). Pre-HF16 it is HIVE instead —
+			// the asset carries its own symbol, which is why the vop field is
+			// a plain asset and not a VEST_asset.
+			emitProducerReward(d, witnessName, vests, true)
+		} else {
 			// Silent failure here historically dropped the per-block witness
 			// VESTS credit while leaving CurrentSupply / TotalVestingFundHive
 			// already incremented above — the source of the steem-account
@@ -507,4 +518,25 @@ func processFundsHF16(s *state.Session, dgpo *objects.DynamicGlobalProperty, blo
 				blockNum, witnessName, witnessReward, err)
 		}
 	}
+}
+
+// emitProducerReward pushes the producer_reward virtual op. Split out because
+// the pre-HF16 and HF16+ branches pay the witness from different places and
+// both must report it.
+//
+// asVests says which symbol the payment carried: VESTS normally, HIVE during
+// the first 30 days after genesis, which is why hived types the field as a
+// bare asset rather than a VEST_asset.
+func emitProducerReward(d *Database, witnessName string, amount int64, asVests bool) {
+	if d == nil || amount == 0 {
+		return
+	}
+	sym := asset.Symbol{Num: asset.VestsSymbol}
+	if !asVests {
+		sym = asset.Symbol{Num: asset.HiveSymbol}
+	}
+	d.pushVOp(op.ProducerReward{
+		Producer:      auth.AccountName(witnessName),
+		VestingShares: asset.Asset{Amount: amount, Symbol: sym},
+	})
 }
