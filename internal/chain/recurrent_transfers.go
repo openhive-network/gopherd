@@ -5,6 +5,7 @@ import (
 
 	"gopherd/internal/protocol/asset"
 	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/protocol/op"
 	"gopherd/internal/state"
 	"gopherd/internal/state/objects"
 )
@@ -147,14 +148,13 @@ func processRecurrentTransfers(s *state.Session, blockTime, blockNum uint32, d *
 				objects.PutRecurrentTransfer(s, &rt)
 			}
 			if d != nil {
-				d.pushVOp(BlockVOp{
-					Kind:                BlockVOpFillRecurrentTransfer,
+				d.pushVOp(op.FillRecurrentTransfer{
 					From:                rt.From,
 					To:                  rt.To,
 					Amount:              amt,
 					Memo:                rt.Memo,
 					RemainingExecutions: remaining,
-					PairID:              f.pairID,
+					Extensions:          op.RecurrentTransferPairIDExtension(f.pairID),
 				})
 			}
 		} else {
@@ -189,16 +189,15 @@ func processRecurrentTransfers(s *state.Session, blockTime, blockNum uint32, d *
 				}
 			}
 			if d != nil {
-				d.pushVOp(BlockVOp{
-					Kind:                BlockVOpFailedRecurrentTransfer,
+				d.pushVOp(op.FailedRecurrentTransfer{
 					From:                rt.From,
 					To:                  rt.To,
 					Amount:              amt,
 					Memo:                rt.Memo,
-					RemainingExecutions: remaining,
 					ConsecutiveFailures: newCF,
+					RemainingExecutions: remaining,
 					Deleted:             deleted,
-					PairID:              f.pairID,
+					Extensions:          op.RecurrentTransferPairIDExtension(f.pairID),
 				})
 			}
 		}

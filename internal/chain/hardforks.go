@@ -5,6 +5,7 @@ import (
 
 	"gopherd/internal/protocol/auth"
 	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/protocol/op"
 	"gopherd/internal/reward"
 	"gopherd/internal/state"
 	"gopherd/internal/state/objects"
@@ -23,7 +24,7 @@ import (
 // hooks observe HF state matching the head block" — which is fine
 // either way since the block whose HF activates can't reference the
 // HF's effects in its own evaluator dispatch.
-func processHardforks(s *state.Session, blockNum uint32, blockTime uint32) {
+func processHardforks(s *state.Session, blockNum uint32, blockTime uint32, d *Database) {
 	if blockNum == 0 {
 		return
 	}
@@ -54,7 +55,7 @@ func processHardforks(s *state.Session, blockNum uint32, blockTime uint32) {
 	// flags the HF as active (strict `>`, see hardfork.go:SetForBlock).
 	for id := hardfork.ID(1); id <= hardfork.NumHardforks; id++ {
 		if blockNum == hardfork.MainnetActivationBlock[id] {
-			applyHardfork(s, id)
+			applyHardfork(s, id, d)
 		}
 	}
 }
@@ -62,7 +63,7 @@ func processHardforks(s *state.Session, blockNum uint32, blockTime uint32) {
 // applyGenesisHardforks applies each hardfork whose activation time has already
 // passed as of blockTime, contiguously from HF1. Stops at the first hardfork
 // still in the future, matching hived's break-on-first-future loop.
-func applyGenesisHardforks(s *state.Session, blockTime uint32) {
+func applyGenesisHardforks(s *state.Session, blockTime uint32, d *Database) {
 	n := hardfork.ID(0)
 	for id := hardfork.ID(1); id <= hardfork.NumHardforks; id++ {
 		if hardfork.MainnetActivationTime[id] > blockTime {
@@ -71,15 +72,16 @@ func applyGenesisHardforks(s *state.Session, blockTime uint32) {
 		n = id
 	}
 	for id := hardfork.ID(1); id <= n; id++ {
-		applyHardfork(s, id)
+		applyHardfork(s, id, d)
 	}
 }
 
 // RunHardforkActivation is an exported entry point for tests so the
 // testfixture package can drive HF activation without walking blocks.
-// Production callers go through processHardforks.
+// Production callers go through processHardforks. No Database here, so no
+// virtual op is emitted — the fixture drives state, not the vop stream.
 func RunHardforkActivation(s *state.Session, id hardfork.ID, blockNum uint32) {
-	applyHardfork(s, id)
+	applyHardfork(s, id, nil)
 }
 
 // applyHardfork dispatches the per-HF state-mutation logic, mirroring
@@ -87,7 +89,14 @@ func RunHardforkActivation(s *state.Session, id hardfork.ID, blockNum uint32) {
 // state level (their effects are encoded as gates on evaluators);
 // the ones we model here are the ones whose state mutations are
 // observable post-activation.
-func applyHardfork(s *state.Session, id hardfork.ID) {
+func applyHardfork(s *state.Session, id hardfork.ID, d *Database) {
+	// hived pushes hardfork_operation as part of applying one
+	// (database_hardfork.cpp). It is how a consumer of the stream learns the
+	// rules changed at this exact point rather than inferring it from a block
+	// number table.
+	if d != nil {
+		d.pushVOp(op.Hardfork{HardforkID: uint32(id)})
+	}
 	// Mirror C++ apply_hardfork (database_hardfork.cpp:519-527): per-HF
 	// effects run FIRST, then the hardfork_property_object is bumped.
 	// This ordering matters when an effect handler reads

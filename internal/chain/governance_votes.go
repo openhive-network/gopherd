@@ -8,6 +8,7 @@ import (
 	"gopherd/internal/protocol/auth"
 	"gopherd/internal/protocol/hardfork"
 	"gopherd/internal/protocol/network"
+	"gopherd/internal/protocol/op"
 	"gopherd/internal/state"
 	"gopherd/internal/state/objects"
 )
@@ -188,11 +189,15 @@ func removeExpiredGovernanceVotes(s *state.Session, blockTime, blockNum uint32, 
 		// libraries/chain/database.cpp:3650 (push_virtual_operation of
 		// proxy_cleared_operation in remove_expired_governance_votes).
 		if d != nil && oldProxy != "" {
-			d.pushVOp(BlockVOp{
-				Kind:    BlockVOpProxyCleared,
+			d.pushVOp(op.ProxyCleared{
 				Account: auth.AccountName(e.name),
 				Proxy:   auth.AccountName(oldProxy),
 			})
+		}
+		if d != nil {
+			// hived emits this for every account it clears, AFTER any
+			// proxy_cleared for the same account (database.cpp:3520).
+			d.pushVOp(op.ExpiredAccountNotification{Account: auth.AccountName(e.name)})
 		}
 	}
 }

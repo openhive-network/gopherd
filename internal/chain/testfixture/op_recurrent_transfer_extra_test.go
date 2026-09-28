@@ -173,24 +173,27 @@ func TestRecurrentTransferExtensionsInVirtualOps(t *testing.T) {
 	// First firing happens inside the create block (Trigger=head_block_time).
 	// LastBlockVOps should contain exactly one fill_recurrent_transfer
 	// vop carrying pair_id = 78.
+	// The stream carries every virtual op the block emitted — producer_reward
+	// fires on EVERY block — so find the one under test rather than assuming
+	// it is alone. It was alone when only four vops existed.
 	vops := f.Chain.LastBlockVOps()
-	if len(vops) != 1 {
-		t.Fatalf("after first fire: vops count = %d, want 1; got %+v", len(vops), vops)
+	fv := chain.FindVOp(vops, op.TagFillRecurrentTransfer)
+	if fv == nil {
+		t.Fatalf("after first fire: no fill_recurrent_transfer vop; got %+v", vops)
 	}
-	if vops[0].Kind != chain.BlockVOpFillRecurrentTransfer {
-		t.Errorf("after first fire: vop.Kind = %d, want BlockVOpFillRecurrentTransfer", vops[0].Kind)
+	fill := fv.(op.FillRecurrentTransfer)
+	wantExt := op.RecurrentTransferPairIDExtension(pairIDValue)
+	if string(fill.Extensions) != string(wantExt) {
+		t.Errorf("after first fire: pair-id extension = %x, want %x", fill.Extensions, wantExt)
 	}
-	if vops[0].PairID != pairIDValue {
-		t.Errorf("after first fire: vop.PairID = %d, want %d", vops[0].PairID, pairIDValue)
+	if fill.From != "alice" || fill.To != "bob" {
+		t.Errorf("after first fire: from=%q to=%q, want alice/bob", fill.From, fill.To)
 	}
-	if vops[0].From != "alice" || vops[0].To != "bob" {
-		t.Errorf("after first fire: from=%q to=%q, want alice/bob", vops[0].From, vops[0].To)
+	if fill.Amount.Amount != 6_000 || fill.Amount.Symbol.Num != asset.HbdSymbol {
+		t.Errorf("after first fire: amount = %+v, want 6000 HBD", fill.Amount)
 	}
-	if vops[0].Amount.Amount != 6_000 || vops[0].Amount.Symbol.Num != asset.HbdSymbol {
-		t.Errorf("after first fire: amount = %+v, want 6000 HBD", vops[0].Amount)
-	}
-	if vops[0].RemainingExecutions != 1 {
-		t.Errorf("after first fire: remaining = %d, want 1", vops[0].RemainingExecutions)
+	if fill.RemainingExecutions != 1 {
+		t.Errorf("after first fire: remaining = %d, want 1", fill.RemainingExecutions)
 	}
 
 	// Advance one recurrence — second firing fails (alice now has only
@@ -198,24 +201,23 @@ func TestRecurrentTransferExtensionsInVirtualOps(t *testing.T) {
 	// failed_recurrent_transfer vop with the same pair_id.
 	f.SkipSeconds(24 * 3600)
 	vops = f.Chain.LastBlockVOps()
-	if len(vops) != 1 {
-		t.Fatalf("after second fire: vops count = %d, want 1; got %+v", len(vops), vops)
+	xv := chain.FindVOp(vops, op.TagFailedRecurrentTransfer)
+	if xv == nil {
+		t.Fatalf("after second fire: no failed_recurrent_transfer vop; got %+v", vops)
 	}
-	if vops[0].Kind != chain.BlockVOpFailedRecurrentTransfer {
-		t.Errorf("after second fire: vop.Kind = %d, want BlockVOpFailedRecurrentTransfer", vops[0].Kind)
+	failed := xv.(op.FailedRecurrentTransfer)
+	if string(failed.Extensions) != string(wantExt) {
+		t.Errorf("after second fire: pair-id extension = %x, want %x", failed.Extensions, wantExt)
 	}
-	if vops[0].PairID != pairIDValue {
-		t.Errorf("after second fire: vop.PairID = %d, want %d", vops[0].PairID, pairIDValue)
-	}
-	if vops[0].ConsecutiveFailures != 1 {
-		t.Errorf("after second fire: consec_failures = %d, want 1", vops[0].ConsecutiveFailures)
+	if failed.ConsecutiveFailures != 1 {
+		t.Errorf("after second fire: consec_failures = %d, want 1", failed.ConsecutiveFailures)
 	}
 	// executions was 1 before this fire, so remaining = 0; that puts the
 	// schedule into the deleted-on-failure branch.
-	if vops[0].RemainingExecutions != 0 {
-		t.Errorf("after second fire: remaining = %d, want 0", vops[0].RemainingExecutions)
+	if failed.RemainingExecutions != 0 {
+		t.Errorf("after second fire: remaining = %d, want 0", failed.RemainingExecutions)
 	}
-	if !vops[0].Deleted {
+	if !failed.Deleted {
 		t.Errorf("after second fire: vop.Deleted = false, want true (executions reached 0)")
 	}
 }
