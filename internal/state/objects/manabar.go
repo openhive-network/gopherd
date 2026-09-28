@@ -196,36 +196,68 @@ func RCStaleMaxCount() uint64 { return rcStaleMaxCount.Load() }
 // hived has TWO functions where gopherd had one, and they carry DIFFERENT
 // expectations:
 //
-//	regenerate_rc_mana()            asserts last_max_rc is FRESH. Called
-//	                                BEFORE anything changes vests or RC.
+//	regenerate_rc_mana()                asserts last_max_rc is FRESH. Called
+//	                                    BEFORE anything changes vests or RC.
 //	update_account_after_vest_change()  recomputes last_max_rc. Called AFTER.
-//	                                Asserts only that a regeneration already
-//	                                happened this block.
+//	                                    Asserts only that a regeneration
+//	                                    already happened this block.
 //
-// Calling the first where hived calls the second is not a bug in the result —
-// the arithmetic is identical and state is unaffected — but it reports every
-// legitimate post-change refresh as a staleness violation. Measured, that
-// conflation was 95% of the stale-max count: two sites, both of which mutate
-// vests and then refresh, exactly as hived does.
+// The first version of this split treated the difference as being about
+// MEASUREMENT only — "this function does what RegenerateRCMana does, and
+// counts against the other assertion". That was wrong about hived. The real
+// body (rc_utility.cpp:458-479) does NOT regenerate:
 //
-// So the split here is about MEASUREMENT, not behaviour. This function does
-// what RegenerateRCMana does, and counts against the condition hived's
-// update_account_after_vest_change actually asserts — "not regenerated prior
-// to VEST change" — leaving RCStaleMaxCount to mean what hived's max_mana
-// assertion means. Only then can either be judged safe to enforce at HF29.
-func UpdateAccountAfterVestChange(a *Account, now uint32) {
+//	new_last_max_rc = account.get_maximum_rc().value;
+//	drc = _fill_new_mana ? new_last_max_rc - account.last_max_rc : 0;
+//	if( new_last_max_rc != account.last_max_rc ) {
+//	  acc.last_max_rc = new_last_max_rc;
+//	  acc.rc_manabar.current_mana += std::max( drc, 0 );
+//	  if( acc.rc_manabar.current_mana > acc.last_max_rc )
+//	    acc.rc_manabar.current_mana = acc.last_max_rc;
+//	}
+//
+// Three differences, each one a state divergence rather than a counting one:
+//
+//  1. No regeneration, and last_update_time is NOT advanced. When a prior
+//     regenerate_rc_mana DID run this block the two agree — regeneration is a
+//     no-op and both clamp an over-max bar down. When it did NOT, the old code
+//     granted mana hived leaves alone. That is what the rc-not-regen counter
+//     has been measuring: not a bookkeeping quirk, a divergence.
+//  2. The whole body is gated on the maximum actually CHANGING. hived writes
+//     nothing when it has not.
+//  3. Only the POSITIVE delta reaches current_mana, and only when the caller
+//     asks for it. hived's comment explains why the negative one is skipped:
+//     a negative delta comes from a power down or a reduced incoming
+//     delegation, both of which impose a delay longer than a full
+//     regeneration, so withholding it cannot be used to pump RC — while
+//     applying it would destroy mana the account had already earned.
+//
+// fillNewMana mirrors _fill_new_mana, which defaults to TRUE in hived
+// (rc_utility.hpp:118). Every gopherd caller wants true except the
+// withdraw_vesting evaluator, where hived passes false because starting a
+// power down can only LOWER the maximum.
+func UpdateAccountAfterVestChange(a *Account, now uint32, fillNewMana bool) {
 	if a.RCManaLastUpdate != now {
 		rcNotRegeneratedCount.Add(1)
 		if rcAttributionEnabled {
 			noteRCNotRegenCaller(2)
 		}
 	}
-	maxRC := a.MaximumRC()
-	params := ManabarParams{MaxMana: maxRC, RegenTime: RCRegenTimeSec}
-	newMana, newUpdate := RegenerateMana(a.RCManaCurrent, a.RCManaLastUpdate, params, now, true)
-	a.RCManaCurrent = newMana
-	a.RCManaLastUpdate = newUpdate
-	a.LastMaxRC = maxRC
+	newMaxRC := a.MaximumRC()
+	if newMaxRC == a.LastMaxRC {
+		return
+	}
+	drc := int64(0)
+	if fillNewMana {
+		drc = newMaxRC - a.LastMaxRC
+	}
+	a.LastMaxRC = newMaxRC
+	if drc > 0 {
+		a.RCManaCurrent += drc
+	}
+	if a.RCManaCurrent > a.LastMaxRC {
+		a.RCManaCurrent = a.LastMaxRC
+	}
 }
 
 // rcNotRegeneratedCount counts arrivals at a post-change refresh whose manabar

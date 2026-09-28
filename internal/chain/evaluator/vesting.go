@@ -82,6 +82,9 @@ func (withdrawVestingEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		a.NextVestingWithdrawal = 0
 		a.ToWithdraw = 0
 		a.Withdrawn = 0
+		if ctx.Hardforks.Has(hardfork.HF20) {
+			objects.UpdateAccountAfterVestChange(&a, ctx.HeadBlockTime, false)
+		}
 		objects.PutAccount(ctx.DB, &a)
 		return nil
 	}
@@ -107,8 +110,33 @@ func (withdrawVestingEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		a.VestingWithdrawRate++
 	}
 	a.NextVestingWithdrawal = ctx.HeadBlockTime + intervalSec
+	// hive_evaluator_transfer.cpp:397-398 — at HF20+ withdraw_vesting ends
+	// with update_account_after_vest_change(account, now, false, true), and
+	// gopherd had NO RC refresh here at all. Starting or cancelling a power
+	// down changes to_withdraw, which changes
+	// EffectiveVestingSharesExclWithdraw and therefore max_rc, so the cache
+	// was left disagreeing with its own reader until something else happened
+	// to the account — surfacing later as a stale-max hit on the read-only
+	// transaction path, which is where the remaining hits are concentrated.
+	//
+	// fill_new_mana is FALSE here, the one gopherd site where it is: starting
+	// a power down can only LOWER the ceiling, so there is no new headroom to
+	// hand out, and hived deliberately does not subtract the negative delta
+	// from mana the account already earned.
+	//
+	// NOT PORTED: hived also passes _check_for_rc_delegation_overflow = true,
+	// which expires outgoing RC delegations that no longer fit under the new
+	// maximum. gopherd's clip lives in HandleVestingWithdrawalRCImpact and is
+	// not wired here. Updating the ceiling without it is still strictly closer
+	// to hived than the previous behaviour of not updating it at all.
 	a.ToWithdraw = w.VestingShares.Amount
 	a.Withdrawn = 0
+	// AFTER the fields move: the new ceiling is read from
+	// EffectiveVestingSharesExclWithdraw, which depends on ToWithdraw and
+	// Withdrawn. hived's call is likewise outside the modify block.
+	if ctx.Hardforks.Has(hardfork.HF20) {
+		objects.UpdateAccountAfterVestChange(&a, ctx.HeadBlockTime, false)
+	}
 	objects.PutAccount(ctx.DB, &a)
 	objects.PutVestingWithdrawalSchedule(ctx.DB, a.NextVestingWithdrawal, w.Account)
 	return nil

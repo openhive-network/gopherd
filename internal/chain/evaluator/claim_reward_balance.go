@@ -125,7 +125,10 @@ func (claimRewardBalanceEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	// violation. Same arithmetic, same state — only the counter it feeds
 	// changes.
 	if ctx.Hardforks.Has(hardfork.HF20) {
-		objects.UpdateAccountAfterVestChange(&a, ctx.HeadBlockTime)
+		// hive_evaluator_transfer.cpp:709 uses the default true — claimed
+		// reward VESTS raise the ceiling and the account can spend the
+		// difference immediately.
+		objects.UpdateAccountAfterVestChange(&a, ctx.HeadBlockTime, true)
 	}
 	objects.PutAccount(ctx.DB, &a)
 

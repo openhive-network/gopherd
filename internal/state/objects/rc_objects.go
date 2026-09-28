@@ -875,7 +875,8 @@ func HandleVestingWithdrawalRCImpact(s *state.Session, a *Account, now uint32) {
 	// already moved by the time it runs. The regeneration inside it is the one
 	// hived does there, not a pre-change regenerate_rc_mana — identical
 	// arithmetic, but it belongs to the other counter.
-	UpdateAccountAfterVestChange(a, now)
+	// database_vesting.cpp:280 passes (from_account, now, true, true).
+	UpdateAccountAfterVestChange(a, now, true)
 
 	// hived: `int64_t new_last_max_rc = account.get_maximum_rc().value;`
 	// (rc_utility.cpp, update_account_after_vest_change). It derives the new

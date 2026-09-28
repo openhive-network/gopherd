@@ -401,15 +401,24 @@ func processWithdrawRoutes(s *state.Session, fromAccount string, toWithdraw int6
 				if hardfork.SetForBlock(dgpoNow.HeadBlockNumber).Has(hardfork.HF20) {
 					if fresh, ferr := objects.GetAccount(s, route.To); ferr == nil {
 						freshNow := fresh
-						eff := freshNow.VestingShares - freshNow.DelegatedVestingShares + freshNow.ReceivedVestingShares
-						if eff < 0 {
-							eff = 0
-						}
-						freshNow.LastMaxRC = eff - freshNow.DelegatedRCOut + freshNow.DelegatedRCIn
-						if freshNow.LastMaxRC < 0 {
-							freshNow.LastMaxRC = 0
-						}
-						objects.RegenerateRCMana(&freshNow, now)
+						// database_vesting.cpp:211 —
+						// update_account_after_vest_change(to_account, now),
+						// i.e. the default fill_new_mana=true and no overflow
+						// check (the receiver GAINED vests, so it cannot have
+						// become over-delegated).
+						//
+						// This used to hand-roll the cache instead:
+						//
+						//	eff := VestingShares - DelegatedVestingShares + ReceivedVestingShares
+						//	LastMaxRC = eff - DelegatedRCOut + DelegatedRCIn
+						//
+						// the same expression bde36f1 removed from
+						// HandleVestingWithdrawalRCImpact, surviving in a
+						// second site. It differs from MaximumRC() twice: it
+						// omits RCAdjustment — the creation-fee seed, whose
+						// absence is the whole of the max_rc == 0 bug — and it
+						// does not exclude the next withdrawal slice.
+						objects.UpdateAccountAfterVestChange(&freshNow, now, true)
 						objects.PutAccount(s, &freshNow)
 					}
 				}
