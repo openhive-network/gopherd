@@ -28,9 +28,12 @@ func NewRemoveGuard(limit int16) *RemoveGuard {
 // Done reports whether the budget is exhausted.
 func (g *RemoveGuard) Done() bool { return g.limit == 0 }
 
-// step consumes one unit of budget, reporting whether there was any. Matches
+// Step consumes one unit of budget, reporting whether there was any. Matches
 // remove_guard::step: a negative (unlimited) budget always succeeds and never
-// decrements.
+// decrements. Exported because the governance sweeps drive their own removal
+// loops rather than going through the proposal helpers.
+func (g *RemoveGuard) Step() bool { return g.step() }
+
 func (g *RemoveGuard) step() bool {
 	if g.limit > 0 {
 		g.limit--

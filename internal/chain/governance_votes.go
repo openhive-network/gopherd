@@ -48,6 +48,10 @@ func removeExpiredGovernanceVotes(s *state.Session, blockTime, blockNum uint32, 
 	accts := objects.EnsureAccountStore(s)
 	type expired struct {
 		name string
+		// expiration and created reproduce hived's by_governance_vote_expiration_ts
+		// ordering — see the sort below.
+		expiration uint32
+		created    uint32
 	}
 	var due []expired
 	if accts.GovExpHeapReady() {
@@ -90,7 +94,33 @@ func removeExpiredGovernanceVotes(s *state.Session, blockTime, blockNum uint32, 
 		// heap push automatically.
 		accts.SetGovExpBound(nextDue)
 	}
-	sort.Slice(due, func(i, j int) bool { return due[i].name < due[j].name })
+	// hived iterates by_governance_vote_expiration_ts, whose composite key is
+	// (expiration_ts, account_id). Sorting by name alone was fine while every
+	// due account was processed anyway; with a budget the ORDER decides which
+	// accounts get deferred, so it has to match.
+	//
+	// gopherd has no account_id. Account.Created stands in for it — hived
+	// assigns ids in creation order, so ordering by creation TIME agrees with
+	// ordering by id for any two accounts created in different blocks. The
+	// residue is accounts created within the same block, where this falls back
+	// to name and hived would use the id. That is the same proxy already
+	// validated for the liquidity-reward tie-break (7838fd8), and it is the
+	// best available until accounts carry a creation sequence.
+	for i := range due {
+		if a, err := objects.GetAccount(s, due[i].name); err == nil {
+			due[i].expiration = a.GovernanceVoteExpiration
+			due[i].created = a.Created
+		}
+	}
+	sort.Slice(due, func(i, j int) bool {
+		if due[i].expiration != due[j].expiration {
+			return due[i].expiration < due[j].expiration
+		}
+		if due[i].created != due[j].created {
+			return due[i].created < due[j].created
+		}
+		return due[i].name < due[j].name
+	})
 	if envGhivediffGovExp != "" {
 		for _, e := range due {
 			ghiveDiff("GHIVEDIFF GOVEXP block=%d account=%s\n", blockNum, e.name)
@@ -99,6 +129,20 @@ func removeExpiredGovernanceVotes(s *state.Session, blockTime, blockNum uint32, 
 
 	removed := 0
 	defer func() { noteGovernanceRemovals(removed) }()
+	// hived's remove_guard. When an account's proposal-vote removal exhausts
+	// it, hived does NOTHING further for that account — no witness-vote
+	// clearing, no proxy clearing, no expiration bump — and BREAKS, deferring
+	// it and every later account to the next block (database.cpp:3522). Its
+	// votes that WERE removed stay removed, so the next block resumes rather
+	// than restarting.
+	//
+	// Until now gopherd cleared every due account in one go. That is
+	// consensus-visible whenever the budget is reached: an account's witness
+	// votes cleared a block early move vote totals, and vote totals move the
+	// schedule. It has never been reached on mainnet — govsweep-scan over the
+	// whole post-HF21 chain found three over-budget slots, all in mid-2027 —
+	// so enabling this changes nothing today and is correct when it does.
+	guard := objects.NewRemoveGuard(network.GlobalRemoveThreshold)
 	for _, e := range due {
 		a, err := objects.GetAccount(s, e.name)
 		if err != nil {
@@ -114,8 +158,18 @@ func removeExpiredGovernanceVotes(s *state.Session, blockTime, blockNum uint32, 
 				directPower = 0
 			}
 		}
+		// Proposal votes first, and ONLY proceed if they all came out. hived
+		// gates the entire rest of the account's processing on this
+		// (`if( dhf_helper::remove_proposal_votes( ... ) )`), so a partial
+		// removal must leave the account otherwise untouched.
+		n, complete := removeProposalVotesForVoterBudgeted(s, e.name, guard)
+		removed += n
+		if !complete {
+			// Deferred: this account and every later one wait for the next
+			// block, exactly as hived's `break` does.
+			break
+		}
 		objects.NullifyProxiedWitnessVotes(s, &a, directPower)
-		removed += clearProposalVotesForVoter(s, e.name)
 		// Drop direct witness votes. Pass 0 because Nullify above
 		// already removed the propagation-array contribution for the
 		// chain-walk's witnesses.
@@ -150,12 +204,43 @@ func removeExpiredGovernanceVotes(s *state.Session, blockTime, blockNum uint32, 
 //
 // The count is what the governance sweeps meter against
 // HIVE_GLOBAL_REMOVE_THRESHOLD — see governanceRemovalBudgetExceeded.
-func clearProposalVotesForVoter(s *state.Session, voter string) int {
-	type pair struct {
-		proposalID int64
-		voter      string
+// removeProposalVotesForVoterBudgeted is clearProposalVotesForVoter under a
+// removal budget: it reports how many rows it erased and whether it got them
+// all. Mirrors dhf_helper::remove_proposal_votes(voter, ...), whose bool
+// return is what gates the rest of an account's governance clearing.
+//
+// Rows removed before the budget ran out STAY removed — hived does not roll
+// them back — so the next block resumes where this one stopped rather than
+// starting the account over.
+func removeProposalVotesForVoterBudgeted(s *state.Session, voter string, g *objects.RemoveGuard) (removed int, complete bool) {
+	for _, p := range proposalVotesOf(s, voter) {
+		if !g.Step() {
+			return removed, false
+		}
+		objects.DeleteProposalVote(s, p.proposalID, p.voter)
+		removed++
 	}
-	var toDelete []pair
+	return removed, true
+}
+
+func clearProposalVotesForVoter(s *state.Session, voter string) int {
+	toDelete := proposalVotesOf(s, voter)
+	for _, p := range toDelete {
+		objects.DeleteProposalVote(s, p.proposalID, p.voter)
+	}
+	return len(toDelete)
+}
+
+type proposalVoteRef struct {
+	proposalID int64
+	voter      string
+}
+
+// proposalVotesOf collects every proposal_vote row cast BY one account. The
+// table is keyed (proposalID, voter) with no by-voter index, so this scans;
+// callers are the once-a-block governance paths, not per-operation code.
+func proposalVotesOf(s *state.Session, voter string) []proposalVoteRef {
+	var toDelete []proposalVoteRef
 	_ = s.Range(objects.ProposalVoteTable, state.PrimaryIndex, nil,
 		func(body, _ []byte) (bool, error) {
 			if len(body) < 8+state.AccountNameKeyLen {
@@ -172,14 +257,11 @@ func clearProposalVotesForVoter(s *state.Session, voter string) int {
 				n--
 			}
 			if string(voterBytes[:n]) == voter {
-				toDelete = append(toDelete, pair{id, voter})
+				toDelete = append(toDelete, proposalVoteRef{id, voter})
 			}
 			return true, nil
 		})
-	for _, p := range toDelete {
-		objects.DeleteProposalVote(s, p.proposalID, p.voter)
-	}
-	return len(toDelete)
+	return toDelete
 }
 
 // Governance-sweep removal budget, NOT yet enforced.

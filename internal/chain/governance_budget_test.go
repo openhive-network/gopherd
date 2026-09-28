@@ -94,3 +94,82 @@ func TestNoteGovernanceRemovalsFlagsOverBudget(t *testing.T) {
 		t.Errorf("high-water mark regressed: got %d, want %d", m, maxPer)
 	}
 }
+
+// TestBudgetedVoteRemovalDefersRatherThanPartiallyClearing covers the
+// semantics that make the guard safe to enforce: hived gates an account's
+// ENTIRE governance clearing on its proposal votes coming out completely
+// (`if( dhf_helper::remove_proposal_votes( ... ) )`), and breaks otherwise.
+//
+// Getting this half-right is worse than not enforcing at all. An account whose
+// votes are partially removed but whose witness votes are cleared anyway has
+// had its governance weight dropped a block early — the exact divergence the
+// budget exists to reproduce.
+func TestBudgetedVoteRemovalDefersRatherThanPartiallyClearing(t *testing.T) {
+	db, err := state.Open(t.TempDir(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s := state.NewSession(db)
+
+	limit := int(network.GlobalRemoveThreshold)
+	for i := 0; i < limit+10; i++ {
+		objects.PutProposalVote(s, int64(i), auth.AccountName("whale"))
+	}
+
+	g := objects.NewRemoveGuard(network.GlobalRemoveThreshold)
+	removed, complete := removeProposalVotesForVoterBudgeted(s, "whale", g)
+	if complete {
+		t.Fatal("an account holding more votes than the budget cannot be completed in one pass")
+	}
+	if removed != limit {
+		t.Errorf("removed %d, want exactly the budget %d", removed, limit)
+	}
+
+	// The removed rows STAY removed — hived does not roll them back, which is
+	// what lets the next block resume instead of restarting the account.
+	left := len(proposalVotesOf(s, "whale"))
+	if left != 10 {
+		t.Errorf("rows left: got %d, want 10 (resumable remainder)", left)
+	}
+
+	// Next block, fresh budget: the remainder comes out and the account
+	// completes.
+	g2 := objects.NewRemoveGuard(network.GlobalRemoveThreshold)
+	removed2, complete2 := removeProposalVotesForVoterBudgeted(s, "whale", g2)
+	if !complete2 || removed2 != 10 {
+		t.Errorf("second pass: removed=%d complete=%v, want 10/true", removed2, complete2)
+	}
+}
+
+// TestBudgetIsSharedAcrossAccounts — one guard per sweep, not per account. Two
+// accounts that each fit individually can still exhaust it together, and the
+// second one must then be deferred whole.
+func TestBudgetIsSharedAcrossAccounts(t *testing.T) {
+	db, err := state.Open(t.TempDir(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s := state.NewSession(db)
+
+	limit := int(network.GlobalRemoveThreshold)
+	for i := 0; i < limit-5; i++ {
+		objects.PutProposalVote(s, int64(i), auth.AccountName("alice"))
+	}
+	for i := 0; i < 20; i++ {
+		objects.PutProposalVote(s, int64(1000+i), auth.AccountName("bob"))
+	}
+
+	g := objects.NewRemoveGuard(network.GlobalRemoveThreshold)
+	if _, ok := removeProposalVotesForVoterBudgeted(s, "alice", g); !ok {
+		t.Fatal("alice fits inside the budget and must complete")
+	}
+	removed, complete := removeProposalVotesForVoterBudgeted(s, "bob", g)
+	if complete {
+		t.Error("bob must NOT complete — alice already spent all but 5 of the shared budget")
+	}
+	if removed != 5 {
+		t.Errorf("bob removed %d, want the 5 the shared guard had left", removed)
+	}
+}

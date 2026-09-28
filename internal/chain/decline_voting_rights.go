@@ -3,6 +3,7 @@ package chain
 import (
 	"gopherd/internal/protocol/auth"
 	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/protocol/network"
 	"gopherd/internal/state"
 	"gopherd/internal/state/objects"
 )
@@ -57,12 +58,18 @@ func processDeclineVotingRights(s *state.Session, blockTime, blockNum uint32, d 
 
 	hf := hardfork.SetForBlock(blockNum)
 	// hived opens a remove_guard( HIVE_GLOBAL_REMOVE_THRESHOLD ) here
-	// (database_dhf.cpp:218), separate from the one the governance-expiry
-	// sweep opens, and stops processing accounts once it is spent. Metered,
-	// not enforced — see GovernanceRemovalStats in governance_votes.go for
-	// why it cannot be enforced correctly yet.
+	// (database_dhf.cpp:218), SEPARATE from the one the governance-expiry
+	// sweep opens — each gets a fresh budget — and gates the rest of an
+	// account's processing on the removal completing:
+	//
+	//	if( !has_hardfork( HF28 ) || dhf_helper::remove_proposal_votes( ... ) )
+	//
+	// Note the short-circuit: before HF28 the removal is not attempted at all
+	// and the account is always processed, which is why the budget only binds
+	// from HF28 onward.
 	removed := 0
 	defer func() { noteGovernanceRemovals(removed) }()
+	guard := objects.NewRemoveGuard(network.GlobalRemoveThreshold)
 	for _, p := range ready {
 		req, err := objects.GetDeclineVotingRightsRequest(s, p.account)
 		if err != nil {
@@ -71,9 +78,18 @@ func processDeclineVotingRights(s *state.Session, blockTime, blockNum uint32, d 
 		a, aerr := objects.GetAccount(s, p.account)
 		if aerr == nil {
 			// HF28: drop any DHF proposal votes the account has cast.
-			// Mirrors database_dhf.cpp:223 (remove_proposal_votes).
+			// Mirrors database_dhf.cpp:224. When the budget runs out part-way
+			// hived logs "Threshold exceeded while deleting proposal votes"
+			// and BREAKS — the account keeps its request row and is retried
+			// next block, along with everything after it. Same as the
+			// governance-expiry sweep; I assumed it continued and the source
+			// says otherwise.
 			if hf.Has(hardfork.HF28) {
-				removed += clearProposalVotesForVoter(s, p.account)
+				n, complete := removeProposalVotesForVoterBudgeted(s, p.account, guard)
+				removed += n
+				if !complete {
+					break
+				}
 			}
 			// nullify_proxied_witness_votes: subtract the account's full
 			// propagation (direct + proxied_vsf_votes[*]) from each
