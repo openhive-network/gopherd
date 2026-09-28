@@ -158,6 +158,14 @@ func (t Tag) Name() string {
 	if int(t) < len(tagNames) && tagNames[t] != "" {
 		return tagNames[t]
 	}
+	// Virtual tags continue past the end of tagNames. Without this the whole
+	// virtual range prints as "unknown(64)", which is the least useful thing
+	// a vop-stream diagnostic can say.
+	if t >= TagFirstVirtual && int(t-TagFirstVirtual) < len(virtualTagNames) {
+		if n := virtualTagNames[t-TagFirstVirtual]; n != "" {
+			return n
+		}
+	}
 	return fmt.Sprintf("unknown(%d)", t)
 }
 

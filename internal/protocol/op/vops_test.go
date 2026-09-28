@@ -161,3 +161,35 @@ func TestVirtualOpsCarryTheirTag(t *testing.T) {
 		}
 	}
 }
+
+// TestVirtualTagNamesComplete — a vop-stream diagnostic that prints
+// "unknown(64)" is the least useful thing it can say, and the name table is a
+// hand-written parallel list, which is the shape that drifts. Every tag in the
+// range must resolve, and no two may share a name.
+func TestVirtualTagNamesComplete(t *testing.T) {
+	seen := map[string]Tag{}
+	for tag := TagFirstVirtual; tag < TagLastVirtual; tag++ {
+		name := tag.Name()
+		if name == "" || name[:2] == "un" {
+			t.Errorf("tag %d has no name (got %q)", tag, name)
+			continue
+		}
+		if prev, dup := seen[name]; dup {
+			t.Errorf("tag %d and tag %d share the name %q", prev, tag, name)
+		}
+		seen[name] = tag
+	}
+	// Spot-check the ends and one in the middle against hived's own spelling.
+	for _, c := range []struct {
+		tag  Tag
+		want string
+	}{
+		{TagFillConvertRequest, "fill_convert_request"},
+		{TagProducerReward, "producer_reward"},
+		{TagDeclinedVotingRights, "declined_voting_rights"},
+	} {
+		if got := c.tag.Name(); got != c.want {
+			t.Errorf("tag %d = %q, want %q", c.tag, got, c.want)
+		}
+	}
+}
