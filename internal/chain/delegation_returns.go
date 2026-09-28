@@ -112,6 +112,17 @@ func clearExpiredDelegations(s *state.Session, blockTime uint32) {
 		if a.DelegatedVestingShares < 0 {
 			a.DelegatedVestingShares = 0
 		}
+		if hf20 {
+			// The regenerate above is the BEFORE half, and hived's
+			// update_account_after_vest_change is the AFTER half — without it
+			// the account is written back carrying a last_max_rc computed from
+			// the pre-return delegation, and the next reader anywhere finds it
+			// stale. That made this the largest remaining source of stale-cache
+			// hits once the post-change sites were reclassified. The
+			// regeneration inside it is a no-op here (same block time); what
+			// matters is the refreshed ceiling.
+			objects.UpdateAccountAfterVestChange(&a, blockTime)
+		}
 		objects.PutAccount(s, &a)
 		objects.DeleteVestingDelegationExpirationFull(s, &exp)
 	}

@@ -165,6 +165,11 @@ func RegenerateRCMana(a *Account, now uint32) {
 	// replay") can actually be gathered before the assertion is turned on.
 	if a.LastMaxRC != maxRC && a.LastMaxRC != 0 {
 		rcStaleMaxCount.Add(1)
+		if rcAttributionEnabled {
+			// skip=2: 0 is runtime.Caller, 1 is noteRCStaleCaller, 2 is
+			// whoever called RegenerateRCMana — the site that matters.
+			noteRCStaleCaller(2)
+		}
 	}
 	params := ManabarParams{MaxMana: maxRC, RegenTime: RCRegenTimeSec}
 	newMana, newUpdate := RegenerateMana(a.RCManaCurrent, a.RCManaLastUpdate, params, now, true)
@@ -184,6 +189,52 @@ var rcStaleMaxCount atomic.Uint64
 // the signal that HF29's RC_IS_CONSENSUS assertion would WEDGE this node once
 // the fork activates, and names the work that has to happen first.
 func RCStaleMaxCount() uint64 { return rcStaleMaxCount.Load() }
+
+// UpdateAccountAfterVestChange mirrors
+// resource_credits::update_account_after_vest_change (rc_utility.cpp:407).
+//
+// hived has TWO functions where gopherd had one, and they carry DIFFERENT
+// expectations:
+//
+//	regenerate_rc_mana()            asserts last_max_rc is FRESH. Called
+//	                                BEFORE anything changes vests or RC.
+//	update_account_after_vest_change()  recomputes last_max_rc. Called AFTER.
+//	                                Asserts only that a regeneration already
+//	                                happened this block.
+//
+// Calling the first where hived calls the second is not a bug in the result —
+// the arithmetic is identical and state is unaffected — but it reports every
+// legitimate post-change refresh as a staleness violation. Measured, that
+// conflation was 95% of the stale-max count: two sites, both of which mutate
+// vests and then refresh, exactly as hived does.
+//
+// So the split here is about MEASUREMENT, not behaviour. This function does
+// what RegenerateRCMana does, and counts against the condition hived's
+// update_account_after_vest_change actually asserts — "not regenerated prior
+// to VEST change" — leaving RCStaleMaxCount to mean what hived's max_mana
+// assertion means. Only then can either be judged safe to enforce at HF29.
+func UpdateAccountAfterVestChange(a *Account, now uint32) {
+	if a.RCManaLastUpdate != now {
+		rcNotRegeneratedCount.Add(1)
+		if rcAttributionEnabled {
+			noteRCNotRegenCaller(2)
+		}
+	}
+	maxRC := a.MaximumRC()
+	params := ManabarParams{MaxMana: maxRC, RegenTime: RCRegenTimeSec}
+	newMana, newUpdate := RegenerateMana(a.RCManaCurrent, a.RCManaLastUpdate, params, now, true)
+	a.RCManaCurrent = newMana
+	a.RCManaLastUpdate = newUpdate
+	a.LastMaxRC = maxRC
+}
+
+// rcNotRegeneratedCount counts arrivals at a post-change refresh whose manabar
+// had NOT been regenerated earlier in the same block — hived's other HF29
+// assertion ("Account not regenerated prior to VEST change").
+var rcNotRegeneratedCount atomic.Uint64
+
+// RCNotRegeneratedCount reports that counter.
+func RCNotRegeneratedCount() uint64 { return rcNotRegeneratedCount.Load() }
 
 // InitRCManabar primes the manabar on a freshly created account.
 // At creation a new account has zero VESTS, so max_rc = 0 and
