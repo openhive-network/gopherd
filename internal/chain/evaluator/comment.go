@@ -908,6 +908,10 @@ func (voteEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	// Comments created before this use the rshares³/abs_rshares² weight
 	// (hive_evaluator_social.cpp:502-516); after, the bounded W(R) curve.
 	const hf6ReverseAuctionTimeCubed uint32 = 1466776800
+	// effectiveVoteWeight is the curation weight that ends up ON THE ROW,
+	// which is what effective_comment_vote reports: voteCurationWeight for a
+	// fresh vote, recastCurationWeight for an edit (zero pre-HF26).
+	var effectiveVoteWeight uint64
 	var voteCurationWeight, maxVoteWeight uint64
 	// hive_evaluator_social.cpp:515-517: curation_reward_eligible is also
 	// gated on !was_paid — votes cast on a comment that has already paid
@@ -1090,6 +1094,7 @@ func (voteEvaluator) Apply(ctx *Context, opArg op.Op) error {
 			LastUpdate:     ctx.HeadBlockTime,
 			CurationWeight: voteCurationWeight,
 		})
+		effectiveVoteWeight = voteCurationWeight
 		c.NetRshares += rshares
 		c.VoteCount++
 		c.TotalVoteWeight += maxVoteWeight
@@ -1196,6 +1201,7 @@ func (voteEvaluator) Apply(ctx *Context, opArg op.Op) error {
 			CurationWeight: recastCurationWeight, // 0 pre-HF26 (edit penalty)
 		}
 		objects.PutCommentVote(ctx.DB, &recast)
+		effectiveVoteWeight = recastCurationWeight
 		if voteDebug {
 			ghiveDiff("GHIVEDIFF VOTE-RECAST block=%d t=%d voter=%s author=%s permlink=%s weight=%d rshares=%d prev_rshares=%d prev_curation_weight=%d total_vote_weight_after=%d\n",
 				ctx.BlockNum, ctx.HeadBlockTime, v.Voter, v.Author, v.Permlink,
@@ -1358,6 +1364,10 @@ rootDone:
 		blockNumForAdjust = dgpoRef.HeadBlockNumber
 	}
 	adjustRewardShares2(ctx.DB, oldNetRshares, c.NetRshares, blockNumForAdjust)
+	// The vote counted. Every earlier return — rejected, comment already
+	// paid, votes disallowed — skips this, which is the whole signal.
+	ctx.EmitEffectiveCommentVote(string(v.Voter), string(v.Author), v.Permlink,
+		effectiveVoteWeight, rshares, c.TotalVoteWeight)
 	return nil
 }
 
