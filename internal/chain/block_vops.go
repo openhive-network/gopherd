@@ -30,11 +30,21 @@ import (
 // answer if two ops swap. Appending in emission order is the whole mechanism;
 // there is no sorting step, and there must not be one.
 //
-// STILL MISSING: 19 of the 43. The ones defined and wired here are those whose
-// emission point already exists in gopherd. The rest need their emission site
-// built as well as their payload — comment cashout's author/curation/benefactor
-// trio, the hardfork ops, effective_comment_vote, and the escrow pair among
-// them. op.Tag names all 43, so the gap is visible from the tag list.
+// STILL MISSING: 16 of the 43 are defined but not yet emitted —
+//
+//	fill_order, limit_order_cancelled                     market
+//	fill_collateralized_convert_request,
+//	collateralized_convert_immediate_conversion           HF25 converts
+//	interest, fill_vesting_withdraw, liquidity_reward     periodic payouts
+//	delayed_voting, vesting_shares_split                  VESTS bookkeeping
+//	changed_recovery_account, ineffective_delete_comment  evaluator outcomes
+//	clear_null_account_balance, consolidate_treasury_balance,
+//	hardfork_hive, hardfork_hive_restore                  HF23 sweep
+//	system_warning                                        node-level notice
+//
+// op.Tag names all 43 and TestVirtualOpsCarryTheirTag pins the range as
+// contiguous, so the gap stays visible from the tag list rather than from
+// this comment going stale.
 
 // LastBlockVOps returns the virtual ops emitted during the most recent
 // successful ApplyBlock, in emission order. Safe to call concurrently with
@@ -151,6 +161,24 @@ func (d *Database) emitVOpClosure() func(any) {
 				Worker: auth.AccountName(p.Worker),
 				Reward: reward,
 			})
+		case evaluator.EscrowApprovedVOp:
+			d.pushVOp(op.EscrowApproved{
+				From:     auth.AccountName(p.From),
+				To:       auth.AccountName(p.To),
+				Agent:    auth.AccountName(p.Agent),
+				EscrowID: p.EscrowID,
+				Fee:      escrowFeeAsset(p.Fee, p.FeeIsHBD),
+			})
+		case evaluator.EscrowRejectedVOp:
+			d.pushVOp(op.EscrowRejected{
+				From:       auth.AccountName(p.From),
+				To:         auth.AccountName(p.To),
+				Agent:      auth.AccountName(p.Agent),
+				EscrowID:   p.EscrowID,
+				HbdAmount:  vopHbd(p.HbdAmount),
+				HiveAmount: vopHive(p.HiveAmount),
+				Fee:        escrowFeeAsset(p.Fee, p.FeeIsHBD),
+			})
 		case evaluator.ProxyClearedVOp:
 			d.pushVOp(op.ProxyCleared{
 				Account: auth.AccountName(p.Account),
@@ -176,4 +204,15 @@ func vopHbd(amount int64) asset.Asset {
 
 func vopVests(amount int64) asset.Asset {
 	return asset.Asset{Amount: amount, Symbol: asset.Symbol{Num: asset.VestsSymbol}}
+}
+
+// escrowFeeAsset builds the fee asset with the symbol the escrow actually
+// locked. An escrow fee is HIVE or HBD depending on what escrow_transfer
+// carried, and reporting the wrong one turns a fee refund into a claim
+// about a currency that never moved.
+func escrowFeeAsset(amount int64, isHBD bool) asset.Asset {
+	if isHBD {
+		return vopHbd(amount)
+	}
+	return vopHive(amount)
 }
