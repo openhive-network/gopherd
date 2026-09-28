@@ -6,7 +6,36 @@ import (
 	"gopherd/internal/chain"
 	"gopherd/internal/protocol/hardfork"
 	"gopherd/internal/protocol/op"
+	"gopherd/internal/state"
+	"gopherd/internal/state/objects"
 )
+
+// seedRewardFundForPayout makes the next cashout actually pay.
+//
+// The fixture inherits a reward fund holding 2000 satoshi against a
+// recent_claims near 3.7e30 — the shape of a chain that has been running,
+// because SkipSeconds jumps time rather than accruing inflation block by
+// block. Every payout then floors to zero, and a test asserting on the payout
+// ops would pass on an empty stream forever.
+//
+// Zeroing recent_claims makes the block's own pre-add the entire denominator,
+// so the one comment cashing out claims the whole balance. That is the
+// arrangement the C++ cluster_database_fixture reaches by running real
+// inflation; seeding it directly keeps the test about the vop stream.
+func seedRewardFundForPayout(t *testing.T, f *Fixture, balance int64) {
+	t.Helper()
+	s := state.NewSession(f.State)
+	rf, err := objects.GetRewardFund(s, objects.PostRewardFundName)
+	if err != nil {
+		t.Fatalf("GetRewardFund: %v", err)
+	}
+	rf.RewardBalance = balance
+	rf.RecentClaims = [16]byte{}
+	objects.PutRewardFund(s, &rf)
+	if err := s.Commit(false); err != nil {
+		t.Fatalf("seed reward fund: %v", err)
+	}
+}
 
 // The virtual-op stream is ORDERED, and the order is load-bearing: a consumer
 // that rebuilds balances by replaying it gets a different answer if two ops
@@ -30,12 +59,16 @@ func vopIndex(vops []op.Operation, tag op.Tag) int {
 	return -1
 }
 
-// generateUntilVOp rolls blocks forward until one carries the given tag,
-// returning that block's stream. Which block a cashout lands in depends on the
-// schedule, so searching for it beats hard-coding an offset that quietly stops
-// matching.
-func generateUntilVOp(t *testing.T, f *Fixture, tag op.Tag, maxBlocks int) []op.Operation {
+// findVOpStream returns the stream carrying the given tag, checking the block
+// just applied FIRST and only then rolling forward. SkipSeconds lands one real
+// block at the target time and the per-block hooks fire in it, so a cashout
+// scheduled inside the skipped window is already in the current stream —
+// generating another block first would replace it with an empty one.
+func findVOpStream(t *testing.T, f *Fixture, tag op.Tag, maxBlocks int) []op.Operation {
 	t.Helper()
+	if vops := f.Chain.LastBlockVOps(); vopIndex(vops, tag) >= 0 {
+		return vops
+	}
 	for i := 0; i < maxBlocks; i++ {
 		f.GenerateBlock()
 		vops := f.Chain.LastBlockVOps()
@@ -73,8 +106,9 @@ func TestVOpCashoutStreamOrder(t *testing.T) {
 	f.SkipSeconds(60 * 60)
 	f.MustApplyOp(op.Vote{Voter: "bob", Author: "alice", Permlink: "post", Weight: 10000})
 
+	seedRewardFundForPayout(t, f, 10_000_000)
 	f.SkipSeconds(60 * 60 * 24 * 7)
-	vops := generateUntilVOp(t, f, op.TagAuthorReward, 8)
+	vops := findVOpStream(t, f, op.TagAuthorReward, 8)
 
 	iCuration := vopIndex(vops, op.TagCurationReward)
 	iBenefactor := vopIndex(vops, op.TagCommentBenefactorReward)
@@ -174,8 +208,10 @@ func TestVOpEffectiveCommentVote(t *testing.T) {
 
 	f.MustApplyOp(op.Comment{Author: "alice", Permlink: "post", Body: "body"})
 	f.SkipSeconds(60 * 60)
+	// MustApplyOp generates the block containing the op, so the stream to
+	// read is the one it just produced. Generating another first would
+	// replace it with an empty block's stream.
 	f.MustApplyOp(op.Vote{Voter: "bob", Author: "alice", Permlink: "post", Weight: 10000})
-	f.GenerateBlock()
 
 	vops := f.Chain.LastBlockVOps()
 	v := chain.FindVOp(vops, op.TagEffectiveCommentVote)

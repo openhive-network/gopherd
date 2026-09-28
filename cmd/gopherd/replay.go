@@ -94,6 +94,7 @@ func cmdReplay(args []string) int {
 	snapshotEvery := fs.Uint("snapshot-every", 0, "save a directory snapshot every N applied blocks (0 = off)")
 	snapshotDir := fs.String("snapshot-dir", "", "directory under which periodic snapshots are saved (block-<N>/ subdir per snapshot, used with --snapshot-every)")
 	checkInvariants := fs.Uint("check-invariants", 0, "verify HIVE/HBD/VESTS conservation laws every N blocks (0 = off); aborts at the first block where the books don't balance — catches silent drift WITHOUT a reference hived")
+	emitVOps := fs.Bool("emit-vops", false, "build the per-block virtual-op stream during replay. OFF by default: nothing in a bulk replay reads it, and a paired replay proves state is bit-identical either way, while building it costs ~7% of throughput — most of that on the vote path, where effective_comment_vote fires once per vote. Turn it on to inspect the stream a live node would serve.")
 	checkInvariantsStop := fs.Bool("check-invariants-stop", true, "stop replay at the first invariant violation (set false to log and continue)")
 	selfContainedSnap := fs.Bool("snapshot-self-contained", false, "when saving a snapshot on a persist cold backend, STREAM the full cold tier into the snapshot (portable, loads into any cold backend) instead of the default resident-only durable dump. Use for a frozen near-frontier checkpoint that each fix-test run reloads into a fresh volatile tier.")
 	prefetch := fs.Int("prefetch", 8, "read+decompress this many blocks ahead of apply on a background goroutine (0 = serial read like before)")
@@ -343,6 +344,7 @@ func cmdReplay(args []string) int {
 	}
 
 	cdb := chain.New(stateDB)
+	cdb.SetVOpEmission(*emitVOps)
 	start := time.Now()
 	var (
 		applied, errCount uint64

@@ -322,29 +322,6 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 	// cashout_time and not its own — the same walk the vote evaluator does
 	// (see the calculate_discussion_payout_time note in evaluator/comment.go).
 	// A reply under a root that was just rescheduled +30d is NOT settled.
-	emitPayoutUpdate := func() {
-		if !hfReschedule.Has(hardfork.HF17) {
-			payoutTime := rescheduleTime
-			if c.ParentAuthor != "" {
-				rootAuthor, rootPermlink := string(c.RootAuthor), c.RootPermlink
-				if rootAuthor == "" {
-					rootAuthor, rootPermlink = string(c.Author), c.Permlink
-				}
-				if rootAuthor != string(c.Author) || rootPermlink != c.Permlink {
-					if root, rerr := objects.GetComment(s, rootAuthor, rootPermlink); rerr == nil {
-						payoutTime = root.CashoutTime
-					}
-				}
-			}
-			if payoutTime != 0 {
-				return
-			}
-		}
-		d.pushVOp(op.CommentPayoutUpdate{
-			Author:   auth.AccountName(author),
-			Permlink: permlink,
-		})
-	}
 	// Mirror comment_cashout_object::on_payout (comment_object.hpp:213-219)
 	// + comment_cashout_ex_object::on_payout (comment_object.hpp:343-349):
 	// after a payout, zero the cashout-side accumulators (NetRshares,
@@ -399,7 +376,7 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 		// reward_balance and cascading into the post-HF19 sat-level reward
 		// cluster + markrmorrisjr's claim failure at 13,060,794.
 		zero()
-		emitPayoutUpdate()
+		emitCommentPayoutUpdate(s, d, c, author, permlink, rescheduleTime, hfReschedule)
 		deleteCommentVotes(s, author, permlink)
 		return
 	}
@@ -443,13 +420,13 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 	// recast-shaped path in Go but a fresh-vote-shaped path in C++.
 	if fundBalance <= 0 {
 		zero()
-		emitPayoutUpdate()
+		emitCommentPayoutUpdate(s, d, c, author, permlink, rescheduleTime, hfReschedule)
 		deleteCommentVotes(s, author, permlink)
 		return
 	}
 	if shares2.IsZero() {
 		zero()
-		emitPayoutUpdate()
+		emitCommentPayoutUpdate(s, d, c, author, permlink, rescheduleTime, hfReschedule)
 		deleteCommentVotes(s, author, permlink)
 		return
 	}
@@ -465,7 +442,7 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 	}
 	if commentCurve.IsZero() {
 		zero()
-		emitPayoutUpdate()
+		emitCommentPayoutUpdate(s, d, c, author, permlink, rescheduleTime, hfReschedule)
 		deleteCommentVotes(s, author, permlink)
 		return
 	}
@@ -575,7 +552,7 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 		// short, dropping his hbd_payout from 487 to 460 sat HBD and
 		// cascading into the 25-sat HBD insufficient-balance failure at
 		// block 3,076,587 (limit_order_create vs bittrex transfer).
-		emitPayoutUpdate()
+		emitCommentPayoutUpdate(s, d, c, author, permlink, rescheduleTime, hfReschedule)
 		deleteCommentVotes(s, author, permlink)
 		return
 	}
@@ -615,6 +592,7 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 	// order. Earlier Go paid beneficiaries before curators, which drifted
 	// share prices for any post with both — dormant pre-HF17 (no
 	// beneficiaries) but visible later.
+	emitVOps := d.VOpEmissionEnabled()
 	curatorRemainder := int64(0)
 	curatorsVestingPayout := int64(0)
 	if c.AllowCurationRewards && curatorPool > 0 {
@@ -710,15 +688,17 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 			// (database_comment.cpp:257) — the treasury has no reward balance
 			// to claim from, so the op must not tell a consumer to wait for a
 			// claim that will never come.
-			d.pushVOp(op.CommentBenefactorReward{
-				Benefactor:          b.Account,
-				Author:              c.Author,
-				Permlink:            c.Permlink,
-				HbdPayout:           vopHbd(hbdPayout),
-				HivePayout:          vopHive(0),
-				VestingPayout:       vopVests(0),
-				PayoutMustBeClaimed: false,
-			})
+			if emitVOps {
+				d.pushVOp(op.CommentBenefactorReward{
+					Benefactor:          b.Account,
+					Author:              c.Author,
+					Permlink:            c.Permlink,
+					HbdPayout:           vopHbd(hbdPayout),
+					HivePayout:          vopHive(0),
+					VestingPayout:       vopVests(0),
+					PayoutMustBeClaimed: false,
+				})
+			}
 			totalBeneficiary += share
 			continue
 		}
@@ -761,15 +741,17 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 		}
 		// Pre-HF20 the whole slice is VESTS and both money legs read zero;
 		// that is the correct payload, not a missing one.
-		d.pushVOp(op.CommentBenefactorReward{
-			Benefactor:          b.Account,
-			Author:              c.Author,
-			Permlink:            c.Permlink,
-			HbdPayout:           vopHbd(beneHbdPaid),
-			HivePayout:          vopHive(beneHivePaid),
-			VestingPayout:       vopVests(beneVests),
-			PayoutMustBeClaimed: toReward,
-		})
+		if emitVOps {
+			d.pushVOp(op.CommentBenefactorReward{
+				Benefactor:          b.Account,
+				Author:              c.Author,
+				Permlink:            c.Permlink,
+				HbdPayout:           vopHbd(beneHbdPaid),
+				HivePayout:          vopHive(beneHivePaid),
+				VestingPayout:       vopVests(beneVests),
+				PayoutMustBeClaimed: toReward,
+			})
+		}
 
 		if traceAccount(string(b.Account)) {
 			ghiveDiff("GHIVEDIFF CASHOUT-BENEFICIARY block=%d author=%s permlink=%s beneficiary=%s weight=%d author_pool=%d share=%d hbd_slice=%d vesting_slice=%d percent_hbd=%d\n",
@@ -818,27 +800,23 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 	// currency. curators_vesting_payout is carried here so a consumer can
 	// account the whole claim from this one op without summing every
 	// curation_reward (hived's own stated reason, database_comment.cpp:228-230).
-	d.pushVOp(op.AuthorReward{
-		Author:                auth.AccountName(author),
-		Permlink:              permlink,
-		HbdPayout:             vopHbd(authorHbdPaid),
-		HivePayout:            vopHive(authorHivePaid),
-		VestingPayout:         vopVests(authorVests),
-		CuratorsVestingPayout: vopVests(curatorsVestingPayout),
-		PayoutMustBeClaimed:   authorToReward,
-	})
+	if emitVOps {
+		d.pushVOp(op.AuthorReward{
+			Author:                auth.AccountName(author),
+			Permlink:              permlink,
+			HbdPayout:             vopHbd(authorHbdPaid),
+			HivePayout:            vopHive(authorHivePaid),
+			VestingPayout:         vopVests(authorVests),
+			CuratorsVestingPayout: vopVests(curatorsVestingPayout),
+			PayoutMustBeClaimed:   authorToReward,
+		})
+	}
 
 	// comment_reward restates the same cashout in HBD so a consumer has one
 	// comparable number per comment regardless of which currencies the legs
 	// were paid in. hived's to_hbd yields zero on a null feed rather than
 	// falling back to the HIVE amount, so an unpriced payout reports zero
 	// here and the real amounts in author_reward.
-	toHbd := func(hive int64) int64 {
-		if !feedReady || hive <= 0 {
-			return 0
-		}
-		return convertHiveToHBD(hive, feedHistoryFetched.CurrentMedianHistory)
-	}
 	// MISSING: total/curator/beneficiary_payout_value are documented as
 	// "overall ... from multiple cashouts prior to HF17" — hived accumulates
 	// them on comment_cashout_ex_object (add_payout_values, gated !HF19) so a
@@ -850,15 +828,17 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 	// that was deliberately slimmed. So these report THIS payout, which is
 	// exact from HF17 onward (cashout_time is frozen, so there is only ever
 	// one) and low on the second cashout of a pre-HF17 post.
-	d.pushVOp(op.CommentReward{
-		Author:                 auth.AccountName(author),
-		Permlink:               permlink,
-		Payout:                 vopHbd(toHbd(claimedReward)),
-		AuthorRewards:          authorPool,
-		TotalPayoutValue:       vopHbd(authorHbdPaid + toHbd(authorHivePaid+vestingHive)),
-		CuratorPayoutValue:     vopHbd(toHbd(curatorPool)),
-		BeneficiaryPayoutValue: vopHbd(toHbd(totalBeneficiary)),
-	})
+	if emitVOps {
+		d.pushVOp(op.CommentReward{
+			Author:                 auth.AccountName(author),
+			Permlink:               permlink,
+			Payout:                 vopHbd(toHbdOrZero(claimedReward, feedReady, feedHistoryFetched.CurrentMedianHistory)),
+			AuthorRewards:          authorPool,
+			TotalPayoutValue:       vopHbd(authorHbdPaid + toHbdOrZero(authorHivePaid+vestingHive, feedReady, feedHistoryFetched.CurrentMedianHistory)),
+			CuratorPayoutValue:     vopHbd(toHbdOrZero(curatorPool, feedReady, feedHistoryFetched.CurrentMedianHistory)),
+			BeneficiaryPayoutValue: vopHbd(toHbdOrZero(totalBeneficiary, feedReady, feedHistoryFetched.CurrentMedianHistory)),
+		})
+	}
 
 	if traceAccount(author) {
 		if a, gerr := objects.GetAccount(s, author); gerr == nil {
@@ -872,7 +852,7 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 	// to free memory and so any post-cashout re-vote starts fresh. Our
 	// vote evaluator now also gates votes on CashoutTime==0 comments,
 	// so this cleanup is mostly a memory hygiene measure.
-	emitPayoutUpdate()
+	emitCommentPayoutUpdate(s, d, c, author, permlink, rescheduleTime, hfReschedule)
 	deleteCommentVotes(s, author, permlink)
 	zero()
 
@@ -1363,16 +1343,74 @@ func distributeCuratorPool(s *state.Session, author, permlink string, pool int64
 		// that call minted at the then-current share price — which moves
 		// with every curator paid. Pushing after the call with the value it
 		// returned is the same number.
-		d.pushVOp(op.CurationReward{
-			Curator:             auth.AccountName(p.Voter),
-			Reward:              vopVests(curVests),
-			Author:              auth.AccountName(author),
-			Permlink:            permlink,
-			PayoutMustBeClaimed: toReward,
-		})
+		if d.VOpEmissionEnabled() {
+			d.pushVOp(op.CurationReward{
+				Curator:             auth.AccountName(p.Voter),
+				Reward:              vopVests(curVests),
+				Author:              auth.AccountName(author),
+				Permlink:            permlink,
+				PayoutMustBeClaimed: toReward,
+			})
+		}
 	}
 	if paid > pool {
 		return 0, paidVests
 	}
 	return pool - paid, paidVests
+}
+
+// emitCommentPayoutUpdate pushes comment_payout_update, which tells a consumer
+// a comment is settled and to stop tracking a pending payout for it. hived
+// pushes it from the TAIL of cashout_comment_helper (database_comment.cpp:
+// 359-363), after every path including the ones that paid nothing — a dust
+// comment still stops being pending. Every early return in processOneCashout
+// calls this.
+//
+// The gate is HF17_769 || discussion_payout_time == maximum. Post-HF17
+// cashout_time is always frozen, so it is unconditional. PRE-HF17 the relevant
+// time is the DISCUSSION's, which for a reply is its ROOT's cashout_time and
+// not its own — the same walk the vote evaluator does (see the
+// calculate_discussion_payout_time note in evaluator/comment.go). A reply under
+// a root that was just rescheduled +30d is NOT settled.
+//
+// A free function rather than a closure over processOneCashout's locals: a
+// closure capturing seven variables allocates once per cashout, and cashouts
+// run in the thousands per block in the high-volume era.
+func emitCommentPayoutUpdate(s *state.Session, d *Database, c *objects.Comment,
+	author, permlink string, rescheduleTime uint32, hf hardfork.Set) {
+	if d == nil || !d.VOpEmissionEnabled() {
+		return
+	}
+	if !hf.Has(hardfork.HF17) {
+		payoutTime := rescheduleTime
+		if c.ParentAuthor != "" {
+			rootAuthor, rootPermlink := string(c.RootAuthor), c.RootPermlink
+			if rootAuthor == "" {
+				rootAuthor, rootPermlink = string(c.Author), c.Permlink
+			}
+			if rootAuthor != string(c.Author) || rootPermlink != c.Permlink {
+				if root, rerr := objects.GetComment(s, rootAuthor, rootPermlink); rerr == nil {
+					payoutTime = root.CashoutTime
+				}
+			}
+		}
+		if payoutTime != 0 {
+			return
+		}
+	}
+	d.pushVOp(op.CommentPayoutUpdate{
+		Author:   auth.AccountName(author),
+		Permlink: permlink,
+	})
+}
+
+// toHbdOrZero restates a HIVE amount in HBD for the comment_reward summary.
+// hived's to_hbd yields zero on a null feed rather than falling back to the
+// HIVE amount, so an unpriced payout reports zero here and the real amounts in
+// author_reward.
+func toHbdOrZero(hive int64, feedReady bool, p asset.Price) int64 {
+	if !feedReady || hive <= 0 {
+		return 0
+	}
+	return convertHiveToHBD(hive, p)
 }
