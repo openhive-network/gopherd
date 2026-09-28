@@ -1284,7 +1284,7 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 		}
 	}
 	processConversions(session, hdr.Timestamp, &d.hooks, d)
-	processCommentCashouts(session, hdr.Timestamp, blockNum, &d.hooks)
+	processCommentCashouts(session, hdr.Timestamp, blockNum, &d.hooks, d)
 	processVestingWithdrawals(session, hdr.Timestamp, &d.hooks)
 	processSavingsWithdraws(session, hdr.Timestamp, d)
 	processSubsidizedAccounts(session, blockNum)

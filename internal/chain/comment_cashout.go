@@ -11,6 +11,7 @@ import (
 	"gopherd/internal/protocol/asset"
 	"gopherd/internal/protocol/auth"
 	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/protocol/op"
 	"gopherd/internal/reward"
 	"gopherd/internal/state"
 	"gopherd/internal/state/objects"
@@ -123,7 +124,7 @@ func curationPercentForBlock(blockNum uint32) int64 {
 // pre-HF7 backlog of 24h-due comments accumulate. At HF7 the queue
 // drains in one cascade ("the first cashout will be 2+ months of
 // rewards" — the C++ comment).
-func processCommentCashouts(s *state.Session, blockTime, blockNum uint32, hooks *blockHookScratch) {
+func processCommentCashouts(s *state.Session, blockTime, blockNum uint32, hooks *blockHookScratch, d *Database) {
 	if !hardfork.SetForBlock(blockNum).Has(hardfork.HF7) {
 		return
 	}
@@ -187,7 +188,7 @@ func processCommentCashouts(s *state.Session, blockTime, blockNum uint32, hooks 
 		// HF17+: pay each due comment individually (matches
 		// database_comment.cpp:466-481).
 		for _, p := range *ready {
-			processOneCashout(s, blockTime, blockNum, p.cashoutTime, p.commentID, p.author, p.permlink, curationPct, hooks, snapshotBalance)
+			processOneCashout(s, blockTime, blockNum, p.cashoutTime, p.commentID, p.author, p.permlink, curationPct, hooks, snapshotBalance, d)
 		}
 		return
 	}
@@ -251,7 +252,7 @@ func processCommentCashouts(s *state.Session, blockTime, blockNum uint32, hooks 
 				continue
 			}
 			paid[key] = struct{}{}
-			processOneCashout(s, blockTime, blockNum, sib.cashoutTime, sib.id, sib.author, sib.permlink, curationPct, hooks, 0)
+			processOneCashout(s, blockTime, blockNum, sib.cashoutTime, sib.id, sib.author, sib.permlink, curationPct, hooks, 0, d)
 		}
 	}
 }
@@ -276,7 +277,7 @@ func processCommentCashouts(s *state.Session, blockTime, blockNum uint32, hooks 
 // its reward-fund denominator instead of fund.RewardBalance (which is
 // being decremented across the loop). When 0 (or pre-HF17), the
 // per-cashout fund.RewardBalance read is the legacy behavior.
-func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint32, commentID uint64, author, permlink string, curationPct int64, hooks *blockHookScratch, snapshotBalance int64) {
+func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint32, commentID uint64, author, permlink string, curationPct int64, hooks *blockHookScratch, snapshotBalance int64, d *Database) {
 	objects.DeleteCommentCashoutSchedule(s, scheduledTime, commentID)
 
 	// processOneCashout runs in the per-block hooks (after the tx
@@ -575,8 +576,9 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 	// share prices for any post with both — dormant pre-HF17 (no
 	// beneficiaries) but visible later.
 	curatorRemainder := int64(0)
+	curatorsVestingPayout := int64(0)
 	if c.AllowCurationRewards && curatorPool > 0 {
-		curatorRemainder = distributeCuratorPool(s, c.Author, c.Permlink, curatorPool, hooks)
+		curatorRemainder, curatorsVestingPayout = distributeCuratorPool(s, c.Author, c.Permlink, curatorPool, hooks, d)
 	}
 	// When curation is disallowed, curatorRemainder stays 0 — the curation
 	// share is forfeited (already excluded from `drain` above), NOT forwarded
@@ -715,14 +717,17 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 	}
 	hfHere := hardfork.SetForBlock(blockNum)
 	authorToReward := hfHere.Has(hardfork.HF17)
+	authorHbdPaid, authorHivePaid := int64(0), int64(0)
 	if hbdHive > 0 {
 		if a, gerr := objects.GetAccount(s, author); gerr == nil {
-			payCreateHbd(s, &a, blockTime, hbdHive, authorToReward)
+			authorHbdPaid, authorHivePaid = payCreateHbd(s, &a, blockTime, hbdHive, authorToReward)
 			objects.PutAccount(s, &a)
 		}
 	}
+	authorVests := int64(0)
 	if vestingHive > 0 {
 		avests, err := CreateVesting_via_chain(s, author, vestingHive, authorToReward)
+		authorVests = avests
 		if err != nil {
 			ghiveDiff("GHIVEDIFF CREATE-VESTING-FAIL site=comment_cashout.author block=%d author=%s permlink=%s amount=%d err=%v\n",
 				blockNum, author, permlink, vestingHive, err)
@@ -731,6 +736,23 @@ func processOneCashout(s *state.Session, blockTime, blockNum, scheduledTime uint
 				blockNum, author, permlink, vestingHive, avests)
 		}
 	}
+	// hived pushes author_reward unconditionally once a comment reaches the
+	// paying branch (database_comment.cpp:291-299) — even when a leg is zero,
+	// because the op is how a consumer learns the payout HAPPENED. Gating it
+	// on a non-zero leg would drop the op for posts paid entirely in one
+	// currency. curators_vesting_payout is carried here so a consumer can
+	// account the whole claim from this one op without summing every
+	// curation_reward (hived's own stated reason, database_comment.cpp:228-230).
+	d.pushVOp(op.AuthorReward{
+		Author:                auth.AccountName(author),
+		Permlink:              permlink,
+		HbdPayout:             vopHbd(authorHbdPaid),
+		HivePayout:            vopHive(authorHivePaid),
+		VestingPayout:         vopVests(authorVests),
+		CuratorsVestingPayout: vopVests(curatorsVestingPayout),
+		PayoutMustBeClaimed:   authorToReward,
+	})
+
 	if traceAccount(author) {
 		if a, gerr := objects.GetAccount(s, author); gerr == nil {
 			ghiveDiff("GHIVEDIFF CASHOUT-POST-VEST block=%d author=%s permlink=%s vesting_shares=%d hive=%d hbd=%d\n",
@@ -1009,9 +1031,9 @@ func chainISqrt64(n uint64) uint64 {
 // hbd_print_rate IS tracked: update_virtual_supply recomputes it each block
 // (virtual_supply.go) and the body below reads the live DGPO value. 0 is a
 // valid rate (0% to HBD) — see the guard-bug note at the read site.
-func payCreateHbd(s *state.Session, a *objects.Account, blockTime uint32, hiveAmount int64, toReward bool) {
+func payCreateHbd(s *state.Session, a *objects.Account, blockTime uint32, hiveAmount int64, toReward bool) (hbdPaid, hivePaid int64) {
 	if hiveAmount <= 0 {
-		return
+		return 0, 0
 	}
 	fh, err := objects.GetFeedHistory(s)
 	if err != nil || priceIsZero(fh.CurrentMedianHistory) {
@@ -1021,7 +1043,7 @@ func payCreateHbd(s *state.Session, a *objects.Account, blockTime uint32, hiveAm
 		} else {
 			a.Balance += hiveAmount
 		}
-		return
+		return 0, hiveAmount
 	}
 	// hbd_print_rate is recomputed each block by update_virtual_supply.
 	// Pre-HF14 it stays at 10000 (100% — entire HIVE portion converts
@@ -1069,6 +1091,7 @@ func payCreateHbd(s *state.Session, a *objects.Account, blockTime uint32, hiveAm
 		adjustSupplyHive(s, p, -toHbdHive)
 		adjustSupplyHbd(s, p, hbdAmount)
 	})
+	return hbdAmount, toHive
 }
 
 // convertHiveToHBD applies a HBD/HIVE feed price to convert a HIVE
@@ -1102,15 +1125,15 @@ func convertHiveToHBD(hiveAmount int64, p asset.Price) int64 {
 // If the comment has total_vote_weight == 0 (no upvotes), the entire
 // pool stays unclaimed and folds back to the author (handled by the
 // caller).
-func distributeCuratorPool(s *state.Session, author, permlink string, pool int64, hooks *blockHookScratch) int64 {
+func distributeCuratorPool(s *state.Session, author, permlink string, pool int64, hooks *blockHookScratch, d *Database) (int64, int64) {
 	// Read-only access: only inspecting c.TotalVoteWeight to gate +
 	// derive the denominator for the curator-share math.
 	c, ok := objects.GetCommentRef(s, author, permlink)
 	if !ok {
-		return pool
+		return pool, 0
 	}
 	if c.TotalVoteWeight == 0 || pool <= 0 {
-		return pool
+		return pool, 0
 	}
 	totalW := c.TotalVoteWeight
 
@@ -1191,6 +1214,11 @@ func distributeCuratorPool(s *state.Session, author, permlink string, pool int64
 	})
 
 	paid := int64(0)
+	// Total VESTS handed to curators. author_reward carries this as
+	// curators_vesting_payout, so the author's own vop reports what the
+	// curators took off the same claim — hived threads the identical value
+	// out of pay_curators (database_comment.cpp:174, total_paid_reward).
+	paidVests := int64(0)
 	// blockNum at the start of distributeCuratorPool is the dgpo's
 	// HeadBlockNumber (mutated by ApplyBlock pre-hooks). GetDGPORef
 	// skips the ~1 KB struct value-copy that GetDGPO would do per
@@ -1221,9 +1249,22 @@ func distributeCuratorPool(s *state.Session, author, permlink string, pool int64
 				headBlockNum, author, permlink, p.Voter, p.Weight, c.TotalVoteWeight, pool, p.Share, curVests)
 		}
 		paid += p.Share
+		paidVests += curVests
+		// hived builds the vop BEFORE create_vesting2 and fills in the
+		// reward inside its callback, so the VESTS reported are the ones
+		// that call minted at the then-current share price — which moves
+		// with every curator paid. Pushing after the call with the value it
+		// returned is the same number.
+		d.pushVOp(op.CurationReward{
+			Curator:             auth.AccountName(p.Voter),
+			Reward:              vopVests(curVests),
+			Author:              auth.AccountName(author),
+			Permlink:            permlink,
+			PayoutMustBeClaimed: toReward,
+		})
 	}
 	if paid > pool {
-		return 0
+		return 0, paidVests
 	}
-	return pool - paid
+	return pool - paid, paidVests
 }
