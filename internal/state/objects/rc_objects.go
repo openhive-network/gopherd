@@ -870,16 +870,43 @@ func HandleVestingWithdrawalRCImpact(s *state.Session, a *Account, now uint32) {
 	// the first version of this fix silently did nothing — the account still
 	// showed 0.0% mana after funding.)
 	oldMaxRC := a.LastMaxRC
-	RegenerateRCMana(a, now)
+	// This whole function IS hived's update_account_after_vest_change: it is
+	// the post_apply visitor on fill_vesting_withdraw, so the vests have
+	// already moved by the time it runs. The regeneration inside it is the one
+	// hived does there, not a pre-change regenerate_rc_mana — identical
+	// arithmetic, but it belongs to the other counter.
+	UpdateAccountAfterVestChange(a, now)
 
-	// effective_delegable_rc = effective_vesting - DelegatedRCOut
+	// hived: `int64_t new_last_max_rc = account.get_maximum_rc().value;`
+	// (rc_utility.cpp, update_account_after_vest_change). It derives the new
+	// cache from the SAME function its assertion later compares against, so
+	// the two cannot disagree.
+	//
+	// This used to hand-roll the expression instead:
+	//
+	//	eff := VestingShares - DelegatedVestingShares + ReceivedVestingShares
+	//	LastMaxRC = eff - DelegatedRCOut + DelegatedRCIn
+	//
+	// which differs from MaximumRC() twice over — it omits RCAdjustment, and
+	// its `eff` does not subtract the next scheduled withdrawal slice the way
+	// EffectiveVestingSharesExclWithdraw does. This function runs on
+	// fill_vesting_withdraw, i.e. on an account that by definition HAS an
+	// active withdrawal, so that second difference was non-zero on essentially
+	// every call: the cache was left disagreeing with its own reader, and the
+	// next regeneration anywhere saw a stale value.
+	//
+	// Measured, it was the single largest source — 46.4% of all stale-cache
+	// hits, plus the downstream hits at the read-only transaction path that
+	// inherited the bad value.
+	a.LastMaxRC = a.MaximumRC()
+
+	// `eff` survives for the over-delegation clip below, which is a DIFFERENT
+	// hived quantity: get_maximum_rc(only_delegable=true), i.e. without
+	// DelegatedRCIn. Folding the two together would change the clip decision,
+	// and the clip already carries its own replay-parity caveat.
 	eff := a.VestingShares - a.DelegatedVestingShares + a.ReceivedVestingShares
 	if eff < 0 {
 		eff = 0
-	}
-	a.LastMaxRC = eff - a.DelegatedRCOut + a.DelegatedRCIn
-	if a.LastMaxRC < 0 {
-		a.LastMaxRC = 0
 	}
 
 	// Credit a POSITIVE change in maximum RC straight to current mana, so an
@@ -985,10 +1012,8 @@ func HandleVestingWithdrawalRCImpact(s *state.Session, a *Account, now uint32) {
 	if a.DelegatedRCOut < 0 {
 		a.DelegatedRCOut = 0
 	}
-	a.LastMaxRC = eff - a.DelegatedRCOut + a.DelegatedRCIn
-	if a.LastMaxRC < 0 {
-		a.LastMaxRC = 0
-	}
+	// Same reasoning as above: derive from the reader, never restate it.
+	a.LastMaxRC = a.MaximumRC()
 
 	if totalExpired > 0 {
 		prev, _ := GetRCExpiredDelegation(s, a.Name)

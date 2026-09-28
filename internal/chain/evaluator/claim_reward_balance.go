@@ -119,10 +119,13 @@ func (claimRewardBalanceEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		}
 	}
 	a.VestingShares += cr.RewardVests.Amount
-	// Refresh again so LastMaxRC tracks the post-claim cap (C++
-	// update_account_after_vest_change).
+	// Post-change refresh. The comment always said this mirrors C++
+	// update_account_after_vest_change; now it calls the function that
+	// actually models it, so the refresh is no longer counted as a stale-cache
+	// violation. Same arithmetic, same state — only the counter it feeds
+	// changes.
 	if ctx.Hardforks.Has(hardfork.HF20) {
-		objects.RegenerateRCMana(&a, ctx.HeadBlockTime)
+		objects.UpdateAccountAfterVestChange(&a, ctx.HeadBlockTime)
 	}
 	objects.PutAccount(ctx.DB, &a)
 

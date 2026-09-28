@@ -650,6 +650,24 @@ func cmdReplay(args []string) int {
 	// assertion would be safe to enable. A clean replay must report 0.
 	if n := objects.RCStaleMaxCount(); n > 0 {
 		fmt.Printf("rc stale max:   %d  (HF29 RC_IS_CONSENSUS would REJECT these blocks)\n", n)
+		// The count says how often; only the call sites say whether it is an
+		// ordering artifact (a site that mutates vesting then regenerates,
+		// where hived would have regenerated first) or a real bookkeeping
+		// hole (a read-only site finding the cache stale). Run with
+		// GOPHERD_RC_ATTRIBUTION=1 to get this.
+		if t := objects.FormatRCStaleCallSites(12); t != "" {
+			fmt.Print(t)
+		} else {
+			fmt.Println("                (set GOPHERD_RC_ATTRIBUTION=1 to attribute these by call site)")
+		}
+	}
+	// hived's OTHER HF29 assertion, counted separately: a post-change refresh
+	// that arrived without a regeneration earlier in the block.
+	if n := objects.RCNotRegeneratedCount(); n > 0 {
+		fmt.Printf("rc not-regen:   %d  (hived's \"not regenerated prior to VEST change\")\n", n)
+		if t := objects.FormatRCNotRegenCallSites(12); t != "" {
+			fmt.Print(t)
+		}
 	}
 	// hived caps each governance sweep at HIVE_GLOBAL_REMOVE_THRESHOLD
 	// proposal-vote removals and defers the rest to a later block; gopherd
