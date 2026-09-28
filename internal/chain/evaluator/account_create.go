@@ -163,6 +163,7 @@ func (accountCreateEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	creator.Balance -= ac.Fee.Amount
 	objects.PutAccount(ctx.DB, &creator)
 
+	initialVestingShares := int64(0)
 	// Create the new account first so CreateVesting can credit it.
 	// hived's account_create_evaluator (libraries/chain/hive_evaluator.cpp)
 	// runs `db.create_vesting(new_account, o.fee)` immediately after,
@@ -245,10 +246,14 @@ func (accountCreateEvaluator) Apply(ctx *Context, opArg op.Op) error {
 			}
 		}
 	} else if ac.Fee.Amount > 0 {
-		if _, err := CreateVesting(ctx.DB, ac.NewAccountName, ac.Fee.Amount, false); err != nil {
+		initialVestingShares, err = CreateVesting(ctx.DB, ac.NewAccountName, ac.Fee.Amount, false)
+		if err != nil {
 			return err
 		}
 	}
+	// From HF20 the fee is burned to the null account rather than vested,
+	// so a zero here is the true starting balance, not a dropped value.
+	ctx.EmitAccountCreated(string(ac.NewAccountName), string(ac.Creator), initialVestingShares, 0)
 	return nil
 }
 

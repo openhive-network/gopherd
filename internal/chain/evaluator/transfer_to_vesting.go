@@ -90,26 +90,31 @@ func (transferToVestingEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	if err != nil {
 		return err
 	}
-	if newVests <= 0 {
-		return nil
-	}
-	if ctx.Hardforks.Has(hardfork.HF24) {
-		to, err := objects.GetAccount(ctx.DB, toName)
-		if err != nil {
-			return err
-		}
-		if err := objects.DelayedVotingAddOnAccount(&to, ctx.HeadBlockTime, uint64(newVests)); err != nil {
-			return fmt.Errorf("transfer_to_vesting: delayed_voting add: %w", err)
-		}
-		objects.PutAccount(ctx.DB, &to)
-	}
-	// HF20+: recipient's effective_vests went up → refresh RC cap.
-	if ctx.Hardforks.Has(hardfork.HF20) {
-		if to, err := objects.GetAccount(ctx.DB, toName); err == nil {
-			objects.RegenerateRCMana(&to, ctx.HeadBlockTime)
+	// hived emits transfer_to_vesting_completed unconditionally and says why
+	// (hive_evaluator_transfer.cpp:334): the VESTS balance moved immediately,
+	// independent of what delayed_voting later does to the voting power. So
+	// the post-vest bookkeeping below is what gets skipped on a zero
+	// conversion, not the op.
+	if newVests > 0 {
+		if ctx.Hardforks.Has(hardfork.HF24) {
+			to, err := objects.GetAccount(ctx.DB, toName)
+			if err != nil {
+				return err
+			}
+			if err := objects.DelayedVotingAddOnAccount(&to, ctx.HeadBlockTime, uint64(newVests)); err != nil {
+				return fmt.Errorf("transfer_to_vesting: delayed_voting add: %w", err)
+			}
 			objects.PutAccount(ctx.DB, &to)
 		}
+		// HF20+: recipient's effective_vests went up → refresh RC cap.
+		if ctx.Hardforks.Has(hardfork.HF20) {
+			if to, err := objects.GetAccount(ctx.DB, toName); err == nil {
+				objects.RegenerateRCMana(&to, ctx.HeadBlockTime)
+				objects.PutAccount(ctx.DB, &to)
+			}
+		}
 	}
+	ctx.EmitTransferToVestingCompleted(string(tv.From), string(toName), tv.Amount.Amount, newVests)
 	return nil
 }
 

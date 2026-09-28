@@ -128,6 +128,29 @@ func (d *Database) emitVOpClosure() func(any) {
 				// evaluator.EffectiveCommentVoteVOp.
 				PendingPayout: vopHbd(0),
 			})
+		case evaluator.AccountCreatedVOp:
+			d.pushVOp(op.AccountCreated{
+				NewAccountName:       auth.AccountName(p.NewAccountName),
+				Creator:              auth.AccountName(p.Creator),
+				InitialVestingShares: vopVests(p.InitialVestingShares),
+				InitialDelegation:    vopVests(p.InitialDelegation),
+			})
+		case evaluator.TransferToVestingCompletedVOp:
+			d.pushVOp(op.TransferToVestingCompleted{
+				FromAccount:           auth.AccountName(p.FromAccount),
+				ToAccount:             auth.AccountName(p.ToAccount),
+				HiveVested:            vopHive(p.HiveVested),
+				VestingSharesReceived: vopVests(p.VestingSharesReceived),
+			})
+		case evaluator.PowRewardVOp:
+			reward := vopHive(p.Reward)
+			if p.RewardIsVests {
+				reward = vopVests(p.Reward)
+			}
+			d.pushVOp(op.PowReward{
+				Worker: auth.AccountName(p.Worker),
+				Reward: reward,
+			})
 		case evaluator.ProxyClearedVOp:
 			d.pushVOp(op.ProxyCleared{
 				Account: auth.AccountName(p.Account),
