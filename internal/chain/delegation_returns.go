@@ -123,7 +123,9 @@ func clearExpiredDelegations(s *state.Session, blockTime uint32, d *Database) {
 			// hits once the post-change sites were reclassified. The
 			// regeneration inside it is a no-op here (same block time); what
 			// matters is the refreshed ceiling.
-			objects.UpdateAccountAfterVestChange(&a, blockTime)
+			// database.cpp:3168, clear_expired_delegations — the default true: the
+			// delegator just got VESTS back, so the new headroom is theirs now.
+			objects.UpdateAccountAfterVestChange(&a, blockTime, true)
 		}
 		objects.PutAccount(s, &a)
 		if d != nil {
