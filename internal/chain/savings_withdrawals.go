@@ -2,6 +2,7 @@ package chain
 
 import (
 	"gopherd/internal/protocol/asset"
+	"gopherd/internal/protocol/op"
 	"gopherd/internal/state"
 	"gopherd/internal/state/objects"
 )
@@ -12,7 +13,7 @@ import (
 // liquid balance and remove the row (and the by-complete index entry).
 // Iteration order is by-complete time, so we stop at the first
 // not-yet-mature row.
-func processSavingsWithdraws(s *state.Session, blockTime uint32) {
+func processSavingsWithdraws(s *state.Session, blockTime uint32, d *Database) {
 	if hint, ok := s.GetExpHint(objects.SavingsWithdrawTable, objects.SavingsWithdrawByCompleteIndex); ok && hint > blockTime {
 		return
 	}
@@ -60,6 +61,15 @@ func processSavingsWithdraws(s *state.Session, blockTime uint32) {
 				objects.AdjustHBDBalance(s, &to, blockTime, w.Amount)
 			}
 			objects.PutAccount(s, &to)
+		}
+		if d != nil {
+			d.pushVOp(op.FillTransferFromSavings{
+				From:      w.From,
+				To:        w.To,
+				Amount:    asset.Asset{Amount: w.Amount, Symbol: asset.Symbol{Num: asset.AssetNum(w.Symbol)}},
+				RequestID: w.RequestID,
+				Memo:      w.Memo,
+			})
 		}
 		objects.DeleteSavingsWithdrawFull(s, &w)
 	}

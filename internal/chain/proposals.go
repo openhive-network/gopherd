@@ -6,8 +6,10 @@ import (
 	"sort"
 
 	"gopherd/internal/protocol/asset"
+	"gopherd/internal/protocol/auth"
 	"gopherd/internal/protocol/hardfork"
 	"gopherd/internal/protocol/network"
+	"gopherd/internal/protocol/op"
 	"gopherd/internal/state"
 	"gopherd/internal/state/objects"
 )
@@ -62,7 +64,7 @@ const dailySecondsConst int64 = 24 * 60 * 60
 //     (sps_processor::convert_funds, HF24+ only).
 //
 // Pre-HF21 this hook is a no-op.
-func processProposals(s *state.Session, blockTime uint32, blockNum uint32) {
+func processProposals(s *state.Session, blockTime uint32, blockNum uint32, d *Database) {
 	hf := hardfork.SetForBlock(blockNum)
 	if !hf.Has(hardfork.HF21) {
 		return
@@ -74,7 +76,7 @@ func processProposals(s *state.Session, blockTime uint32, blockNum uint32) {
 	// Daily HIVE→HBD treasury conversion (HF24+) runs first; matches
 	// the C++ order: convert_funds() → make_payments() inside
 	// sps_processor::run().
-	convertProposalFunds(s, blockTime, hf)
+	convertProposalFunds(s, blockTime, hf, d)
 	// hived gates DHF maintenance on head_time >= next_maintenance_time
 	// (dhf_processor::is_maintenance_period) and reschedules via
 	// set_next_maintenance_time(head_time, HIVE_PROPOSAL_MAINTENANCE_PERIOD)
@@ -103,6 +105,18 @@ func processProposals(s *state.Session, blockTime uint32, blockNum uint32) {
 		// it mirrors hived's hourly cadence instead of growing unbounded.
 		d.DHFIntervalLedger = 0
 	})
+	if d != nil && mdgpo.DHFIntervalLedger > 0 {
+		// hived's dhf_processor::record_funding pushes this once per
+		// maintenance interval for the HBD accumulated since the last one —
+		// the funds are already in the treasury, this reports the tally.
+		d.pushVOp(op.DhfFunding{
+			Treasury: auth.AccountName(currentTreasuryName(s, hf)),
+			AdditionalFunds: asset.Asset{
+				Amount: mdgpo.DHFIntervalLedger,
+				Symbol: asset.Symbol{Num: asset.HbdSymbol},
+			},
+		})
+	}
 
 	// Snapshot ACTIVE proposals (start<=now<=end) for the vote recalc.
 	// hived does NOT auto-remove expired proposals: dhf_processor::
@@ -287,6 +301,16 @@ func processProposals(s *state.Session, blockTime uint32, blockNum uint32) {
 		}
 		objects.AdjustHBDBalance(s, &recv, blockTime, periodPay)
 		objects.PutAccount(s, &recv)
+		if d != nil {
+			// hived pushes proposal_pay_operation per funded proposal, after
+			// the transfer (dhf_processor::processing).
+			d.pushVOp(op.ProposalPay{
+				ProposalID: uint32(p.ID),
+				Receiver:   p.Receiver,
+				Payer:      auth.AccountName(treasuryName),
+				Payment:    asset.Asset{Amount: periodPay, Symbol: asset.Symbol{Num: asset.HbdSymbol}},
+			})
+		}
 		budget -= periodPay
 		if dhfTrace {
 			fmt.Fprintf(os.Stderr, "GHIVEDIFF DHF-PAY block=%d pid=%d recv=%s votes=%d dailyPay=%d periodPay=%d budgetLeft=%d\n",
@@ -376,7 +400,7 @@ func removeOldProposals(s *state.Session, blockTime uint32) {
 	}
 }
 
-func convertProposalFunds(s *state.Session, blockTime uint32, hf hardfork.Set) {
+func convertProposalFunds(s *state.Session, blockTime uint32, hf hardfork.Set, d *Database) {
 	if !hf.Has(hardfork.HF24) {
 		return
 	}
@@ -438,6 +462,13 @@ func convertProposalFunds(s *state.Session, blockTime uint32, hf hardfork.Set) {
 	adjustSupplyHive(s, &dgpo, -toConvert)
 	adjustSupplyHbd(s, &dgpo, convertedHbd)
 	objects.PutDGPO(s, &dgpo)
+	if d != nil {
+		d.pushVOp(op.DhfConversion{
+			Treasury:     treasury.Name,
+			HiveAmountIn: asset.Asset{Amount: toConvert, Symbol: asset.Symbol{Num: asset.HiveSymbol}},
+			HbdAmountOut: asset.Asset{Amount: convertedHbd, Symbol: asset.Symbol{Num: asset.HbdSymbol}},
+		})
+	}
 	_ = asset.HiveSymbol // keep asset import in case future expansion needs it
 }
 

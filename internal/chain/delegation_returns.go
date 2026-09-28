@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"os"
 
+	"gopherd/internal/protocol/asset"
 	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/protocol/op"
 	"gopherd/internal/state"
 	"gopherd/internal/state/objects"
 )
@@ -20,7 +22,7 @@ var envDelegretTrace = os.Getenv("GHIVEDIFF_DELEGRET")
 // vesting_delegation_expiration row whose `expiration` has passed,
 // return the locked VESTS to the delegator's available pool by
 // decrementing their `delegated_vesting_shares`.
-func clearExpiredDelegations(s *state.Session, blockTime uint32) {
+func clearExpiredDelegations(s *state.Session, blockTime uint32, d *Database) {
 	if hint, ok := s.GetExpHint(objects.VestingDelegationExpirationTable, objects.VestingDelegationExpirationByDateIndex); ok && hint > blockTime {
 		if envDelegretTrace != "" {
 			fmt.Fprintf(os.Stderr, "DELEGRET skip blockTime=%d hint=%d\n", blockTime, hint)
@@ -124,6 +126,14 @@ func clearExpiredDelegations(s *state.Session, blockTime uint32) {
 			objects.UpdateAccountAfterVestChange(&a, blockTime)
 		}
 		objects.PutAccount(s, &a)
+		if d != nil {
+			// hived pushes return_vesting_delegation_operation as the
+			// cooldown expires and the VESTS become the delegator's again.
+			d.pushVOp(op.ReturnVestingDelegation{
+				Account:       a.Name,
+				VestingShares: asset.Asset{Amount: exp.VestingShares, Symbol: asset.Symbol{Num: asset.VestsSymbol}},
+			})
+		}
 		objects.DeleteVestingDelegationExpirationFull(s, &exp)
 	}
 	if nextExp == 0 {
