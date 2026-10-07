@@ -2,6 +2,8 @@ package chain
 
 import (
 	"fmt"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/protocol/op"
 	"os"
 
 	"gopherd/internal/protocol/hardfork"
@@ -29,7 +31,7 @@ const liquidityRewardMin int64 = 1000 * int64(liquidityRewardBlocks)
 //     Reset row's volumes/weight to 0; refresh last_update.
 //
 // HF12__178 disables the entire liquidity-reward subsystem.
-func payLiquidityReward(s *state.Session, blockNum, blockTime uint32) {
+func payLiquidityReward(s *state.Session, blockNum, blockTime uint32, d *Database) {
 	if blockNum%liquidityRewardBlocks != 0 {
 		return
 	}
@@ -136,6 +138,10 @@ func payLiquidityReward(s *state.Session, blockNum, blockTime uint32) {
 	}
 	a.Balance += reward
 	objects.PutAccount(s, &a)
+	// database_vesting.cpp:57.
+	if d != nil {
+		d.pushVOp(op.LiquidityReward{Owner: auth.AccountName(best.owner), Payout: vopHive(reward)})
+	}
 
 	// hived's pay_liquidity_reward calls adjust_supply(reward, true):
 	// supply += 10×reward; fund_hive += 9×reward (post-201600).

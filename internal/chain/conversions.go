@@ -98,9 +98,20 @@ func processConversions(s *state.Session, blockTime uint32, hooks *blockHookScra
 	})
 	for i := range matured {
 		req := &matured[i]
-		requiredHIVE, _, sErr := evaluator.SettleCollateralizedConvert(s, req, blockTime)
+		requiredHIVE, excess, sErr := evaluator.SettleCollateralizedConvert(s, req, blockTime)
 		if sErr != nil {
 			continue
+		}
+		// database_conversion.cpp:193 — fill_collateralized_convert_request( owner,
+		// requestid, collateral in, HBD out, excess collateral returned ).
+		if d != nil {
+			d.pushVOp(op.FillCollateralizedConvertRequest{
+				Owner:            req.Owner,
+				RequestID:        req.RequestID,
+				AmountIn:         vopHive(req.Collateral),
+				AmountOut:        vopHbd(req.HBDOut),
+				ExcessCollateral: vopHive(excess),
+			})
 		}
 		// current_supply -= requiredHIVE (the collateral that's burned).
 		// HBD was already minted at op-apply, so HBD supply needs no

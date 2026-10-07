@@ -3,6 +3,7 @@ package chain
 import (
 	"errors"
 	"fmt"
+	"gopherd/internal/protocol/op"
 	"math/bits"
 	"os"
 
@@ -40,19 +41,19 @@ func treasuryNameForClear(s *state.Session) string {
 // exists) drains it via clearAccount. Mirrors database::clear_accounts
 // (libraries/chain/database.cpp:2275). Used at HF23 to wipe the
 // Steemit Inc. / Tron-puppet accounts.
-func clearAccounts(s *state.Session, names []string) {
+func clearAccounts(s *state.Session, names []string, d *Database) {
 	for _, name := range names {
 		if has, _ := objects.HasAccount(s, name); !has {
 			continue
 		}
-		_ = clearAccount(s, name)
+		_ = clearAccount(s, name, d)
 	}
 }
 
 // ClearAccount is the exported public entry point for tests. Internal
 // callers should use clearAccount/clearAccounts.
 func ClearAccount(s *state.Session, name string) error {
-	return clearAccount(s, name)
+	return clearAccount(s, name, nil)
 }
 
 // clearAccount drains an account's balances and pending state into the
@@ -78,7 +79,7 @@ func ClearAccount(s *state.Session, name string) error {
 // gatherBalance is called at the end to snapshot the (totalHive,
 // totalHBD) pair that crossed to the treasury, so restoreAccounts at
 // HF24 can re-credit the same amounts from the treasury.
-func clearAccount(s *state.Session, name string) error {
+func clearAccount(s *state.Session, name string, d *Database) error {
 	account, err := objects.GetAccount(s, name)
 	if err != nil {
 		return err
@@ -110,6 +111,9 @@ func clearAccount(s *state.Session, name string) error {
 	// in database.cpp:2298-2536.
 	var totalTransferredHive int64
 	var totalTransferredHBD int64
+	// For hardfork_hive_operation (database.cpp:1640-1668): the VESTS turned
+	// into HIVE for the treasury and the HIVE they became.
+	var vestsConverted, hiveFromVests int64
 
 	prefix := state.AppendAccountName(nil, account.Name)
 
@@ -225,6 +229,8 @@ func clearAccount(s *state.Session, name string) error {
 		objects.UpdateVotingManabar(&account, blockTime, dvPoolPct, 0, clearBlockNum)
 		hiveValue := vestsToHive(account.VestingShares, &dgpo)
 		dgpo.TotalVestingFundHive -= hiveValue
+		vestsConverted += account.VestingShares
+		hiveFromVests += hiveValue
 		dgpo.TotalVestingShares -= account.VestingShares
 		treasury.Balance += hiveValue
 		account.VestingShares = 0
@@ -435,6 +441,8 @@ func clearAccount(s *state.Session, name string) error {
 		// reward-vest fields.
 		treasury.Balance += account.RewardVestingHive
 		dgpo.PendingRewardedVestingShares -= account.RewardVests
+		vestsConverted += account.RewardVests
+		hiveFromVests += account.RewardVestingHive
 		dgpo.PendingRewardedVestingHive -= account.RewardVestingHive
 		account.RewardVests = 0
 		account.RewardVestingHive = 0
@@ -448,6 +456,23 @@ func clearAccount(s *state.Session, name string) error {
 		fmt.Fprintf(os.Stderr, "CLEARTRACE name=%s hive=%d hbd=%d\n", account.Name, totalTransferredHive, totalTransferredHBD)
 	}
 	gatherBalance(s, account.Name, totalTransferredHive, totalTransferredHBD)
+	// database.cpp:1660-1668 — hardfork_hive( account, treasury, delegatees whose
+	// received delegation was removed, hbd, hive, vests converted, hive from vests ).
+	if d != nil {
+		var affected []auth.AccountName
+		for _, dp := range delegations {
+			affected = append(affected, dp.delegatee)
+		}
+		d.pushVOp(op.HardforkHive{
+			Account:               account.Name,
+			Treasury:              auth.AccountName(treasuryName),
+			OtherAffectedAccounts: affected,
+			HbdTransferred:        vopHbd(totalTransferredHBD),
+			HiveTransferred:       vopHive(totalTransferredHive),
+			VestsConverted:        vopVests(vestsConverted),
+			TotalHiveFromVests:    vopHive(hiveFromVests),
+		})
+	}
 
 	objects.PutAccount(s, &account)
 	objects.PutAccount(s, &treasury)
@@ -480,7 +505,7 @@ func GatherBalance(s *state.Session, name string, balance, hbdBalance int64) {
 // account with the same (balance, hbd_balance) pair.
 //
 // Mirrors database::restore_accounts (database.cpp:2228).
-func restoreAccounts(s *state.Session, names []string) {
+func restoreAccounts(s *state.Session, names []string, d *Database) {
 	treasuryName := treasuryNameForClear(s)
 	treasury, terr := objects.GetAccount(s, treasuryName)
 	if terr != nil {
@@ -508,6 +533,15 @@ func restoreAccounts(s *state.Session, names []string) {
 			objects.AdjustHBDBalance(s, &acct, blockTime, snap.HBDBalance)
 		}
 		objects.PutAccount(s, &acct)
+		// database.cpp:1472 — hardfork_hive_restore( name, treasury, hbd, hive ).
+		if d != nil {
+			d.pushVOp(op.HardforkHiveRestore{
+				Account:         acctName,
+				Treasury:        auth.AccountName(treasuryName),
+				HbdTransferred:  vopHbd(snap.HBDBalance),
+				HiveTransferred: vopHive(snap.Balance),
+			})
+		}
 	}
 	objects.PutAccount(s, &treasury)
 }
@@ -515,7 +549,7 @@ func restoreAccounts(s *state.Session, names []string) {
 // RestoreAccounts is the exported public entry point for tests.
 // Production callers route through processHardforks at HF24.
 func RestoreAccounts(s *state.Session, names []string) {
-	restoreAccounts(s, names)
+	restoreAccounts(s, names, nil)
 }
 
 // hasHF24 reports whether HF24 has been processed (i.e. its activation
@@ -532,7 +566,7 @@ func hasHF24(s *state.Session) bool {
 // consolidateTreasuryBalance moves all assets from the old treasury
 // (steem.dao) into the new one (hive.fund) at HF24. Mirrors
 // database::consolidate_treasury_balance (database.cpp:1267).
-func consolidateTreasuryBalance(s *state.Session, blockTime uint32) {
+func consolidateTreasuryBalance(s *state.Session, blockTime uint32, d *Database) {
 	const (
 		oldTreasuryName = "steem.dao"
 		newTreasuryName = "hive.fund"
@@ -549,6 +583,34 @@ func consolidateTreasuryBalance(s *state.Session, blockTime uint32) {
 			VotingManaCurrent:    10000,
 			VotingManaLastUpdate: blockTime,
 		}
+		// database_hardfork.cpp:527-530 — the new treasury is created at HF24
+		// and announced with account_created( name, name, 0, 0 ).
+		if d != nil {
+			d.pushVOp(op.AccountCreated{NewAccountName: newTreasuryName, Creator: newTreasuryName, InitialVestingShares: vopVests(0), InitialDelegation: vopVests(0)})
+		}
+	}
+	// database.cpp:1315-1322 — consolidate_treasury_balance is pushed first
+	// (pre-push) with the totals about to move, HIVE / VESTS / HBD, each only
+	// when non-zero (collect_account_total_balance, database.cpp:1142-1159).
+	if d != nil {
+		dgpoT, _ := objects.GetDGPO(s)
+		hiveTotal := old.Balance + old.SavingsBalance + old.RewardHive + old.RewardVestingHive
+		if old.VestingShares > 0 {
+			hiveTotal += vestsToHive(old.VestingShares, &dgpoT)
+		}
+		vestsTotal := old.VestingShares + old.RewardVests
+		hbdTotal := old.HBDBalance + old.SavingsHBDBalance + old.RewardHBD
+		var moved []asset.Asset
+		if hiveTotal > 0 {
+			moved = append(moved, vopHive(hiveTotal))
+		}
+		if vestsTotal > 0 {
+			moved = append(moved, vopVests(vestsTotal))
+		}
+		if hbdTotal > 0 {
+			moved = append(moved, vopHbd(hbdTotal))
+		}
+		d.pushVOp(op.ConsolidateTreasuryBalance{TotalMoved: moved})
 	}
 	newAcct.Balance += old.Balance
 	old.Balance = 0

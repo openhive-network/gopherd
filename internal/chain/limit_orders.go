@@ -2,6 +2,8 @@ package chain
 
 import (
 	"fmt"
+	"gopherd/internal/protocol/auth"
+	"gopherd/internal/protocol/op"
 	"os"
 
 	"gopherd/internal/protocol/asset"
@@ -20,7 +22,7 @@ import (
 // (meaning "no expiry") sort to the very front but we skip them since
 // hived's by_expiration index excludes them too via fc::time_point_sec
 // max-value sentinel.
-func clearExpiredOrders(s *state.Session, blockTime uint32) {
+func clearExpiredOrders(s *state.Session, blockTime uint32, d *Database) {
 	type pending struct {
 		owner   string
 		orderID uint32
@@ -42,13 +44,13 @@ func clearExpiredOrders(s *state.Session, blockTime uint32) {
 	})
 
 	for _, p := range ready {
-		cancelExpiredOrder(s, p.owner, p.orderID, blockTime)
+		cancelExpiredOrder(s, p.owner, p.orderID, blockTime, d)
 	}
 }
 
 // cancelExpiredOrder refunds the order's for_sale amount to the seller
 // and removes the order. Mirrors hived's cancel_order.
-func cancelExpiredOrder(s *state.Session, owner string, orderID uint32, blockTime uint32) {
+func cancelExpiredOrder(s *state.Session, owner string, orderID uint32, blockTime uint32, d *Database) {
 	order, err := objects.GetLimitOrder(s, owner, orderID)
 	if err != nil {
 		return
@@ -69,5 +71,14 @@ func cancelExpiredOrder(s *state.Session, owner string, orderID uint32, blockTim
 		objects.AdjustHBDBalance(s, &a, blockTime, order.ForSaleAmount)
 	}
 	objects.PutAccount(s, &a)
+	// database_market.cpp:420 — the expiry sweep cancels through cancel_order,
+	// which pushes limit_order_cancelled like an explicit cancel does.
+	if d != nil {
+		d.pushVOp(op.LimitOrderCancelled{
+			Seller:     auth.AccountName(owner),
+			OrderID:    orderID,
+			AmountBack: hiveOrHbd(order.ForSaleAmount, asset.AssetNum(order.ForSaleSymbol) == asset.HbdSymbol),
+		})
+	}
 	objects.DeleteLimitOrderFull(s, &order)
 }

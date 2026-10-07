@@ -2,6 +2,7 @@ package chain
 
 import (
 	"gopherd/internal/protocol/auth"
+	"gopherd/internal/protocol/op"
 	"gopherd/internal/state"
 	"gopherd/internal/state/objects"
 )
@@ -17,9 +18,9 @@ import (
 //
 // The owner_authority_history cleanup is omitted — we don't track that
 // table since signature verification is skipped during replay.
-func processAccountRecovery(s *state.Session, blockTime uint32) {
+func processAccountRecovery(s *state.Session, blockTime uint32, d *Database) {
 	clearExpiredRecoveryRequests(s, blockTime)
-	applyEffectiveRecoveryAccountChanges(s, blockTime)
+	applyEffectiveRecoveryAccountChanges(s, blockTime, d)
 }
 
 func clearExpiredRecoveryRequests(s *state.Session, blockTime uint32) {
@@ -66,7 +67,7 @@ func clearExpiredRecoveryRequests(s *state.Session, blockTime uint32) {
 	s.SetExpHint(objects.AccountRecoveryRequestTable, objects.AccountRecoveryByExpirationIndex, nextExp)
 }
 
-func applyEffectiveRecoveryAccountChanges(s *state.Session, blockTime uint32) {
+func applyEffectiveRecoveryAccountChanges(s *state.Session, blockTime uint32, d *Database) {
 	if hint, ok := s.GetExpHint(objects.ChangeRecoveryAccountRequestTable, objects.ChangeRecoveryByEffectiveDateIndex); ok && hint > blockTime {
 		return
 	}
@@ -112,8 +113,16 @@ func applyEffectiveRecoveryAccountChanges(s *state.Session, blockTime uint32) {
 		// and push a virtual op. Without this, change_recovery_account
 		// is a 30-day no-op that only removes the request row.
 		if acct, gerr := objects.GetAccount(s, auth.AccountName(req.AccountToRecover)); gerr == nil {
+			old := acct.RecoveryAccount // "" when the account had none (database.cpp:2016-2018)
 			acct.RecoveryAccount = req.RecoveryAccount
 			objects.PutAccount(s, &acct)
+			if d != nil {
+				d.pushVOp(op.ChangedRecoveryAccount{
+					Account:            acct.Name,
+					OldRecoveryAccount: old,
+					NewRecoveryAccount: req.RecoveryAccount,
+				})
+			}
 		}
 		objects.DeleteChangeRecoveryRequestFull(s, &req)
 	}

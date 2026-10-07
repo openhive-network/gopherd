@@ -110,7 +110,7 @@ func applyHardfork(s *state.Session, id hardfork.ID, d *Database) {
 	// effect handler that reads hpo could trip on the wrong order.)
 	switch id {
 	case hardfork.HF1:
-		performVestingShareSplit(s, 1_000_000)
+		performVestingShareSplit(s, 1_000_000, d)
 	case hardfork.HF2, hardfork.HF3:
 		// retally_witness_votes — pre-HF2 vote-tally accounting was
 		// out of sync with the post-HF1 share split (and similar pre-
@@ -359,6 +359,10 @@ func applyHardfork(s *state.Session, id hardfork.ID, d *Database) {
 					VotingManaCurrent:    10000,
 					VotingManaLastUpdate: dgpo.Time,
 				})
+				// database_hardfork.cpp:427-430 — account_created( name, name, 0, 0 ).
+				if d != nil {
+					d.pushVOp(op.AccountCreated{NewAccountName: "steem.dao", Creator: "steem.dao", InitialVestingShares: vopVests(0), InitialDelegation: vopVests(0)})
+				}
 			}
 		}
 		// Lock the treasury account so its authorities can never
@@ -390,14 +394,14 @@ func applyHardfork(s *state.Session, id hardfork.ID, d *Database) {
 	case hardfork.HF23:
 		// Hive fork airdrop: zero the Steemit / Tron-puppet account
 		// list (libraries/chain/database_hardfork.cpp:454). 328 names.
-		clearAccounts(s, hf23ClearAccounts)
+		clearAccounts(s, hf23ClearAccounts, d)
 	case hardfork.HF24:
 		// Restore a small set of accounts mistakenly cleared at HF23
 		// (no-op in our model — see hardfork_accounts.go), then rename
 		// the treasury from steem.dao to hive.fund and consolidate.
-		restoreAccounts(s, hf24RestoreAccounts)
+		restoreAccounts(s, hf24RestoreAccounts, d)
 		if dgpo, err := objects.GetDGPO(s); err == nil {
-			consolidateTreasuryBalance(s, dgpo.Time)
+			consolidateTreasuryBalance(s, dgpo.Time, d)
 			// Lock the new treasury (hive.fund). Mirrors C++
 			// database_hardfork.cpp:528 lock_account(get_treasury())
 			// at HF24 activation, called AFTER consolidation so the
@@ -674,7 +678,7 @@ func applyHardfork17(s *state.Session) {
 // Applied as a single Range-and-batch since the underlying pebble overlay
 // can absorb the per-account modifications without invalidating the
 // outer iterator.
-func performVestingShareSplit(s *state.Session, magnitude int64) {
+func performVestingShareSplit(s *state.Session, magnitude int64, d *Database) {
 	type acctMod struct {
 		owner string
 	}
@@ -688,7 +692,17 @@ func performVestingShareSplit(s *state.Session, magnitude int64) {
 		if err != nil {
 			continue
 		}
+		before := a.VestingShares
 		a.VestingShares *= magnitude
+		// database_comment.cpp:630 — one vesting_shares_split per account whose
+		// balance actually changed.
+		if d != nil && before != a.VestingShares {
+			d.pushVOp(op.VestingSharesSplit{
+				Owner:                    auth.AccountName(m.owner),
+				VestingSharesBeforeSplit: vopVests(before),
+				VestingSharesAfterSplit:  vopVests(a.VestingShares),
+			})
+		}
 		a.Withdrawn *= magnitude
 		a.ToWithdraw *= magnitude
 		// Pre-HF16 rate divisor (HF16 hasn't fired yet at HF1).
