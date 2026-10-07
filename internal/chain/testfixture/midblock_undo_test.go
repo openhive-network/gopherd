@@ -78,7 +78,7 @@ func TestMidBlockMixedOpFailureRollsBackAll(t *testing.T) {
 	// First op: post a comment (succeeds).
 	// Second op: vote on a non-existent comment (fails).
 	// The whole tx rolls back, so alice's posted comment vanishes.
-	f.PushOp(op.Comment{
+	f.PushOp(op.Comment{ParentPermlink: "test",
 		Author: "alice", Permlink: "p", Body: "hi",
 	})
 	f.PushOp(op.Vote{

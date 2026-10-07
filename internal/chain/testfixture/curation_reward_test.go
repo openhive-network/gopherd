@@ -39,7 +39,7 @@ func TestCurationRewardNoVotes(t *testing.T) {
 	f.Actor("author0")
 	f.GenerateBlock()
 
-	if err := f.ApplyOp(op.Comment{
+	if err := f.ApplyOp(op.Comment{ParentPermlink: "test",
 		Author: "author0", Permlink: "somethingpermlink", Body: "body",
 	}); err != nil {
 		t.Fatalf("comment: %v", err)
@@ -112,7 +112,7 @@ func TestCurationRewardOneVoteForComment(t *testing.T) {
 	f.GenerateBlock()
 
 	for _, a := range []string{"author0", "author1", "author2"} {
-		f.MustApplyOp(op.Comment{Author: a, Permlink: "somethingpermlink", Body: "x"})
+		f.MustApplyOp(op.Comment{ParentPermlink: "test", Author: a, Permlink: "somethingpermlink", Body: "x"})
 	}
 
 	// Skip past the 1h reverse-auction window so all votes get full
@@ -189,7 +189,7 @@ func TestCurationRewardTwoVotesForComment(t *testing.T) {
 	f.GenerateBlock()
 
 	for _, a := range []string{"author0", "author1", "author2"} {
-		f.MustApplyOp(op.Comment{Author: a, Permlink: "somethingpermlink", Body: "x"})
+		f.MustApplyOp(op.Comment{ParentPermlink: "test", Author: a, Permlink: "somethingpermlink", Body: "x"})
 	}
 
 	// Skip past auction so all votes get full time-weight.

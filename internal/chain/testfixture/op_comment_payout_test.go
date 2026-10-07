@@ -50,8 +50,8 @@ func TestCommentPayoutDust(t *testing.T) {
 	// Two parallel comments + votes from each author at different weights
 	// (81% and 59%) so per-comment payouts diverge slightly and integer
 	// truncation produces a small dust residue in the fund.
-	f.MustApplyOp(op.Comment{Author: "alice", Permlink: "test", Body: "test"})
-	f.MustApplyOp(op.Comment{Author: "bob", Permlink: "test", Body: "test"})
+	f.MustApplyOp(op.Comment{ParentPermlink: "test", Author: "alice", Permlink: "test", Body: "test"})
+	f.MustApplyOp(op.Comment{ParentPermlink: "test", Author: "bob", Permlink: "test", Body: "test"})
 	// Wait past reverse_auction_seconds.
 	f.SkipSeconds(60 * 60) // 1h post-HF17 reverse auction window
 	f.MustApplyOp(op.Vote{Voter: "alice", Author: "alice", Permlink: "test", Weight: 81 * 100})
@@ -137,7 +137,7 @@ func TestCommentPayoutEqualize(t *testing.T) {
 
 	// Authors post.
 	for _, a := range []string{"alice", "bob", "dave"} {
-		f.MustApplyOp(op.Comment{Author: a, Permlink: "mypost", Body: "hi"})
+		f.MustApplyOp(op.Comment{ParentPermlink: "test", Author: a, Permlink: "mypost", Body: "hi"})
 	}
 	// bob declines payout: max_accepted_payout = 0 HBD.
 	f.MustApplyOp(op.CommentOptions{

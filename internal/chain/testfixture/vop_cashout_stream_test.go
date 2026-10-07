@@ -89,7 +89,7 @@ func TestVOpCashoutStreamOrder(t *testing.T) {
 	f.FundVesting("dave", 10_000)
 	f.GenerateBlock()
 
-	f.MustApplyOp(op.Comment{Author: "alice", Permlink: "post", Body: "body"})
+	f.MustApplyOp(op.Comment{ParentPermlink: "test", Author: "alice", Permlink: "post", Body: "body"})
 	// dave takes a quarter off the top of the author's share, so the stream
 	// has to contain a benefactor op between the curators and the author.
 	f.MustApplyOp(op.CommentOptions{
@@ -206,7 +206,7 @@ func TestVOpEffectiveCommentVote(t *testing.T) {
 	f.FundVesting("bob", 100_000)
 	f.GenerateBlock()
 
-	f.MustApplyOp(op.Comment{Author: "alice", Permlink: "post", Body: "body"})
+	f.MustApplyOp(op.Comment{ParentPermlink: "test", Author: "alice", Permlink: "post", Body: "body"})
 	f.SkipSeconds(60 * 60)
 	// MustApplyOp generates the block containing the op, so the stream to
 	// read is the one it just produced. Generating another first would

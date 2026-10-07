@@ -176,13 +176,13 @@ func TestPostRateLimit(t *testing.T) {
 	f.GenerateBlock()
 
 	// First root post — fine.
-	if err := f.ApplyOp(op.Comment{
+	if err := f.ApplyOp(op.Comment{ParentPermlink: "test",
 		Author: "alice", Permlink: "p1", Body: "hi",
 	}); err != nil {
 		t.Fatalf("p1: %v", err)
 	}
 	t.Log("--- Second root post immediately → fails (5-min interval)")
-	if err := f.ApplyOp(op.Comment{
+	if err := f.ApplyOp(op.Comment{ParentPermlink: "test",
 		Author: "alice", Permlink: "p2", Body: "hi2",
 	}); err == nil {
 		t.Fatal("expected rate-limit failure")
@@ -190,7 +190,7 @@ func TestPostRateLimit(t *testing.T) {
 
 	t.Log("--- After 5+ minutes, second root post succeeds")
 	f.SkipSeconds(60*5 + 5)
-	if err := f.ApplyOp(op.Comment{
+	if err := f.ApplyOp(op.Comment{ParentPermlink: "test",
 		Author: "alice", Permlink: "p3", Body: "hi3",
 	}); err != nil {
 		t.Fatalf("p3 after 5min: %v", err)

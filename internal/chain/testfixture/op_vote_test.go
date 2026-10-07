@@ -24,7 +24,7 @@ func TestVoteApplyDustSubtraction(t *testing.T) {
 	f.FundVesting("alice", 100_000_000) // enough VESTS for non-dust votes
 	f.GenerateBlock()
 
-	if err := f.ApplyOp(op.Comment{
+	if err := f.ApplyOp(op.Comment{ParentPermlink: "test",
 		Author: "alice", Permlink: "p", Body: "hi",
 	}); err != nil {
 		t.Fatalf("comment: %v", err)
@@ -77,12 +77,12 @@ func TestVoteApplyConsecutiveDrainsMana(t *testing.T) {
 	f.GenerateBlock()
 
 	// Two posts by bob to vote on. Need 5min gap between root posts post-HF6.
-	if err := f.ApplyOp(op.Comment{Author: "bob", Permlink: "p1", Body: "hi"}); err != nil {
+	if err := f.ApplyOp(op.Comment{ParentPermlink: "test", Author: "bob", Permlink: "p1", Body: "hi"}); err != nil {
 		t.Fatalf("comment p1: %v", err)
 	}
 	f.GenerateBlock()
 	f.SkipSeconds(6 * 60) // wait 6 minutes
-	if err := f.ApplyOp(op.Comment{Author: "bob", Permlink: "p2", Body: "hi"}); err != nil {
+	if err := f.ApplyOp(op.Comment{ParentPermlink: "test", Author: "bob", Permlink: "p2", Body: "hi"}); err != nil {
 		t.Fatalf("comment p2: %v", err)
 	}
 	f.GenerateBlock()
@@ -141,7 +141,7 @@ func TestVoteApplyConsecutiveAroundOwnComment(t *testing.T) {
 	f.GenerateBlock()
 
 	// bob's root post (target of vote 1).
-	if err := f.ApplyOp(op.Comment{Author: "bob", Permlink: "p1", Body: "hi"}); err != nil {
+	if err := f.ApplyOp(op.Comment{ParentPermlink: "test", Author: "bob", Permlink: "p1", Body: "hi"}); err != nil {
 		t.Fatalf("bob comment: %v", err)
 	}
 	f.GenerateBlock()
@@ -216,7 +216,7 @@ func TestVoteApplyZeroWeightFirstCast(t *testing.T) {
 	f.Actor("bob")
 	f.FundVesting("bob", 100_000_000)
 	f.GenerateBlock()
-	if err := f.ApplyOp(op.Comment{
+	if err := f.ApplyOp(op.Comment{ParentPermlink: "test",
 		Author: "alice", Permlink: "p", Body: "hi",
 	}); err != nil {
 		t.Fatalf("comment: %v", err)
@@ -239,7 +239,7 @@ func TestVoteApplyBelowDustRejected(t *testing.T) {
 	f.Actor("bob")
 	f.FundVesting("bob", 1) // 1 satoshi VESTS — votes will hit dust floor
 	f.GenerateBlock()
-	if err := f.ApplyOp(op.Comment{
+	if err := f.ApplyOp(op.Comment{ParentPermlink: "test",
 		Author: "alice", Permlink: "p", Body: "hi",
 	}); err != nil {
 		t.Fatalf("comment: %v", err)

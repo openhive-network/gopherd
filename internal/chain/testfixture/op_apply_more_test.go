@@ -124,7 +124,7 @@ func TestCommentOptionsDeletedPermlinkReuse(t *testing.T) {
 	f.GenerateBlock()
 
 	// Create a comment.
-	if err := f.ApplyOp(op.Comment{
+	if err := f.ApplyOp(op.Comment{ParentPermlink: "test",
 		Author: "alice", Permlink: "p", Title: "t", Body: "b",
 	}); err != nil {
 		t.Fatalf("comment: %v", err)

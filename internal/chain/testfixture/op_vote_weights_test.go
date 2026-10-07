@@ -24,8 +24,8 @@ func TestVoteWeightSameInsideAuctionEqualizes(t *testing.T) {
 	f.GenerateBlock()
 
 	// Parallel posts so each voter sees curve(0) baseline.
-	f.MustApplyOp(op.Comment{Author: "carol", Permlink: "p1", Body: "hi"})
-	f.MustApplyOp(op.Comment{Author: "dave", Permlink: "p2", Body: "hi"})
+	f.MustApplyOp(op.Comment{ParentPermlink: "test", Author: "carol", Permlink: "p1", Body: "hi"})
+	f.MustApplyOp(op.Comment{ParentPermlink: "test", Author: "dave", Permlink: "p2", Body: "hi"})
 
 	// Two voters cast in the same block, well past the reverse-auction
 	// window so the time-discount is 100%.
@@ -60,8 +60,8 @@ func TestVoteWeightInAuctionDiscount(t *testing.T) {
 	f.GenerateBlock()
 
 	// Two parallel posts.
-	f.MustApplyOp(op.Comment{Author: "carol", Permlink: "p1", Body: "hi"})
-	f.MustApplyOp(op.Comment{Author: "dave", Permlink: "p2", Body: "hi"})
+	f.MustApplyOp(op.Comment{ParentPermlink: "test", Author: "carol", Permlink: "p1", Body: "hi"})
+	f.MustApplyOp(op.Comment{ParentPermlink: "test", Author: "dave", Permlink: "p2", Body: "hi"})
 
 	// Vote on carol's IMMEDIATELY (inside reverse-auction window).
 	f.MustApplyOp(op.Vote{Voter: "alice", Author: "carol", Permlink: "p1", Weight: 1000})
@@ -100,8 +100,8 @@ func TestVoteWeightProportionalToStake(t *testing.T) {
 	f.FundVesting("bob", 2_000_000)   // 2× stake
 	f.GenerateBlock()
 
-	f.MustApplyOp(op.Comment{Author: "carol", Permlink: "p1", Body: "hi"})
-	f.MustApplyOp(op.Comment{Author: "dave", Permlink: "p2", Body: "hi"})
+	f.MustApplyOp(op.Comment{ParentPermlink: "test", Author: "carol", Permlink: "p1", Body: "hi"})
+	f.MustApplyOp(op.Comment{ParentPermlink: "test", Author: "dave", Permlink: "p2", Body: "hi"})
 
 	// Both voters cast post-auction at the same percent.
 	f.SkipSeconds(60 * 60)
@@ -130,9 +130,9 @@ func TestVoteRsharesProportionalToVotePercent(t *testing.T) {
 	f.FundVesting("v3", 1_000_000_000)
 	f.GenerateBlock()
 
-	f.MustApplyOp(op.Comment{Author: "a1", Permlink: "p", Body: "x"})
-	f.MustApplyOp(op.Comment{Author: "a2", Permlink: "p", Body: "x"})
-	f.MustApplyOp(op.Comment{Author: "a3", Permlink: "p", Body: "x"})
+	f.MustApplyOp(op.Comment{ParentPermlink: "test", Author: "a1", Permlink: "p", Body: "x"})
+	f.MustApplyOp(op.Comment{ParentPermlink: "test", Author: "a2", Permlink: "p", Body: "x"})
+	f.MustApplyOp(op.Comment{ParentPermlink: "test", Author: "a3", Permlink: "p", Body: "x"})
 	f.SkipSeconds(60 * 60)
 
 	f.MustApplyOp(op.Vote{Voter: "v1", Author: "a1", Permlink: "p", Weight: 100})   // 1%
@@ -173,7 +173,7 @@ func TestVoteWeightEditZerosCurationPreHF20(t *testing.T) {
 	f.FundVesting("voter", 1_000_000)
 	f.GenerateBlock()
 
-	f.MustApplyOp(op.Comment{Author: "author", Permlink: "p", Body: "x"})
+	f.MustApplyOp(op.Comment{ParentPermlink: "test", Author: "author", Permlink: "p", Body: "x"})
 	f.SkipSeconds(60 * 60) // past reverse-auction
 
 	// First cast — should produce a non-zero curation weight.
@@ -208,7 +208,7 @@ func TestDownvoteSubtractsRshares(t *testing.T) {
 	f.FundVesting("bob", 1_000_000)
 	f.GenerateBlock()
 
-	f.MustApplyOp(op.Comment{Author: "carol", Permlink: "p", Body: "x"})
+	f.MustApplyOp(op.Comment{ParentPermlink: "test", Author: "carol", Permlink: "p", Body: "x"})
 	f.SkipSeconds(60 * 60)
 
 	// Upvote 5% then equal-magnitude downvote from another voter at same

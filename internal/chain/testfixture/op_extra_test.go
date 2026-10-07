@@ -15,7 +15,7 @@ func TestCommentBeneficiariesApply(t *testing.T) {
 	f.Actors("alice", "bob", "sam", "dave")
 	f.GenerateBlock()
 
-	if err := f.ApplyOp(op.Comment{
+	if err := f.ApplyOp(op.Comment{ParentPermlink: "test",
 		Author: "alice", Permlink: "test", Body: "x",
 	}); err != nil {
 		t.Fatal(err)

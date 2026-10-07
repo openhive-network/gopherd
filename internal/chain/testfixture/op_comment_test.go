@@ -113,7 +113,7 @@ func TestCommentDeleteApply(t *testing.T) {
 	f.Actor("alice")
 	f.GenerateBlock()
 
-	if err := f.ApplyOp(op.Comment{
+	if err := f.ApplyOp(op.Comment{ParentPermlink: "test",
 		Author:   "alice",
 		Permlink: "test",
 		Body:     "hello",
@@ -147,7 +147,7 @@ func TestVoteApply(t *testing.T) {
 	f.FundVesting("alice", 100_000) // ample vesting
 	f.GenerateBlock()
 
-	if err := f.ApplyOp(op.Comment{
+	if err := f.ApplyOp(op.Comment{ParentPermlink: "test",
 		Author:   "alice",
 		Permlink: "test",
 		Body:     "hello",
