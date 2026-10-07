@@ -141,6 +141,8 @@ func (transferEvaluator) Apply(ctx *Context, opArg op.Op) error {
 			}
 			objects.PutDGPO(ctx.DB, &dgpo)
 		}
+		// hive_evaluator_transfer.cpp:289 — dhf_conversion( to, HIVE in, HBD out ).
+		ctx.EmitDhfConversion(string(tx.To), tx.Amount.Amount, convertedAmt)
 		return nil
 	}
 

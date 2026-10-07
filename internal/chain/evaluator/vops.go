@@ -233,3 +233,97 @@ func (c *Context) EmitEscrowRejected(from, to, agent string, escrowID uint32, hb
 		HbdAmount: hbd, HiveAmount: hive, Fee: fee, FeeIsHBD: feeIsHBD,
 	})
 }
+
+// LimitOrderCancelledVOp mirrors hived's limit_order_cancelled_operation,
+// pushed by cancel_order (database_market.cpp:81) with the amount refunded
+// to the seller, in the order's sell asset.
+type LimitOrderCancelledVOp struct {
+	Seller          string
+	OrderID         uint32
+	AmountBack      int64
+	AmountBackIsHBD bool
+}
+
+// EmitLimitOrderCancelled pushes the vop through ctx.EmitVOp if non-nil.
+func (c *Context) EmitLimitOrderCancelled(seller string, orderID uint32, amountBack int64, isHBD bool) {
+	if c.EmitVOp == nil {
+		return
+	}
+	c.EmitVOp(LimitOrderCancelledVOp{Seller: seller, OrderID: orderID, AmountBack: amountBack, AmountBackIsHBD: isHBD})
+}
+
+// FillOrderVOp mirrors hived's fill_order_operation, pushed once per match
+// (database_market.cpp:342) BEFORE either side is filled: the incoming
+// ("current") order and the resting ("open") one, each with what it pays.
+type FillOrderVOp struct {
+	CurrentOwner     string
+	CurrentOrderID   uint32
+	CurrentPays      int64
+	CurrentPaysIsHBD bool
+	OpenOwner        string
+	OpenOrderID      uint32
+	OpenPays         int64
+	OpenPaysIsHBD    bool
+}
+
+// EmitFillOrder pushes the vop through ctx.EmitVOp if non-nil.
+func (c *Context) EmitFillOrder(v FillOrderVOp) {
+	if c.EmitVOp == nil {
+		return
+	}
+	c.EmitVOp(v)
+}
+
+// CollateralizedConvertImmediateConversionVOp mirrors
+// collateralized_convert_immediate_conversion_operation
+// (hive_evaluator_transfer.cpp:532): the HBD handed out right away against
+// the collateral, before the request itself settles 3.5 days later.
+type CollateralizedConvertImmediateConversionVOp struct {
+	Owner     string
+	RequestID uint32
+	HbdOut    int64
+}
+
+// EmitCollateralizedConvertImmediateConversion pushes the vop through
+// ctx.EmitVOp if non-nil.
+func (c *Context) EmitCollateralizedConvertImmediateConversion(owner string, requestID uint32, hbdOut int64) {
+	if c.EmitVOp == nil {
+		return
+	}
+	c.EmitVOp(CollateralizedConvertImmediateConversionVOp{Owner: owner, RequestID: requestID, HbdOut: hbdOut})
+}
+
+// IneffectiveDeleteCommentVOp mirrors ineffective_delete_comment_operation
+// (hive_evaluator_social.cpp:74): pre-HF19 a delete_comment on a comment
+// with net positive votes is a silent no-op, and this is how a consumer
+// learns the delete did nothing.
+type IneffectiveDeleteCommentVOp struct {
+	Author   string
+	Permlink string
+}
+
+// EmitIneffectiveDeleteComment pushes the vop through ctx.EmitVOp if non-nil.
+func (c *Context) EmitIneffectiveDeleteComment(author, permlink string) {
+	if c.EmitVOp == nil {
+		return
+	}
+	c.EmitVOp(IneffectiveDeleteCommentVOp{Author: author, Permlink: permlink})
+}
+
+// DhfConversionVOp mirrors dhf_conversion_operation as pushed by the
+// transfer evaluator (hive_evaluator_transfer.cpp:289) when HIVE sent to
+// the treasury is converted to HBD on the way in. The daily DHF hook has
+// its own emission in chain/proposals.go.
+type DhfConversionVOp struct {
+	Treasury string
+	HiveIn   int64
+	HbdOut   int64
+}
+
+// EmitDhfConversion pushes the vop through ctx.EmitVOp if non-nil.
+func (c *Context) EmitDhfConversion(treasury string, hiveIn, hbdOut int64) {
+	if c.EmitVOp == nil {
+		return
+	}
+	c.EmitVOp(DhfConversionVOp{Treasury: treasury, HiveIn: hiveIn, HbdOut: hbdOut})
+}

@@ -387,6 +387,8 @@ func (limitOrderCancelEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		objects.AdjustHBDBalance(ctx.DB, &a, ctx.HeadBlockTime, order.ForSaleAmount)
 	}
 	objects.PutAccount(ctx.DB, &a)
+	// database_market.cpp:81 — limit_order_cancelled with the refunded amount.
+	ctx.EmitLimitOrderCancelled(string(lo.Owner), orderID, order.ForSaleAmount, asset.AssetNum(order.ForSaleSymbol) == asset.HbdSymbol)
 	objects.DeleteLimitOrderFull(ctx.DB, &order)
 	return nil
 }

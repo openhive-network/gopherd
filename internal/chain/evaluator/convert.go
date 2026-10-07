@@ -183,6 +183,8 @@ func (collateralizedConvertEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		HBDOut:     hbdOut,
 		Conversion: ctx.HeadBlockTime + conversionDelay(ctx.Hardforks),
 	})
+	// hive_evaluator_transfer.cpp:532.
+	ctx.EmitCollateralizedConvertImmediateConversion(string(c.Owner), c.RequestID, hbdOut)
 	return nil
 }
 

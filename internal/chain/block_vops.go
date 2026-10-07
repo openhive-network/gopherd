@@ -30,17 +30,9 @@ import (
 // answer if two ops swap. Appending in emission order is the whole mechanism;
 // there is no sorting step, and there must not be one.
 //
-// STILL MISSING: 16 of the 43 are defined but not yet emitted —
+// STILL MISSING: 1 of the 43 is defined but not yet emitted —
 //
-//	fill_order, limit_order_cancelled                     market
-//	fill_collateralized_convert_request,
-//	collateralized_convert_immediate_conversion           HF25 converts
-//	interest, fill_vesting_withdraw, liquidity_reward     periodic payouts
-//	delayed_voting, vesting_shares_split                  VESTS bookkeeping
-//	changed_recovery_account, ineffective_delete_comment  evaluator outcomes
-//	clear_null_account_balance, consolidate_treasury_balance,
-//	hardfork_hive, hardfork_hive_restore                  HF23 sweep
-//	system_warning                                        node-level notice
+//	system_warning  node-level notice (fee-symbol, HBD cutoff, collateral shortfall)
 //
 // op.Tag names all 43 and TestVirtualOpsCarryTheirTag pins the range as
 // contiguous, so the gap stays visible from the tag list rather than from
@@ -187,6 +179,38 @@ func (d *Database) newVOpEmitter() func(any) {
 				Account: auth.AccountName(p.Account),
 				Proxy:   auth.AccountName(p.Proxy),
 			})
+		case evaluator.LimitOrderCancelledVOp:
+			d.pushVOp(op.LimitOrderCancelled{
+				Seller:     auth.AccountName(p.Seller),
+				OrderID:    p.OrderID,
+				AmountBack: hiveOrHbd(p.AmountBack, p.AmountBackIsHBD),
+			})
+		case evaluator.FillOrderVOp:
+			d.pushVOp(op.FillOrder{
+				CurrentOwner:   auth.AccountName(p.CurrentOwner),
+				CurrentOrderID: p.CurrentOrderID,
+				CurrentPays:    hiveOrHbd(p.CurrentPays, p.CurrentPaysIsHBD),
+				OpenOwner:      auth.AccountName(p.OpenOwner),
+				OpenOrderID:    p.OpenOrderID,
+				OpenPays:       hiveOrHbd(p.OpenPays, p.OpenPaysIsHBD),
+			})
+		case evaluator.CollateralizedConvertImmediateConversionVOp:
+			d.pushVOp(op.CollateralizedConvertImmediateConversion{
+				Owner:     auth.AccountName(p.Owner),
+				RequestID: p.RequestID,
+				HbdOut:    vopHbd(p.HbdOut),
+			})
+		case evaluator.IneffectiveDeleteCommentVOp:
+			d.pushVOp(op.IneffectiveDeleteComment{
+				Author:   auth.AccountName(p.Author),
+				Permlink: p.Permlink,
+			})
+		case evaluator.DhfConversionVOp:
+			d.pushVOp(op.DhfConversion{
+				Treasury:     auth.AccountName(p.Treasury),
+				HiveAmountIn: vopHive(p.HiveIn),
+				HbdAmountOut: vopHbd(p.HbdOut),
+			})
 		}
 	}
 }
@@ -214,6 +238,15 @@ func vopVests(amount int64) asset.Asset {
 // carried, and reporting the wrong one turns a fee refund into a claim
 // about a currency that never moved.
 func escrowFeeAsset(amount int64, isHBD bool) asset.Asset {
+	if isHBD {
+		return vopHbd(amount)
+	}
+	return vopHive(amount)
+}
+
+// hiveOrHbd builds a HIVE or HBD asset for a payload that carries a liquid
+// amount in whichever of the two the operation moved.
+func hiveOrHbd(amount int64, isHBD bool) asset.Asset {
 	if isHBD {
 		return vopHbd(amount)
 	}
