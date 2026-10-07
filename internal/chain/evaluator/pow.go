@@ -66,6 +66,13 @@ func (powEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		return fmt.Errorf("powEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
 	pw := opArg.AsPow()
+	// hive_evaluator.cpp:498-501: pow is rejected outright from HF13 on.
+	// Without this gate anyone could still submit pow at the head and have
+	// gopherd create accounts and witnesses for it (and relay the tx), which
+	// no hived node accepts.
+	if ctx.Hardforks.Has(hardfork.HF13) {
+		return fmt.Errorf("pow: deprecated since HF13, use pow2 instead")
+	}
 	// pow1 always pays the reward (it's deprecated at HF13 and chains
 	// past that point reject the op entirely; the block_log won't
 	// contain pow1 ops post-HF13). Pass the work.worker as signing_key
@@ -86,6 +93,13 @@ func (pow2Evaluator) Apply(ctx *Context, opArg op.Op) error {
 		return fmt.Errorf("pow2Evaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
 	pw := opArg.AsPow2()
+	// hive_evaluator.cpp:505-508: "mining is now disabled" from HF17 on.
+	// pow2 with new_owner_key needs no account signature, so without this
+	// gate it was an unauthenticated way to mint accounts and witnesses at
+	// the head and feed the schedule's miner slot.
+	if ctx.Hardforks.Has(hardfork.HF17) {
+		return fmt.Errorf("pow2: mining is disabled since HF17")
+	}
 	var worker string
 	var workPrev [20]byte
 	var powSummary uint32
