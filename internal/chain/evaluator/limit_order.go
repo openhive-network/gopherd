@@ -216,6 +216,15 @@ func applyLimitOrderCreate(ctx *Context, owner string, orderID uint32, amountToS
 	if expiration <= ctx.HeadBlockTime {
 		return ErrLimitOrderExpired
 	}
+	// hive_evaluator_transfer.cpp:548-551 (create) and :588-591 (create2):
+	// from HF20 on the expiration may not exceed head_block_time +
+	// HIVE_MAX_LIMIT_ORDER_EXPIRATION (28 days). Pre-HF20 the
+	// cappedExpiration* helpers clamp instead. This assert was documented
+	// as existing here but had never been written, so gopherd admitted
+	// and relayed orders every hived node rejects.
+	if ctx.Hardforks.Has(hardfork.HF20) && expiration > ctx.HeadBlockTime+maxLimitOrderExpirationSec {
+		return fmt.Errorf("%w: expiration %d exceeds head time + 28 days", ErrLimitOrderExpired, expiration)
+	}
 	// Both legs must be in the HIVE:HBD market (hive_operations.cpp:601+620
 	// in validate(); re-checked in the evaluator because the canonical replay
 	// path does not run op.Validate()). Without it a malformed
