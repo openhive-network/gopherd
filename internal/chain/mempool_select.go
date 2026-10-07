@@ -275,7 +275,7 @@ func (d *Database) SelectPendingTransactions(
 			// code computes was only ~500k, i.e. the price was right and the
 			// transaction was being charged for its predecessors.
 			resetRCDifferentialForTx(session, blockNum)
-			rcErr := applyRCForTx(session, &res.SignedTx, blockNum, blockTime,
+			rcErr := applyRCForTx(session, &res.SignedTx, blockNum, headBlockTime,
 				int64(res.SignedEnd-res.UnsignedStart), true /* enforce */, hf)
 			if rcErr != nil {
 				// Log the payer and the shortfall. Our RC cost accounting is

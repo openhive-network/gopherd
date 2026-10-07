@@ -1084,7 +1084,11 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 			//   5. Enforce insufficient-RC error when EnforceRC is on (live
 			//      sync); replay leaves it false and lets mana go negative.
 			if !txFailed && hf.Has(hardfork.HF20) && len(txRes.SignedTx.Operations) > 0 {
-				rcErr := applyRCForTx(session, &txRes.SignedTx, blockNum, hdr.Timestamp,
+				// hived charges RC on head_block_time(), still the PREVIOUS block.s
+				// timestamp during transaction application (rc_utility.cpp:527, :841;
+				// update_global_dynamic_data runs after the tx loop). Regenerating on
+				// the new block.s time credited every payer three extra seconds.
+				rcErr := applyRCForTx(session, &txRes.SignedTx, blockNum, headBlockTime,
 					int64(txRes.SignedEnd-txRes.UnsignedStart), opts.EnforceRC, hf)
 				if rcErr != nil {
 					txFailed = true

@@ -192,7 +192,10 @@ func (d *Database) applyTxSerial(
 	}
 	// HF20+: charge RC for the whole transaction.
 	if hf := hardfork.SetForBlock(blockNum); hf.Has(hardfork.HF20) && len(signed.Operations) > 0 {
-		if rcErr := applyRCForTx(session, signed, blockNum, hdrTimestamp, int64(signedLen), opts.EnforceRC, hf); rcErr != nil {
+		// hived charges RC on head_block_time(), which during transaction
+		// application is still the PREVIOUS block's timestamp (rc_utility.cpp:527,
+		// :841; update_global_dynamic_data runs after the tx loop).
+		if rcErr := applyRCForTx(session, signed, blockNum, ctx.HeadBlockTime, int64(signedLen), opts.EnforceRC, hf); rcErr != nil {
 			return rcErr
 		}
 	}
