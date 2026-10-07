@@ -418,7 +418,9 @@ func validateWitnessSetPropertyBlob(key string, blob []byte) error {
 		if !isHive(a) {
 			return errors.New("witness_set_properties.account_creation_fee: must be in HIVE")
 		}
-		if a.Amount < 0 {
+		// HIVE_MIN_ACCOUNT_CREATION_FEE is 1 (config.hpp:274), so a zero fee
+		// is "smaller than minimum", not merely a negative one.
+		if a.Amount < 1 {
 			return errors.New("witness_set_properties.account_creation_fee: smaller than minimum account creation fee")
 		}
 		if a.Amount > maxAccountCreationFeeSatoshi {

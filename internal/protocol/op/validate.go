@@ -214,14 +214,36 @@ func (o WitnessUpdate) Validate() error {
 	if err := validateAccountName("witness_update.owner", string(o.Owner)); err != nil {
 		return err
 	}
+	// hive_operations.cpp:276-285: url ≤ HIVE_MAX_WITNESS_URL_LENGTH (2048),
+	// non-empty, UTF-8; fee not negative (its symbol is checked by the
+	// evaluator, HF14+ is_canon); props.validate<false>().
 	if len(o.URL) == 0 || len(o.URL) > 2048 {
 		return fmt.Errorf("witness_update.url: length %d not in (0, 2048]", len(o.URL))
 	}
-	if err := requireSymbol("witness_update.fee", o.Fee, asset.HiveSymbol); err != nil {
-		// fee may be zero-amount + HIVE; accept either form
+	if !utf8.ValidString(o.URL) {
+		return errors.New("witness_update.url: not valid UTF-8")
 	}
 	if o.Fee.Amount < 0 {
 		return fmt.Errorf("witness_update.fee: must be non-negative, got %d", o.Fee.Amount)
+	}
+	// legacy_chain_properties::validate<false> (hive_operations.hpp:418-433).
+	// None of these were checked before, so a witness_update with a zero
+	// creation fee, a 1-byte block size or a 150 % interest rate was admitted
+	// and relayed where hived refuses it.
+	if o.Props.AccountCreationFee.Amount < 1 {
+		return errors.New("witness_update.props.account_creation_fee: must be at least the minimum (1)")
+	}
+	if o.Props.AccountCreationFee.Amount > maxAccountCreationFeeSatoshi {
+		return errors.New("witness_update.props.account_creation_fee: cannot be too large")
+	}
+	if o.Props.MaximumBlockSize < hiveMinBlockSizeLimit {
+		return fmt.Errorf("witness_update.props.maximum_block_size: %d is set too low (min %d)", o.Props.MaximumBlockSize, hiveMinBlockSizeLimit)
+	}
+	if o.Props.MaximumBlockSize > hiveMaxBlockSize {
+		return fmt.Errorf("witness_update.props.maximum_block_size: %d is set too high (max %d)", o.Props.MaximumBlockSize, hiveMaxBlockSize)
+	}
+	if o.Props.HBDInterestRate > hivePercent {
+		return fmt.Errorf("witness_update.props.hbd_interest_rate: %d exceeds 100%%", o.Props.HBDInterestRate)
 	}
 	return nil
 }
