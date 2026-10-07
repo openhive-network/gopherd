@@ -413,10 +413,18 @@ func (commentOptionsEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		if len(c.Beneficiaries) > 0 {
 			return fmt.Errorf("comment_options: beneficiaries already set")
 		}
-		if c.AbsRshares != 0 {
+		// hive_evaluator_social.cpp:121 gates on has_votes() == was_voted_on,
+		// which on_vote() sets for every real vote — including a dust vote
+		// that leaves abs_rshares at 0 post-HF26. Gating on AbsRshares let a
+		// post with a dust vote still take beneficiaries where hived refuses.
+		if c.WasVotedOn {
 			return fmt.Errorf("comment_options: beneficiaries cannot be set after first vote")
 		}
-		if len(co.Beneficiaries) > 8 {
+		// hive_evaluator_social.cpp:123-124: the HIVE_MAX_COMMENT_BENEFICIARIES
+		// cap is a SOFT fork — `!_db.is_in_control() || size <= 8`. Protocol
+		// validate allows up to 127, so a block from another witness may
+		// legitimately carry 9..127 beneficiaries and must apply here.
+		if ctx.InControl && len(co.Beneficiaries) > 8 {
 			return fmt.Errorf("comment_options: too many beneficiaries (max 8)")
 		}
 		var totalWeight uint32
