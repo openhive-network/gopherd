@@ -39,10 +39,15 @@ var OldChainID = Hash32{}
 const GlobalRemoveThreshold int16 = 200
 
 // BlockchainVersion mirrors HIVE_BLOCKCHAIN_VERSION for the live network
-// (config.hpp:139 at 1.29.0-rc2). hived defines it in THREE places — mainnet,
-// testnet and mirrornet — and 1.29 bumped only mainnet, to 1.28.7 (commit
-// dab219074, the release carrying the p2p fork-tolerance fixes); the testnet
-// definition went to 1.29.0 separately.
+// (config.hpp:139, mainnet branch). hived defines it in THREE places —
+// mainnet, testnet and mirrornet — and the mainnet one moves with each
+// release: 1.28.7 (dab219074, 2026-07-10, the p2p fork-tolerance fixes) and
+// 1.28.8 (4f1961fe3, 2026-10-05). The testnet definition is 1.29.0.
+//
+// This must move to 1.29.x together with the HF29 activation work:
+// database.cpp:2304 rejects a block whose witness.running_version is below
+// the current hardfork version, so a gopherd witness still advertising
+// 1.28.x after HF29 produces blocks hived refuses.
 //
 // Two consumers, one source of truth: database_api.get_version reports the
 // string, and a produced block header carries the packed v_num in its version
@@ -51,5 +56,5 @@ const GlobalRemoveThreshold int16 = 200
 const (
 	BlockchainVersionMajor    = 1
 	BlockchainVersionHardfork = 28
-	BlockchainVersionRevision = 7
+	BlockchainVersionRevision = 8
 )
