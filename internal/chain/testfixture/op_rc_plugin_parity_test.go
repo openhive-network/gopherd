@@ -271,7 +271,7 @@ func TestRCPluginSingleRecoverAccount(t *testing.T) {
 	pubKey[0], pubKey[1] = 0x02, 'A'
 	stx := newSubsidizedRecoverAccountTx("alice", pubKey, 2)
 	var result [objects.RCNumResources]int64
-	chain.CountResources(stx, int64(50), &result) // txSize ignored when subsidized
+	chain.CountResources(stx, int64(50), 0, &result) // txSize ignored when subsidized
 	for i := 0; i < objects.RCNumResources; i++ {
 		if result[i] != 0 {
 			t.Fatalf("subsidized tx should have zero RC usage, got [%d]=%d",
@@ -297,7 +297,10 @@ func TestRCPluginManyRecoverAccounts(t *testing.T) {
 		RecentOwnerAuthority: newAuth(pubKey),
 	}))
 	var result [objects.RCNumResources]int64
-	chain.CountResources(stx, int64(80), &result)
+	// One hour to expiration: the per-tx state charge is 128 × 1
+	// (resource_count.cpp:621-623).
+	stx.Expiration = 3600
+	chain.CountResources(stx, int64(80), 0, &result)
 	// With 2 ops the subsidy is denied → history/state bytes nonzero.
 	if result[objects.RCHistoryBytes] == 0 {
 		t.Fatalf("2 recover_accounts should be charged history_bytes, got 0")
@@ -333,7 +336,7 @@ func TestRCPluginMultisigRecoverAccount(t *testing.T) {
 		Signatures: make([][tx.SignatureSize]byte, 2),
 	}
 	var result [objects.RCNumResources]int64
-	chain.CountResources(stx, int64(100), &result)
+	chain.CountResources(stx, int64(100), 0, &result)
 	// Multisig auth (2 keys) disqualifies subsidy.
 	if result[objects.RCHistoryBytes] == 0 {
 		t.Fatalf("multisig recover should be charged history_bytes, got 0")
@@ -696,7 +699,7 @@ func TestRCPluginDifferentialUsageNegative(t *testing.T) {
 		MemoKey: newKey,
 	})}
 	usage := readRCPendingData(t, f).DifferentialUsage
-	chain.CountResources(&stx, 100, &usage)
+	chain.CountResources(&stx, 100, 0, &usage)
 	if usage[objects.RCStateBytes] < 0 {
 		t.Fatalf("clamped state_bytes = %d, want ≥ 0", usage[objects.RCStateBytes])
 	}

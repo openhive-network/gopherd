@@ -101,7 +101,7 @@ func applyRCForTx(s *state.Session, stx *tx.SignedTransaction, blockNum, blockTi
 	// differential_usage from the per-op visitor pass — CountResources
 	// will add the new state_bytes on top.
 	usage := pending.DifferentialUsage
-	CountResources(stx, txSize, &usage)
+	CountResources(stx, txSize, blockTime, &usage)
 
 	// 2. Price the usage through hived's per-resource curve.
 	//
@@ -331,14 +331,14 @@ func HasSufficientRC(s *state.Session, stx *tx.SignedTransaction, blockNum, bloc
 	// candidate with insufficient-rc and built near-empty blocks while the
 	// hived witnesses mined the same transactions.
 	var usage [objects.RCNumResources]int64
-	CountResources(stx, txSize, &usage)
+	CountResources(stx, txSize, blockTime, &usage)
 	cost := rcCostOfUsage(s, usage)
 	if cost <= 0 {
 		// RC subsystem not initialised (no vesting yet): everything is free,
 		// matching hived's "when rc_regen is 0" branch.
 		return nil
 	}
-	payer := PayerOf(stx.Operations[0])
+	payer := ResourceUserOf(stx)
 	if payer == "" {
 		return nil
 	}
