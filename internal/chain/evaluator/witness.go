@@ -529,6 +529,13 @@ func (accountWitnessProxyEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	if !a.CanVote() {
 		return fmt.Errorf("account_witness_proxy: %q has declined voting rights", pr.Account)
 	}
+	// hive_evaluator.cpp:218 and :254 — "Proxy must change." Setting the
+	// proxy that is already set, or clearing when none is set, is rejected.
+	// gopherd applied both as no-ops (and refreshed the governance vote
+	// expiration on the way), admitting a transaction hived refuses.
+	if string(a.Proxy) == pr.Proxy {
+		return fmt.Errorf("account_witness_proxy: proxy must change")
+	}
 	// hive_evaluator.cpp:218-232 — when SETTING a new proxy, walk the
 	// chain above new_proxy looking for loops AND enforcing
 	// proxy_chain.size() <= HIVE_MAX_PROXY_RECURSION_DEPTH (4).
