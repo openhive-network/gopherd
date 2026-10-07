@@ -277,10 +277,13 @@ func (witnessSetPropertiesEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		w.MaximumBlockSize = le32(v[:4])
 	}
 
-	// hbd_interest_rate (or sbd_interest_rate pre-HF24): uint16.
-	if v, ok := props["hbd_interest_rate"]; ok && len(v) >= 2 {
+	// hive_evaluator.cpp:150-152: `sbd_interest_rate` is looked up FIRST and
+	// `hbd_interest_rate` only when it is absent AND HF24 is active. With
+	// both keys present the sbd value wins; pre-HF24 the hbd key is ignored.
+	// gopherd had the preference reversed and accepted hbd_* before HF24.
+	if v, ok := props["sbd_interest_rate"]; ok && len(v) >= 2 {
 		w.HBDInterestRate = uint16(v[0]) | uint16(v[1])<<8
-	} else if v, ok := props["sbd_interest_rate"]; ok && len(v) >= 2 {
+	} else if v, ok := props["hbd_interest_rate"]; ok && len(v) >= 2 && ctx.Hardforks.Has(hardfork.HF24) {
 		w.HBDInterestRate = uint16(v[0]) | uint16(v[1])<<8
 	}
 
@@ -304,9 +307,11 @@ func (witnessSetPropertiesEvaluator) Apply(ctx *Context, opArg op.Op) error {
 
 	// hbd_exchange_rate (or sbd_exchange_rate pre-HF24): packed price.
 	// Updates LastHBDExchangeUpdate to head_block_time per C++ line 178.
-	exchangeVal, hasExchange := props["hbd_exchange_rate"]
-	if !hasExchange {
-		exchangeVal, hasExchange = props["sbd_exchange_rate"]
+	// Same key preference as the interest rate (hive_evaluator.cpp:167-172):
+	// sbd_exchange_rate first, hbd_exchange_rate only when absent and HF24+.
+	exchangeVal, hasExchange := props["sbd_exchange_rate"]
+	if !hasExchange && ctx.Hardforks.Has(hardfork.HF24) {
+		exchangeVal, hasExchange = props["hbd_exchange_rate"]
 	}
 	if hasExchange {
 		// Price serializes as base.amount(8) + base.symbol(8) +

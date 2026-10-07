@@ -339,7 +339,9 @@ func TestHF28GlobalWitnessPropsBasic(t *testing.T) {
 		Props: []op.WitnessProperty{
 			{Key: "key", Value: append([]byte{}, signKey[:]...)},
 			{Key: "maximum_block_size", Value: bs},
-			{Key: "hbd_interest_rate", Value: hbd},
+			// Pre-HF24 hived recognises only the `sbd_interest_rate` key
+			// (hive_evaluator.cpp:150-152); this fixture runs at HF20.
+			{Key: "sbd_interest_rate", Value: hbd},
 		},
 	}); err != nil {
 		t.Fatalf("witness_set_properties: %v", err)
