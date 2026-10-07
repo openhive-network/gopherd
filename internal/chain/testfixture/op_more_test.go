@@ -446,7 +446,7 @@ func TestCommentOptionsApply(t *testing.T) {
 	f := New(t)
 	f.Actor("alice")
 	f.GenerateBlock()
-	if err := f.ApplyOp(op.Comment{
+	if err := f.ApplyOp(op.Comment{ParentPermlink: "test",
 		Author: "alice", Permlink: "p", Body: "hi",
 	}); err != nil {
 		t.Fatalf("comment: %v", err)

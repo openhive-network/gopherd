@@ -19,7 +19,7 @@ func TestCommentFreezeAfterCashout(t *testing.T) {
 	f.FundVesting("bob", 1_000_000)
 	f.GenerateBlock()
 
-	f.MustApplyOp(op.Comment{Author: "alice", Permlink: "p", Body: "hi"})
+	f.MustApplyOp(op.Comment{ParentPermlink: "test", Author: "alice", Permlink: "p", Body: "hi"})
 	f.SkipSeconds(60 * 60)
 	f.MustApplyOp(op.Vote{Voter: "bob", Author: "alice", Permlink: "p", Weight: 10000})
 

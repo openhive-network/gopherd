@@ -76,7 +76,7 @@ func TestDeclinedVotingRightsRevoked(t *testing.T) {
 	f.GenerateBlocks(2)
 
 	// alice should now have VoteRevoked=true. Cast a comment + vote.
-	f.MustApplyOp(op.Comment{Author: "bob", Permlink: "p", Body: "x"})
+	f.MustApplyOp(op.Comment{ParentPermlink: "test", Author: "bob", Permlink: "p", Body: "x"})
 
 	err := f.ApplyOp(op.Vote{Voter: "alice", Author: "bob", Permlink: "p", Weight: 10000})
 	if err == nil {

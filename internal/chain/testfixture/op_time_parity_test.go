@@ -203,20 +203,20 @@ func TestPostRateLimitParityReplay(t *testing.T) {
 	f.FundVesting("alice", 10_000)
 	f.GenerateBlock()
 
-	if err := f.ApplyOp(op.Comment{
+	if err := f.ApplyOp(op.Comment{ParentPermlink: "test",
 		Author: "alice", Permlink: "p1", Body: "first",
 	}); err != nil {
 		t.Fatalf("p1: %v", err)
 	}
 	// Immediate second root post → must fail (5-minute interval).
-	if err := f.ApplyOp(op.Comment{
+	if err := f.ApplyOp(op.Comment{ParentPermlink: "test",
 		Author: "alice", Permlink: "p2", Body: "second",
 	}); err == nil {
 		t.Fatal("expected post_rate_limit rejection on immediate second root post")
 	}
 	// After 5 minutes + 1 block → succeeds.
 	f.SkipSeconds(5*60 + 6)
-	if err := f.ApplyOp(op.Comment{
+	if err := f.ApplyOp(op.Comment{ParentPermlink: "test",
 		Author: "alice", Permlink: "p3", Body: "third",
 	}); err != nil {
 		t.Fatalf("p3 after 5min: %v", err)
@@ -242,7 +242,7 @@ func TestCommentFreezeParityReplay(t *testing.T) {
 	f.FundVesting("bob", 1_000_000)
 	f.GenerateBlock()
 
-	f.MustApplyOp(op.Comment{Author: "alice", Permlink: "p", Body: "hi"})
+	f.MustApplyOp(op.Comment{ParentPermlink: "test", Author: "alice", Permlink: "p", Body: "hi"})
 	f.SkipSeconds(60 * 60)
 	f.MustApplyOp(op.Vote{Voter: "bob", Author: "alice", Permlink: "p", Weight: 10000})
 

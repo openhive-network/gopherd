@@ -40,7 +40,7 @@ func TestComputeRCCostOrdering(t *testing.T) {
 	commentTx := tx.SignedTransaction{
 		Transaction: tx.Transaction{
 			Operations: op.Ops(
-				op.Comment{Author: "alice", Permlink: "p", Body: "hi"},
+				op.Comment{ParentPermlink: "test", Author: "alice", Permlink: "p", Body: "hi"},
 			),
 		},
 	}

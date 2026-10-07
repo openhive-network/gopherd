@@ -23,7 +23,7 @@ func TestCurationVoteWeightRecorded(t *testing.T) {
 	f.FundVesting("bob", 100_000_000)
 	f.GenerateBlock()
 
-	if err := f.ApplyOp(op.Comment{
+	if err := f.ApplyOp(op.Comment{ParentPermlink: "test",
 		Author: "alice", Permlink: "p", Body: "hi",
 	}); err != nil {
 		t.Fatalf("comment: %v", err)
@@ -73,7 +73,7 @@ func TestCurationTwoVotersAccumulate(t *testing.T) {
 	f.FundVesting("carol", 100_000_000)
 	f.GenerateBlock()
 
-	if err := f.ApplyOp(op.Comment{
+	if err := f.ApplyOp(op.Comment{ParentPermlink: "test",
 		Author: "alice", Permlink: "p", Body: "hi",
 	}); err != nil {
 		t.Fatalf("comment: %v", err)
@@ -123,7 +123,7 @@ func TestCurationReverseAuctionTimeScaling(t *testing.T) {
 	f.FundVesting("carol", 100_000_000)
 	f.GenerateBlock()
 
-	if err := f.ApplyOp(op.Comment{
+	if err := f.ApplyOp(op.Comment{ParentPermlink: "test",
 		Author: "alice", Permlink: "p", Body: "hi",
 	}); err != nil {
 		t.Fatalf("comment: %v", err)
@@ -167,7 +167,7 @@ func TestCurationNoVotesNoRewards(t *testing.T) {
 	f.HardforksUpTo(hardfork.HF17)
 	f.Actor("alice")
 	f.GenerateBlock()
-	if err := f.ApplyOp(op.Comment{
+	if err := f.ApplyOp(op.Comment{ParentPermlink: "test",
 		Author: "alice", Permlink: "p", Body: "hi",
 	}); err != nil {
 		t.Fatalf("comment: %v", err)
@@ -226,7 +226,7 @@ func TestCurationTwoEqualVotersEqualPayout(t *testing.T) {
 	}
 
 	f.GenerateBlock()
-	if err := f.ApplyOp(op.Comment{
+	if err := f.ApplyOp(op.Comment{ParentPermlink: "test",
 		Author: "alice", Permlink: "p", Body: "hi",
 	}); err != nil {
 		t.Fatalf("comment: %v", err)
@@ -308,7 +308,7 @@ func TestCurationSingleVoterCashout(t *testing.T) {
 	}
 
 	f.GenerateBlock()
-	if err := f.ApplyOp(op.Comment{
+	if err := f.ApplyOp(op.Comment{ParentPermlink: "test",
 		Author: "alice", Permlink: "p", Body: "hi",
 	}); err != nil {
 		t.Fatalf("comment: %v", err)

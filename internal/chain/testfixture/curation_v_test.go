@@ -24,9 +24,9 @@ func TestCurationOneVotePerComment(t *testing.T) {
 	f.GenerateBlock()
 
 	// Three parallel posts.
-	f.MustApplyOp(op.Comment{Author: "a0", Permlink: "p", Body: "x"})
-	f.MustApplyOp(op.Comment{Author: "a1", Permlink: "p", Body: "x"})
-	f.MustApplyOp(op.Comment{Author: "a2", Permlink: "p", Body: "x"})
+	f.MustApplyOp(op.Comment{ParentPermlink: "test", Author: "a0", Permlink: "p", Body: "x"})
+	f.MustApplyOp(op.Comment{ParentPermlink: "test", Author: "a1", Permlink: "p", Body: "x"})
+	f.MustApplyOp(op.Comment{ParentPermlink: "test", Author: "a2", Permlink: "p", Body: "x"})
 	f.SkipSeconds(60 * 60)
 
 	// One vote per comment, all in the same block.
@@ -60,7 +60,7 @@ func TestCurationTwoVotesForCommentDifferent(t *testing.T) {
 	f.FundVesting("v1", 1_000_000)
 	f.GenerateBlock()
 
-	f.MustApplyOp(op.Comment{Author: "a0", Permlink: "p", Body: "x"})
+	f.MustApplyOp(op.Comment{ParentPermlink: "test", Author: "a0", Permlink: "p", Body: "x"})
 	f.SkipSeconds(60 * 60)
 
 	f.MustApplyOp(op.Vote{Voter: "v0", Author: "a0", Permlink: "p", Weight: 10000})
@@ -88,7 +88,7 @@ func TestCurationFiveVotersAllRewarded(t *testing.T) {
 	}
 	f.GenerateBlock()
 
-	f.MustApplyOp(op.Comment{Author: "a0", Permlink: "p", Body: "x"})
+	f.MustApplyOp(op.Comment{ParentPermlink: "test", Author: "a0", Permlink: "p", Body: "x"})
 	f.SkipSeconds(60 * 60)
 	for _, n := range []string{"v1", "v2", "v3", "v4", "v5"} {
 		f.MustApplyOp(op.Vote{Voter: n, Author: "a0", Permlink: "p", Weight: 10000})
@@ -118,8 +118,8 @@ func TestCurationTwoCommentsInSameBlock(t *testing.T) {
 	f.GenerateBlock()
 
 	// Two parallel posts in the same block.
-	f.PushOp(op.Comment{Author: "a0", Permlink: "p", Body: "x"})
-	f.PushOp(op.Comment{Author: "a1", Permlink: "p", Body: "x"})
+	f.PushOp(op.Comment{ParentPermlink: "test", Author: "a0", Permlink: "p", Body: "x"})
+	f.PushOp(op.Comment{ParentPermlink: "test", Author: "a1", Permlink: "p", Body: "x"})
 	f.GenerateBlock()
 	f.SkipSeconds(60 * 60)
 
@@ -153,13 +153,13 @@ func TestCurationTwoCommentsInDifferentBlocks(t *testing.T) {
 	f.GenerateBlock()
 
 	// First post.
-	f.MustApplyOp(op.Comment{Author: "a0", Permlink: "p", Body: "x"})
+	f.MustApplyOp(op.Comment{ParentPermlink: "test", Author: "a0", Permlink: "p", Body: "x"})
 	f.SkipSeconds(60 * 60)
 	f.MustApplyOp(op.Vote{Voter: "v0", Author: "a0", Permlink: "p", Weight: 10000})
 
 	// Second post several blocks later.
 	f.GenerateBlocks(5)
-	f.MustApplyOp(op.Comment{Author: "a1", Permlink: "p", Body: "x"})
+	f.MustApplyOp(op.Comment{ParentPermlink: "test", Author: "a1", Permlink: "p", Body: "x"})
 	f.SkipSeconds(60 * 60)
 	f.MustApplyOp(op.Vote{Voter: "v1", Author: "a1", Permlink: "p", Weight: 10000})
 
