@@ -23,13 +23,18 @@ import (
 // post-HF11 is the dominant on-chain case; the "steem" pre-HF11
 // default is the original legacy behavior.
 func defaultRecoveryAccount(ctx *Context, creator auth.AccountName) auth.AccountName {
+	// hive_evaluator_account.cpp:136-144: the TEMP→none substitution lives
+	// INSIDE the HF11 branch; before HF11 every new account got "steem" as
+	// recovery agent, whoever created it. Handling temp first gave pre-HF11
+	// temp-created accounts no recovery agent at all, which changes who may
+	// request_account_recovery for them today.
+	if !ctx.Hardforks.Has(hardfork.HF11) {
+		return "steem"
+	}
 	if creator == "temp" {
 		return ""
 	}
-	if ctx.Hardforks.Has(hardfork.HF11) {
-		return creator
-	}
-	return "steem"
+	return creator
 }
 
 // verifyAuthorityAccountsExist mirrors hived's verify_authority_accounts_exist
