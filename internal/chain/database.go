@@ -251,6 +251,9 @@ func New(s *state.Database) *Database {
 	}
 	// Emission on by default — see the vopsOff field for why that polarity.
 	d.vopEmit = d.newVOpEmitter()
+	// State opened from a snapshot may already be past a vote-driven
+	// hardfork; the table must know before the first pending-tx check.
+	syncDynamicHardforks(d.session)
 	return d
 }
 
@@ -755,7 +758,25 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	// TestGenesisHardforksNoOpOnMainnet).
 	if blockNum == 1 {
 		applyGenesisHardforks(session, hdr.Timestamp, d)
+		// database.cpp:2402-2414 process_genesis_accounts: block 1 announces
+		// every account that existed at genesis with
+		// account_created( name, name, 0 VESTS, 0 VESTS ), outside any
+		// transaction.
+		_ = objects.RangeAccounts(session, func(a *objects.Account) (bool, error) {
+			d.pushVOp(op.AccountCreated{
+				NewAccountName:       a.Name,
+				Creator:              a.Name,
+				InitialVestingShares: vopVests(0),
+				InitialDelegation:    vopVests(0),
+			})
+			return true, nil
+		})
 	}
+	// Hardforks that activate by witness vote (HF29) are learned at runtime
+	// and recorded in the hardfork_property_object; mirror that into the
+	// activation table before deriving this block's rule set, so a restart
+	// or a fork switch cannot leave the table out of step with state.
+	syncDynamicHardforks(session)
 	hf := hardfork.SetForBlock(blockNum)
 	// hived's head_block_time() during transactions returns dgpo.time,
 	// which is the PREVIOUS block's timestamp — update_global_dynamic_data
@@ -1502,6 +1523,9 @@ func (d *Database) UndoReversible() {
 	}
 	d.session.Undo()
 	d.reversiblePending = nil
+	// The undo may have popped the block that activated a vote-driven
+	// hardfork; the table must follow the restored hardfork_property_object.
+	syncDynamicHardforks(d.session)
 }
 
 // HeadBlock returns the current head block number per DGPO. Returns 0

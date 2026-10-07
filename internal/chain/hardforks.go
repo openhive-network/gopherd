@@ -58,6 +58,9 @@ func processHardforks(s *state.Session, blockNum uint32, blockTime uint32, d *Da
 			applyHardfork(s, id, d)
 		}
 	}
+	// Forks without a compiled-in block activate the way hived activates
+	// every fork: when the witness-voted next_hardfork_time arrives.
+	processVotedHardforks(s, blockNum, blockTime, hardfork.SetForBlock(blockNum), d)
 }
 
 // applyGenesisHardforks applies each hardfork whose activation time has already
@@ -480,6 +483,13 @@ func bumpHardforkPropertyObject(s *state.Session, id hardfork.ID) {
 	// actual mainnet block 905693 timestamp). State-dump diff only,
 	// but the parity-fix is cheap.
 	t := hardfork.MainnetActivationTime[id]
+	// A fork activated by witness vote has only the year-2100 placeholder in
+	// the table; hived records HIVE_HARDFORK_1_N_TIME, which is the time the
+	// witnesses voted for (block_producer.cpp:87-110 votes exactly that
+	// constant), so the voted time IS the canonical one.
+	if t == hardfork.DynamicActivationPlaceholderTime && hpo.NextHardforkTime != 0 {
+		t = hpo.NextHardforkTime
+	}
 	hpo.ProcessedHardforks = append(hpo.ProcessedHardforks, t)
 	hpo.LastHardfork = uint32(id)
 	hpo.CurrentHardforkVersion = hardfork.PackedVersion(id)
@@ -1239,5 +1249,83 @@ func truncateFeedHistoryWindow(s *state.Session, n int) {
 	if len(fh.PriceHistory) > n {
 		fh.PriceHistory = fh.PriceHistory[len(fh.PriceHistory)-n:]
 		objects.PutFeedHistory(s, &fh)
+	}
+}
+
+// syncDynamicHardforks mirrors the hardfork_property_object's recorded
+// dynamic activations (hardforks that fired by witness vote, see
+// processHardforks) into the hardfork activation table that SetForBlock reads.
+//
+// It runs at the top of every ApplyBlock and after an undo, so the table
+// follows state through restarts (the HPO is in the snapshot) and fork
+// switches (the HPO entry is undone with the block that wrote it, and the
+// table is cleared with it). Cheap: one singleton read.
+func syncDynamicHardforks(s *state.Session) {
+	ids := hardfork.DynamicIDs()
+	if len(ids) == 0 {
+		return
+	}
+	hpo, err := objects.GetHardforkPropertyObject(s)
+	if err != nil {
+		return
+	}
+	for _, id := range ids {
+		block, ok := hpo.DynamicActivationBlock(uint32(id))
+		switch {
+		case ok && (!hardfork.IsScheduled(id) || hardfork.MainnetActivationBlock[id] != block):
+			hardfork.SetDynamicActivation(id, block)
+		case !ok && hardfork.IsScheduled(id):
+			hardfork.ClearDynamicActivation(id)
+		}
+	}
+}
+
+// processVotedHardforks is the HF5+ half of hived's process_hardforks
+// (database_hardfork.cpp:121-133):
+//
+//	while( versions[ last_hardfork ] < next_hardfork && next_hardfork_time <= head_block_time() )
+//	  apply_hardfork( last_hardfork + 1 );
+//
+// Hardforks with a compiled-in activation block (recorded history) fire from
+// the block table in processHardforks; this path activates the ones that have
+// none (hardfork.DynamicIDs, today HF29) when the witness-voted
+// (next_hardfork, next_hardfork_time) in the hardfork_property_object is
+// reached — which is how hived decides, so the two nodes activate on the same
+// block. The block number is recorded in the HPO and mirrored into the table
+// so that `Has(HF29)` is true from the next block on.
+//
+// Before this existed, HF29 was pinned to NeverActivates: when the witnesses
+// schedule it, hived applies it at the first block at or after the voted
+// time and gopherd would have kept running HF28 rules.
+func processVotedHardforks(s *state.Session, blockNum, blockTime uint32, hf hardfork.Set, d *Database) {
+	if !hf.Has(hardfork.HF5) {
+		return
+	}
+	for {
+		hpo, err := objects.GetHardforkPropertyObject(s)
+		if err != nil {
+			return
+		}
+		if hpo.LastHardfork >= uint32(hardfork.NumHardforks) {
+			return
+		}
+		if hardfork.PackedVersion(hardfork.ID(hpo.LastHardfork)) >= hpo.NextHardfork || hpo.NextHardforkTime > blockTime {
+			return
+		}
+		next := hardfork.ID(hpo.LastHardfork + 1)
+		if hardfork.IsScheduled(next) {
+			// Recorded history: the block table owns this one.
+			return
+		}
+		applyHardfork(s, next, d)
+		// applyHardfork bumped last_hardfork; record where, and let the
+		// table see it from the next block on.
+		hpo, err = objects.GetHardforkPropertyObject(s)
+		if err != nil || hpo.LastHardfork < uint32(next) {
+			return
+		}
+		hpo.SetDynamicActivation(uint32(next), blockNum)
+		objects.PutHardforkPropertyObject(s, &hpo)
+		hardfork.SetDynamicActivation(next, blockNum)
 	}
 }

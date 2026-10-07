@@ -47,6 +47,45 @@ type HardforkPropertyObject struct {
 	// >= HardforkRequiredWitnesses agree on a (version, time) tuple.
 	NextHardfork     uint32
 	NextHardforkTime uint32
+	// DynamicActivations records, for hardforks that had no activation block
+	// in gopherd's table when they fired, the mainnet block at which the
+	// witness vote activated them (chain.processHardforks). gopherd has no
+	// hived counterpart for this field: hived gates everything on
+	// last_hardfork, gopherd on a per-block table that must learn the block.
+	// It lives in state so an undo (fork switch) or a restart re-derives the
+	// table from it. Sorted by ID; absent in snapshots written before it
+	// existed, which decode as empty.
+	DynamicActivations []DynamicHardforkActivation
+}
+
+// DynamicHardforkActivation is one (hardfork id, activation block) pair.
+type DynamicHardforkActivation struct {
+	ID    uint32
+	Block uint32
+}
+
+// DynamicActivationBlock returns the recorded activation block of id.
+func (h *HardforkPropertyObject) DynamicActivationBlock(id uint32) (uint32, bool) {
+	for _, a := range h.DynamicActivations {
+		if a.ID == id {
+			return a.Block, true
+		}
+	}
+	return 0, false
+}
+
+// SetDynamicActivation records (id, block), replacing an existing entry.
+func (h *HardforkPropertyObject) SetDynamicActivation(id, block uint32) {
+	for i := range h.DynamicActivations {
+		if h.DynamicActivations[i].ID == id {
+			h.DynamicActivations[i].Block = block
+			return
+		}
+	}
+	h.DynamicActivations = append(h.DynamicActivations, DynamicHardforkActivation{ID: id, Block: block})
+	for i := len(h.DynamicActivations) - 1; i > 0 && h.DynamicActivations[i-1].ID > h.DynamicActivations[i].ID; i-- {
+		h.DynamicActivations[i-1], h.DynamicActivations[i] = h.DynamicActivations[i], h.DynamicActivations[i-1]
+	}
 }
 
 // AppendHardforkPropertyObject serializes h.
@@ -59,6 +98,15 @@ func AppendHardforkPropertyObject(dst []byte, h *HardforkPropertyObject) []byte 
 	dst = appendU32LE(dst, h.CurrentHardforkVersion)
 	dst = appendU32LE(dst, h.NextHardfork)
 	dst = appendU32LE(dst, h.NextHardforkTime)
+	// Trailing, optional: only written when non-empty so a record with no
+	// dynamic activations is byte-identical to the pre-field encoding.
+	if len(h.DynamicActivations) > 0 {
+		dst = fcraw.AppendVarUint(dst, uint32(len(h.DynamicActivations)))
+		for _, a := range h.DynamicActivations {
+			dst = appendU32LE(dst, a.ID)
+			dst = appendU32LE(dst, a.Block)
+		}
+	}
 	return dst
 }
 
@@ -91,6 +139,22 @@ func ReadHardforkPropertyObject(src []byte) (HardforkPropertyObject, error) {
 	}
 	if h.NextHardforkTime, err = r.ReadUint32(); err != nil {
 		return h, fmt.Errorf("hpo.next_hardfork_time: %w", err)
+	}
+	if !r.AtEnd() {
+		n, err := r.ReadVarUint()
+		if err != nil {
+			return h, fmt.Errorf("hpo.dynamic_activations.len: %w", err)
+		}
+		for i := uint32(0); i < n; i++ {
+			var a DynamicHardforkActivation
+			if a.ID, err = r.ReadUint32(); err != nil {
+				return h, fmt.Errorf("hpo.dynamic_activations[%d].id: %w", i, err)
+			}
+			if a.Block, err = r.ReadUint32(); err != nil {
+				return h, fmt.Errorf("hpo.dynamic_activations[%d].block: %w", i, err)
+			}
+			h.DynamicActivations = append(h.DynamicActivations, a)
+		}
 	}
 	if !r.AtEnd() {
 		return h, errors.New("hardfork_property: trailing bytes")
