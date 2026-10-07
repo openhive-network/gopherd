@@ -106,13 +106,11 @@ func (transferToVestingEvaluator) Apply(ctx *Context, opArg op.Op) error {
 			}
 			objects.PutAccount(ctx.DB, &to)
 		}
-		// HF20+: recipient's effective_vests went up → refresh RC cap.
-		if ctx.Hardforks.Has(hardfork.HF20) {
-			if to, err := objects.GetAccount(ctx.DB, toName); err == nil {
-				objects.RegenerateRCMana(&to, ctx.HeadBlockTime)
-				objects.PutAccount(ctx.DB, &to)
-			}
-		}
+		// The RC bookkeeping (regenerate BEFORE the vests move, then
+		// update_account_after_vest_change) is done inside createVesting,
+		// exactly where hived's create_vesting does it (database.cpp:1023,
+		// :1039). A second regeneration here, after the vests moved, ran
+		// against the NEW ceiling and is not something hived does.
 	}
 	ctx.EmitTransferToVestingCompleted(string(tv.From), string(toName), tv.Amount.Amount, newVests)
 	return nil
