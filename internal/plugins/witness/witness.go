@@ -1464,6 +1464,14 @@ func (p *Plugin) headerVersionExtensions(s *state.Session, witnessName string) [
 		}
 		wantVer := hardfork.PackedVersion(next)
 		wantTime := hardfork.ActivationTime(next)
+		// A fork whose time is still hived's year-2100 placeholder is not
+		// scheduled; voting that sentinel would be a vote no hived counts and,
+		// if this binary's version had been bumped ahead of the time (see the
+		// HF29 release checklist in hardfork.go), a vote for a time we do not
+		// know. Say nothing until the real time is in the table.
+		if hardfork.HasPlaceholderTime(next) {
+			break
+		}
 		if w.HardforkVersionVote != wantVer || w.HardforkTimeVote != wantTime {
 			exts = append(exts, block.HeaderExtension{
 				Tag:                 block.HeaderExtHardforkVersionVote,
