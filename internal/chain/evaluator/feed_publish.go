@@ -3,6 +3,7 @@ package evaluator
 import (
 	"fmt"
 
+	"gopherd/internal/protocol/asset"
 	"gopherd/internal/protocol/hardfork"
 	"gopherd/internal/protocol/op"
 	"gopherd/internal/state"
@@ -30,10 +31,16 @@ func (feedPublishEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		}
 		return err
 	}
-	// hived post-HF20 enforces HBD base + HIVE quote; pre-HF20 there
-	// were even reverted-orientation feeds (commit f87cc43e is the
-	// canonical example). We accept whatever the op says since the
-	// median computation normalizes anyway.
+	// hive_evaluator.cpp:597-605 — from HF20 (HIVE_HARDFORK_0_20__409) a feed
+	// must be base HBD / quote HIVE. Pre-HF20 reversed feeds exist on chain
+	// (f87cc43e is hived's own example), so the rule is HF-gated. The median
+	// does NOT normalise orientation (hived's comment explains why it cannot:
+	// it would change the price sort and therefore the median), so a reversed
+	// feed accepted here would enter the median hived computes without it.
+	if ctx.Hardforks.Has(hardfork.HF20) &&
+		(fp.ExchangeRate.Base.Symbol.Num != asset.HbdSymbol || fp.ExchangeRate.Quote.Symbol.Num != asset.HiveSymbol) {
+		return fmt.Errorf("feed_publish: price feed must be a HBD/HIVE price")
+	}
 	w.HBDExchangeRate = fp.ExchangeRate
 	w.LastHBDExchangeUpdate = ctx.HeadBlockTime
 	objects.PutWitness(ctx.DB, &w)
