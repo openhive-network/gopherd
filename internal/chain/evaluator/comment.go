@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/bits"
 	"os"
+	"unicode/utf8"
 
 	"gopherd/internal/math128"
 	"gopherd/internal/protocol/auth"
@@ -115,6 +116,22 @@ func (commentEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	existing, err := objects.GetComment(ctx.DB, c.Author, c.Permlink)
 	if err != nil && err != state.ErrNotFound {
 		return err
+	}
+	// hive_evaluator_social.cpp:193 — unconditional, create and edit alike.
+	if !utf8.ValidString(c.JSONMetadata) {
+		return fmt.Errorf("comment: JSON Metadata must be UTF-8")
+	}
+	if err == state.ErrNotFound && ctx.Hardforks.Has(hardfork.HF1) {
+		// hive_evaluator_social.cpp:240-244, new comments only:
+		// validate_permlink_0_1 restricts both permlinks to [a-z0-9-] and
+		// size < 256 ("there was a case prior to HF1 where parent_permlink
+		// was empty"). The protocol-level validate checks only size/UTF-8.
+		if err := validatePermlink01(c.ParentPermlink); err != nil {
+			return fmt.Errorf("comment: parent_permlink: %w", err)
+		}
+		if err := validatePermlink01(c.Permlink); err != nil {
+			return fmt.Errorf("comment: permlink: %w", err)
+		}
 	}
 
 	// Per-author posting intervals (libraries/chain/hive_evaluator_social.cpp:204):
@@ -247,8 +264,39 @@ func (commentEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		return nil
 	}
 	// Update existing.
+	//
+	// hive_evaluator_social.cpp:293-304 — "The parent of a comment cannot
+	// change." A root-post edit must target a root comment; a reply edit
+	// (HF21+, HIVE_HARDFORK_0_21__2203) must name the same parent it was
+	// created under (two pre-HF21 transactions, 11ad62ee / dca20959, changed
+	// parents under the older, looser rule, hence the gate).
+	if !hasParent {
+		if existing.ParentAuthor != "" {
+			return fmt.Errorf("comment: the parent of a comment cannot change")
+		}
+	} else if ctx.Hardforks.Has(hardfork.HF21) &&
+		(existing.ParentAuthor != c.ParentAuthor || existing.ParentPermlink != c.ParentPermlink) {
+		return fmt.Errorf("comment: the parent of a comment cannot change")
+	}
 	existing.LastUpdate = ctx.HeadBlockTime
 	objects.PutComment(ctx.DB, &existing)
+	return nil
+}
+
+// validatePermlink01 is validate_permlink_0_1 (hive_evaluator_social.cpp:37-51):
+// HIVE_MIN_PERMLINK_LENGTH (0) < size < HIVE_MAX_PERMLINK_LENGTH (256) and
+// every byte in [a-z0-9-].
+func validatePermlink01(permlink string) error {
+	if len(permlink) == 0 || len(permlink) >= 256 {
+		return fmt.Errorf("permlink is not of valid size (%d)", len(permlink))
+	}
+	for i := 0; i < len(permlink); i++ {
+		ch := permlink[i]
+		if (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-' {
+			continue
+		}
+		return fmt.Errorf("invalid permlink character %q", ch)
+	}
 	return nil
 }
 
