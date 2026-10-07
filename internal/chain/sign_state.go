@@ -83,11 +83,18 @@ func (s *signState) checkAuthority(level AuthorityLevel, name auth.AccountName, 
 // satisfies returns true if `a`'s weight_threshold is met by the
 // signing-key + account-auth combination available in s.
 func (s *signState) satisfies(a *auth.Authority, level AuthorityLevel, depth int) bool {
-	if a == nil || a.WeightThreshold == 0 {
-		// hived treats threshold==0 as "trivially unsatisfiable" — only
-		// real authorities can be satisfied.
+	if a == nil {
 		return false
 	}
+	// A weight_threshold of 0 is NOT special-cased: sign_state.hpp walks the
+	// members as usual (so a present key is still consumed, which matters for
+	// the pre-HF28 unused-signature rule) and ends check_authority_impl with
+	// `return total_weight >= auth.weight_threshold` (:292), which is true for
+	// 0 by any signature set, including none. hived forbids an open authority
+	// only where it checks for one explicitly (account recovery,
+	// hive_evaluator_account.cpp:511,522); authority::validate does not.
+	// gopherd used to return false here, so a transaction from such an
+	// account was refused — and the block carrying it rejected.
 	// HIVE_MAX_AUTHORITY_MEMBERSHIP — per-authority cap on the sum of
 	// key_auths + account_auths. Pathological authorities are rejected.
 	if len(a.KeyAuths)+len(a.AccountAuths) > maxAuthorityMembership {
@@ -147,7 +154,9 @@ func (s *signState) satisfies(a *auth.Authority, level AuthorityLevel, depth int
 			}
 		}
 	}
-	return false
+	// sign_state.hpp:292 — only ever true here for an open (threshold 0)
+	// authority; every other case returned above or falls short.
+	return total >= uint64(a.WeightThreshold)
 }
 
 func (s *signState) fetchAuthority(level AuthorityLevel, name auth.AccountName) (*auth.Authority, error) {
