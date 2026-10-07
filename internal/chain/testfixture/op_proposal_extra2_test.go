@@ -119,33 +119,97 @@ func TestProposalUpdate005_cpp(t *testing.T) {
 	t.Skip("missing: UpdateProposal evaluator does not validate permlink references a comment by creator/receiver")
 }
 
+// dhfFixtureHF25 is the HF25-active variant: the update_proposal_end_date
+// extension is accepted only from HF25 on (dhf_evaluator.cpp:123-137).
+// hived's unit tests run on a testnet with every hardfork applied, so the
+// ports that exercise the extension need this one, not dhfFixtureHF24.
+func dhfFixtureHF25(t *testing.T, extraActors ...string) *Fixture {
+	t.Helper()
+	f := New(t)
+	actors := append([]string{"alice", "bob"}, extraActors...)
+	f.Actors(actors...)
+	f.GenerateBlock()
+	f.HardforksUpTo(hardfork.HF25)
+	f.FundLiquidHBD("alice", 1_000_000)
+	f.GenerateBlock()
+	return f
+}
+
 // TestProposalUpdate006_cpp ports update_proposal_006 — when the
 // `update_proposal_end_date` extension is present, the new end_date
-// must be > head_block_time AND must NOT exceed the proposal's
-// existing end_date (i.e. end_date can only be shortened, never
-// lengthened).
+// must be > the proposal's start_date AND must NOT exceed its existing
+// end_date (dhf_evaluator.cpp:131-132: end_date can only be shortened).
 //
-// The two reject-paths C++ checks:
+// The two reject paths C++ checks:
 //
-//	new_end_date = start_date       — passes start (< current end), should fail
-//	new_end_date = start + 3 days   — beyond current end (start + 2 days), should fail
-//
-// Go's evaluator currently ignores the extensions field on
-// update_proposal entirely — both ops will be accepted as no-ops on
-// end_date. Skip with a note.
+//	new_end_date = start_date       — not after start, must fail
+//	new_end_date = start + 3 days   — beyond current end (start + 2 days), must fail
 func TestProposalUpdate006_cpp(t *testing.T) {
-	t.Skip("missing: UpdateProposal evaluator ignores update_proposal_end_date extension; no end_date validation")
+	f := dhfFixtureHF25(t)
+
+	startDate := f.HeadBlockTime() + 60*60*24
+	endDate := startDate + 60*60*24*2
+	f.MustApplyOp(op.CreateProposal{
+		Creator:   "alice",
+		Receiver:  "bob",
+		StartDate: startDate,
+		EndDate:   endDate,
+		DailyPay:  HBD(100),
+		Subject:   "hello",
+		Permlink:  "somethingpermlink",
+	})
+	pid := findProposalIDByCreator(f, "alice")
+	if pid < 0 {
+		t.Fatal("expected proposal owned by alice")
+	}
+	for _, bad := range []uint32{startDate, startDate + 60*60*24*3} {
+		err := f.ApplyOp(op.UpdateProposal{
+			ProposalID: pid,
+			Creator:    "alice",
+			DailyPay:   HBD(100),
+			Subject:    "hello",
+			Permlink:   "somethingpermlink",
+			Extensions: makeUpdateProposalEndDateExtension(bad),
+		})
+		if err == nil {
+			t.Fatalf("update_proposal with end_date %d (start %d, end %d) was accepted", bad, startDate, endDate)
+		}
+	}
+	p, err := objects.GetProposal(state.NewSession(f.State), pid)
+	if err != nil {
+		t.Fatalf("proposal lookup: %v", err)
+	}
+	if p.EndDate != endDate {
+		t.Fatalf("EndDate changed by a rejected update: got %d, want %d", p.EndDate, endDate)
+	}
+}
+
+// TestProposalUpdateExtensionPreHF25 pins the pre-HF25 half of
+// dhf_evaluator.cpp:134-137: before HF25 any extension is rejected
+// ("Cannot set extensions").
+func TestProposalUpdateExtensionPreHF25(t *testing.T) {
+	f := dhfFixtureHF24(t)
+	startDate := f.HeadBlockTime() + 60*60*24
+	endDate := startDate + 60*60*24*2
+	f.MustApplyOp(op.CreateProposal{
+		Creator: "alice", Receiver: "bob", StartDate: startDate, EndDate: endDate,
+		DailyPay: HBD(100), Subject: "hello", Permlink: "somethingpermlink",
+	})
+	pid := findProposalIDByCreator(f, "alice")
+	err := f.ApplyOp(op.UpdateProposal{
+		ProposalID: pid, Creator: "alice", DailyPay: HBD(100), Subject: "hello", Permlink: "somethingpermlink",
+		Extensions: makeUpdateProposalEndDateExtension(endDate - 60*60*24),
+	})
+	if err == nil {
+		t.Fatal("pre-HF25 update_proposal with an extension was accepted")
+	}
 }
 
 // TestProposalUpdateWithExtension_cpp ports the second update in
 // update_proposal_000, which carries the `update_proposal_end_date`
-// extension shortening the proposal's end_date by 1 day. The Go
-// evaluator does not yet read the extension — the op is accepted, but
-// the on-disk end_date is unchanged. We assert at least that the op
-// applies cleanly (mirroring evaluator parity), then skip on the
-// end_date mutation gap.
+// extension shortening the proposal's end_date by 1 day.
 func TestProposalUpdateWithExtension_cpp(t *testing.T) {
-	f := dhfFixtureHF24(t)
+	f := dhfFixtureHF25(t)
 
 	startDate := f.HeadBlockTime() + 60*60*24
 	endDate := startDate + 60*60*24*2
@@ -189,11 +253,8 @@ func TestProposalUpdateWithExtension_cpp(t *testing.T) {
 		t.Fatalf("Subject: got %q, want %q", p.Subject, "Other subject")
 	}
 
-	// End_date should be `newEnd` but Go's evaluator doesn't parse the
-	// extension yet. Skip on that gap.
 	if p.EndDate != newEnd {
-		t.Skipf("missing: UpdateProposal evaluator doesn't read update_proposal_end_date extension (EndDate stayed at %d, expected %d)",
-			p.EndDate, newEnd)
+		t.Fatalf("EndDate: got %d, want %d (update_proposal_end_date extension not applied)", p.EndDate, newEnd)
 	}
 }
 
