@@ -110,6 +110,10 @@ type Fixture struct {
 	// PushOp/MustApplyOp.
 	RequireSignatures bool
 
+	// notInControl is set by ApplyOpNotInControl for the duration of one
+	// block so soft-fork (in-control-only) asserts stay silent.
+	notInControl bool
+
 	// actorKeys is the per-actor PrivateKey cache keyed by name. Filled
 	// lazily by Actor() so tests calling f.ActorKey("alice") get a stable
 	// key even when RequireSignatures is off. Mirrors hived's
@@ -247,7 +251,8 @@ func (f *Fixture) GenerateBlock() uint32 {
 		// Fixture blocks are generated at the head — the C++ unit tests
 		// these port run with is_in_control()==true, so admission-only
 		// asserts (delegate_rc min/sufficiency) stay active.
-		InControl: true,
+		// ApplyOpNotInControl flips this for one block.
+		InControl: !f.notInControl,
 	}, &stats)
 	if err != nil {
 		f.t.Fatalf("testfixture: ApplyBlock %d: %v", blockNum, err)
@@ -584,6 +589,17 @@ func (f *Fixture) MustApplyOp(o op.Operation) {
 	}
 }
 
+// ApplyOpNotInControl is ApplyOp with is_in_control()==false, i.e. the block
+// is applied as if it came from another witness. Use it to pin soft-fork
+// rules (hived's `!_db.is_in_control() || ...` asserts), which must NOT fire
+// on this path.
+func (f *Fixture) ApplyOpNotInControl(o op.Operation) error {
+	f.notInControl = true
+	defer func() { f.notInControl = false }()
+	f.PushOp(o)
+	return f.tryGenerateBlock()
+}
+
 // tryGenerateBlock is GenerateBlock except it returns ApplyBlock errors
 // instead of t.Fatal-ing — used by ApplyOp so callers can assert on
 // expected failures (HIVE_REQUIRE_THROW analogue).
@@ -602,7 +618,8 @@ func (f *Fixture) tryGenerateBlock() error {
 		// Fixture blocks are generated at the head — the C++ unit tests
 		// these port run with is_in_control()==true, so admission-only
 		// asserts (delegate_rc min/sufficiency) stay active.
-		InControl: true,
+		// ApplyOpNotInControl flips this for one block.
+		InControl: !f.notInControl,
 	}, &stats)
 	if err != nil {
 		// Increment the block counter even on failure so the next call
