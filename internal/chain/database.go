@@ -794,27 +794,34 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 			return objects.DynamicGlobalProperty{}, err
 		}
 		if blockNum > 1 {
+			// validate_block_header, database.cpp:2800-2818:
+			//   FC_ASSERT( head_block_time() < next_block.timestamp )
+			//   FC_ASSERT( slot_num > 0 )
+			//   FC_ASSERT( witness.owner == get_scheduled_witness( slot_num ) )
+			// A block whose timestamp does not advance, or whose producer is
+			// not the witness scheduled for its slot, is INVALID to every hived
+			// node even when the signature is genuine: a witness can sign a
+			// block for a slot that is not theirs, and nothing but this check
+			// stops it. Only the signature was being enforced here; the slot
+			// test was a logged warning.
+			if hdr.Timestamp <= headBlockTime {
+				return objects.DynamicGlobalProperty{}, fmt.Errorf("block %d: timestamp %d does not advance head time %d", blockNum, hdr.Timestamp, headBlockTime)
+			}
 			slot := slotNumForBlockTime(headBlockTime, hdr.Timestamp)
-			if slot > 0 {
-				if ws, wErr := objects.GetWitnessSchedule(session); wErr == nil {
-					expected := ws.ScheduledWitnessForSlotAslot(prevCurrentAslot, slot)
-					if expected != "" && expected != hdr.Witness {
-						// Schedule-mismatch: our predicted witness for
-						// this slot disagrees with the block header.
-						// Downgraded from a hard error to a warning
-						// because the block-signature check above is
-						// the cryptographic security gate (it recovers
-						// the pubkey from the sig and compares to the
-						// witness's on-chain BlockSigningKey). The
-						// schedule check is a peer-trust pre-validation
-						// — if our state diverges from hived's in
-						// pre-1.135M era (per memory iter5/iter10/15:
-						// "trace identical Go==hived past block 1.135M"),
-						// a strict check rejects valid blocks during
-						// catch-up. Once state converges past 1.135M
-						// the warning silences itself.
-						mismatchWarn(blockNum, slot, hdr.Witness, expected)
-					}
+			if slot == 0 {
+				return objects.DynamicGlobalProperty{}, fmt.Errorf("block %d: timestamp %d is not on a slot boundary after head time %d", blockNum, hdr.Timestamp, headBlockTime)
+			}
+			if ws, wErr := objects.GetWitnessSchedule(session); wErr == nil {
+				expected := ws.ScheduledWitnessForSlotAslot(prevCurrentAslot, slot)
+				if expected != "" && expected != hdr.Witness {
+					// Historical replay used to log this instead of failing,
+					// citing a pre-1.135M catch-up drift that has since been
+					// closed (state and block ids match through head). Blocks
+					// that reach this branch are live or self-produced, so the
+					// check is hived-strict. The warning counter stays for the
+					// replay path, which does not enter this block at all.
+					mismatchWarn(blockNum, slot, hdr.Witness, expected)
+					return objects.DynamicGlobalProperty{}, fmt.Errorf("block %d: witness %q is not scheduled for slot %d (expected %q)", blockNum, hdr.Witness, slot, expected)
 				}
 			}
 		}
