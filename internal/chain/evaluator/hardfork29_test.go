@@ -200,10 +200,27 @@ func TestHF29RecoveryAuthoritySizeGate(t *testing.T) {
 			t.Fatalf("got %v, want ErrAuthoritySize", err)
 		}
 	})
-	t.Run("accepted while replaying pre-HF29", func(t *testing.T) {
+	// hived has ALWAYS size-checked a NEW request (hive_evaluator_account.cpp:513-514,
+	// `if( !checked_size ) validate_auth_size`); what HF29 closes is the CHANGE
+	// path, where an update to a pending request skipped the check. So the
+	// pre-HF29 leniency is only observable when a request already exists.
+	t.Run("new request is size-checked even while replaying pre-HF29", func(t *testing.T) {
 		ctx := &Context{DB: seed(t), InControl: false, Hardforks: preHF29Set(), HeadBlockTime: 100_000}
+		if err := Apply(ctx, req); !errors.Is(err, ErrAuthoritySize) {
+			t.Fatalf("got %v, want ErrAuthoritySize (hived checks the size of a new request unconditionally)", err)
+		}
+	})
+	t.Run("change of a pending request accepted while replaying pre-HF29", func(t *testing.T) {
+		s := seed(t)
+		small := auth.Authority{WeightThreshold: 1, KeyAuths: []auth.KeyAuth{{Key: oversized.KeyAuths[0].Key, Weight: 1}}}
+		objects.PutAccountRecoveryRequest(s, &objects.AccountRecoveryRequest{
+			AccountToRecover:     "victim",
+			NewOwnerAuthorityRaw: auth.AppendAuthority(nil, small),
+			Expiration:           200_000,
+		})
+		ctx := &Context{DB: s, InControl: false, Hardforks: preHF29Set(), HeadBlockTime: 100_000}
 		if err := Apply(ctx, req); errors.Is(err, ErrAuthoritySize) {
-			t.Fatal("oversized recovery authority rejected during pre-HF29 replay")
+			t.Fatal("oversized recovery authority on a CHANGE rejected during pre-HF29 replay")
 		}
 	})
 	t.Run("exactly at the limit is allowed", func(t *testing.T) {
