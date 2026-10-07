@@ -288,10 +288,23 @@ func ComputeRCCost(signedTx *tx.SignedTransaction, blockNum uint32) int64 {
 	return cost
 }
 
-// PayerOf returns the account that pays the RC for the given tx.
-// Mirrors hived's logic: the first required-active or required-posting
-// authority. We use the canonical "from / account / owner / voter /
-// creator" field of the op.
+// PayerOf returns the account that pays RC for ONE operation, or "" when
+// the operation names no resource user. Mirrors get_resource_user_visitor
+// (rc/resource_user.cpp:10-47): the first required ACTIVE authority, else
+// the first required OWNER authority, else the first required POSTING
+// authority (each a sorted flat_set, so "first" is the lexically smallest
+// name), with three explicit overrides:
+//
+//	witness_set_properties → owner
+//	recover_account        → account_to_recover
+//	witness_block_approve  → witness
+//
+// Every real operation here has at most one account per level, so the
+// canonical "from / account / owner / voter / creator" field IS the first
+// element. custom_json is the exception: hived checks required_auths
+// (active) BEFORE required_posting_auths. Use ResourceUserOf for a whole
+// transaction: hived walks every operation until one yields a payer
+// (resource_user.cpp:54-62), it does not stop at operations[0].
 func PayerOf(o op.Op) string {
 	switch o.Tag {
 	case op.TagTransfer:
@@ -359,12 +372,36 @@ func PayerOf(o op.Op) string {
 	case op.TagUpdateProposal:
 		return string(o.AsUpdateProposal().Creator)
 	case op.TagCustomJSON:
-		if len(o.AsCustomJSON().RequiredPostingAuths) > 0 {
-			return string(o.AsCustomJSON().RequiredPostingAuths[0])
-		}
+		// active before posting, like the generic visitor.
 		if len(o.AsCustomJSON().RequiredAuths) > 0 {
 			return string(o.AsCustomJSON().RequiredAuths[0])
 		}
+		if len(o.AsCustomJSON().RequiredPostingAuths) > 0 {
+			return string(o.AsCustomJSON().RequiredPostingAuths[0])
+		}
+	case op.TagCustom:
+		if len(o.AsCustom().RequiredAuths) > 0 {
+			return string(o.AsCustom().RequiredAuths[0])
+		}
+	case op.TagCustomBinary:
+		cb := o.AsCustomBinary()
+		if len(cb.RequiredActiveAuths) > 0 {
+			return string(cb.RequiredActiveAuths[0])
+		}
+		if len(cb.RequiredOwnerAuths) > 0 {
+			return string(cb.RequiredOwnerAuths[0])
+		}
+		if len(cb.RequiredPostingAuths) > 0 {
+			return string(cb.RequiredPostingAuths[0])
+		}
+	case op.TagAccountUpdate2:
+		// owner / active / posting — whichever tier the op requires, the
+		// account is the same.
+		return string(o.AsAccountUpdate2().Account)
+	case op.TagWitnessSetProperties:
+		return string(o.AsWitnessSetProperties().Owner)
+	case op.TagWitnessBlockApprove:
+		return string(o.AsWitnessBlockApprove().Witness)
 	case op.TagCollateralizedConvert:
 		return string(o.AsCollateralizedConvert().Owner)
 	case op.TagRequestAccountRecovery:

@@ -55,9 +55,20 @@ import (
 // Mirrors hive::not_enough_rc_exception.
 var ErrInsufficientRC = errors.New("insufficient RC")
 
-// HIVE_RC_MAX_NEGATIVE_PERCENT — the fraction of max_mana the manabar is
-// allowed to go below 0. Default is 10 (10%); set as a constant.
-const rcMaxNegativePercent int64 = 10
+// ResourceUserOf returns the account that pays RC for the transaction.
+// Mirrors resource_credits::get_resource_user (rc/resource_user.cpp:54-62):
+// visit the operations in order and take the first one that names a payer.
+// Looking only at operations[0] left any transaction whose first operation
+// has no payer (or an unmapped tag) uncharged — and, once RC is consensus
+// under HF29, rejected.
+func ResourceUserOf(stx *tx.SignedTransaction) string {
+	for _, o := range stx.Operations {
+		if payer := PayerOf(o); payer != "" {
+			return payer
+		}
+	}
+	return ""
+}
 
 // applyRCForTx is the post-apply tx hook. Invoked from ApplyBlock after
 // every op in the tx has applied successfully and BEFORE the per-tx
@@ -113,7 +124,7 @@ func applyRCForTx(s *state.Session, stx *tx.SignedTransaction, blockNum, blockTi
 	objects.PutRCPendingData(s, &pending)
 
 	// 4. Charge the payer's manabar.
-	payer := PayerOf(stx.Operations[0])
+	payer := ResourceUserOf(stx)
 	if payer == "" {
 		// hived HF29 (6dc8d6fd8, rc_utility.cpp:507) promoted this from a
 		// NOTIFYALERT to an assertion:
@@ -121,17 +132,14 @@ func applyRCForTx(s *state.Session, stx *tx.SignedTransaction, blockNum, blockTi
 		//   FC_ASSERT( !db.is_in_control() && !db.has_hardfork( ..._RC_IS_CONSENSUS ),
 		//     "Tried to execute transaction with no resource user" );
 		//
-		// DELIBERATE DEVIATION: hived also throws when merely in control, and
-		// we do not. PayerOf is a tag switch, so ANY operation whose tag it
-		// does not map returns "" and is currently charged nothing — the
-		// assertion would therefore fire on our own coverage gaps, not just on
-		// genuinely payer-less transactions, and `enforce` is true during block
-		// assembly. Turning it on there could silently drop valid traffic from
-		// our blocks, which this node has a measured history of. Auditing
-		// PayerOf against hived's resource-user mapping is its own task; until
-		// then the hardfork half is correct and inert, and the in-control half
-		// waits for that audit.
-		if hf.Has(hardfork.HF29) {
+		// Both halves are live. The in-control half used to be held back
+		// because PayerOf covered only part of the operation set and this
+		// would have fired on gopherd's own gaps; PayerOf now mirrors
+		// get_resource_user_visitor for every operation and ResourceUserOf
+		// walks the whole transaction, so a payer-less transaction here is
+		// one hived refuses too (post-HF17 that is only a transaction made
+		// entirely of operations with no required authority at all).
+		if enforce || hf.Has(hardfork.HF29) {
 			return fmt.Errorf("%w: transaction with no resource user", ErrInsufficientRC)
 		}
 		return nil
@@ -144,8 +152,13 @@ func applyRCForTx(s *state.Session, stx *tx.SignedTransaction, blockNum, blockTi
 		return nil
 	}
 	objects.RegenerateRCMana(&a, blockTime)
-	maxMana := a.MaximumRC()
-	minMana := -(maxMana * rcMaxNegativePercent / 100)
+	// util::manabar::use_mana (manabar.hpp:87-95) saturates at min_mana,
+	// and rc_utility.cpp:604 calls it with the default, i.e. 0. There is no
+	// HIVE_RC_MAX_NEGATIVE_PERCENT anywhere in hived; the 10 % negative
+	// floor that used to live here let a payer's mana sink below zero during
+	// replay, where hived stops at 0 — and under HF29 (RC is consensus) a
+	// payer hived still considers funded would have been refused here.
+	const minMana int64 = 0
 	hasMana := a.RCManaCurrent >= cost
 	// HF29 RC_IS_CONSENSUS (hived cbd08b3ce, rc_utility.cpp:567):
 	//
