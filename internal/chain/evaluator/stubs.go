@@ -17,7 +17,12 @@ package evaluator
 // Every other tag has a real evaluator registered elsewhere; the
 // TestEveryRegularTagHasEvaluator test enforces full coverage.
 
-import "gopherd/internal/protocol/op"
+import (
+	"fmt"
+
+	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/protocol/op"
+)
 
 // noopStub returns nil for every op — used for tags whose state effects
 // live in plugins (custom*) or are pre-HF1 placeholders that never fire
@@ -28,12 +33,34 @@ import "gopherd/internal/protocol/op"
 // machinery is gone.
 func noopStub(ctx *Context, opArg op.Op) error { return nil }
 
+// customOpDataMaxLength is HIVE_CUSTOM_OP_DATA_MAX_LENGTH (config.hpp:425).
+const customOpDataMaxLength = 8192
+
+// customEvaluator mirrors custom_evaluator::do_apply (hive_evaluator.cpp:328-335):
+// from HF26 (SOLIDIFY_OLD_SOFTFORKS) the payload may not exceed 8192 bytes.
+// The chain itself does nothing else with `custom`.
+func customEvaluator(ctx *Context, opArg op.Op) error {
+	if ctx.Hardforks.Has(hardfork.HF26) && len(opArg.AsCustom().Data) > customOpDataMaxLength {
+		return fmt.Errorf("custom: operation data must be at most %d bytes", customOpDataMaxLength)
+	}
+	return nil
+}
+
+// customBinaryEvaluator mirrors custom_binary_evaluator::do_apply
+// (hive_evaluator.cpp:376-379), which starts with an unconditional
+// UNREACHABLE_CODE_ASSERT( false ): the operation is disallowed and no block
+// has ever carried one. Accepting it as a no-op admitted and relayed
+// transactions every hived node refuses.
+func customBinaryEvaluator(ctx *Context, opArg op.Op) error {
+	return fmt.Errorf("custom_binary: operation disallowed")
+}
+
 func init() {
-	register(op.TagCustom, EvaluatorFunc(noopStub))
+	register(op.TagCustom, EvaluatorFunc(customEvaluator))
 	// custom_json now has a real evaluator (custom_json_rc.go) that
 	// dispatches consensus-touching IDs (chiefly "rc" for delegate_rc
 	// post-HF22). It registers itself separately.
-	register(op.TagCustomBinary, EvaluatorFunc(noopStub))
+	register(op.TagCustomBinary, EvaluatorFunc(customBinaryEvaluator))
 	register(op.TagWitnessBlockApprove, EvaluatorFunc(noopStub))
 	register(op.TagResetAccount, EvaluatorFunc(noopStub))
 	register(op.TagSetResetAccount, EvaluatorFunc(noopStub))
