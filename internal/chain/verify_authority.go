@@ -142,20 +142,13 @@ func RequiredAuthorities(signedTx *tx.SignedTransaction) map[AuthorityLevel]map[
 		case op.TagChangeRecoveryAccount, op.TagDeclineVotingRights:
 			add(AuthorityOwner, PayerOf(o))
 
-		// recover_account uses get_required_authorities (an ad-hoc list
-		// of TWO embedded authorities — new_owner_authority and
-		// recent_owner_authority — directly from the op), NOT
-		// get_required_owner_authorities on a state-stored account.
-		// Mirrors C++ hive_operations.cpp:recover_account_operation::
-		// get_required_authorities. The evaluator at
-		// internal/chain/evaluator/recovery.go re-checks
-		// recent_owner_authority against owner_authority_history at
-		// apply time, so omitting the pre-flight key→account match
-		// here loses some defense-in-depth but doesn't open a real
-		// hole: a malformed tx still fails the evaluator gate.
-		case op.TagRecoverAccount:
-			// no required state-authority; leave the op for the
-			// evaluator to validate.
+		// recover_account and witness_set_properties declare NO account-tier
+		// authority. They are authorised through hived's fourth category,
+		// `other` (vector<authority> get_required_authorities): embedded
+		// authorities that the tx signatures must satisfy directly. Those
+		// are collected by RequiredOtherAuthorities, not here. Listing them
+		// explicitly keeps them out of the `default` active-of-payer arm.
+		case op.TagRecoverAccount, op.TagWitnessSetProperties:
 
 		default:
 			// Everything else (transfer, transfer_to_vesting,
@@ -165,6 +158,63 @@ func RequiredAuthorities(signedTx *tx.SignedTransaction) map[AuthorityLevel]map[
 		}
 	}
 	return out
+}
+
+// RequiredOtherAuthorities collects hived's `other` category: authorities
+// embedded in the operation itself rather than looked up on an account.
+// Mirrors the per-op get_required_authorities( vector<authority>& )
+// overloads in hive_operations.hpp:
+//
+//   - recover_account (hpp:851-855): new_owner_authority AND
+//     recent_owner_authority. Both are public data (the open request and
+//     owner_authority_history), so without this check an UNSIGNED
+//     recover_account for any account with an open request passed
+//     verification and only the evaluator's equality checks stood between
+//     it and the chain.
+//   - witness_set_properties (hpp:475-489): authority(1, props["key"], 1),
+//     i.e. the tx must be signed by the witness's current signing key. The
+//     evaluator compares props["key"] to the stored key, but that is public
+//     too; the signature is the proof.
+//   - pow2 with new_owner_key (hpp:751-757): authority(1, new_owner_key, 1).
+//     Dead on mainnet since HF17, kept for completeness.
+//
+// hived verifies these at transaction_util.cpp:124-127 with the ACTIVE
+// fetcher for any account_auths they contain. A malformed `key` blob makes
+// fc::raw::unpack throw in hived, so it is an error here too.
+func RequiredOtherAuthorities(signedTx *tx.SignedTransaction) ([]auth.Authority, error) {
+	var out []auth.Authority
+	keyAuthority := func(k crypto.PublicKey) auth.Authority {
+		return auth.Authority{
+			WeightThreshold: 1,
+			KeyAuths:        []auth.KeyAuth{{Key: k, Weight: 1}},
+		}
+	}
+	for _, o := range signedTx.Operations {
+		switch o.Tag {
+		case op.TagRecoverAccount:
+			ra := o.AsRecoverAccount()
+			out = append(out, ra.NewOwnerAuthority, ra.RecentOwnerAuthority)
+		case op.TagWitnessSetProperties:
+			wsp := o.AsWitnessSetProperties()
+			for _, p := range wsp.Props {
+				if p.Key != "key" {
+					continue
+				}
+				if len(p.Value) < crypto.PublicKeySize {
+					return nil, fmt.Errorf("verify_authority: witness_set_properties 'key' prop is %d bytes, need %d", len(p.Value), crypto.PublicKeySize)
+				}
+				var k crypto.PublicKey
+				copy(k[:], p.Value[:crypto.PublicKeySize])
+				out = append(out, keyAuthority(k))
+				break
+			}
+		case op.TagPow2:
+			if k := o.AsPow2().NewOwnerKey; k != nil {
+				out = append(out, keyAuthority(*k))
+			}
+		}
+	}
+	return out, nil
 }
 
 // VerifyAuthority is the entry point for live-mode signature
@@ -243,6 +293,10 @@ func RecoverTxSignerKeys(signedTx *tx.SignedTransaction, unsignedBytes []byte, c
 // state.Session must be owned by the caller.
 func VerifyAuthorityWithKeys(s *state.Session, signedTx *tx.SignedTransaction, keys []crypto.PublicKey) error {
 	required := RequiredAuthorities(signedTx)
+	other, err := RequiredOtherAuthorities(signedTx)
+	if err != nil {
+		return err
+	}
 	// Hived's verify_authority does NOT enforce "len(sigs)>0" globally;
 	// each required authority is checked individually. Operations like
 	// pow_operation declare zero required authorities ("there is no need
@@ -253,7 +307,8 @@ func VerifyAuthorityWithKeys(s *state.Session, signedTx *tx.SignedTransaction, k
 	if len(required[AuthorityOwner]) == 0 &&
 		len(required[AuthorityActive]) == 0 &&
 		len(required[AuthorityPosting]) == 0 &&
-		len(required[AuthorityWitness]) == 0 {
+		len(required[AuthorityWitness]) == 0 &&
+		len(other) == 0 {
 		// No required authorities — nothing to satisfy. (Hived would
 		// also reject "unused signatures" pre-HF28, but in practice
 		// pow txs never carry sigs and we don't currently track
@@ -277,8 +332,11 @@ func VerifyAuthorityWithKeys(s *state.Session, signedTx *tx.SignedTransaction, k
 	if dgpoRef, ok := objects.GetDGPORef(s); ok {
 		hf28 = hardfork.SetForBlock(dgpoRef.HeadBlockNumber).Has(hardfork.HF28)
 	}
+	// transaction_util.cpp:99-104 lists all four non-posting categories in
+	// the mixed check: active, owner, witness and other.
 	if len(required[AuthorityPosting]) > 0 &&
-		(len(required[AuthorityActive]) > 0 || len(required[AuthorityOwner]) > 0) {
+		(len(required[AuthorityActive]) > 0 || len(required[AuthorityOwner]) > 0 ||
+			len(required[AuthorityWitness]) > 0 || len(other) > 0) {
 		if !hf28 {
 			return fmt.Errorf("verify_authority: tx mixes posting-required ops with active/owner-required ops")
 		}
@@ -287,10 +345,19 @@ func VerifyAuthorityWithKeys(s *state.Session, signedTx *tx.SignedTransaction, k
 	fetcher := &sessionAuthFetcher{s: s}
 	state := newSignState(keys, fetcher)
 
-	// Walk required authorities by level. Each must be satisfied. Hived
-	// allows higher-power authorities to substitute for lower
-	// (active/owner can sign for posting; owner can sign for active),
-	// modelled by retrying upward when the strict level fails.
+	// Walk required authorities by level. Each must be satisfied.
+	//
+	// Role upgrade — a higher authority standing in for a lower one (owner
+	// for active; active or owner for posting) — is PRE-HF28 ONLY. With
+	// HIVE_HARDFORK_1_28_ALLOW_STRICT_AND_MIXED_AUTHORITIES hived calls
+	// s.check_authority(id) alone (transaction_util.cpp:84-86 posting,
+	// :131-134 active); the get_active/get_owner fallbacks at :88-100 and
+	// :137-150 are the `else` branch. On mainnet today a vote signed with
+	// the active key, or a transfer signed with the owner key, is REJECTED
+	// by hived (tx_missing_posting_auth / tx_missing_active_auth). Keeping
+	// the fallbacks unconditionally let gopherd admit, relay, and put into
+	// its own blocks transactions every hived node refuses.
+	allowRoleUpgrade := !hf28
 	for _, name := range sortedSet(required[AuthorityOwner]) {
 		if !state.checkAuthority(AuthorityOwner, name, 0) {
 			return fmt.Errorf("verify_authority: missing owner authority for %q", name)
@@ -298,19 +365,27 @@ func VerifyAuthorityWithKeys(s *state.Session, signedTx *tx.SignedTransaction, k
 	}
 	for _, name := range sortedSet(required[AuthorityActive]) {
 		if !state.checkAuthority(AuthorityActive, name, 0) {
-			// Owner can substitute for active.
-			if !state.checkAuthority(AuthorityOwner, name, 0) {
+			if !allowRoleUpgrade || !state.checkAuthority(AuthorityOwner, name, 0) {
 				return fmt.Errorf("verify_authority: missing active authority for %q", name)
 			}
 		}
 	}
 	for _, name := range sortedSet(required[AuthorityPosting]) {
 		if !state.checkAuthority(AuthorityPosting, name, 0) {
-			// Active or owner can substitute for posting.
-			if !state.checkAuthority(AuthorityActive, name, 0) &&
-				!state.checkAuthority(AuthorityOwner, name, 0) {
+			if !allowRoleUpgrade ||
+				(!state.checkAuthority(AuthorityActive, name, 0) &&
+					!state.checkAuthority(AuthorityOwner, name, 0)) {
 				return fmt.Errorf("verify_authority: missing posting authority for %q", name)
 			}
+		}
+	}
+	// `other` category — transaction_util.cpp:124-127: each embedded
+	// authority is checked as-is, with account_auths resolved at the ACTIVE
+	// level (change_current_authority(get_active) precedes the loop). No
+	// role upgrade applies: there is no account to upgrade through.
+	for i := range other {
+		if !state.satisfies(&other[i], AuthorityActive, 0) {
+			return fmt.Errorf("verify_authority: missing signature for embedded authority %d (recover_account / witness_set_properties)", i)
 		}
 	}
 	// Witness-signature category — C++ transaction_util.cpp:169. Satisfied
