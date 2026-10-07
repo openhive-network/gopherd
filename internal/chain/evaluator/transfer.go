@@ -128,7 +128,10 @@ func (transferEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		dgpo, derr := objects.GetDGPO(ctx.DB)
 		if derr == nil {
 			dgpo.CurrentSupply -= tx.Amount.Amount
-			dgpo.VirtualSupply -= tx.Amount.Amount
+			// convert_HIVE_to_HBD( ..., full_update = amount_to_transfer > 0 )
+			// (global_property_object.hpp:335-348): when the HBD result rounds
+			// to 0 hived burns the HIVE but leaves virtual_supply alone until
+			// the end-of-block recompute; otherwise it recomputes it fully.
 			if convertedAmt > 0 {
 				dgpo.CurrentHBDSupply += convertedAmt
 				dgpo.VirtualSupply = dgpo.CurrentSupply
