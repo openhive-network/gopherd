@@ -526,8 +526,22 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 			t       uint32
 		}
 		hfvCounts := make(map[hfvKey]uint32)
-		for _, p := range active {
-			w, ok := objects.GetWitnessRef(s, p.owner)
+		// witness_schedule.cpp:270-282 iterates wso.current_shuffled_witnesses
+		// of the object PASSED IN, read before step 5 overwrites it: pre-HF26
+		// that is the schedule that just finished, post-HF26 it is the set
+		// that was just promoted to current (the caller copies the future
+		// object into ws before calling). gopherd tallied the NEW set it had
+		// just picked instead — a different 21 whenever the timeshare slot
+		// rotates or the elected set changes, so majority_version and
+		// next_hardfork(_time) could flip a round earlier or later than hived
+		// at a 16/17-of-21 vote, which is exactly where a hardfork vote
+		// hovers.
+		tallied := ws.CurrentShuffledWitnesses
+		if n := int(ws.NumScheduledWitnesses); n < len(tallied) {
+			tallied = tallied[:n]
+		}
+		for _, owner := range tallied {
+			w, ok := objects.GetWitnessRef(s, owner)
 			if !ok {
 				continue
 			}
