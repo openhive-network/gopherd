@@ -240,6 +240,8 @@ func processProducerReward(s *state.Session, witnessName string, blockNum uint32
 		objects.MutateAccount(s, auth.AccountName(witnessName), func(a *objects.Account) {
 			a.Balance += pay
 		})
+		// database.cpp:1853-1859 — the liquid branch pushes producer_reward too.
+		emitProducerReward(d, witnessName, pay, false)
 	}
 }
 

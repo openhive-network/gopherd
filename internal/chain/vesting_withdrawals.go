@@ -2,6 +2,7 @@ package chain
 
 import (
 	"fmt"
+	"gopherd/internal/protocol/op"
 	"math/big"
 	"math/bits"
 	"os"
@@ -98,7 +99,7 @@ func vestsToHive(vests int64, dgpo *objects.DynamicGlobalProperty) int64 {
 // The full hived flow also generates a fill_vesting_withdraw virtual op
 // (for history) and applies HF20+ RC mana regeneration / HF24+ delayed
 // voting tracking; those land with the corresponding subsystems.
-func processVestingWithdrawals(s *state.Session, blockTime uint32, hooks *blockHookScratch) {
+func processVestingWithdrawals(s *state.Session, blockTime uint32, hooks *blockHookScratch, d *Database) {
 	store := objects.EnsureVestingWithdrawalScheduleStore(s)
 	// Short-circuit when the earliest scheduled withdrawal is in the
 	// future. Killed the per-block Session.Range cost (~250 bytes/block,
@@ -116,7 +117,7 @@ func processVestingWithdrawals(s *state.Session, blockTime uint32, hooks *blockH
 	})
 
 	for _, p := range *ready {
-		processOneWithdrawal(s, p.account, p.nextWithdrawal, blockTime)
+		processOneWithdrawal(s, p.account, p.nextWithdrawal, blockTime, d)
 	}
 }
 
@@ -124,7 +125,7 @@ func processVestingWithdrawals(s *state.Session, blockTime uint32, hooks *blockH
 // vesting withdrawal — convert min(rate, remaining) VESTS to HIVE, credit
 // from_account.balance (and any routed accounts), update DGPO totals,
 // advance or clear the schedule.
-func processOneWithdrawal(s *state.Session, accountName string, scheduledTime, blockTime uint32) {
+func processOneWithdrawal(s *state.Session, accountName string, scheduledTime, blockTime uint32, d *Database) {
 	objects.DeleteVestingWithdrawalSchedule(s, scheduledTime, accountName)
 
 	a, err := objects.GetAccount(s, accountName)
@@ -204,8 +205,8 @@ func processOneWithdrawal(s *state.Session, accountName string, scheduledTime, b
 		routeDelayedVotes = map[string]int64{}
 	}
 	var depositedVests int64
-	depositedVests += processWithdrawRoutes(s, accountName, toWithdraw, true, scheduledTime, routeDelayedVotes)
-	depositedVests += processWithdrawRoutes(s, accountName, toWithdraw, false, scheduledTime, routeDelayedVotes)
+	depositedVests += processWithdrawRoutes(s, accountName, toWithdraw, true, scheduledTime, routeDelayedVotes, d)
+	depositedVests += processWithdrawRoutes(s, accountName, toWithdraw, false, scheduledTime, routeDelayedVotes, d)
 
 	// Re-read account in case routing modified it (specifically, if a
 	// route loops back to the source account or shares the dgpo).
@@ -257,6 +258,17 @@ func processOneWithdrawal(s *state.Session, accountName string, scheduledTime, b
 	// at a different instant and counts as un-regenerated regardless.
 	if hfWithdraw.Has(hardfork.HF20) {
 		objects.RegenerateRCMana(&a, blockTime)
+	}
+	// database_vesting.cpp:252-255 — the remainder that converts to HIVE is a
+	// fill_vesting_withdraw from the account to itself, pushed before the
+	// balances move; hived emits it only when something converts.
+	if d != nil && toConvertToHive > 0 {
+		d.pushVOp(op.FillVestingWithdraw{
+			FromAccount: auth.AccountName(accountName),
+			ToAccount:   auth.AccountName(accountName),
+			Withdrawn:   vopVests(toConvertToHive),
+			Deposited:   vopHive(convertedHive),
+		})
 	}
 	a.VestingShares -= toWithdraw
 	a.Balance += convertedHive
@@ -361,7 +373,7 @@ func processOneWithdrawal(s *state.Session, accountName string, scheduledTime, b
 // for one account's withdrawal chunk. autoVest controls which pass we're
 // running — VESTS routes first (preserve precision), HIVE routes second.
 // Returns the total VESTS-satoshi diverted in this pass.
-func processWithdrawRoutes(s *state.Session, fromAccount string, toWithdraw int64, autoVest bool, now uint32, delayedVotes map[string]int64) int64 {
+func processWithdrawRoutes(s *state.Session, fromAccount string, toWithdraw int64, autoVest bool, now uint32, delayedVotes map[string]int64, d *Database) int64 {
 	var deposited int64
 	prefix := state.AppendAccountName(nil, fromAccount)
 	_ = s.Range(objects.WithdrawRouteTable, state.PrimaryIndex, prefix,
@@ -395,6 +407,23 @@ func processWithdrawRoutes(s *state.Session, fromAccount string, toWithdraw int6
 			if dgpoT, _ := objects.GetDGPO(s); wdTraceOn(dgpoT.HeadBlockNumber) {
 				fmt.Fprintf(os.Stderr, "GHIVEDIFF WDROUTE block=%d from=%s to=%s pct=%d autoVest=%v toDeposit=%d\n",
 					dgpoT.HeadBlockNumber, fromAccount, route.To, route.Percent, route.AutoVest, toDeposit)
+			}
+			// database_vesting.cpp:197-224 — fill_vesting_withdraw( from, to,
+			// to_deposit VESTS, deposited ) is pre-pushed before the deposit moves,
+			// carrying VESTS for an auto_vest route and HIVE otherwise.
+			if d != nil && toDeposit > 0 {
+				deposited := vopVests(toDeposit)
+				if !autoVest {
+					if dgpoD, derr := objects.GetDGPO(s); derr == nil {
+						deposited = vopHive(vestsToHive(toDeposit, &dgpoD))
+					}
+				}
+				d.pushVOp(op.FillVestingWithdraw{
+					FromAccount: auth.AccountName(fromAccount),
+					ToAccount:   route.To,
+					Withdrawn:   vopVests(toDeposit),
+					Deposited:   deposited,
+				})
 			}
 			if autoVest {
 				// database_vesting.cpp:199-200 — regenerate the RECIPIENT

@@ -1,7 +1,9 @@
 package chain
 
 import (
+	"gopherd/internal/protocol/auth"
 	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/protocol/op"
 	"gopherd/internal/state"
 	"gopherd/internal/state/objects"
 )
@@ -23,7 +25,7 @@ import (
 // hundreds of ms) and can be replaced with a secondary index later.
 //
 // Pre-HF24 this is a no-op — DelayedVotes is empty for every account.
-func processDelayedVoting(s *state.Session, blockTime, blockNum uint32) {
+func processDelayedVoting(s *state.Session, blockTime, blockNum uint32, d *Database) {
 	hf := hardfork.SetForBlock(blockNum)
 	if !hf.Has(hardfork.HF24) {
 		return
@@ -87,6 +89,10 @@ func processDelayedVoting(s *state.Session, blockTime, blockNum uint32) {
 		a, err := objects.GetAccount(s, m.name)
 		if err != nil {
 			continue
+		}
+		// util/delayed_voting.cpp:97 — pushed before adjust_proxied_witness_votes.
+		if d != nil {
+			d.pushVOp(op.DelayedVoting{Voter: auth.AccountName(m.name), Votes: m.val})
 		}
 		objects.AdjustProxiedWitnessVotes(s, &a, int64(m.val))
 	}

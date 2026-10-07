@@ -1,7 +1,9 @@
 package chain
 
 import (
+	"gopherd/internal/protocol/asset"
 	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/protocol/op"
 	"gopherd/internal/state"
 	"gopherd/internal/state/objects"
 )
@@ -17,7 +19,7 @@ const nullAccountName = "null"
 // supply totals.
 //
 // Pre-HF14, no-op (matches HIVE_HARDFORK_0_14__327 gate).
-func clearNullAccountBalance(s *state.Session, blockNum uint32) {
+func clearNullAccountBalance(s *state.Session, blockNum uint32, d *Database) {
 	hf := hardfork.SetForBlock(blockNum)
 	if !hf.Has(hardfork.HF14) {
 		return
@@ -38,6 +40,36 @@ func clearNullAccountBalance(s *state.Session, blockNum uint32) {
 	// sum so it leaves current_supply alongside the regular HIVE balances.
 	totalHIVE := a.Balance + a.SavingsBalance + a.RewardHive + a.RewardVestingHive
 	totalHBD := a.HBDBalance + a.SavingsHBDBalance + a.RewardHBD
+
+	// database.cpp:1142-1159 collect_account_total_balance + :1192-1203: when
+	// nothing is held the sweep is skipped entirely; otherwise
+	// clear_null_account_balance is pushed FIRST (pre-push) listing, in this
+	// order and only when non-zero, the HIVE (liquid + savings + rewards +
+	// the HIVE value of all vests), the VESTS (vesting + reward vests) and
+	// the HBD (liquid + savings + rewards) about to be burned.
+	vopHiveTotal := totalHIVE
+	vopVestsTotal := a.VestingShares + a.RewardVests
+	if a.VestingShares > 0 {
+		if dgpoV, derr := objects.GetDGPO(s); derr == nil && dgpoV.TotalVestingShares > 0 {
+			vopHiveTotal += mulDiv(a.VestingShares, dgpoV.TotalVestingFundHive, dgpoV.TotalVestingShares)
+		}
+	}
+	if vopHiveTotal == 0 && vopVestsTotal == 0 && totalHBD == 0 {
+		return
+	}
+	if d != nil {
+		var cleared []asset.Asset
+		if vopHiveTotal > 0 {
+			cleared = append(cleared, vopHive(vopHiveTotal))
+		}
+		if vopVestsTotal > 0 {
+			cleared = append(cleared, vopVests(vopVestsTotal))
+		}
+		if totalHBD > 0 {
+			cleared = append(cleared, vopHbd(totalHBD))
+		}
+		d.pushVOp(op.ClearNullAccountBalance{TotalCleared: cleared})
+	}
 
 	// Mirror C++ database.cpp:1186-1204 — call adjust_balance /
 	// adjust_savings_balance with the negated current balance so the

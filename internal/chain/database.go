@@ -1222,12 +1222,12 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	// updates the producer's record before the LIB recompute below).
 	d.updateProducerLastConfirmed(session, hdr.Witness, blockNum)
 
-	clearExpiredOrders(session, hdr.Timestamp)
+	clearExpiredOrders(session, hdr.Timestamp, d)
 	clearExpiredDelegations(session, hdr.Timestamp, d)
 	updateWitnessSchedule(session, blockNum, &d.schedScratch)
 	updateMedianFeed(session, blockNum, hdr.Timestamp)
 	updateVirtualSupply(session, blockNum)
-	clearNullAccountBalance(session, blockNum)
+	clearNullAccountBalance(session, blockNum, d)
 	// Treasury sweep (post-HF24): "steem.dao" is the obsolete treasury; any
 	// funds that land on it — notably the DHF return-proposal payment whose
 	// receiver is still "steem.dao" — must be migrated to the current
@@ -1243,7 +1243,7 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 			(sd.Balance > 0 || sd.HBDBalance > 0 || sd.SavingsBalance > 0 ||
 				sd.SavingsHBDBalance > 0 || sd.RewardHive > 0 || sd.RewardHBD > 0 ||
 				sd.VestingShares > 0) {
-			consolidateTreasuryBalance(session, hdr.Timestamp)
+			consolidateTreasuryBalance(session, hdr.Timestamp, d)
 		}
 	}
 	processProducerReward(session, hdr.Witness, blockNum, d)
@@ -1348,16 +1348,16 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	}
 	processConversions(session, hdr.Timestamp, &d.hooks, d)
 	processCommentCashouts(session, hdr.Timestamp, blockNum, &d.hooks, d)
-	processVestingWithdrawals(session, hdr.Timestamp, &d.hooks)
+	processVestingWithdrawals(session, hdr.Timestamp, &d.hooks, d)
 	processSavingsWithdraws(session, hdr.Timestamp, d)
 	processSubsidizedAccounts(session, blockNum)
-	payLiquidityReward(session, blockNum, hdr.Timestamp)
+	payLiquidityReward(session, blockNum, hdr.Timestamp, d)
 	updateVirtualSupply(session, blockNum)
-	processAccountRecovery(session, hdr.Timestamp)
+	processAccountRecovery(session, hdr.Timestamp, d)
 	expireEscrowRatifications(session, hdr.Timestamp, d)
 	processDeclineVotingRights(session, hdr.Timestamp, blockNum, d)
 	processProposals(session, hdr.Timestamp, blockNum, d)
-	processDelayedVoting(session, hdr.Timestamp, blockNum)
+	processDelayedVoting(session, hdr.Timestamp, blockNum, d)
 	removeExpiredGovernanceVotes(session, hdr.Timestamp, blockNum, d)
 	processRecurrentTransfers(session, hdr.Timestamp, blockNum, d)
 	processHardforks(session, blockNum, hdr.Timestamp, d)
