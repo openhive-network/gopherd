@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"gopherd/internal/protocol/asset"
+	"gopherd/internal/protocol/auth"
 	"gopherd/internal/protocol/hardfork"
 	"gopherd/internal/protocol/op"
 	"gopherd/internal/state"
@@ -135,6 +136,14 @@ func (createClaimedAccountEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		return err
 	} else if has {
 		return fmt.Errorf("%w: %q", ErrAccountAlreadyExists, cc.NewAccountName)
+	}
+	// hive_evaluator_account.cpp:493-495: every account named in the new
+	// account's authorities must exist (account_create has the same check;
+	// this path lacked it).
+	for _, a := range []auth.Authority{cc.Owner, cc.Active, cc.Posting} {
+		if err := verifyAuthorityAccountsExist(ctx, a); err != nil {
+			return err
+		}
 	}
 	// HF20+ VotingManaCurrent is VESTS (no vesting at creation = 0);
 	// pre-HF20 it is percent (10000 = full).
