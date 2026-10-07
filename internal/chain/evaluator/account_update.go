@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 
+	"gopherd/internal/crypto"
 	"gopherd/internal/protocol/auth"
 	"gopherd/internal/protocol/hardfork"
 	"gopherd/internal/protocol/op"
@@ -85,12 +86,29 @@ func (accountUpdateEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		}
 		return err
 	}
+	// hive_evaluator_account.cpp:299: the temp account cannot be updated
+	// (its authority is open, so anyone could otherwise rewrite it).
+	if au.Account == hiveTempAccount {
+		return fmt.Errorf("account_update: cannot update temp account")
+	}
 	// HF29 FIX_OPEN_AUTHORITY (hive_evaluator_account.cpp:308-314). Placed
 	// ahead of the accounts-exist checks to match hived's ordering, so a
 	// rejection reports the same reason theirs does when both would fail.
 	if hf29Rule(ctx, hardfork.HF29) {
 		if err := validateAccountUpdateAuthorities(au.Account, au.Owner, au.Active, au.Posting); err != nil {
 			return err
+		}
+	}
+	// hive_evaluator_account.cpp:305-313 (HF20): validate_auth_size on every
+	// authority carried by the op, independent of HF29's open-authority rule.
+	if ctx.Hardforks.Has(hardfork.HF20) {
+		for _, a := range []*auth.Authority{au.Owner, au.Active, au.Posting} {
+			if a == nil {
+				continue
+			}
+			if err := validateAuthSize(*a, string(au.Account)); err != nil {
+				return err
+			}
 		}
 	}
 	// hived: each rotated authority's account_auths must reference real
@@ -217,11 +235,29 @@ func (accountUpdate2Evaluator) Apply(ctx *Context, opArg op.Op) error {
 			return err
 		}
 	}
-	if au.MemoKey != nil {
+	// hive_evaluator_account.cpp:357: the temp account cannot be updated.
+	if au.Account == hiveTempAccount {
+		return fmt.Errorf("account_update2: cannot update temp account")
+	}
+	// hive_evaluator_account.cpp:367-369:
+	//   if( o.memo_key && *o.memo_key != public_key_type() ) acc.memo_key = *o.memo_key;
+	// The null key is a sentinel for "leave it", same as in account_update;
+	// writing it zeroed the account's memo key.
+	if au.MemoKey != nil && *au.MemoKey != (crypto.PublicKey{}) {
 		a.MemoKey = *au.MemoKey
 	}
 	if au.JSONMetadata != "" {
 		a.JSONMetadata = au.JSONMetadata
+	}
+	// hive_evaluator_account.cpp:368-373: every account named in a rotated
+	// authority must exist (account_update has this; update2 lacked it).
+	for _, pa := range []*auth.Authority{au.Owner, au.Active, au.Posting} {
+		if pa == nil {
+			continue
+		}
+		if err := verifyAuthorityAccountsExist(ctx, *pa); err != nil {
+			return err
+		}
 	}
 	// Rotate authorities on the account_authority_object.
 	authObj, authErr := objects.GetAccountAuthority(ctx.DB, au.Account)
@@ -306,3 +342,8 @@ func validateAccountUpdateAuthorities(account auth.AccountName, owner, active, p
 	}
 	return nil
 }
+
+// hiveTempAccount is HIVE_TEMP_ACCOUNT ("temp"): an account with an open
+// authority that hived refuses to let account_update / account_update2 touch
+// (hive_evaluator_account.cpp:299, :357).
+const hiveTempAccount = "temp"
