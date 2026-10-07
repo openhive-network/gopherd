@@ -180,15 +180,19 @@ func createVestingImpl(s *state.Session, accountName string, hiveSatoshi int64, 
 			a.RewardVestingHive += hiveSatoshi
 		} else {
 			if manabarHF20 {
+				// database.cpp:1023: regenerate_rc_mana( to_account, _now )
+				// BEFORE the vests move, so the elapsed time is credited
+				// against the OLD ceiling; update_account_after_vest_change
+				// (below) then hands out the new headroom once. Skipping the
+				// pre-change regeneration here was 99 % of the "not regenerated
+				// prior to VEST change" count, and under HF29 hived asserts it.
+				objects.RegenerateRCMana(a, dgpoRef.Time)
 				objects.UpdateVotingManabar(a, dgpoRef.Time, dvPoolPct, vestsAmount, dgpoRef.HeadBlockNumber)
 			}
 			a.VestingShares += vestsAmount
 			// Gaining VESTS raises max_rc, and hived credits that increase to
-			// current mana immediately (update_account_after_vest_change) so the
-			// account can use the new RC right away. gopherd only ran this on
-			// withdrawals and delegations, never on powering up, so an account
-			// funded after creation carried a billion-RC ceiling with zero
-			// usable mana until five days of regeneration had passed.
+			// current mana immediately (update_account_after_vest_change,
+			// database.cpp:1039) so the account can use the new RC right away.
 			if manabarHF20 {
 				objects.HandleVestingWithdrawalRCImpact(s, a, dgpoRef.Time)
 			}
