@@ -27,8 +27,25 @@ import (
 )
 
 // transactionBaseStateBytes mirrors state_object_size_info::transaction_base_size
-// — a fixed per-tx state-bytes overhead (recorded in resource_sizes.cpp).
-const transactionBaseStateBytes int64 = 256
+// (resource_sizes.cpp:120-122): SIZE(transaction_index node, 128) ×
+// TEMPORARY_STATE_BYTE × 1, "multiply by signature expiration time (rounded
+// up to full hours)". The multiplication happens in count_resources
+// (resource_count.cpp:621-623); a flat 256 was charged here before.
+const transactionBaseStateBytes int64 = 128
+
+// transactionExpirationHours is resource_count.cpp:621:
+//
+//	( tx.expiration - now + 3600 - 1 ) / 3600
+//
+// in uint32 arithmetic. A transaction is only counted after it passed the
+// expiration check, so expiration > now and the result is at least 1;
+// clamp at 0 for callers that count a synthetic transaction.
+func transactionExpirationHours(expiration, now uint32) int64 {
+	if expiration <= now {
+		return 0
+	}
+	return (int64(expiration) - int64(now) + 3600 - 1) / 3600
+}
 
 // rcCountVisitor collects per-op resource counts. Mirrors C++
 // count_operation_visitor's mutable accumulators.
@@ -43,14 +60,16 @@ type rcCountVisitor struct {
 
 // visit accumulates op `o` into v. Mirrors count_operation_visitor's
 // per-op overloads.
-func (v *rcCountVisitor) visit(o op.Op) {
-	// state_bytes — reuse the existing stateBytesForOp helper.
-	v.stateBytesCount += stateBytesForOp(o)
+func (v *rcCountVisitor) visit(o op.Op, now uint32) {
+	// state_bytes — hived's table, case by case.
+	v.stateBytesCount += stateBytesForOp(o, now)
 
-	// execution_time — reuse the execTimeNS map.
+	// execution_time — the per-op table plus the pieces hived adds outside
+	// it (recurrent_transfer executions, delegate_rc).
 	if t, ok := execTimeNS[o.Tag]; ok {
 		v.executionTimeCount += t
 	}
+	v.executionTimeCount += extraExecTimeForOp(o)
 
 	// market_op flag — these match the C++ visitor's market_op_count++.
 	switch o.Tag {
@@ -92,10 +111,14 @@ func (v *rcCountVisitor) visit(o op.Op) {
 //
 // The initial value of result is preserved (used for the per-tx
 // differential_usage initialization).
-func CountResources(stx *tx.SignedTransaction, txSize int64, result *[objects.RCNumResources]int64) {
+//
+// now is hived's `now` argument to count_resources: head_block_time() at the
+// moment the transaction is charged. It only feeds the per-transaction state
+// charge, which scales with how many whole hours remain until expiration.
+func CountResources(stx *tx.SignedTransaction, txSize int64, now uint32, result *[objects.RCNumResources]int64) {
 	var v rcCountVisitor
 	for _, o := range stx.Operations {
-		v.visit(o)
+		v.visit(o, now)
 	}
 	subsidized := v.subsidizedOp &&
 		len(stx.Operations) == 1 &&
@@ -116,7 +139,8 @@ func CountResources(stx *tx.SignedTransaction, txSize int64, result *[objects.RC
 	if v.marketOpCount > 0 {
 		result[objects.RCMarketBytes] += txSize
 	}
-	result[objects.RCStateBytes] += v.stateBytesCount + transactionBaseStateBytes
+	result[objects.RCStateBytes] += v.stateBytesCount +
+		transactionBaseStateBytes*transactionExpirationHours(stx.Expiration, now)
 	// per-tx execution time includes the base + signature verification.
 	verifyTime := verifyAuthorityTimeNS * int64(len(stx.Signatures))
 	result[objects.RCExecutionTime] += v.executionTimeCount + transactionExecTimeNS + verifyTime
@@ -134,8 +158,8 @@ func CountResources(stx *tx.SignedTransaction, txSize int64, result *[objects.RC
 // CountResourcesForTx is a convenience wrapper that allocates a fresh
 // result slice. Tests use this; production callers initialize result
 // from the (negated) differential_usage on rc_pending_data and reuse it.
-func CountResourcesForTx(stx *tx.SignedTransaction, txSize int64) [objects.RCNumResources]int64 {
+func CountResourcesForTx(stx *tx.SignedTransaction, txSize int64, now uint32) [objects.RCNumResources]int64 {
 	var result [objects.RCNumResources]int64
-	CountResources(stx, txSize, &result)
+	CountResources(stx, txSize, now, &result)
 	return result
 }

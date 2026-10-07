@@ -1,6 +1,7 @@
 package chain
 
 import (
+	"gopherd/internal/protocol/auth"
 	"gopherd/internal/protocol/hardfork"
 	"gopherd/internal/protocol/op"
 	"gopherd/internal/protocol/tx"
@@ -21,52 +22,81 @@ const (
 	persistentStateByte int64 = 1 * 5 * 365 * 24 // 43,800
 )
 
-// Multi-index node sizes in bytes (from resource_sizes.cpp's SIZE
-// macros). These are the per-row state object sizes as measured by
-// hived's chainbase introspection.
+// State sizes, verbatim from state_object_size_info's constructor
+// (libraries/chain/rc/resource_sizes.cpp:55-164). Each is
+// SIZE(multiindex node) × byte-class × lifetime-hours, already multiplied
+// out; the names follow hived's so the two tables can be diffed side by
+// side. An earlier version of this table carried approximations ("≈ 760 ×
+// persistent", a flat 200 per authority, comment = 224 × 1) that were off
+// from hived by up to four orders of magnitude on the most common
+// operations, which under HF29 (RC is consensus) would have been a split.
 const (
-	accountIndexNodeSize           int64 = 616 + 144 // = 760
-	commentIndexNodeSize           int64 = 224
-	convertIndexNodeSize           int64 = 96
-	collateralConvertNodeSize      int64 = 128
-	declineVotingRightsNodeSize    int64 = 128
-	escrowIndexNodeSize            int64 = 216
-	limitOrderIndexNodeSize        int64 = 208
-	savingsWithdrawIndexNodeSize   int64 = 232
-	transactionIndexNodeSize       int64 = 128
-	vestingDelegationNodeSize      int64 = 88
-	vestingDelegationExpNodeSize   int64 = 120
-	withdrawVestingRouteNodeSize   int64 = 144
-	witnessIndexNodeSize           int64 = 544
-	witnessVoteIndexNodeSize       int64 = 136
-	proposalIndexNodeSize          int64 = 336
-	proposalVoteIndexNodeSize      int64 = 128
-	recurrentTransferIndexNodeSize int64 = 200
-	rcDirectDelegationNodeSize     int64 = 88
-	ownerAuthHistoryObjectSize     int64 = 200
+	// account create (all versions): account node + account_authority node.
+	rcAccountCreateBaseSize      = (616+144)*persistentStateByte + 312*persistentStateByte
+	rcAuthorityAccountMemberSize = 24 * persistentStateByte
+	rcAuthorityKeyMemberSize     = 36 * persistentStateByte
+	// account update (both versions)
+	rcOwnerAuthorityHistoryObjectSize = 168 * temporaryStateByte * 30 * 24 // HIVE_OWNER_AUTH_RECOVERY_PERIOD
+	// transfer to vesting: delayed_votes_data for HIVE_DELAYED_VOTING_TOTAL_INTERVAL_SECONDS
+	rcTransferToVestingSize = 16 * temporaryStateByte * 30 * 24
+	// request account recovery: HIVE_ACCOUNT_RECOVERY_REQUEST_EXPIRATION_PERIOD
+	rcRequestAccountRecoverySize = 192 * temporaryStateByte * 24
+	// change recovery account: HIVE_OWNER_AUTH_RECOVERY_PERIOD
+	rcChangeRecoveryAccountSize = 136 * temporaryStateByte * 30 * 24
+	// comment: comment node (persistent) + comment_cashout node for HIVE_CASHOUT_WINDOW_SECONDS
+	rcCommentBaseSize                = 96*persistentStateByte + 192*temporaryStateByte*7*24
+	rcCommentPermlinkCharSize        = temporaryStateByte * 7 * 24
+	rcCommentBeneficiariesMemberSize = 8 * temporaryStateByte * 7 * 24
+	// vote: comment_vote node for HIVE_CASHOUT_WINDOW_SECONDS
+	rcVoteSize = 144 * temporaryStateByte * 7 * 24
+	// convert: HIVE_CONVERSION_DELAY (3.5 days)
+	rcConvertSize = 120 * temporaryStateByte * 7 * 12
+	// collateralized convert: HIVE_COLLATERALIZED_CONVERSION_DELAY
+	rcCollateralizedConvertSize = 128 * temporaryStateByte * 7 * 12
+	// decline voting rights: HIVE_OWNER_AUTH_RECOVERY_PERIOD
+	rcDeclineVotingRightsSize = 128 * temporaryStateByte * 30 * 24
+	// escrow transfer
+	rcEscrowTransferSize = 216 * lastingStateByte
+	// limit order create (both versions): HIVE_MAX_LIMIT_ORDER_EXPIRATION
+	rcLimitOrderCreateSize = 208 * temporaryStateByte * 28 * 24
+	// transfer from savings: HIVE_SAVINGS_WITHDRAW_TIME
+	rcTransferFromSavingsSize = 232 * temporaryStateByte * 3 * 24
+	// delegate vesting shares
+	rcVestingDelegationObjectSize           = 88 * lastingStateByte
+	rcVestingDelegationExpirationObjectSize = 120 * temporaryStateByte * 5 * 24 // HIVE_DELEGATION_RETURN_PERIOD_HF20
+	// set withdraw vesting route
+	rcSetWithdrawVestingRouteSize = 144 * lastingStateByte
+	// witness update
+	rcWitnessUpdateBaseSize    = 544 * persistentStateByte
+	rcWitnessUpdateURLCharSize = persistentStateByte
+	// account witness vote: HIVE_GOVERNANCE_VOTE_EXPIRATION_PERIOD
+	rcAccountWitnessVoteSize = 136 * temporaryStateByte * 365 * 24
+	// create proposal: × actual lifetime (hours, rounded up)
+	rcCreateProposalBaseSize                = 336 * temporaryStateByte
+	rcCreateProposalSubjectPermlinkCharSize = temporaryStateByte
+	// update proposal votes: HIVE_GOVERNANCE_VOTE_EXPIRATION_PERIOD, × ids
+	rcUpdateProposalVotesMemberSize = 128 * temporaryStateByte * 365 * 24
+	// recurrent transfer: × actual lifetime (recurrence × executions hours)
+	rcRecurrentTransferBaseSize     = 200 * temporaryStateByte
+	rcRecurrentTransferMemoCharSize = temporaryStateByte
+	// direct rc delegation: × number of delegatees
+	rcDelegateRCBaseSize = 88 * lastingStateByte
+
+	// Node sizes the differential visitor (rc_differential.go) refers to by
+	// name.
+	witnessIndexNodeSize       int64 = 544
+	rcDirectDelegationNodeSize int64 = 88
+	ownerAuthHistoryObjectSize int64 = 168
+	witnessUpdateURLCharSize         = rcWitnessUpdateURLCharSize
+	authorityAccountMemberSize       = rcAuthorityAccountMemberSize
+	authorityKeyMemberSize           = rcAuthorityKeyMemberSize
 )
 
-// Lifetime windows (in HOURS) for each TEMPORARY object. From
-// resource_sizes.cpp.
+// Execution-time pieces hived keeps outside the per-op table
+// (resource_sizes.cpp:225-227).
 const (
-	limitOrderLifetimeHours        int64 = 28 * 24  // HIVE_MAX_LIMIT_ORDER_EXPIRATION (28 days)
-	collateralConvertLifetimeHours int64 = 7 * 12   // 3.5 days
-	declineVotingLifetimeHours     int64 = 30 * 24  // HIVE_OWNER_AUTH_RECOVERY_PERIOD
-	savingsWithdrawLifetimeHours   int64 = 3 * 24   // HIVE_SAVINGS_WITHDRAW_TIME
-	vestingDelegationExpHours      int64 = 5 * 24   // HIVE_DELEGATION_RETURN_PERIOD_HF20
-	witnessVoteLifetimeHours       int64 = 365 * 24 // HIVE_GOVERNANCE_VOTE_EXPIRATION_PERIOD
-	proposalVoteLifetimeHours      int64 = 365 * 24 // same
-)
-
-// Per-byte state costs for variable-length fields.
-const (
-	commentPermlinkCharSize        int64 = temporaryStateByte // dynamic
-	witnessUpdateURLCharSize       int64 = persistentStateByte
-	authorityAccountMemberSize     int64 = persistentStateByte * 80 // approx
-	authorityKeyMemberSize         int64 = persistentStateByte * 80
-	commentBeneficiariesMemberSize int64 = temporaryStateByte * 16
-	createProposalSubjectCharSize  int64 = temporaryStateByte // × lifetime
-	recurrentTransferMemoCharSize  int64 = temporaryStateByte // × lifetime
+	rcRecurrentTransferProcessingTimeNS int64 = 14347 // × executions
+	rcDelegateRCTimeNS                  int64 = 75000 // on top of custom_json_time
 )
 
 // Execution times (in nanoseconds) from resource_sizes.cpp's
@@ -118,8 +148,6 @@ var execTimeNS = map[op.Tag]int64{
 	op.TagRemoveProposal:              527 + 129323 + 3886 + 1692,
 	op.TagRecurrentTransfer:           914 + 12426 + 330 + 238,
 	op.TagRecoverAccount:              727 + 17934 + 149 + 145,
-	op.TagPow:                         177321 + 23458 + 165 + 57,
-	op.TagPow2:                        86349 + 17226 + 160 + 92,
 }
 
 // transactionExecTimeNS — per-tx overhead from operation_exec_info::
@@ -130,140 +158,179 @@ const transactionExecTimeNS int64 = 2821 + 386 + 3415
 // signatures during replay, but the constant is needed for live mode.
 const verifyAuthorityTimeNS int64 = 94165
 
-// stateBytesForOp returns the state-bytes resource cost for op `o`
-// (in hour-bytes). For ops that create new chain state objects (orders,
-// withdrawals, comments...), this is `node_size × lifetime_hours ×
-// byte_cost_class`. For pure transfers (no state object), this is 0.
-//
-// Mirrors the count_operation_visitor methods in
-// libraries/chain/rc/resource_count.cpp.
-func stateBytesForOp(o op.Op) int64 {
+// stateBytesForOp returns the state_bytes resource usage of one operation,
+// mirroring count_operation_visitor in rc/resource_count.cpp:196-553 case
+// by case. `now` is head_block_time, used for create_proposal's lifetime.
+// Operations not listed consume no state bytes in hived either.
+func stateBytesForOp(o op.Op, now uint32) int64 {
 	switch o.Tag {
 	case op.TagAccountCreate:
-		// account_create_base_size ≈ 760 × persistent + authority_dynamic
-		base := accountIndexNodeSize * persistentStateByte
-		base += authorityDynamicSize(o.AsAccountCreate().Owner)
-		base += authorityDynamicSize(o.AsAccountCreate().Active)
-		base += authorityDynamicSize(o.AsAccountCreate().Posting)
-		return base
+		a := o.AsAccountCreate()
+		return rcAccountCreateBaseSize +
+			authorityDynamicSize(&a.Owner) + authorityDynamicSize(&a.Active) + authorityDynamicSize(&a.Posting)
 	case op.TagAccountCreateWithDelegation:
-		base := accountIndexNodeSize * persistentStateByte
-		base += authorityDynamicSize(o.AsAccountCreateWithDelegation().Owner)
-		base += authorityDynamicSize(o.AsAccountCreateWithDelegation().Active)
-		base += authorityDynamicSize(o.AsAccountCreateWithDelegation().Posting)
-		base += vestingDelegationNodeSize * lastingStateByte
-		return base
+		a := o.AsAccountCreateWithDelegation()
+		return rcAccountCreateBaseSize +
+			authorityDynamicSize(&a.Owner) + authorityDynamicSize(&a.Active) + authorityDynamicSize(&a.Posting) +
+			rcVestingDelegationObjectSize
 	case op.TagCreateClaimedAccount:
-		base := accountIndexNodeSize * persistentStateByte
-		base += authorityDynamicSize(o.AsCreateClaimedAccount().Owner)
-		base += authorityDynamicSize(o.AsCreateClaimedAccount().Active)
-		base += authorityDynamicSize(o.AsCreateClaimedAccount().Posting)
-		return base
+		a := o.AsCreateClaimedAccount()
+		return rcAccountCreateBaseSize +
+			authorityDynamicSize(&a.Owner) + authorityDynamicSize(&a.Active) + authorityDynamicSize(&a.Posting)
 	case op.TagAccountUpdate:
+		a := o.AsAccountUpdate()
 		var s int64
-		if o.AsAccountUpdate().Owner != nil {
-			s += authorityDynamicSize(*o.AsAccountUpdate().Owner)
-			s += ownerAuthHistoryObjectSize * persistentStateByte
+		if a.Owner != nil {
+			s += authorityDynamicSize(a.Owner) + rcOwnerAuthorityHistoryObjectSize
 		}
-		if o.AsAccountUpdate().Active != nil {
-			s += authorityDynamicSize(*o.AsAccountUpdate().Active)
+		if a.Active != nil {
+			s += authorityDynamicSize(a.Active)
 		}
-		if o.AsAccountUpdate().Posting != nil {
-			s += authorityDynamicSize(*o.AsAccountUpdate().Posting)
+		if a.Posting != nil {
+			s += authorityDynamicSize(a.Posting)
+		}
+		return s
+	case op.TagAccountUpdate2:
+		a := o.AsAccountUpdate2()
+		var s int64
+		if a.Owner != nil {
+			s += authorityDynamicSize(a.Owner) + rcOwnerAuthorityHistoryObjectSize
+		}
+		if a.Active != nil {
+			s += authorityDynamicSize(a.Active)
+		}
+		if a.Posting != nil {
+			s += authorityDynamicSize(a.Posting)
 		}
 		return s
 	case op.TagAccountWitnessVote:
-		if !o.AsAccountWitnessVote().Approve {
-			return 0
+		if o.AsAccountWitnessVote().Approve {
+			return rcAccountWitnessVoteSize
 		}
-		return witnessVoteIndexNodeSize * temporaryStateByte * witnessVoteLifetimeHours
+		return 0
 	case op.TagComment:
-		return commentIndexNodeSize*temporaryStateByte +
-			commentPermlinkCharSize*int64(len(o.AsComment().Permlink))
+		return rcCommentBaseSize + rcCommentPermlinkCharSize*int64(len(o.AsComment().Permlink))
 	case op.TagCommentOptions:
-		return commentBeneficiariesMemberSize * int64(len(o.AsCommentOptions().Beneficiaries))
+		// comment_payout_beneficiaries extension only.
+		return rcCommentBeneficiariesMemberSize * int64(len(o.AsCommentOptions().Beneficiaries))
 	case op.TagConvert:
-		return convertIndexNodeSize * temporaryStateByte * 7 * 12 * 24 // 3.5 days
+		return rcConvertSize
 	case op.TagCollateralizedConvert:
-		return collateralConvertNodeSize * temporaryStateByte * collateralConvertLifetimeHours
+		return rcCollateralizedConvertSize
 	case op.TagDeclineVotingRights:
-		if !o.AsDeclineVotingRights().Decline {
-			return 0
+		if o.AsDeclineVotingRights().Decline {
+			return rcDeclineVotingRightsSize
 		}
-		return declineVotingRightsNodeSize * temporaryStateByte * declineVotingLifetimeHours
+		return 0
 	case op.TagDelegateVestingShares:
-		// max(vesting_delegation_object, vesting_delegation_expiration_object)
-		a := vestingDelegationNodeSize * lastingStateByte
-		b := vestingDelegationExpNodeSize * temporaryStateByte * vestingDelegationExpHours
-		if a > b {
-			return a
+		if o.AsDelegateVestingShares().VestingShares.Amount > 0 {
+			// delegate_vesting_shares_size = max(object, expiration object)
+			if rcVestingDelegationObjectSize > rcVestingDelegationExpirationObjectSize {
+				return rcVestingDelegationObjectSize
+			}
+			return rcVestingDelegationExpirationObjectSize
 		}
-		return b
+		return rcVestingDelegationExpirationObjectSize
 	case op.TagEscrowTransfer:
-		return escrowIndexNodeSize * lastingStateByte
+		return rcEscrowTransferSize
 	case op.TagLimitOrderCreate:
-		// FillOrKill orders don't persist (they fill or cancel immediately).
 		if o.AsLimitOrderCreate().FillOrKill {
 			return 0
 		}
-		return limitOrderIndexNodeSize * temporaryStateByte * limitOrderLifetimeHours
+		return rcLimitOrderCreateSize
 	case op.TagLimitOrderCreate2:
 		if o.AsLimitOrderCreate2().FillOrKill {
 			return 0
 		}
-		return limitOrderIndexNodeSize * temporaryStateByte * limitOrderLifetimeHours
+		return rcLimitOrderCreateSize
+	case op.TagRequestAccountRecovery:
+		if o.AsRequestAccountRecovery().NewOwnerAuthority.WeightThreshold != 0 {
+			return rcRequestAccountRecoverySize
+		}
+		return 0
 	case op.TagSetWithdrawVestingRoute:
-		if o.AsSetWithdrawVestingRoute().Percent == 0 {
+		if o.AsSetWithdrawVestingRoute().Percent != 0 {
+			return rcSetWithdrawVestingRouteSize
+		}
+		return 0
+	case op.TagVote:
+		return rcVoteSize
+	case op.TagWitnessUpdate:
+		return rcWitnessUpdateBaseSize + rcWitnessUpdateURLCharSize*int64(len(o.AsWitnessUpdate().URL))
+	case op.TagTransferToVesting:
+		return rcTransferToVestingSize
+	case op.TagTransferFromSavings:
+		return rcTransferFromSavingsSize
+	case op.TagChangeRecoveryAccount:
+		return rcChangeRecoveryAccountSize
+	case op.TagCreateProposal:
+		cp := o.AsCreateProposal()
+		// FC_ASSERT( op.end_date > _now ); lifetime rounded up to whole hours
+		// from NOW (not from start_date). The evaluator rejects end_date <= now
+		// before any charge, so 0 here is unreachable in practice.
+		if cp.EndDate <= now {
 			return 0
 		}
-		return withdrawVestingRouteNodeSize * lastingStateByte
-	case op.TagWitnessUpdate:
-		return witnessIndexNodeSize*persistentStateByte +
-			witnessUpdateURLCharSize*int64(len(o.AsWitnessUpdate().URL))
-	case op.TagTransferToVesting:
-		// transfer_to_vesting_size — noted as 0 in resource_sizes.cpp
-		// (no new state created; only existing balances mutated).
-		return 0
-	case op.TagTransferFromSavings:
-		return savingsWithdrawIndexNodeSize * temporaryStateByte * savingsWithdrawLifetimeHours
-	case op.TagRequestAccountRecovery:
-		// new_owner_authority weight_threshold == 0 cancels — no state.
-		// We don't have the field on our op type yet; conservative
-		// estimate the full size.
-		return 200 * temporaryStateByte * declineVotingLifetimeHours
-	case op.TagVote:
-		return commentIndexNodeSize * temporaryStateByte // approx vote_size
-	case op.TagRecurrentTransfer:
-		base := recurrentTransferIndexNodeSize * temporaryStateByte
-		base += recurrentTransferMemoCharSize * int64(len(o.AsRecurrentTransfer().Memo))
-		// hived multiplies by actual lifetime; we approximate.
-		return base * 24 * int64(o.AsRecurrentTransfer().Recurrence)
-	case op.TagCreateProposal:
-		base := proposalIndexNodeSize * temporaryStateByte
-		base += createProposalSubjectCharSize * int64(len(o.AsCreateProposal().Subject)+len(o.AsCreateProposal().Permlink))
-		// Multiply by actual lifetime: end - start, in hours.
-		lifetimeHours := int64(o.AsCreateProposal().EndDate-o.AsCreateProposal().StartDate) / 3600
-		if lifetimeHours <= 0 {
-			lifetimeHours = 1
-		}
-		return base * lifetimeHours
+		lifetime := (int64(cp.EndDate) - int64(now) + 3600 - 1) / 3600
+		size := rcCreateProposalBaseSize +
+			rcCreateProposalSubjectPermlinkCharSize*int64(len(cp.Subject)+len(cp.Permlink))
+		return size * lifetime
 	case op.TagUpdateProposalVotes:
-		return proposalVoteIndexNodeSize * temporaryStateByte * proposalVoteLifetimeHours *
-			int64(len(o.AsUpdateProposalVotes().ProposalIDs))
+		uv := o.AsUpdateProposalVotes()
+		if uv.Approve {
+			return rcUpdateProposalVotesMemberSize * int64(len(uv.ProposalIDs))
+		}
+		return 0
+	case op.TagRecurrentTransfer:
+		rt := o.AsRecurrentTransfer()
+		if rt.Amount.Amount > 0 {
+			lifetime := int64(rt.Recurrence) * int64(rt.Executions) // hours
+			return (rcRecurrentTransferBaseSize + rcRecurrentTransferMemoCharSize*int64(len(rt.Memo))) * lifetime
+		}
+		return 0
+	case op.TagRecoverAccount:
+		// Charged even when the subsidy applies; the subsidy zeroes the whole
+		// transaction afterwards (resource_count.cpp:534-546).
+		return authorityDynamicSize(&o.AsRecoverAccount().NewOwnerAuthority) + rcOwnerAuthorityHistoryObjectSize
+	case op.TagCustomJSON:
+		// delegate_rc rides in custom_json id "rc"; hived adds its state usage
+		// in handle_custom_op_usage (resource_count.cpp:548-553) once the
+		// payload was interpreted.
+		cj := o.AsCustomJSON()
+		if cj.ID == "rc" {
+			if _, delegatees, maxRC, ok := parseDelegateRCPayload(cj.JSON); ok && maxRC != 0 {
+				return rcDelegateRCBaseSize * int64(len(delegatees))
+			}
+		}
+		return 0
 	}
 	return 0
 }
 
-// authorityDynamicSize approximates authority dynamic size (counting
-// account_auths + key_auths members). authorityAccountMemberSize and
-// authorityKeyMemberSize are PERSISTENT_STATE_BYTE × 80 in hived.
-func authorityDynamicSize(a interface{}) int64 {
-	// We don't have a direct way to walk auth.Authority members
-	// from this package without adding an import. Use a flat estimate
-	// of 200 bytes per authority — typical hived authorities have
-	// 1-2 key_auths and 0 account_auths, so 80 bytes × 1-2 ≈ 80-160.
-	_ = a
-	return 200
+// authorityDynamicSize is get_authority_dynamic_size (resource_count.cpp):
+// per-member cost of the account_auths and key_auths maps.
+func authorityDynamicSize(a *auth.Authority) int64 {
+	return rcAuthorityAccountMemberSize*int64(len(a.AccountAuths)) +
+		rcAuthorityKeyMemberSize*int64(len(a.KeyAuths))
+}
+
+// extraExecTimeForOp is the execution time hived adds outside the per-op
+// table: recurrent_transfer_processing_time × executions
+// (resource_count.cpp:524-525) and delegate_rc_time for an interpreted
+// delegate_rc custom_json (rc_utility.cpp:121 → resource_count.cpp:672-678).
+func extraExecTimeForOp(o op.Op) int64 {
+	switch o.Tag {
+	case op.TagRecurrentTransfer:
+		return rcRecurrentTransferProcessingTimeNS * int64(o.AsRecurrentTransfer().Executions)
+	case op.TagCustomJSON:
+		cj := o.AsCustomJSON()
+		if cj.ID == "rc" {
+			if _, _, _, ok := parseDelegateRCPayload(cj.JSON); ok {
+				return rcDelegateRCTimeNS
+			}
+		}
+	}
+	return 0
 }
 
 // ComputeRCCost returns the total RC cost of `signedTx` at `blockNum`,
@@ -280,7 +347,7 @@ func ComputeRCCost(signedTx *tx.SignedTransaction, blockNum uint32) int64 {
 	}
 	cost := transactionExecTimeNS
 	for _, o := range signedTx.Operations {
-		cost += stateBytesForOp(o)
+		cost += stateBytesForOp(o, 0) // approximation helper: no head time available
 		if t, ok := execTimeNS[o.Tag]; ok {
 			cost += t
 		}
