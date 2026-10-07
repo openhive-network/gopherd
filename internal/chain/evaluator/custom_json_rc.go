@@ -32,6 +32,11 @@ func (customJSONEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		return fmt.Errorf("customJSONEvaluator: unexpected tag %d (%s)", opArg.Tag, opArg.Tag.Name())
 	}
 	cj := opArg.AsCustomJSON()
+	// hive_evaluator.cpp:340-343: from HF26 (SOLIDIFY_OLD_SOFTFORKS) the JSON
+	// may not exceed HIVE_CUSTOM_OP_DATA_MAX_LENGTH (8192) bytes.
+	if ctx.Hardforks.Has(hardfork.HF26) && len(cj.JSON) > customOpDataMaxLength {
+		return fmt.Errorf("custom_json: operation JSON must be at most %d bytes", customOpDataMaxLength)
+	}
 	switch cj.ID {
 	case "rc":
 		// RC delegations activate at HF26 (mirrors C++ delegate_rc_evaluator,
