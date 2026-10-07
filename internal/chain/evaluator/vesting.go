@@ -183,6 +183,22 @@ func (setWithdrawVestingRouteEvaluator) Apply(ctx *Context, opArg op.Op) error {
 			return fmt.Errorf("set_withdraw_vesting_route: cannot create a 0%% destination")
 		}
 		objects.DeleteWithdrawRoute(ctx.DB, r.FromAccount, r.ToAccount)
+	} else if !exists {
+		// hive_evaluator_transfer.cpp:409-410: `withdraw_routes < HIVE_MAX_WITHDRAW_ROUTES`
+		// (10) before a new row is created. gopherd kept no counter at all.
+		n, err := objects.CountWithdrawRoutesFrom(ctx.DB, r.FromAccount)
+		if err != nil {
+			return err
+		}
+		if n >= objects.MaxWithdrawRoutes {
+			return fmt.Errorf("set_withdraw_vesting_route: account already has the maximum number of routes (%d)", objects.MaxWithdrawRoutes)
+		}
+		objects.PutWithdrawRoute(ctx.DB, &objects.WithdrawRoute{
+			From:     r.FromAccount,
+			To:       r.ToAccount,
+			Percent:  r.Percent,
+			AutoVest: r.AutoVest,
+		})
 	} else {
 		objects.PutWithdrawRoute(ctx.DB, &objects.WithdrawRoute{
 			From:     r.FromAccount,

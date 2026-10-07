@@ -193,3 +193,27 @@ func SumWithdrawRoutePercentFrom(s *state.Session, from auth.AccountName) (uint3
 	})
 	return total, err
 }
+
+// CountWithdrawRoutesFrom returns how many withdraw_vesting_route rows have
+// from_account == from. hive_evaluator_transfer.cpp:409-410 caps a new route
+// at HIVE_MAX_WITHDRAW_ROUTES (10) per account.
+func CountWithdrawRoutesFrom(s *state.Session, from auth.AccountName) (int, error) {
+	prefix := state.AppendAccountName(nil, from)
+	n := 0
+	err := s.Range(WithdrawRouteTable, state.PrimaryIndex, prefix, func(_, value []byte) (bool, error) {
+		wr, rerr := ReadWithdrawRoute(value)
+		if rerr != nil {
+			return false, rerr
+		}
+		if wr.From != from {
+			return false, nil
+		}
+		n++
+		return true, nil
+	})
+	return n, err
+}
+
+// MaxWithdrawRoutes is HIVE_MAX_WITHDRAW_ROUTES (config.hpp): the most
+// withdraw_vesting_route rows one account may have.
+const MaxWithdrawRoutes = 10
