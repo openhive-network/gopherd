@@ -487,10 +487,31 @@ func (voteEvaluator) Apply(ctx *Context, opArg op.Op) error {
 			return fmt.Errorf("%w: %q/%q", ErrCommentNotFound, v.Author, v.Permlink)
 		}
 	}
-	// hived rejects allows_votes=false ONLY when this is an upvote
-	// (weight > 0); downvotes still go through to dock rshares
-	// (hive_evaluator_social.cpp:325).
-	if v.Weight > 0 && !c.AllowVotes {
+	// hive_evaluator_social.cpp:612-625, in hived's order:
+	//   1. voter.can_vote              — always
+	//   2. allows_votes (upvotes only) — only while comment_cashout EXISTS
+	//   3. return silently if the comment is already paid
+	// Before HF19 the cashout object lives forever, so (2) always runs. From
+	// HF19 on it is removed at payout, so an upvote on a paid-out post that
+	// had votes disabled is a silent no-op in hived, not an error. gopherd
+	// ran (2) unconditionally and (1) after (3): one such upvote in a hived
+	// block made gopherd reject the block, and a voter who had declined
+	// voting rights could vote on a paid post as a no-op where hived
+	// rejects the transaction.
+	if va, ok := objects.GetAccountRef(ctx.DB, v.Voter); ok {
+		if !va.CanVote() {
+			return fmt.Errorf("vote: %q has declined voting rights", v.Voter)
+		}
+	} else if va, verr := objects.GetAccount(ctx.DB, v.Voter); verr != nil {
+		if verr == state.ErrNotFound {
+			return fmt.Errorf("%w: voter=%q", ErrAccountNotFound, v.Voter)
+		}
+		return verr
+	} else if !va.CanVote() {
+		return fmt.Errorf("vote: %q has declined voting rights", v.Voter)
+	}
+	cashoutObjectExists := !(ctx.Hardforks.Has(hardfork.HF19) && c.WasPaid)
+	if cashoutObjectExists && v.Weight > 0 && !c.AllowVotes {
 		return fmt.Errorf("%w: votes disabled for comment", ErrCommentClosed)
 	}
 	// hive_evaluator_social.cpp:328: skip the vote when comment_cashout
