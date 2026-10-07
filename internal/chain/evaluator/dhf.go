@@ -335,9 +335,27 @@ func (updateProposalEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	if up.DailyPay.Amount > p.DailyPay {
 		return fmt.Errorf("update_proposal: daily_pay can only decrease")
 	}
+	// dhf_evaluator.cpp:123-150 — the HF25 update_proposal_end_date
+	// extension. Ignoring it left a proposal that its owner had shortened
+	// still paying and still votable in gopherd after hived stopped both.
+	newEndDate, hasEndDate, err := updateProposalEndDate(up.Extensions, ctx.Hardforks.Has(hardfork.HF25))
+	if err != nil {
+		return err
+	}
+	if hasEndDate {
+		if newEndDate > p.EndDate {
+			return fmt.Errorf("update_proposal: cannot increase the end date of the proposal")
+		}
+		if newEndDate <= p.StartDate {
+			return fmt.Errorf("update_proposal: the new end date must be after the start date")
+		}
+	}
 	p.DailyPay = up.DailyPay.Amount
 	p.Subject = up.Subject
 	p.Permlink = up.Permlink
+	if hasEndDate {
+		p.EndDate = newEndDate
+	}
 	objects.PutProposal(ctx.DB, &p)
 	return nil
 }
