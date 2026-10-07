@@ -175,6 +175,12 @@ func (updateProposalVotesEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		}
 		return err
 	}
+	// dhf_evaluator.cpp:167 — a voter who declined voting rights may not
+	// vote on proposals either (the witness vote and proxy evaluators already
+	// had this check; this one did not).
+	if !voter.CanVote() {
+		return fmt.Errorf("update_proposal_votes: %q has declined voting rights", uv.Voter)
+	}
 	// dhf_evaluator.cpp:169 — UNCONDITIONAL refresh of governance vote
 	// expiration on every proposal vote, with the HF25 redistribution
 	// formula applied to votes that would otherwise expire before
