@@ -2,6 +2,7 @@ package chain
 
 import (
 	"gopherd/internal/protocol/auth"
+	"gopherd/internal/protocol/hardfork"
 	"gopherd/internal/state"
 	"gopherd/internal/state/objects"
 )
@@ -28,6 +29,16 @@ func (d *Database) updateLastIrreversibleBlock(s *state.Session) {
 	wsRef, ok := objects.GetWitnessScheduleRef(s)
 	if !ok {
 		return
+	}
+	// database.cpp:2928-2934 get_witness_schedule_object_for_irreversibility:
+	// from HF26 (FUTURE_WITNESS_SCHEDULE) the 21 opinions that count are the
+	// FUTURE schedule's, not the current one's. Sampling the current set put
+	// gopherd's last_irreversible_block_num a few blocks off hived's at round
+	// boundaries, which moves fork-db pruning and finality timing.
+	if hardfork.SetForBlock(dgpoRef.HeadBlockNumber).Has(hardfork.HF26) {
+		if fws, ok := objects.EnsureFutureWitnessScheduleStore(s).GetRef(); ok {
+			wsRef = fws
+		}
 	}
 	if wsRef.NumScheduledWitnesses == 0 {
 		return
