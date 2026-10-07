@@ -121,6 +121,39 @@ var MainnetActivationBlock = [NumHardforks + 1]uint32{
 	HF29: NeverActivates,
 }
 
+// IsScheduled reports whether the activation block of id is known: either
+// recorded history or a dynamic activation learned from the witness vote.
+func IsScheduled(id ID) bool {
+	return id <= NumHardforks && MainnetActivationBlock[id] != NeverActivates
+}
+
+// SetDynamicActivation records that hardfork id activated at mainnet block
+// `block`, for a fork whose table entry is NeverActivates. hived activates a
+// fork when the witness-voted (next_hardfork, next_hardfork_time) in the
+// hardfork_property_object is reached (database_hardfork.cpp:121-133); the
+// block number is only known then. The caller (chain.processHardforks) also
+// persists it in the hardfork_property_object so a restart or a fork switch
+// can re-derive it; SetForBlock's cache is invalidated here.
+//
+// Must be called from the apply goroutine, like every other state mutation.
+func SetDynamicActivation(id ID, block uint32) {
+	if id > NumHardforks {
+		return
+	}
+	MainnetActivationBlock[id] = block
+	setForBlockCache.Store(0)
+}
+
+// ClearDynamicActivation undoes SetDynamicActivation (a fork switch popped
+// the activation block, or a test restores the table).
+func ClearDynamicActivation(id ID) {
+	if id > NumHardforks {
+		return
+	}
+	MainnetActivationBlock[id] = NeverActivates
+	setForBlockCache.Store(0)
+}
+
 // Set is a bitmap of activated hardforks. The zero value has only HF0 active
 // (genesis is always implicitly active).
 type Set uint32
@@ -247,3 +280,27 @@ func ActivationTime(id ID) uint32 {
 	}
 	return MainnetActivationTime[id]
 }
+
+// dynamicIDs are the hardforks whose activation block was NOT known when the
+// binary was built (table entry NeverActivates at init). Only these may be
+// changed by SetDynamicActivation / ClearDynamicActivation at runtime;
+// recorded history is immutable.
+var dynamicIDs = func() []ID {
+	var out []ID
+	for i := ID(1); i <= NumHardforks; i++ {
+		if MainnetActivationBlock[i] == NeverActivates {
+			out = append(out, i)
+		}
+	}
+	return out
+}()
+
+// DynamicIDs returns the hardforks that activate by witness vote at runtime
+// rather than by a compiled-in block number (currently HF29).
+func DynamicIDs() []ID { return dynamicIDs }
+
+// DynamicActivationPlaceholderTime is the far-future time hived gives a
+// hardfork that has not been scheduled yet (HIVE_HARDFORK_1_29_DEFAULT_TIME,
+// 2100-01-01). A MainnetActivationTime entry equal to it is a placeholder,
+// not the fork's real time.
+const DynamicActivationPlaceholderTime uint32 = 4102444800
