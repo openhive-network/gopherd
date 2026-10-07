@@ -167,6 +167,14 @@ func matchOrders(ctx *Context, newOrder, old *objects.LimitOrder) int {
 		}
 	}
 
+	// database_market.cpp:342 — one fill_order per match, pushed before either
+	// side is filled: the incoming order is "current", the resting one "open".
+	ctx.EmitFillOrder(FillOrderVOp{
+		CurrentOwner: string(newOrder.Owner), CurrentOrderID: newOrder.OrderID,
+		CurrentPays: newOrderPays, CurrentPaysIsHBD: asset.AssetNum(newOrder.ForSaleSymbol) == asset.HbdSymbol,
+		OpenOwner: string(old.Owner), OpenOrderID: old.OrderID,
+		OpenPays: oldOrderPays, OpenPaysIsHBD: asset.AssetNum(old.ForSaleSymbol) == asset.HbdSymbol,
+	})
 	result := 0
 	if fillLimitOrder(ctx, newOrder, newOrderPays, newOrderReceives) {
 		result |= 1

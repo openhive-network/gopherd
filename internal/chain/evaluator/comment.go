@@ -351,6 +351,8 @@ func (deleteCommentEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		if ctx.Hardforks.Has(hardfork.HF19) {
 			return fmt.Errorf("%w: cannot delete comment with net positive votes", ErrCommentClosed)
 		}
+		// hive_evaluator_social.cpp:74 — the delete did nothing; say so.
+		ctx.EmitIneffectiveDeleteComment(string(dc.Author), dc.Permlink)
 		return nil
 	}
 	if c.CashoutTime != 0 {
