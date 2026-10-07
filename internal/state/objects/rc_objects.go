@@ -287,10 +287,13 @@ type RCPool struct {
 	// LastKnownBudget[i] records the per-block budget from the last
 	// recompute; used to detect when params changed.
 	LastKnownBudget [RCNumResources]int64
-	// ResourceWeights[i] is the basis-point share (out of 10000) that
-	// resource i takes from the global RC inflation. The new-accounts
-	// slot is set to SumOfResourceWeights (always 100%).
-	ResourceWeights [RCNumResources]uint16
+	// ResourceWeights[i] is usage_in_window[i] × 10000 / budget[i]
+	// (rc_pool_object::recalculate_resource_weights), the dividend of
+	// resource i's share of global RC inflation over SumOfResourceWeights.
+	// The new-accounts slot is set to the sum (always 100 %). hived keeps
+	// these as uint64 and a day of history bytes over a per-block budget
+	// runs into the billions, so uint16 (the previous type) overflowed.
+	ResourceWeights [RCNumResources]uint64
 	// SumOfResourceWeights is the divisor when computing per-resource
 	// share. Always ≥ 1 (zero is invalid — see C++ init).
 	SumOfResourceWeights uint64
@@ -329,7 +332,7 @@ func AppendRCPool(dst []byte, p *RCPool) []byte {
 		dst = appendI64LE(dst, p.LastKnownBudget[i])
 	}
 	for i := 0; i < RCNumResources; i++ {
-		dst = appendU16LE(dst, p.ResourceWeights[i])
+		dst = appendU64LE(dst, p.ResourceWeights[i])
 	}
 	dst = appendU64LE(dst, p.SumOfResourceWeights)
 	dst = appendU32LE(dst, p.LastRecalcTime)
@@ -388,9 +391,23 @@ func ReadRCPool(src []byte) (RCPool, error) {
 			return p, fmt.Errorf("rc_pool.last_known_budget[%d]: %w", i, err)
 		}
 	}
-	for i := 0; i < RCNumResources; i++ {
-		if p.ResourceWeights[i], err = r.ReadUint16(); err != nil {
-			return p, fmt.Errorf("rc_pool.resource_weights[%d]: %w", i, err)
+	// Records written before ResourceWeights widened to uint64 carry
+	// uint16 weights; tell them apart by total length (the two layouts
+	// differ by RCNumResources × 6 bytes).
+	const fullU16Size = RCNumResources*(8+8+8+2) + 8 + 4 + RCNumResources*(8+8+4+8)
+	if len(src) == fullU16Size {
+		for i := 0; i < RCNumResources; i++ {
+			w, err := r.ReadUint16()
+			if err != nil {
+				return p, fmt.Errorf("rc_pool.resource_weights[%d]: %w", i, err)
+			}
+			p.ResourceWeights[i] = uint64(w)
+		}
+	} else {
+		for i := 0; i < RCNumResources; i++ {
+			if p.ResourceWeights[i], err = r.ReadUint64(); err != nil {
+				return p, fmt.Errorf("rc_pool.resource_weights[%d]: %w", i, err)
+			}
 		}
 	}
 	if p.SumOfResourceWeights, err = r.ReadUint64(); err != nil {
