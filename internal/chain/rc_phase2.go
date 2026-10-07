@@ -9,15 +9,9 @@
 //      delegator (mirrors C++ update_account_after_vest_change cleanup
 //      pacing).
 //
-//   2. rotateRCUsageBuckets — HF26+ ring-buffer rotation of the 24 hourly
-//      rc_usage_bucket_object rows at HIVE_RC_BUCKET_TIME_LENGTH (3600s)
-//      boundaries. Sums all bucket usage into RCPool.UsageInWindow and
-//      resets the rotated-out bucket.
-//
-//   3. updateRCPool — recomputes RCPool.PoolArray based on the per-block
-//      budget minus the usage_in_window, clamped to MaxPool. Also
-//      recomputes ResourceWeights (popularity shares) for RC inflation
-//      allocation.
+//   2.+3. finalizeRCPoolsForBlock — resource_credits::finalize_block: pool
+//      dynamics, the 24 hourly rc_usage_bucket rows and the resource
+//      weights, every block from HF20.
 //
 //   4. finalizeRCStats — at the day boundary (block_num %
 //      HIVE_RC_STATS_REPORT_FREQUENCY == 0), archives the pending
@@ -37,7 +31,8 @@
 package chain
 
 import (
-	"gopherd/internal/protocol/hardfork"
+	"math/bits"
+
 	"gopherd/internal/state"
 	"gopherd/internal/state/objects"
 )
@@ -45,9 +40,12 @@ import (
 // HIVE_RC_BUCKET_TIME_LENGTH — 3600 seconds per usage bucket (1 hour).
 // HIVE_RC_WINDOW_BUCKET_COUNT — 24 buckets cover the trailing 24 hours.
 const (
-	rcBucketTimeLength   uint32 = 3600
-	rcWindowBucketCount  uint32 = 24
-	rcStatsReportFreqSec uint32 = 28800 // HIVE_RC_STATS_REPORT_FREQUENCY (8 hours)
+	rcBucketTimeLength  uint32 = 3600
+	rcWindowBucketCount uint32 = 24
+	// HIVE_RC_STATS_REPORT_FREQUENCY is HIVE_BLOCKS_PER_DAY = 28800 BLOCKS
+	// (config.hpp:488; rc_utility.cpp:701 compares block numbers), not seconds.
+	// Dividing it by the block interval archived every 9600 blocks instead.
+	rcStatsReportFreqBlocks uint32 = 28800
 )
 
 // rcMaxAccountsPerDelegationOp mirrors HIVE_RC_MAX_ACCOUNTS_PER_DELEGATION_OP.
@@ -114,175 +112,180 @@ func processRCExpiredDelegations(s *state.Session, now uint32) {
 	}
 }
 
-// rotateRCUsageBuckets advances the rolling 24-hour bucket window when
-// block timestamps cross a bucket boundary (every 3600 seconds).
+// finalizeRCPoolsForBlock ports resource_credits::finalize_block
+// (rc/rc_utility.cpp:765-830), the per-block update of the RC resource
+// pools, their rolling 24-hour usage window and the resource weights that
+// split RC inflation between resources. Runs every block from HF20 on, as
+// hived's does.
 //
-// On each rotation:
-//  1. The oldest bucket (max_seqno - 23) is removed.
-//  2. A new bucket with seqno = max_seqno + 1 is created with Used=0.
-//  3. RCPool.UsageInWindow is recomputed by summing all surviving
-//     buckets' Used arrays.
+// Per resource i, with `usage` this block's consumption scaled to pool
+// units (compute_cost multiplies tx usage by resource_unit before it is
+// added to block_info, rc_utility.cpp:318):
 //
-// At genesis (no buckets exist yet) we seed RCWindowBucketCount empty
-// buckets so the math is well-formed.
+//	decay     = rd_compute_pool_decay( params.decay, pool - usage, 1 )
+//	window   -= oldest bucket           (only when the hour rolled over)
+//	window   += usage
+//	new_pool  = pool - decay + budget - usage,   clamped at 0
+//	new_pool  = dgpo.available_account_subsidies  for new_accounts
+//	weight_i  = window_i * 10000 / budget_i  (min 1; new_accounts = sum)
 //
-// Mirrors hive::chain::rc_plugin::on_finish_block bucket rotation +
-// rc_pool_object::recalculate_resource_weights's usage-window scan.
-func rotateRCUsageBuckets(s *state.Session, now uint32) {
-	// Inspect the current set of buckets. We track:
-	//   - maxSeqno: the newest bucket's seqno
-	//   - newestCreated: the newest bucket's Created timestamp
-	//   - count: total number of bucket rows
-	maxSeqno := uint32(0)
-	newestCreated := uint32(0)
-	count := 0
+// then the block's usage is added to the active hourly bucket, which is
+// the OLDEST bucket reset and reused when the newest is an hour old.
+//
+// The previous implementation diverged on every line of this: it never
+// subtracted the block's usage from the pool, decayed by window/24 instead
+// of rd_compute_pool_decay, clamped at a maximum hived does not have,
+// never pinned new_accounts to the subsidy pool, computed weights as shares
+// of total usage instead of usage over budget, pooled UNscaled usage, and
+// refreshed the window only once an hour. Every RC price gopherd quoted
+// therefore drifted from hived's even with identical usage — harmless
+// while RC is advisory, a split once HF29 makes it consensus.
+func finalizeRCPoolsForBlock(s *state.Session, now uint32) {
+	if !objects.HasRCPool(s) {
+		return
+	}
+	pool, err := objects.GetRCPool(s)
+	if err != nil {
+		return
+	}
+	params, err := objects.GetRCResourceParam(s)
+	if err != nil {
+		return
+	}
+	pending := objects.GetRCPendingData(s)
+
+	// Buckets: the newest (highest seqno) is active; by_timestamp rbegin()
+	// in hived. When it is a full HIVE_RC_BUCKET_TIME_LENGTH old, the OLDEST
+	// bucket is reset and becomes the new active one.
+	var newest, oldest objects.RCUsageBucket
+	have := false
 	_ = s.Range(objects.RCUsageBucketTable, state.PrimaryIndex, nil,
 		func(_, val []byte) (bool, error) {
 			b, err := objects.ReadRCUsageBucket(val)
 			if err != nil {
 				return true, nil
 			}
-			if count == 0 || b.BucketSeqno > maxSeqno {
-				maxSeqno = b.BucketSeqno
-				newestCreated = b.Created
+			if !have {
+				newest, oldest, have = b, b, true
+				return true, nil
 			}
-			count++
+			if b.BucketSeqno > newest.BucketSeqno {
+				newest = b
+			}
+			if b.BucketSeqno < oldest.BucketSeqno {
+				oldest = b
+			}
 			return true, nil
 		})
-
-	if count == 0 {
-		// Seed RCWindowBucketCount empty buckets, all marked Created=now.
-		// Their seqno space is [1..RCWindowBucketCount].
+	if !have {
+		// First block with RC active: seed the window (hived creates the
+		// HIVE_RC_WINDOW_BUCKET_COUNT buckets at HF20 bootstrap).
 		for i := uint32(1); i <= rcWindowBucketCount; i++ {
-			objects.PutRCUsageBucket(s, &objects.RCUsageBucket{
-				BucketSeqno: i,
-				Created:     now,
-			})
+			b := objects.RCUsageBucket{BucketSeqno: i, Created: now}
+			objects.PutRCUsageBucket(s, &b)
+			if i == 1 {
+				oldest = b
+			}
+			newest = b
 		}
-		return
+	}
+	reset := newest.Created+rcBucketTimeLength <= now
+	active := newest
+	if reset {
+		active = oldest
 	}
 
-	// Should we rotate? Only when the newest bucket is at least
-	// HIVE_RC_BUCKET_TIME_LENGTH old.
-	if now < newestCreated+rcBucketTimeLength {
-		return
-	}
-
-	// Rotate: drop oldest, add newest. The oldest seqno is the smallest;
-	// since we keep exactly RCWindowBucketCount buckets, oldest =
-	// maxSeqno - RCWindowBucketCount + 1.
-	var oldestSeqno uint32
-	if maxSeqno >= rcWindowBucketCount {
-		oldestSeqno = maxSeqno - rcWindowBucketCount + 1
-	} else {
-		oldestSeqno = 1
-	}
-	objects.DeleteRCUsageBucket(s, oldestSeqno)
-	objects.PutRCUsageBucket(s, &objects.RCUsageBucket{
-		BucketSeqno: maxSeqno + 1,
-		Created:     now,
-	})
-
-	// Recompute RCPool.UsageInWindow as the sum across surviving buckets.
-	if !objects.HasRCPool(s) {
-		return
-	}
-	pool, err := objects.GetRCPool(s)
-	if err != nil {
-		return
-	}
-	var sums [objects.RCNumResources]int64
-	_ = s.Range(objects.RCUsageBucketTable, state.PrimaryIndex, nil,
-		func(_, val []byte) (bool, error) {
-			b, err := objects.ReadRCUsageBucket(val)
-			if err != nil {
-				return true, nil
-			}
-			for i := 0; i < objects.RCNumResources; i++ {
-				sums[i] += b.Used[i]
-			}
-			return true, nil
-		})
-	pool.UsageInWindow = sums
-	objects.PutRCPool(s, &pool)
-}
-
-// updateRCPool recomputes each pool's available capacity:
-//
-//	pool[i] = clamp( pool[i] + budget[i] - usage_in_window[i] / WINDOW_BUCKETS,
-//	                 0, max_pool[i] )
-//
-// and recomputes resource_weights as popularity shares of UsageInWindow.
-// When SumOfResourceWeights would be zero (genesis / cold pool) we fall
-// back to equal weighting so per-resource inflation never divides by zero.
-//
-// Mirrors hive::chain::rc_pool_object::recalculate_resource_weights and
-// the per-block pool top-up in rc_plugin.cpp on_finish_block.
-func updateRCPool(s *state.Session, now uint32) {
-	if !objects.HasRCPool(s) {
-		return
-	}
-	pool, err := objects.GetRCPool(s)
-	if err != nil {
-		return
-	}
-	// Resource-weight recompute: each resource's basis-point share of
-	// UsageInWindow, summed into SumOfResourceWeights.
-	totalUsage := int64(0)
+	var usage [objects.RCNumResources]int64
 	for i := 0; i < objects.RCNumResources; i++ {
-		if pool.UsageInWindow[i] > 0 {
-			totalUsage += pool.UsageInWindow[i]
-		}
-	}
-	if totalUsage > 0 {
-		var sum uint64
-		for i := 0; i < objects.RCNumResources; i++ {
-			share := uint16(0)
-			if pool.UsageInWindow[i] > 0 {
-				// basis-points: usage[i] * 10000 / totalUsage
-				share = uint16(pool.UsageInWindow[i] * 10000 / totalUsage)
-			}
-			pool.ResourceWeights[i] = share
-			sum += uint64(share)
-		}
-		if sum == 0 {
-			sum = 1
-		}
-		pool.SumOfResourceWeights = sum
-	} else {
-		// Equal weighting fallback.
-		for i := 0; i < objects.RCNumResources; i++ {
-			pool.ResourceWeights[i] = 2000 // 1/5 in basis points
-		}
-		pool.SumOfResourceWeights = uint64(objects.RCNumResources) * 2000
+		usage[i] = pending.PendingUsage[i] * int64(params.Entries[i].Dynamics.ResourceUnit)
 	}
 
-	// Per-block budget top-up: pool[i] += budget[i] (clamped to max_pool[i]).
-	// LastKnownBudget mirrors the per-resource budget from the witness-
-	// voted params. Pre-HF20 this is zero so the top-up is a no-op.
+	dgpoRef, haveDGPO := objects.GetDGPORef(s)
 	for i := 0; i < objects.RCNumResources; i++ {
-		// Decay component: subtract a 1/24-hour share of usage_in_window
-		// (one bucket's worth) — approximation of C++'s rd_decay_params.
-		decay := pool.UsageInWindow[i] / int64(rcWindowBucketCount)
-		pool.PoolArray[i] += pool.LastKnownBudget[i] - decay
-		// Clamp [0, legacy.Max]. Pre-HF20 the legacy block carries the
-		// active max for compatibility with initRCPoolIfNeeded.
-		maxP := pool.Pool[i].Max
-		if maxP <= 0 {
-			maxP = (1 << 62)
+		dyn := params.Entries[i].Dynamics
+		p := pool.PoolArray[i]
+		budget := int64(dyn.BudgetPerTime)
+		pool.LastKnownBudget[i] = budget
+		decay := rcPoolDecay(dyn, p-usage[i])
+		if reset {
+			pool.UsageInWindow[i] -= active.Used[i]
 		}
-		if pool.PoolArray[i] > maxP {
-			pool.PoolArray[i] = maxP
+		pool.UsageInWindow[i] += usage[i]
+		newPool := p - decay + budget - usage[i]
+		if i == int(objects.RCNewAccounts) && haveDGPO {
+			// The consensus account-subsidy pool is the authority for this
+			// resource; the RC copy is re-pinned to it every block.
+			newPool = dgpoRef.AvailableAccountSubsidies
 		}
-		if pool.PoolArray[i] < 0 {
-			pool.PoolArray[i] = 0
+		if newPool < 0 {
+			newPool = 0
 		}
-		// Track for legacy callers + writes a stable update timestamp.
-		pool.Pool[i].Current = pool.PoolArray[i]
+		pool.PoolArray[i] = newPool
+		// Legacy shim fields read by older callers.
+		pool.Pool[i].Current = newPool
 		pool.Pool[i].Update = now
 	}
+	// rc_pool_object::recalculate_resource_weights (rc_objects.hpp:81-95).
+	var sum uint64
+	for i := 0; i < objects.RCNumResources; i++ {
+		if i == int(objects.RCNewAccounts) {
+			continue
+		}
+		var w uint64
+		if budget := int64(params.Entries[i].Dynamics.BudgetPerTime); budget > 0 && pool.UsageInWindow[i] > 0 {
+			w = uint64(pool.UsageInWindow[i] * 10000 / budget)
+		}
+		if w == 0 {
+			w = 1 // minimum weight
+		}
+		pool.ResourceWeights[i] = w
+		sum += w
+	}
+	pool.ResourceWeights[objects.RCNewAccounts] = sum // always 100%
+	pool.SumOfResourceWeights = sum
 	pool.LastRecalcTime = now
 	objects.PutRCPool(s, &pool)
+
+	if reset {
+		// bucket.reset( now ): contents were already subtracted above. The
+		// reused bucket takes the next seqno so "newest" stays the highest.
+		objects.DeleteRCUsageBucket(s, active.BucketSeqno)
+		active = objects.RCUsageBucket{BucketSeqno: newest.BucketSeqno + 1, Created: now}
+	}
+	for i := 0; i < objects.RCNumResources; i++ {
+		active.Used[i] += usage[i]
+	}
+	objects.PutRCUsageBucket(s, &active)
+
+	pending.ResetPendingUsage()
+	objects.PutRCPendingData(s, &pending)
+}
+
+// rcPoolDecay is util::rd_compute_pool_decay (util/rd.cpp:23-39) with dt = 1
+// and the resource's own denominator shift:
+//
+//	decay = ( u128(decay_per_time_unit) * pool ) >> shift,  capped at pool
+//
+// negative pools decay symmetrically.
+func rcPoolDecay(dyn objects.ResourceDynamics, pool int64) int64 {
+	if pool < 0 {
+		return -rcPoolDecay(dyn, -pool)
+	}
+	hi, lo := bits.Mul64(uint64(dyn.DecayPerTime), uint64(pool))
+	shift := uint(dyn.DecayDenomShift)
+	var result uint64
+	switch {
+	case shift == 0:
+		result = lo
+	case shift >= 64:
+		result = hi >> (shift - 64)
+	default:
+		result = hi<<(64-shift) | lo>>shift
+	}
+	if result > uint64(pool) {
+		return pool
+	}
+	return int64(result)
 }
 
 // finalizeRCStats archives the pending rc_stats_object row into the
@@ -296,7 +299,7 @@ func updateRCPool(s *state.Session, now uint32) {
 //
 // Mirrors hive::chain::rc_plugin::on_finish_block stats archival.
 func finalizeRCStats(s *state.Session, blockNum uint32) {
-	const blocksPerReport = rcStatsReportFreqSec / 3 // 3-sec block interval
+	const blocksPerReport = rcStatsReportFreqBlocks
 	if blockNum == 0 || blockNum%blocksPerReport != 0 {
 		return
 	}
@@ -353,12 +356,12 @@ func ProcessRCExpiredDelegationsForTest(s *state.Session, now uint32) {
 // RotateRCUsageBucketsForTest rotates the hourly usage buckets.
 // Test-only; see processRCExpiredDelegations for the production path.
 func RotateRCUsageBucketsForTest(s *state.Session, now uint32) {
-	rotateRCUsageBuckets(s, now)
+	finalizeRCPoolsForBlock(s, now)
 }
 
 // UpdateRCPoolForTest recomputes the RC pool. Test-only.
 func UpdateRCPoolForTest(s *state.Session, now uint32) {
-	updateRCPool(s, now)
+	finalizeRCPoolsForBlock(s, now)
 }
 
 // FinalizeRCStatsForTest archives the pending stats row. Test-only.
@@ -377,13 +380,10 @@ func HandleVestingWithdrawalRCImpactForTest(s *state.Session, a *objects.Account
 // existing pre-HF20 fast-skip).
 func rcFinalizeBlockPhase2(s *state.Session, blockNum, blockTime uint32) {
 	processRCExpiredDelegations(s, blockTime)
-	// Phase 5 bridge: flush rc_pending_data.PendingUsage into the
-	// active rc_usage_bucket BEFORE rotation, so the data the block's
-	// txs accumulated lands in the pre-rotation newest bucket.
-	if hardfork.SetForBlock(blockNum).Has(hardfork.HF26) {
-		flushRCPendingToBucket(s)
-		rotateRCUsageBuckets(s, blockTime)
-		updateRCPool(s, blockTime)
-	}
+	// resource_credits::finalize_block runs from HF20 (rc_utility.cpp:767),
+	// not HF26: the pools, window and weights evolve continuously from the
+	// RC bootstrap. Gating this on HF26 left gopherd.s pools parked at
+	// pool_eq for the six hardforks in between.
+	finalizeRCPoolsForBlock(s, blockTime)
 	finalizeRCStats(s, blockNum)
 }

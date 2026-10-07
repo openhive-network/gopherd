@@ -81,7 +81,7 @@ func TestRCPoolFullRoundTrip(t *testing.T) {
 		original.PoolArray[i] = int64(1_000_000 + i)
 		original.UsageInWindow[i] = int64(2_000_000 + i)
 		original.LastKnownBudget[i] = int64(3_000_000 + i)
-		original.ResourceWeights[i] = uint16(100 + i)
+		original.ResourceWeights[i] = uint64(100 + i)
 		original.Pool[i] = RCPoolEntry{
 			Current: int64(40 + i), Max: int64(50 + i),
 			Update: uint32(60 + i), Cost: int64(70 + i),

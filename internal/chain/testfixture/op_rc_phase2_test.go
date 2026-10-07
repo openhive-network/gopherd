@@ -249,7 +249,7 @@ func TestRCUsageBucketRotation(t *testing.T) {
 
 // TestRCPoolPendingDataReset mirrors rc_tests.cpp::rc_pending_data_reset
 // in shape. The pending rc_stats row is reset every
-// HIVE_RC_STATS_REPORT_FREQUENCY/3 blocks (= 9600 blocks). We poke a
+// HIVE_RC_STATS_REPORT_FREQUENCY = 28800 blocks (one day). We poke a
 // pending row, call finalizeRCStats at the boundary, and verify the
 // archive is written and pending is zeroed.
 func TestRCPoolPendingDataReset(t *testing.T) {
@@ -288,9 +288,10 @@ func TestRCPoolPendingDataReset(t *testing.T) {
 		}
 	}
 
-	// Fire at the boundary block (= 9600).
+	// Fire at the boundary block: HIVE_RC_STATS_REPORT_FREQUENCY is
+	// HIVE_BLOCKS_PER_DAY = 28800 blocks (config.hpp:488).
 	s = state.NewSession(f.State)
-	finalizeRCStatsForTest(s, 9600)
+	finalizeRCStatsForTest(s, 28800)
 	if err := s.Commit(false); err != nil {
 		t.Fatalf("boundary fire: %v", err)
 	}
@@ -316,8 +317,8 @@ func TestRCPoolPendingDataReset(t *testing.T) {
 	if pendingNow.Regen != 0 {
 		t.Fatalf("pending.Regen after reset: got %d, want 0", pendingNow.Regen)
 	}
-	if pendingNow.BlockNum != 9600 {
-		t.Fatalf("pending.BlockNum after reset: got %d, want 9600", pendingNow.BlockNum)
+	if pendingNow.BlockNum != 28800 {
+		t.Fatalf("pending.BlockNum after reset: got %d, want 28800", pendingNow.BlockNum)
 	}
 }
 
