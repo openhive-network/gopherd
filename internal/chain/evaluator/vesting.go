@@ -99,16 +99,26 @@ func (withdrawVestingEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		intervals = vestingWithdrawIntervals
 	}
 	intervalSec := uint32(vestingWithdrawIntervalSec)
-	a.VestingWithdrawRate = w.VestingShares.Amount / intervals
-	if a.VestingWithdrawRate == 0 {
-		a.VestingWithdrawRate = 1
+	newRate := w.VestingShares.Amount / intervals
+	if newRate == 0 {
+		newRate = 1
 	}
 	// hive_evaluator_transfer.cpp:374-377 — HF21+ rounds the rate UP so
 	// rate × intervals ≥ requested. Pre-HF21, the integer truncation
 	// could leave a few satoshi unwithdrawn at the end.
-	if ctx.Hardforks.Has(hardfork.HF21) && a.VestingWithdrawRate*intervals < w.VestingShares.Amount {
-		a.VestingWithdrawRate++
+	if ctx.Hardforks.Has(hardfork.HF21) && newRate*intervals < w.VestingShares.Amount {
+		newRate++
 	}
+	// hive_evaluator_transfer.cpp:387-389 — HIVE_HARDFORK_1_28_FIX_CANCEL_POWER_DOWN
+	// also covers the non-zero path: re-issuing a power down at the SAME rate
+	// is rejected ("This operation would not change the vesting withdraw
+	// rate."). Only the zero-amount variant was ported, so gopherd accepted
+	// a repeat power-down that reset to_withdraw/withdrawn where hived
+	// refuses the transaction.
+	if ctx.Hardforks.Has(hardfork.HF28) && a.VestingWithdrawRate == newRate {
+		return fmt.Errorf("withdraw_vesting: operation would not change the vesting withdraw rate")
+	}
+	a.VestingWithdrawRate = newRate
 	a.NextVestingWithdrawal = ctx.HeadBlockTime + intervalSec
 	// hive_evaluator_transfer.cpp:397-398 — at HF20+ withdraw_vesting ends
 	// with update_account_after_vest_change(account, now, false, true), and
