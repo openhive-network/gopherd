@@ -281,6 +281,27 @@ func ActivationTime(id ID) uint32 {
 	return MainnetActivationTime[id]
 }
 
+// HasPlaceholderTime reports whether a hardfork's activation time is still
+// hived's year-2100 "not scheduled yet" sentinel. Such a time must never be
+// voted for: it is not the fork's time, it is the absence of one.
+//
+// HF29 RELEASE CHECKLIST — when hived publishes the real HIVE_HARDFORK_1_29_TIME
+// (it will replace HIVE_HARDFORK_1_29_DEFAULT_TIME in hardfork.d/1_29.hf and
+// bump mainnet HIVE_BLOCKCHAIN_VERSION to 1.29.0), exactly two constants move
+// here, together:
+//
+//  1. MainnetActivationTime[HF29] = that time   (this file)
+//  2. BlockchainVersionHardfork = 29, Revision = 0 (network_mainnet.go)
+//
+// Nothing else: activation is driven by the witness vote in the
+// hardfork_property_object (chain.processVotedHardforks), the activation
+// BLOCK is learned at runtime, and the witness plugin votes the time from
+// this table. TestHardforkReleaseConsistency fails if one moves without the
+// other.
+func HasPlaceholderTime(id ID) bool {
+	return ActivationTime(id) == DynamicActivationPlaceholderTime
+}
+
 // dynamicIDs are the hardforks whose activation block was NOT known when the
 // binary was built (table entry NeverActivates at init). Only these may be
 // changed by SetDynamicActivation / ClearDynamicActivation at runtime;
