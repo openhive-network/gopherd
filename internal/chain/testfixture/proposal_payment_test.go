@@ -70,12 +70,11 @@ func TestProposalDailyPaymentBasic(t *testing.T) {
 	// (dhf_processor.cpp:197-198):
 	//   ratio = (passed_time * HIVE_100_PERCENT) / 86400
 	//   period_pay = (ratio * daily_pay) / HIVE_100_PERCENT
-	// On the first DHF tick post-HF21, gopherd's processProposals
-	// falls back to proposalMaintenancePeriodSec (3600s) because
-	// LastBudgetTime is still zero (mirrors hived behavior where the
-	// field stays at HIVE_GENESIS_TIME default; the first tick on
-	// mainnet sees an empty treasury so the resulting payout is 0).
-	// In this test the treasury is seeded so we observe the formula.
+	// passed_time is head_time - last_budget_time, and last_budget_time
+	// is stamped on EVERY tick, paying or idle (set_next_maintenance_time,
+	// global_property_object.hpp:122-126). The idle tick before this one
+	// stamped it, and the skip lands exactly on next_maintenance_time, so
+	// passed_time is 3600.
 	ratio := int64(3600) * 10000 / 86400
 	wantBob := ratio * 10_000 / 10000
 	deltaBob := bob - preBob
@@ -256,13 +255,17 @@ func TestProposalPreHF21NoOp(t *testing.T) {
 // the next 1-hour boundary (when processProposals fires).
 func proposalMaintenanceUntilNext(f *Fixture) uint32 {
 	// hived's DHF maintenance is anchored to LAST-RUN + 3600
-	// (set_next_maintenance_time), NOT the wall-clock hour grid — skip
-	// to dgpo.NextMaintenanceTime, plus one block so the landing block's
-	// timestamp is past it.
+	// (set_next_maintenance_time), NOT the wall-clock hour grid. The tick
+	// fires on the first block whose timestamp is >= next_maintenance_time,
+	// so land EXACTLY on it: that is what hived's own tests do
+	// (generate_blocks( next_block - 1 ); generate_block();) and it makes
+	// passed_time exactly 3600. Landing one block late made passed_time
+	// 3603 and every expected payout one unit too small once the idle tick
+	// started stamping last_budget_time the way hived does.
 	now := f.HeadBlockTime()
 	next := f.DGPO().NextMaintenanceTime
 	if next <= now {
 		return BlockInterval
 	}
-	return next - now + BlockInterval
+	return next - now
 }

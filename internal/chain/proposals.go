@@ -129,7 +129,7 @@ func processProposals(s *state.Session, blockTime uint32, blockNum uint32, d *Da
 	// end_date here, which orphaned later unapprove votes: an
 	// update_proposal_votes(approve=false) on the expired-but-still-alive
 	// proposal 16 hit "proposal not found" at block 36,196,594.
-	var active []objects.Proposal
+	var active, notYetActive []objects.Proposal
 
 	_ = s.Range(objects.ProposalTable, state.PrimaryIndex, nil,
 		func(_, value []byte) (bool, error) {
@@ -148,11 +148,30 @@ func processProposals(s *state.Session, blockTime uint32, blockNum uint32, d *Da
 			// at block 36,351,128).
 			if p.StartDate <= blockTime {
 				active = append(active, p)
+			} else {
+				notYetActive = append(notYetActive, p)
 			}
 			return true, nil
 		})
 
+	// dhf_processor::calculate_votes runs over the not-yet-active set in
+	// BOTH branches (dhf_processor.cpp:248, :260), so their total_votes stay
+	// current while they wait to start.
+	for i := range notYetActive {
+		notYetActive[i].TotalVotes = recalculateProposalVotes(s, notYetActive[i].ID)
+		objects.PutProposal(s, &notYetActive[i])
+	}
+
 	if len(active) == 0 {
+		// dhf_processor.cpp:244-256: with nothing to pay, hived still calls
+		// update_settings(head_time), which sets last_budget_time = now.
+		// Returning without that left last_budget_time at the previous PAYING
+		// tick, so the next tick with an active proposal computed passed_time
+		// as hours or days instead of 3600 s and over-scaled its budget and
+		// every period_pay by that factor.
+		objects.MutateDGPO(s, func(d *objects.DynamicGlobalProperty) {
+			d.LastBudgetTime = blockTime
+		})
 		return
 	}
 
@@ -213,11 +232,11 @@ func processProposals(s *state.Session, blockTime uint32, blockNum uint32, d *Da
 	} else {
 		passedTime = int64(proposalMaintenancePeriodSec)
 	}
-	// Sanity clamp: a single tick budget shouldn't exceed a full day
-	// (catches stale LastBudgetTime after a long node downtime).
-	if passedTime > dailySecondsConst {
-		passedTime = dailySecondsConst
-	}
+	// No clamp: hived has none (dhf_processor.cpp:145-159). The one that
+	// used to sit here capped passed_time at a day and only existed because
+	// an idle tick (no active proposals) did not refresh last_budget_time;
+	// that is fixed above, and a node that was down replays the missed
+	// blocks, each of whose ticks refreshes the clock.
 	dailyBudget := treasury.HBDBalance / proposalTotalAmountDivider
 	budget := dailyBudget * passedTime / dailySecondsConst
 	dhfTrace := envGhivediffAll != "" && calcTraceWindow(blockNum)
