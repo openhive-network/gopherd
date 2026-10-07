@@ -115,8 +115,13 @@ func (o Transfer) Validate() error {
 	if o.Amount.Amount <= 0 {
 		return fmt.Errorf("transfer.amount: must be positive, got %d", o.Amount.Amount)
 	}
-	if len(o.Memo) > MaxMemoSize {
-		return fmt.Errorf("transfer.memo: %d bytes exceeds %d", len(o.Memo), MaxMemoSize)
+	// hive_operations.cpp:241-249: `memo.size() < HIVE_MAX_MEMO_SIZE` (strict) and
+	// `fc::is_utf8( memo )`.
+	if len(o.Memo) >= MaxMemoSize {
+		return fmt.Errorf("transfer.memo: %d bytes, must be below %d", len(o.Memo), MaxMemoSize)
+	}
+	if !utf8.ValidString(o.Memo) {
+		return fmt.Errorf("transfer.memo: not valid UTF-8")
 	}
 	return nil
 }
