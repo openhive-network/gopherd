@@ -910,27 +910,14 @@ func HandleVestingWithdrawalRCImpact(s *state.Session, a *Account, now uint32) {
 		eff = 0
 	}
 
-	// Credit a POSITIVE change in maximum RC straight to current mana, so an
-	// account that gains VESTS can use the new RC immediately
-	// (resource_credits::update_account_after_vest_change, rc_utility.cpp:458:
-	// "only positive delta is applied directly to mana, so receiver can
-	// immediately start using it"). A negative delta is deliberately NOT
-	// applied: power-down and reduced delegation both carry a delay longer than
-	// full RC regeneration, so skipping it cannot be used to pump RC.
-	//
-	// Without this an account whose VESTS arrive AFTER creation had max_rc in
-	// the billions and current_mana stuck at 0, regenerating over the full five
-	// days. On a testnet — where account_creation_fee is 0, so rc_adjustment is
-	// 0 and the manabar starts empty — every funded account read as completely
-	// drained: measured spent=3,602,697,328 of a 3,602,939,936 maximum after
-	// FIVE transactions, against hived's 2,835. That, not the pricing, is why
-	// gopherd's witnesses produced near-empty blocks under load.
-	if delta := a.LastMaxRC - oldMaxRC; delta > 0 {
-		a.RCManaCurrent += delta
-		if a.RCManaCurrent > a.LastMaxRC {
-			a.RCManaCurrent = a.LastMaxRC
-		}
-	}
+	// The positive max-RC delta is credited to current mana INSIDE
+	// UpdateAccountAfterVestChange (fill_new_mana=true), exactly once, as
+	// rc_utility.cpp:468-488 does. An earlier version of this function
+	// credited `LastMaxRC - oldMaxRC` again here, on top of that: every
+	// power-up, withdrawal fill and delegation change handed the account the
+	// new headroom twice (visible whenever current + delta < max). oldMaxRC
+	// is kept only for the trace below.
+	_ = oldMaxRC
 
 	// Over-delegated? Only when DelegatedRCOut > eff.
 	if a.DelegatedRCOut <= eff {
