@@ -269,6 +269,19 @@ func (delegateVestingSharesEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	// knife-edge ops where clients send EXACTLY hived's minimum — first:
 	// 69,091,421, min 1806814152 vs op 1806814150).
 	minDelegation, minUpdate, vesterr := computeDelegationMinima(ctx)
+	// hive_evaluator_transfer.cpp:826-833: an existing row (any amount,
+	// including the 0 left by account_create_with_delegation) with
+	// op.vesting_shares >= delegation.vesting takes the INCREASE branch,
+	// where `delta >= min_update` fails for delta == 0 whenever min_update is
+	// positive — i.e. always on mainnet (it is a fraction of the creation
+	// fee; only a zero-fee testnet makes it 0). So re-sending the current
+	// amount, or 0 against a 0 row, is a rejected transaction in hived;
+	// gopherd fell through its switch and, for 0 → 0, deleted the row. Not
+	// gated on InControl: hived's assert is consensus, so no block can carry
+	// such an operation.
+	if prevExists && delta == 0 && (vesterr != nil || minUpdate > 0) {
+		return fmt.Errorf("delegate_vesting_shares: Hive Power increase is not enough of a difference (delta 0)")
+	}
 	if vesterr == nil && ctx.InControl {
 		// C++ branches on whether the delegation ROW exists, not on its
 		// amount: an amount-0 row left by account_create_with_delegation
