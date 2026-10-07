@@ -192,6 +192,9 @@ func AdjustHBDBalanceInto(s *state.Session, a *Account, blockTime uint32, delta 
 				interest := hbdInterestPayout(a.HBDSeconds, rateForDGPO(dgpo))
 				if interest > 0 {
 					a.HBDBalance += interest
+					if OnInterestPaid != nil {
+						OnInterestPaid(string(a.Name), interest, true)
+					}
 					// Mirror C++ adjust_balance HBD branch (database.cpp:3350-3354):
 					// virtual_supply += interest_paid × current_median_history.
 					// Without this, Go's intra-block VS lags C++'s by
@@ -230,6 +233,9 @@ func AdjustSavingsHBDBalance(s *state.Session, a *Account, blockTime uint32, del
 				interest := hbdInterestPayout(a.SavingsHBDSeconds, rateForDGPO(&dgpo))
 				if interest > 0 {
 					a.SavingsHBDBalance += interest
+					if OnInterestPaid != nil {
+						OnInterestPaid(string(a.Name), interest, false)
+					}
 					dgpo.CurrentHBDSupply += interest
 					if fh, ferr := GetFeedHistory(s); ferr == nil && !feedPriceIsZero(fh.CurrentMedianHistory) {
 						dgpo.VirtualSupply += hbdInterestVirtualHive(interest, fh.CurrentMedianHistory)
@@ -243,3 +249,11 @@ func AdjustSavingsHBDBalance(s *state.Session, a *Account, blockTime uint32, del
 	}
 	a.SavingsHBDBalance += delta
 }
+
+// OnInterestPaid, when set, is called every time an HBD interest payout is
+// credited (liquid HBD before HF25, savings HBD always) with the owner, the
+// HBD amount and hived's is_saved_into_hbd_balance flag (true for the liquid
+// balance, false for savings). hived pushes interest_operation from inside
+// adjust_balance (database.cpp:3265, :3340); this package has no virtual-op
+// sink, so chain.ApplyBlock installs one for the duration of a block.
+var OnInterestPaid func(owner string, interest int64, savedIntoHbdBalance bool)

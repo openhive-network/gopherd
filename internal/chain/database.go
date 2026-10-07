@@ -913,6 +913,18 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	// the serial loop below; see parallel.go / PARALLEL_DESIGN.md.
 	useParallel := opts.ParallelApply > 0 && opts.SkipTransactionSignatures &&
 		opts.SkipTxSavepoints && opts.SkipDedupAndTaPOS
+	// HBD interest is paid inside objects.AdjustHBDBalance, which has no vop
+	// sink of its own; route hived's interest_operation (database.cpp:3265,
+	// :3340) through the block's buffer for the duration of this apply. The
+	// buffer is single-writer, so the hook stays off under parallel apply,
+	// where speculative transactions run on worker goroutines (parallel.go
+	// drops evaluator vops the same way).
+	if !useParallel {
+		objects.OnInterestPaid = func(owner string, interest int64, saved bool) {
+			d.pushVOp(op.Interest{Owner: auth.AccountName(owner), Interest: vopHbd(interest), IsSavedIntoHbdBalance: saved})
+		}
+		defer func() { objects.OnInterestPaid = nil }()
+	}
 	if useParallel {
 		var perr error
 		skippedThisBlock, perr = d.applyTxsParallel(ctx, session, r, txCount,
