@@ -128,15 +128,45 @@ func (requestAccountRecoveryEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		}
 	}
 
-	// 3-branch shape (hive_evaluator_account.cpp:499-527):
-	// (a) new_owner_authority is "impossible" (weight_threshold 0) →
-	//     cancel the pending request if one exists.
-	// (b) otherwise → upsert the request with 24h expiration.
-	if rr.NewOwnerAuthority.WeightThreshold == 0 {
-		if req, gerr := objects.GetAccountRecoveryRequest(ctx.DB, rr.AccountToRecover); gerr == nil {
-			objects.DeleteAccountRecoveryRequestFull(ctx.DB, &req)
+	// 3-branch shape (hive_evaluator_account.cpp:506-540):
+	//   new request:  !is_impossible, weight_threshold != 0, validate_auth_size
+	//                 (ALWAYS, HF29 only moved it ahead of the branch),
+	//                 accounts in the authority exist → create
+	//   threshold 0:  cancel the pending request (only when one exists —
+	//                 with none, hived takes the new-request branch and
+	//                 fails on "open authority")
+	//   change:       !is_impossible, accounts exist → update
+	// gopherd used to accept a threshold-0 request with nothing pending as
+	// a silent no-op and never checked impossibility or account existence.
+	req, gerr := objects.GetAccountRecoveryRequest(ctx.DB, rr.AccountToRecover)
+	exists := gerr == nil
+	if !exists && gerr != state.ErrNotFound {
+		return gerr
+	}
+	switch {
+	case !exists:
+		if authorityIsImpossible(rr.NewOwnerAuthority) {
+			return fmt.Errorf("request_account_recovery: cannot recover using an impossible authority")
 		}
+		if rr.NewOwnerAuthority.WeightThreshold == 0 {
+			return fmt.Errorf("request_account_recovery: cannot recover using an open authority")
+		}
+		if err := validateAuthSize(rr.NewOwnerAuthority, "request_account_recovery.new_owner_authority"); err != nil {
+			return err
+		}
+		if err := verifyAuthorityAccountsExist(ctx, rr.NewOwnerAuthority); err != nil {
+			return err
+		}
+	case rr.NewOwnerAuthority.WeightThreshold == 0:
+		objects.DeleteAccountRecoveryRequestFull(ctx.DB, &req)
 		return nil
+	default:
+		if authorityIsImpossible(rr.NewOwnerAuthority) {
+			return fmt.Errorf("request_account_recovery: cannot recover using an impossible authority")
+		}
+		if err := verifyAuthorityAccountsExist(ctx, rr.NewOwnerAuthority); err != nil {
+			return err
+		}
 	}
 	objects.PutAccountRecoveryRequest(ctx.DB, &objects.AccountRecoveryRequest{
 		AccountToRecover:     rr.AccountToRecover,
@@ -144,6 +174,19 @@ func (requestAccountRecoveryEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		Expiration:           ctx.HeadBlockTime + recoveryRequestExpirationSec,
 	})
 	return nil
+}
+
+// authorityIsImpossible is authority::is_impossible (protocol/authority.cpp):
+// the sum of all member weights cannot reach the threshold.
+func authorityIsImpossible(a auth.Authority) bool {
+	var sum uint64
+	for _, k := range a.KeyAuths {
+		sum += uint64(k.Weight)
+	}
+	for _, acc := range a.AccountAuths {
+		sum += uint64(acc.Weight)
+	}
+	return sum < uint64(a.WeightThreshold)
 }
 
 type recoverAccountEvaluator struct{}
