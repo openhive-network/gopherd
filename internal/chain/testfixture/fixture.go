@@ -885,9 +885,37 @@ func (f *Fixture) SetMedianAccountCreationFee(fee int64) {
 	}
 	ws.MedianAccountCreationFee = fee
 	objects.PutWitnessSchedule(s, &ws)
+	// Like hived's database_fixture::set_account_creation_fee: set it on the
+	// future schedule too (or the pending one reverts the median a round
+	// later) and on every witness (or the next median recomputation does).
+	if objects.HasFutureWitnessSchedule(s) {
+		if fws, ferr := objects.GetFutureWitnessSchedule(s); ferr == nil {
+			fws.MedianAccountCreationFee = fee
+			objects.PutFutureWitnessSchedule(s, &fws)
+		}
+	}
+	var owners []auth.AccountName
+	_ = objects.EnsureWitnessStore(s).RangePrimary(func(w *objects.Witness) (bool, error) {
+		owners = append(owners, w.Owner)
+		return true, nil
+	})
+	for _, o := range owners {
+		objects.MutateWitness(s, o, func(w *objects.Witness) { w.AccountCreationFee = fee })
+	}
 	if err := s.Commit(false); err != nil {
 		f.t.Fatalf("testfixture: set median fee commit: %v", err)
 	}
+}
+
+// MedianAccountCreationFee returns the witness schedule's current median
+// account_creation_fee, the amount account_create must pay from HF20 on.
+// hived's database_fixture::account_create reads the same field.
+func (f *Fixture) MedianAccountCreationFee() int64 {
+	ws, err := objects.GetWitnessSchedule(state.NewSession(f.State))
+	if err != nil {
+		f.t.Fatalf("testfixture: get witness schedule: %v", err)
+	}
+	return ws.MedianAccountCreationFee
 }
 
 // SetHardfork is an alias for HardforksUpTo.

@@ -454,6 +454,10 @@ func TestDirectRCDelegationVestingWithdrawalRoutes(t *testing.T) {
 func TestUpdateOutdelOverflowDelegatee(t *testing.T) {
 	f := New(t)
 	f.HardforksUpTo(hardfork.HF26)
+	// The genesis median fee follows hived (1 satoshi) and the fee-derived
+	// minimum delegation would exceed the amounts below; clear it as hived's
+	// tests do with set_account_creation_fee.
+	f.SetMedianAccountCreationFee(0)
 	f.Actors("alice", "bob", "dave", "eve")
 	f.FundVesting("alice", 10_000)
 	f.GenerateBlock()
