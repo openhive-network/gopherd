@@ -111,7 +111,7 @@ func TestRCPluginAccountCreation(t *testing.T) {
 	// post-HF20 vanilla account_create path → "dave".
 	f.HardforksUpTo(hardfork.HF20)
 	if err := f.ApplyOp(op.AccountCreate{
-		Fee:            HIVE(0),
+		Fee:            HIVE(f.MedianAccountCreationFee()),
 		Creator:        InitMiner,
 		NewAccountName: "dave",
 		Owner:          newAuth(pubKey),
@@ -439,6 +439,10 @@ func readRCPendingData(t *testing.T, f *Fixture) objects.RCPendingData {
 func TestRCPluginDifferentialUsageOperations(t *testing.T) {
 	f := New(t)
 	f.HardforksUpTo(hardfork.HF26)
+	// The genesis median fee follows hived (1 satoshi) and the fee-derived
+	// minimum delegation would exceed the amounts below; clear it as hived's
+	// tests do with set_account_creation_fee.
+	f.SetMedianAccountCreationFee(0)
 	f.Actors("alice", "bob", "sam")
 	f.FundVesting("alice", 1_000_000)
 	f.FundVesting("bob", 1_000_000)

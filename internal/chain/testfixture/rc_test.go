@@ -30,8 +30,9 @@ func TestRCManabarPostHF20InitOnCreate(t *testing.T) {
 	f.FundLiquid(InitMiner, 100_000)
 	f.GenerateBlock()
 	pubKey := [33]byte{0x02, 'A'}
+	fee := f.MedianAccountCreationFee()
 	if err := f.ApplyOp(op.AccountCreate{
-		Fee:            HIVE(0),
+		Fee:            HIVE(fee),
 		Creator:        InitMiner,
 		NewAccountName: "alice",
 		Owner:          newAuth(pubKey),
@@ -45,9 +46,12 @@ func TestRCManabarPostHF20InitOnCreate(t *testing.T) {
 	if a.RCManaLastUpdate == 0 {
 		t.Fatal("alice.RCManaLastUpdate should be set post-HF20")
 	}
-	// max_rc is zero since alice has no VESTS.
-	if a.LastMaxRC != 0 {
-		t.Fatalf("alice.LastMaxRC: got %d, want 0 (no VESTS)", a.LastMaxRC)
+	// alice has no VESTS, but hived seeds max_rc with the creation fee converted
+	// at the vesting price (rc_adjustment_from_fee, hive_evaluator_account.cpp:148).
+	dgpo := f.DGPO()
+	want := fee * dgpo.TotalVestingShares / dgpo.TotalVestingFundHive
+	if a.LastMaxRC != want {
+		t.Fatalf("alice.LastMaxRC: got %d, want %d (fee %d at the vesting price)", a.LastMaxRC, want, fee)
 	}
 }
 

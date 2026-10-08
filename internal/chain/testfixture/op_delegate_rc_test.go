@@ -425,6 +425,10 @@ func TestDelegateRCOperationApplyManyDifferent(t *testing.T) {
 func TestRCDelegationRemovalNoRC(t *testing.T) {
 	f := New(t)
 	f.HardforksUpTo(hardfork.HF26)
+	// The genesis median fee follows hived (1 satoshi) and the fee-derived
+	// minimum delegation would exceed the amounts below; clear it as hived's
+	// tests do with set_account_creation_fee.
+	f.SetMedianAccountCreationFee(0)
 	f.Actors("alice", "bob")
 	f.FundVesting("alice", 1_000)
 	f.FundLiquid("bob", 9_000_000_000)

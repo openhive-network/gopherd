@@ -139,8 +139,8 @@ func Apply(db *state.Database) error {
 		Created:              network.GenesisTimeUnix,
 		URL:                  "",
 		BlockSigningKey:      memoKey,
-		AccountCreationFee:   0,
-		MaximumBlockSize:     65536,
+		AccountCreationFee:   1,      // chain_properties default: HIVE_MIN_ACCOUNT_CREATION_FEE
+		MaximumBlockSize:     131072, // chain_properties default: HIVE_MIN_BLOCK_SIZE_LIMIT * 2
 		HBDInterestRate:      1000,
 		AccountSubsidyBudget: 797,
 		AccountSubsidyDecay:  347321,
@@ -226,8 +226,8 @@ func Apply(db *state.Database) error {
 		MaxVotedWitnesses:        objects.MaxVotedWitnessesHF0,
 		MaxMinerWitnesses:        objects.MaxMinerWitnessesHF0,
 		NextShuffleBlockNum:      1,
-		MedianAccountCreationFee: 0,
-		MedianMaximumBlockSize:   65536, // HIVE_MIN_BLOCK_SIZE_LIMIT
+		MedianAccountCreationFee: 1,      // chain_properties default (HIVE_MIN_ACCOUNT_CREATION_FEE)
+		MedianMaximumBlockSize:   131072, // chain_properties default (HIVE_MIN_BLOCK_SIZE_LIMIT * 2)
 		MedianHBDInterestRate:    1000,
 	})
 
