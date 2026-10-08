@@ -83,6 +83,9 @@ type AccountRow struct {
 	Proxy                         string `json:"proxy"`
 	WitnessesVotedFor             uint16 `json:"witnesses_voted_for"`
 	PendingClaimedAccounts        int64  `json:"pending_claimed_accounts"`
+	RecoveryAccount               string `json:"recovery_account"`
+	Mined                         bool   `json:"mined"`
+	CanVote                       bool   `json:"can_vote"`
 	VotingManaCurrent             int64  `json:"voting_mana_current"`
 	VotingManaLastUpdate          uint32 `json:"voting_mana_last_update"`
 	HBDLastInterestPayment        uint32 `json:"hbd_last_interest_payment"`
