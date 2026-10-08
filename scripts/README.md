@@ -66,3 +66,5 @@ investigation.)
 | `hived-replay-to.sh`          | Replay hived to N + dump a state_snapshot. Older snapshot-based path. |
 | `hived-api-serve.sh`          | Start hived API by reloading a snapshot dumped by `hived-replay-to.sh`. |
 | `hived-api.conf`              | Plugin/port/p2p config used by `hived-serve-checkpoint.sh`. |
+| `parity-replay-compare.sh`    | Replay one block_log with gopherd AND a mainnet hived, then diff the two states field by field (dgpo, feed, every witness and account, orders, conversions, savings withdrawals, delegation returns). Memory-capped via `systemd-run`. |
+| `parity-compare-state.py`     | The diff itself: gopherd `state-jsonl` dump vs a hived `database_api` endpoint. Exit 1 on any mismatch. Used by `parity-replay-compare.sh`, usable alone against any running hived. |
