@@ -36,7 +36,7 @@ type LiquidityRewardBalance struct {
 	HBDVolume  int64
 }
 
-const LiquidityRewardBalanceTable state.TableID = 21
+const LiquidityRewardBalanceTable state.TableID = 38 // was 21, shared with WitnessScheduleTable and RewardFundTable
 
 // LiquidityRewardByWeightIndex orders entries by (weight, owner)
 // matching hived's by_volume_weight composite key. We sort ASCENDING

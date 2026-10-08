@@ -11,7 +11,7 @@ import (
 
 // RCDirectDelegationTable holds direct RC delegations from one account
 // to another. Mirrors hive::chain::rc_direct_delegation_object.
-const RCDirectDelegationTable state.TableID = 23
+const RCDirectDelegationTable state.TableID = 37 // was 23, shared with DeclineVotingRightsRequestTable (account-prefixed keys)
 
 // RCDirectDelegation is one (from, to, delegated_rc) row.
 type RCDirectDelegation struct {

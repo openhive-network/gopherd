@@ -17,7 +17,7 @@ import (
 // (30 days) the previous owner can request_account_recovery using a
 // key from THIS history (a "previous_owner_authority" within the
 // recovery window).
-const OwnerAuthorityHistoryTable state.TableID = 22
+const OwnerAuthorityHistoryTable state.TableID = 36 // was 22, shared with VestingDelegationExpirationTable (same 20-byte key shape)
 
 // OwnerAuthorityHistory is one row of recorded owner-authority change.
 type OwnerAuthorityHistory struct {

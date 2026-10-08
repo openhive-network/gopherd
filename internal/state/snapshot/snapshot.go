@@ -53,7 +53,11 @@ import (
 
 // Format is bumped only on incompatible on-disk changes. Loaders refuse
 // snapshots with a different format; we don't migrate.
-const Format = 1
+// Format 2: table ids 36-39 replace the ids 21/22/23 that four tables used to
+// share with another table (owner_authority_history, rc_direct_delegation,
+// liquidity_reward_balance, reward_fund). A Format-1 file holds those rows under
+// the old ids and must be rebuilt by replay, not loaded.
+const Format = 2
 
 // HashAlgoCRC32C is the default checksum for newly written snapshots:
 // hardware-accelerated Castagnoli CRC32 (~an order of magnitude faster than
