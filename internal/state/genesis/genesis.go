@@ -36,6 +36,7 @@ func Apply(db *state.Database) error {
 	objects.PutAccount(s, &objects.Account{
 		Name:                 MainnetInitminer,
 		Created:              network.GenesisTimeUnix,
+		Mined:                true, // every genesis account is "mined" in hived (account_object.hpp:148)
 		MemoKey:              memoKey,
 		VotingManaCurrent:    10000, // HIVE_100_PERCENT — starts at full
 		VotingManaLastUpdate: network.GenesisTimeUnix,

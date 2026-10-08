@@ -112,6 +112,7 @@ func ApplyTestnet(db *state.Database, extraWitnesses []string) error {
 		objects.PutAccount(s, &objects.Account{
 			Name:                 name,
 			Created:              gt,
+			Mined:                true, // every genesis account is "mined" in hived (account_object.hpp:148)
 			MemoKey:              initPub,
 			VotingManaCurrent:    10000,
 			VotingManaLastUpdate: gt,
