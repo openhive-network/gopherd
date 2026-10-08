@@ -6,7 +6,8 @@ HF29 defined in `hardfork.d/1_29.hf` but not scheduled). gopherd at 3276037.
 Method: source-to-source comparison of seven areas (HF29 rules, RC, virtual ops,
 tx validation / mempool / production, social+transfer evaluators, per-block
 processing, governance+account evaluators). Every headline finding was re-read in
-both trees before being listed. No replay or test run backs these; where a finding
+both trees before being listed. No replay or test run backed these when written; section F
+records the replay-backed verification done since. Where a finding
 depends on mainnet state ("if such a row exists") that is said.
 
 Block IDs match through head, so none of this is detectable by the block-id check.
@@ -32,7 +33,7 @@ Status column: `[ ]` open, `[x]` fixed in tree, `[~]` partially fixed, `[-]` won
 | A10 | [x] | **Beneficiary cap (8) unconditional**; hived soft-fork (`!is_in_control() || ≤8`). A hived block with 9..127 beneficiaries fails in gopherd. | `comment.go:415-417` | `hive_evaluator_social.cpp:123-124` |
 | A11 | [x] | **Version / hardfork-vote tally over the wrong 21.** gopherd tallies the newly picked set; hived tallies `wso.current_shuffled_witnesses` of the object that just became current. Flips `next_hardfork_time` a round apart at a 16/17-of-21 vote. | `internal/chain/witness_schedule.go:536-548` | `witness_schedule.cpp:270-300` |
 | A12 | [x] | **Scheduled-witness check advisory**; no `head_block_time < timestamp` and no `slot > 0` assert. A validly signed block at the wrong slot is accepted. | `internal/chain/database.go:795-822`, `mismatchWarn` :35 | `database.cpp:2800-2818` |
-| A13 | [x] | **Threshold-0 authority** unsatisfiable in gopherd, trivially satisfied in hived. Existence on mainnet unverified. | `internal/chain/sign_state.go:86` | `sign_state.hpp:167-296` |
+| A13 | [x] | **Threshold-0 authority** unsatisfiable in gopherd, trivially satisfied in hived. Mainnet census at block 8,221,695 (section F): `temp` owner/active/posting and `testing-000001` active have weight_threshold 0, so this is live. | `internal/chain/sign_state.go:86` | `sign_state.hpp:167-296` |
 | A14 | [x] | **delegate_vesting_shares 0→0** on an existing amount-0 row: hived rejects (`delta >= min_update`), gopherd deletes the row. Also minima asserts skipped when `!InControl` citing a few-sat vesting-price residue — if real, that residue is itself a dgpo divergence. | `internal/chain/evaluator/vesting.go:254-293,525` | `hive_evaluator_transfer.cpp:800-833` |
 | A15 | [ ] | **delegate_rc errors during block apply** in some paths; hived swallows custom-op exceptions when not in control. | `internal/chain/evaluator/custom_json_rc.go:280,287,313` | `hive_evaluator.cpp:355-370` |
 | A16 | [x] | **Version constant 1.28.7**; hived 1.28.8 (2026-10-05). After HF29 hived rejects blocks advertising 1.28.x; must be bumped with A1. | `internal/protocol/network/network_mainnet.go:52-54` | `config.hpp:139` | Follow-through: `hardfork.HasPlaceholderTime` + the HF29 RELEASE CHECKLIST in hardfork.go; the witness never votes a placeholder time; `TestHardforkReleaseConsistency` fails if the version and the time move apart. |
@@ -76,9 +77,11 @@ Status column: `[ ]` open, `[x]` fixed in tree, `[~]` partially fixed, `[-]` won
 | C7 | [ ] | recurrent transfer tie-break `(trigger, from, to, pair_id)` vs hived `(trigger_date, object id)`; decides which fails on insufficient balance. | `internal/chain/recurrent_transfers.go:62-74` | `database_dhf.cpp:42-50` |
 | C8 | [-] | Tie-breaks approximated by `(Created, Name)` instead of account id: curator payout order, governance expiry order. Known; consensus-relevant only for same-block-created equal-weight curators or once the 200 budget is hit. | `comment_cashout.go:1266-1300`, `governance_votes.go:95-124` | `database_comment.cpp:129-139`, `database.cpp:3502-3545` |
 | C9 | [x] | transfer HIVE→hive.fund rounding to 0 HBD still adjusts VirtualSupply (hived skips when 0 minted). Intra-block only. | `internal/chain/evaluator/transfer.go:124-134` | `global_property_object.hpp:335-348` |
-| C10 | [x] | account_create by `temp` pre-HF11 → recovery "" vs hived "steem" (changes who may recover today). | `account_create.go:25-33` | `hive_evaluator_account.cpp:136-144` |
+| C10 | [x] | account_create by `temp` pre-HF11 → recovery "" vs hived "steem" (changes who may recover today). Verified: recovery_account of all 124,477 accounts matches hived at 8,221,695 (section F). | `account_create.go:25-33` | `hive_evaluator_account.cpp:136-144` |
 | C11 | [ ] | `ctx.BlockNum` (N) used where hived reads `head_block_num()` (N−1) during tx apply: pow thresholds 201600/864000, owner-history gate 3186477, pre-HF20 shutdown threshold. Single-block boundaries, historic. | `pow.go:194-235`, `account_update.go:166,245`, `database.go:1605` | `hive_evaluator.cpp:482-486`, `database.cpp:1703`, `database_witness.cpp:296` |
 | C12 | [ ] | Pre-HF28 power-down with zero modulo chunk cancels instead of scheduling a zero fill; pre-HF25 period_pay==0 skips `adjust_balance(0)` interest accrual. Historic/dead. | `vesting_withdrawals.go:~175`, `proposals.go:~265` | `database_vesting.cpp:126-127,265-276`, `dhf_processor.cpp:175-218` |
+| C13 | [x] | **Three table ids shared by two tables each** (found by the section-F diff: 415 owner-key history rows surfaced as delegation returns). 21: witness_schedule + reward_fund + liquidity_reward_balance; 22: owner_authority_history + vesting_delegation_expiration (same 20-byte key shape); 23: decline_voting_rights + rc_direct_delegation. Every prefix Range over one table visited the other's rows: recover_account's walk over an account's owner history could stop early on a delegation-return row that happened to decode, RC out-delegation clipping saw the delegator's decline request, the HF liquidity sweeps saw the reward funds, and the API listed garbage. Tables moved to 36-39; mem snapshot Format 2 refuses old state files (replay required). `TestTableIDsUnique` pins it. | `internal/state/objects/{owner_authority_history,rc_delegation,liquidity_reward,reward_fund}.go` | n/a (chainbase gives every index its own id) |
+| C14 | [x] | **Genesis initminer props and median props** seeded 0 / 65536; hived's chain_properties defaults are 1 (HIVE_MIN_ACCOUNT_CREATION_FEE) / 131072 (HIVE_MIN_BLOCK_SIZE_LIMIT×2). Medians recompute at the first schedule round, but initminer's witness row stayed wrong forever. | `internal/state/genesis/genesis.go`, `genesis_testnet.go` | `hive_operations.hpp:408-415`, `database_init.cpp:229` |
 
 ## D. Virtual operations
 
@@ -106,10 +109,43 @@ Totals: 20 matching, 7 divergent, 16 never emitted. No API exposes the stream
 | Status | Item |
 |---|---|
 | [ ] | Untracked `cmd/dgpodump`, `cmd/scanbenef` import `hived-go/...`; `go build ./...` fails. |
+| [x] | initminer account not flagged `mined` (hived flags every genesis account). API-only. |
 | [ ] | Stale comments: `database.go:194-202,623-631` claim ApplyBlock enforces the custom-op block limit (it does not; `enforceCustomOpBlockLimit` has no caller); `hardfork29.go` / `hardfork_testnet.go` claim mainnet does not register HF29 (hived registers it unconditionally). |
 | [~] | rc_stats period fixed to 28800 blocks; `rcFinalizeBlock` runs after `processHardforks` (hived before; HF20 block only); `RCDelegationExpiration` 5-day refund table has no hived counterpart and no caller. |
 | [x] | Early-block hold cap (hived 0b6f8d091) already ported (`internal/p2p/sync/early_block.go:32`). |
 | [x] | `GlobalRemoveThreshold = 200` is faithful: hived's `set_remove_threshold` has no non-test caller. |
+
+## F. Replay verification (2026-10-08)
+
+Procedure: `scripts/parity-replay-compare.sh` — gopherd replays the block_log
+with invariants checked every 100k blocks and vops on, dumps `state-jsonl` from
+the snapshot at head; a mainnet hived 1.28.8 (hive2 develop 4f1961fe3, built in
+`hive2/build_mainnet`) replays the same log and serves `database_api`;
+`scripts/parity-compare-state.py` diffs the two.
+
+Covered: genesis → 8,221,695 (2016-12-06, HF0–HF16), the whole block_log on this
+box. gopherd: 0 block errors, 0 invariant violations, 3m51s. hived: same head,
+same head_block_id.
+
+| Compared | Result |
+|---|---|
+| dgpo: supplies, vesting fund/shares, reward fund, virtual supply, interest/print rates, head_block_id | match |
+| feed median | match |
+| 13,127 witnesses: votes, total_missed, props (fee, block size, interest), signing key | match (after C14) |
+| 124,477 accounts: HIVE/HBD/savings/reward balances, vesting, delegated/received, withdraw rate/to_withdraw/withdrawn/next_vesting_withdrawal, proxy, witnesses_voted_for, recovery_account, pending_claimed_accounts, mined, can_vote | match (after the `mined` fix) |
+| limit orders, HBD conversion requests, savings withdrawals, pending delegation returns (counts and amounts) | match (after C13) |
+| authorities with weight_threshold 0 | 4 on hived: `temp` ×3, `testing-000001.active` (A13 is live) |
+
+Not compared: manabars (hived reports pre-HF20 voting power through post-HF20
+fields), `created` (hived's API field is `block_created`, the block's own
+timestamp; gopherd stores `created`, head_block_time at apply, which is what the
+manabars are seeded from; neither is consensus), comments and votes (not in the
+dump), authorities beyond the threshold census.
+
+Limits: nothing past 8.2M is verified by this. RC pools (HF20+), HF17+ reward
+curves, DHF, delegations at scale and HF28/HF29 behaviour still rest on the
+code review and the fixture tests. The block_log stops at 8,221,695; a longer
+log is the one input needed to extend this.
 
 ## Confirmed matches (where there was reason to doubt)
 
@@ -126,8 +162,8 @@ ba899e6 signature bypass fix is complete.
 
 ## Unresolved without state or a replay
 
-- Does any mainnet account have a threshold-0 authority (A13)?
-- Did `temp` create accounts pre-HF11 (C10)? Any pow op in block 201600/864000, owner rotation in 3186477 (C11)?
+- ~~Does any mainnet account have a threshold-0 authority (A13)?~~ Yes: `temp` (all three roles) and `testing-000001` (active), at 8,221,695.
+- ~~Did `temp` create accounts pre-HF11 (C10)?~~ recovery_account matches hived for every account at 8,221,695. Any pow op in block 201600/864000, owner rotation in 3186477 (C11)? Still unchecked.
 - Was any HF23-cleared account the recipient of a pending savings withdrawal (C5)?
 - Did any mainnet update_proposal carry the end-date extension (C1)? Did the first post-HF21 DHF tick see passed_time > 3600 in gopherd (C2)?
 - Does gopherd's `computeDecayPerTimeUnit` reproduce hived's jsonball conversion bit-for-bit?
