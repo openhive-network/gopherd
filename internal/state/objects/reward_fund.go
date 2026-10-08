@@ -10,7 +10,7 @@ import (
 
 // RewardFundTable holds reward_fund_object rows. Created at HF17 with a
 // single "post" fund populated from dgpo.total_reward_fund_hive.
-const RewardFundTable state.TableID = 21
+const RewardFundTable state.TableID = 39 // was 21, shared with WitnessScheduleTable and LiquidityRewardBalanceTable
 
 // CurveID enumerates the reward curves selectable per fund.
 type CurveID uint8
