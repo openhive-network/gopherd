@@ -421,3 +421,32 @@ func TestApplyBlockHookIntegration(t *testing.T) {
 		t.Fatalf("byte mismatch: got %d bytes, want %d bytes", len(gotBytes), len(wantBytes))
 	}
 }
+
+// TestWipeScratchColdTier pins the recovery preflight rule for the cold tier:
+// a scratch backend's directory goes (the replay rebuilds it), a persist
+// backend's stays, and a missing directory is not an error.
+func TestWipeScratchColdTier(t *testing.T) {
+	dir := t.TempDir()
+	cold := filepath.Join(dir, "cold")
+	if err := os.MkdirAll(filepath.Join(cold, "x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if wiped, err := wipeScratchColdTier(cold, "persist"); err != nil || wiped {
+		t.Fatalf("persist cold tier touched: wiped=%v err=%v", wiped, err)
+	}
+	if _, err := os.Stat(cold); err != nil {
+		t.Fatal("persist cold tier removed")
+	}
+	if wiped, err := wipeScratchColdTier(cold, "pebble"); err != nil || !wiped {
+		t.Fatalf("pebble cold tier not wiped: wiped=%v err=%v", wiped, err)
+	}
+	if _, err := os.Stat(cold); !os.IsNotExist(err) {
+		t.Fatal("pebble cold tier still present")
+	}
+	if wiped, err := wipeScratchColdTier(cold, "pebble"); err != nil || wiped {
+		t.Fatalf("missing cold dir: wiped=%v err=%v", wiped, err)
+	}
+	if wiped, err := wipeScratchColdTier("", "pebble"); err != nil || wiped {
+		t.Fatalf("empty cold dir: wiped=%v err=%v", wiped, err)
+	}
+}

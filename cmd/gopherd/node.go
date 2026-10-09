@@ -156,6 +156,26 @@ func peekPersistedHead(db *state.Database) uint32 {
 	return dgpo.HeadBlockNumber
 }
 
+// wipeScratchColdTier removes a scratch cold tier (--cold-backend pebble or
+// mmap) so a from-genesis recovery replay rebuilds it alongside the typed
+// stores. A persist cold tier, or no directory, is left untouched. Reports
+// whether anything was removed.
+func wipeScratchColdTier(coldDir, coldBackend string) (bool, error) {
+	if coldDir == "" || coldBackend == "persist" {
+		return false, nil
+	}
+	if _, err := os.Stat(coldDir); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if err := os.RemoveAll(coldDir); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // wipePebbleFiles removes pebble's state files from dir while preserving
 // the blockchain/ subtree (block_log + index sidecar) and the peerdb.
 // Used at startup when crash recovery has to rebuild state from genesis
@@ -573,6 +593,21 @@ func newApp(cfg flags) (*app, error) {
 		if _, err := os.Stat(blockLogPath); err == nil {
 			if err := wipePebbleFiles(cfg.dataDir); err != nil {
 				return nil, fmt.Errorf("wipe stale pebble at %s: %w", cfg.dataDir, err)
+			}
+			// The cold tier is state too. It holds the comments and votes
+			// evicted by the previous run, i.e. their shape at the OLD head;
+			// a replay from genesis that promotes them back sees paid-out,
+			// later-voted comments while applying earlier blocks, and pays
+			// those cashouts wrong. Found on a mainnet sync: after a restart
+			// the recovery replay credited a-alice 0 HBD for a comment hived
+			// paid 0.019 HBD, and the next claim_reward_balance failed.
+			// Scratch cold backends (pebble, mmap) are rebuilt by the same
+			// replay; a persist cold tier is meant to survive restarts and
+			// is left alone.
+			if wiped, err := wipeScratchColdTier(cfg.coldDir, cfg.coldBackend); err != nil {
+				return nil, fmt.Errorf("wipe stale cold tier at %s: %w", cfg.coldDir, err)
+			} else if wiped {
+				fmt.Fprintf(os.Stderr, "gopherd node: recovery from block_log — wiped stale cold tier %s (rebuilt by the replay)\n", cfg.coldDir)
 			}
 		}
 	}
