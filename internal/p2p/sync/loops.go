@@ -656,6 +656,7 @@ func (d *Delegate) applyLoop() {
 				PreVerifiedBlockSigner:    job.preVerifiedSigner,
 				PreRecoveredTxKeys:        job.preRecoveredTxKeys,
 				CompressedPayload:         job.wire.payload(),
+				RawBlockRetained:          true, // job.rawBlock is this job's own decompression output
 			}
 			opts.CompressedDictNum, opts.CompressedHasDict = job.wire.dict()
 			var blockStats chain.Stats
@@ -745,6 +746,7 @@ func (d *Delegate) applyLoop() {
 			PreVerifiedBlockSigner: job.preVerifiedSigner,
 			PreRecoveredTxKeys:     job.preRecoveredTxKeys,
 			CompressedPayload:      job.wire.payload(),
+			RawBlockRetained:       true,
 		}
 		liveOpts.CompressedDictNum, liveOpts.CompressedHasDict = job.wire.dict()
 		outcome, err := d.chain.PushLiveBlock(job.rawBlock, job.blockNum, liveOpts)
