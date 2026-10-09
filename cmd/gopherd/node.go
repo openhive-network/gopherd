@@ -524,6 +524,12 @@ type app struct {
 	progressStartT   time.Time
 	progressStartN   atomic.Uint32
 
+	// blocksStoredAsReceived / blocksRecompressed count block_log appends
+	// that reused the peer's compressed payload vs. compressed the raw block
+	// locally (only the second costs apply-loop CPU).
+	blocksStoredAsReceived atomic.Uint64
+	blocksRecompressed     atomic.Uint64
+
 	// cpuProfileFile, when non-nil, is the open profile file; closed by
 	// app.close() AFTER pprof.StopCPUProfile is called.
 	cpuProfileFile *os.File
@@ -1278,11 +1284,11 @@ func (a *app) run() error {
 	// Wire the per-block hook BEFORE starting the sync delegate so the
 	// first APPLIED already lands in the block_log.
 	stopCh := make(chan struct{}, 1)
-	a.chain.SetOnBlockApplied(func(blockNum uint32, _ block.ID) {
+	a.chain.SetOnBlockApplied(func(blockNum uint32, id block.ID) {
 		raw := a.chain.RecentBlockBytes(blockNum)
 		if raw == nil {
 			a.logger.printf("WARN no raw bytes for applied block %d (cache miss)", blockNum)
-		} else if err := a.afterApply(raw, blockNum); err != nil {
+		} else if err := a.afterApply(raw, blockNum, id); err != nil {
 			a.logger.printf("ERROR post-apply hook block %d: %v", blockNum, err)
 		}
 		if a.cfg.targetBlock > 0 && blockNum >= a.cfg.targetBlock {
@@ -1298,7 +1304,10 @@ func (a *app) run() error {
 	// reversible blocks, so this is the sole side-effect path when
 	// --fork-switching is on. raw is handed in directly (no cache lookup).
 	a.chain.SetOnBlockFinalized(func(blockNum uint32, raw []byte) {
-		if err := a.afterApply(raw, blockNum); err != nil {
+		// The id selects the cached compressed form; a miss just means the
+		// block gets compressed locally.
+		id, _ := a.chain.RecentBlockIDForNum(blockNum)
+		if err := a.afterApply(raw, blockNum, id); err != nil {
 			a.logger.printf("ERROR post-finalize hook block %d: %v", blockNum, err)
 		}
 		if a.cfg.targetBlock > 0 && blockNum >= a.cfg.targetBlock {
@@ -1495,7 +1504,7 @@ func (a *app) run() error {
 // afterApply is invoked from chain.SetOnBlockApplied (i.e. after the
 // block has already passed the full validator pipeline). We append it to
 // the block_log writer + diff against --verify-against if set.
-func (a *app) afterApply(rawBlock []byte, blockNum uint32) error {
+func (a *app) afterApply(rawBlock []byte, blockNum uint32, id block.ID) error {
 	if a.verify != nil {
 		want, err := a.verify.Block(blockNum)
 		if err != nil {
@@ -1507,7 +1516,18 @@ func (a *app) afterApply(rawBlock []byte, blockNum uint32) error {
 		}
 	}
 	if a.writer != nil {
-		if err := a.writer.Append(rawBlock); err != nil {
+		// A block that arrived compressed from a peer is already in block_log
+		// form; store that payload instead of recompressing the raw bytes at
+		// level 15 here, on the apply goroutine (it was half its CPU).
+		var err error
+		if payload, dictNum, hasDict, ok := a.chain.RecentCompressedBlock(blockNum, id); ok && a.cfg.compressBlocks {
+			err = a.writer.AppendCompressed(payload, dictNum, hasDict)
+			a.blocksStoredAsReceived.Add(1)
+		} else {
+			err = a.writer.Append(rawBlock)
+			a.blocksRecompressed.Add(1)
+		}
+		if err != nil {
 			return fmt.Errorf("append block %d: %w", blockNum, err)
 		}
 	}

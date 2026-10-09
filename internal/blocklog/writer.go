@@ -49,6 +49,11 @@ type Writer interface {
 	// representation hived expects (compressed or not), with the matching
 	// attributes packed into the trailer.
 	AppendRaw(rawBlock []byte, attr Attributes) error
+	// AppendCompressed writes a block the caller already holds in zstd
+	// block_log form (typically the payload a peer served it in), with the
+	// dictionary it was compressed with. Only valid on a writer opened with
+	// compressBlocks=true; an uncompressed log must get Append(raw).
+	AppendCompressed(payload []byte, dictNum uint8, hasDict bool) error
 	// HeadBlock returns the highest block number written so far. Returns 0
 	// when the file is empty.
 	HeadBlock() uint32
@@ -170,6 +175,21 @@ func (w *fileWriter) Append(rawBlock []byte) error {
 	}
 	if err != nil {
 		return fmt.Errorf("blocklog: compress block %d: %w", blockNum, err)
+	}
+	return w.AppendRaw(payload, Attributes{
+		Compressed:    true,
+		HasDictNum:    hasDict,
+		DictionaryNum: dictNum,
+	})
+}
+
+// AppendCompressed stores an already-compressed block verbatim. This is how
+// a syncing node avoids recompressing every block at level 15 on the apply
+// path: hived peers serve blocks in exactly this form, and hived itself
+// appends the received compressed buffer unchanged.
+func (w *fileWriter) AppendCompressed(payload []byte, dictNum uint8, hasDict bool) error {
+	if !w.compress {
+		return errors.New("blocklog: AppendCompressed on an uncompressed block_log")
 	}
 	return w.AppendRaw(payload, Attributes{
 		Compressed:    true,

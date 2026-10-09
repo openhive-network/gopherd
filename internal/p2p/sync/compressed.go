@@ -38,7 +38,7 @@ func (d *Delegate) handleCompressedBlock(p *node.Peer, body []byte) {
 		// "uncompressed compressed-block" — which is just the raw
 		// signed_block bytes. Forward as if it were a BlockMessage body
 		// (sans trailing block_id, which we'll synthesize).
-		d.dispatchUncompressedFromCompressed(p, msg.CompressedBytes)
+		d.dispatchUncompressedFromCompressed(p, msg.CompressedBytes, nil)
 		return
 	}
 	raw, err := d.decompressCompressedBlock(msg)
@@ -47,7 +47,11 @@ func (d *Delegate) handleCompressedBlock(p *node.Peer, body []byte) {
 		d.logf("compressed_block_message decompress: %v", err)
 		return
 	}
-	d.dispatchUncompressedFromCompressed(p, raw)
+	// The payload decompressed with the dictionary it names, so it is a
+	// valid block_log form of exactly these raw bytes: keep it for the writer.
+	d.dispatchUncompressedFromCompressed(p, raw, &wireCompressed{
+		bytes: msg.CompressedBytes, dictNum: msg.DictionaryNumber, hasDict: msg.HasDictionary,
+	})
 }
 
 // decompressCompressedBlock dispatches by dictionary flag. When no
@@ -73,7 +77,7 @@ func (d *Delegate) decompressCompressedBlock(msg proto.CompressedBlockMessage) (
 //     headBlockHint + recent-block cache in handleBlockBytes still catches
 //     the case where applyLoop already finished and the entry slid out of
 //     the small ring.
-func (d *Delegate) dispatchUncompressedFromCompressed(p *node.Peer, raw []byte) {
+func (d *Delegate) dispatchUncompressedFromCompressed(p *node.Peer, raw []byte, wire *wireCompressed) {
 	if len(raw) == 0 {
 		d.compressedDecodeErrors.Add(1)
 		return
@@ -102,7 +106,7 @@ func (d *Delegate) dispatchUncompressedFromCompressed(p *node.Peer, raw []byte) 
 		d.removeInflight(id)
 		return
 	}
-	d.handleBlockBytes(p, raw, id)
+	d.handleBlockBytesWire(p, raw, id, wire)
 }
 
 // markCompressedSeen returns true if id was already in the ring (caller

@@ -646,14 +646,17 @@ func (d *Delegate) applyLoop() {
 			if d.cfg.LogWorkTiming {
 				applyStart = time.Now()
 			}
-			if _, err := d.chain.ApplyBlock(job.rawBlock, job.blockNum, chain.ApplyOptions{
+			opts := chain.ApplyOptions{
 				Sync:                      false,
 				SkipTransactionSignatures: historical,
 				SkipBlockSignature:        historical,
 				TolerateFailingOps:        historical,
 				PreVerifiedBlockSigner:    job.preVerifiedSigner,
 				PreRecoveredTxKeys:        job.preRecoveredTxKeys,
-			}, nil); err != nil {
+				CompressedPayload:         job.wire.payload(),
+			}
+			opts.CompressedDictNum, opts.CompressedHasDict = job.wire.dict()
+			if _, err := d.chain.ApplyBlock(job.rawBlock, job.blockNum, opts, nil); err != nil {
 				d.logf("apply_block %d failed: %v", job.blockNum, err)
 				// Drop and continue — gossip / next INV will re-deliver
 				// if the chain is on a recoverable fork.
@@ -715,7 +718,7 @@ func (d *Delegate) applyLoop() {
 			applyStart = time.Now()
 		}
 		historical := isHistoricalBlock(blockTimestamp(job.rawBlock))
-		outcome, err := d.chain.PushLiveBlock(job.rawBlock, job.blockNum, chain.ApplyOptions{
+		liveOpts := chain.ApplyOptions{
 			Sync:                      false,
 			SkipTransactionSignatures: historical,
 			// A block we just produced carries our own signature, made
@@ -729,7 +732,10 @@ func (d *Delegate) applyLoop() {
 			TolerateFailingOps:     historical,
 			PreVerifiedBlockSigner: job.preVerifiedSigner,
 			PreRecoveredTxKeys:     job.preRecoveredTxKeys,
-		})
+			CompressedPayload:      job.wire.payload(),
+		}
+		liveOpts.CompressedDictNum, liveOpts.CompressedHasDict = job.wire.dict()
+		outcome, err := d.chain.PushLiveBlock(job.rawBlock, job.blockNum, liveOpts)
 		if err != nil {
 			d.logf("push_live_block %d failed: %v", job.blockNum, err)
 			return

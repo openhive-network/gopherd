@@ -387,6 +387,17 @@ func (d *Database) RecentBlockBytes(blockNum uint32) []byte {
 	return d.recent.ByNum(blockNum)
 }
 
+// RecentCompressedBlock returns the zstd block_log payload the block arrived
+// in over p2p, if the recent-block cache still holds that block under this
+// id and it came compressed. ok is false otherwise (uncompressed arrival,
+// evicted, or a different block at that height).
+func (d *Database) RecentCompressedBlock(blockNum uint32, id block.ID) (payload []byte, dictNum uint8, hasDict bool, ok bool) {
+	if d.recent == nil {
+		return nil, 0, false, false
+	}
+	return d.recent.CompressedByNum(blockNum, id)
+}
+
 // RecentBlockBytesByID returns the FC-binary bytes of the block with the
 // given block_id if the recent-block cache is enabled and contains it.
 func (d *Database) RecentBlockBytesByID(id block.ID) []byte {
@@ -487,6 +498,17 @@ type ApplyOptions struct {
 	// always sets this true — historical txs already passed validation
 	// at the producing-node side; re-verifying is wasted work. Live
 	// sync sets it false.
+	// CompressedPayload, when non-nil, is the zstd block_log form this block
+	// arrived in over p2p (compressed_block_message), with the dictionary it
+	// names in CompressedDictNum / CompressedHasDict. ApplyBlock keeps it in
+	// the recent-block cache next to the raw bytes so the block_log writer
+	// can store it verbatim (RecentCompressedBlock) instead of recompressing
+	// the raw block at level 15 on the apply goroutine. That recompression
+	// was half of the apply loop's CPU on 2017 mainnet blocks.
+	CompressedPayload []byte
+	CompressedDictNum uint8
+	CompressedHasDict bool
+
 	SkipTransactionSignatures bool
 	// SkipBlockSignature bypasses the witness's block-level signature
 	// check (mirrors hived's skip_witness_signature). Same rationale
@@ -1445,7 +1467,11 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	// only see entries for blocks that successfully landed.
 	if d.recent != nil {
 		raw := append([]byte(nil), rawBlock...)
-		d.recent.Put(blockNum, dgpo.HeadBlockID, raw)
+		if opts.CompressedPayload != nil {
+			d.recent.PutWithCompressed(blockNum, dgpo.HeadBlockID, raw, opts.CompressedPayload, opts.CompressedDictNum, !opts.CompressedHasDict)
+		} else {
+			d.recent.Put(blockNum, dgpo.HeadBlockID, raw)
+		}
 	}
 	// Reversible (uncommitted tip) blocks defer their irreversible side-effects
 	// to FinalizeReversible via onBlockFinalized — firing onBlockApplied here
