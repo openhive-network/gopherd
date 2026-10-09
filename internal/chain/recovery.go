@@ -35,7 +35,7 @@ func clearExpiredRecoveryRequests(s *state.Session, blockTime uint32) {
 	var ready []pending
 	var nextExp uint32
 
-	_ = s.Range(objects.AccountRecoveryRequestTable, objects.AccountRecoveryByExpirationIndex, nil,
+	_ = s.RangeFrom(objects.AccountRecoveryRequestTable, objects.AccountRecoveryByExpirationIndex, expHintLowerBound(s, objects.AccountRecoveryRequestTable, objects.AccountRecoveryByExpirationIndex),
 		func(body, _ []byte) (bool, error) {
 			if len(body) < 4+state.AccountNameKeyLen {
 				return true, nil
@@ -79,7 +79,7 @@ func applyEffectiveRecoveryAccountChanges(s *state.Session, blockTime uint32, d 
 	var ready []pending
 	var nextExp uint32
 
-	_ = s.Range(objects.ChangeRecoveryAccountRequestTable, objects.ChangeRecoveryByEffectiveDateIndex, nil,
+	_ = s.RangeFrom(objects.ChangeRecoveryAccountRequestTable, objects.ChangeRecoveryByEffectiveDateIndex, expHintLowerBound(s, objects.ChangeRecoveryAccountRequestTable, objects.ChangeRecoveryByEffectiveDateIndex),
 		func(body, _ []byte) (bool, error) {
 			if len(body) < 4+state.AccountNameKeyLen {
 				return true, nil

@@ -38,7 +38,7 @@ func processDeclineVotingRights(s *state.Session, blockTime, blockNum uint32, d 
 	var ready []pending
 	var nextExp uint32
 
-	_ = s.Range(objects.DeclineVotingRightsRequestTable, objects.DeclineVotingRightsByEffectiveIndex, nil,
+	_ = s.RangeFrom(objects.DeclineVotingRightsRequestTable, objects.DeclineVotingRightsByEffectiveIndex, expHintLowerBound(s, objects.DeclineVotingRightsRequestTable, objects.DeclineVotingRightsByEffectiveIndex),
 		func(body, _ []byte) (bool, error) {
 			if len(body) < 4+state.AccountNameKeyLen {
 				return true, nil

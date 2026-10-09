@@ -26,7 +26,7 @@ func processSavingsWithdraws(s *state.Session, blockTime uint32, d *Database) {
 	var ready []pending
 	var nextExp uint32
 
-	_ = s.Range(objects.SavingsWithdrawTable, objects.SavingsWithdrawByCompleteIndex, nil,
+	_ = s.RangeFrom(objects.SavingsWithdrawTable, objects.SavingsWithdrawByCompleteIndex, expHintLowerBound(s, objects.SavingsWithdrawTable, objects.SavingsWithdrawByCompleteIndex),
 		func(body, _ []byte) (bool, error) {
 			if len(body) < 4+state.AccountNameKeyLen+4 {
 				return true, nil
