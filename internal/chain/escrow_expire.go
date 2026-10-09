@@ -27,7 +27,7 @@ func expireEscrowRatifications(s *state.Session, blockTime uint32, d *Database) 
 	var ready []pending
 	var nextExp uint32
 
-	_ = s.Range(objects.EscrowTable, objects.EscrowByRatificationIndex, nil,
+	_ = s.RangeFrom(objects.EscrowTable, objects.EscrowByRatificationIndex, expHintLowerBound(s, objects.EscrowTable, objects.EscrowByRatificationIndex),
 		func(body, _ []byte) (bool, error) {
 			if len(body) < 4+state.AccountNameKeyLen+4 {
 				return true, nil

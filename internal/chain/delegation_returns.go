@@ -38,7 +38,7 @@ func clearExpiredDelegations(s *state.Session, blockTime uint32, d *Database) {
 	var ready []pending
 	var nextExp uint32
 
-	_ = s.Range(objects.VestingDelegationExpirationTable, objects.VestingDelegationExpirationByDateIndex, nil,
+	_ = s.RangeFrom(objects.VestingDelegationExpirationTable, objects.VestingDelegationExpirationByDateIndex, expHintLowerBound(s, objects.VestingDelegationExpirationTable, objects.VestingDelegationExpirationByDateIndex),
 		func(body, _ []byte) (bool, error) {
 			if len(body) < 4+state.AccountNameKeyLen+4 {
 				return true, nil

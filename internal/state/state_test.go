@@ -244,3 +244,51 @@ func TestSessionSoftCommitKeepsOverlay(t *testing.T) {
 		t.Fatalf("after Commit: k2=%q err=%v", got, err)
 	}
 }
+
+// TestSessionRangeFromLowerBound pins RangeFrom: rows below the bound are
+// skipped, rows at and above it come back in key order, and the overlay is
+// merged exactly as in Range (a committed row deleted in the overlay stays
+// hidden, an overlay insert above the bound shows up).
+func TestSessionRangeFromLowerBound(t *testing.T) {
+	db := openTempDB(t)
+	key := func(ts uint32, name string) []byte {
+		return append(AppendUint32BE(nil, ts), []byte(name)...)
+	}
+	{
+		s := NewSession(db)
+		s.Put(9, 1, key(100, "a"), []byte("100a"))
+		s.Put(9, 1, key(200, "b"), []byte("200b"))
+		s.Put(9, 1, key(300, "c"), []byte("300c"))
+		s.Put(9, 1, key(400, "d"), []byte("400d"))
+		if err := s.Commit(false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s2 := NewSession(db)
+	s2.Delete(9, 1, key(300, "c"))
+	s2.Put(9, 1, key(350, "e"), []byte("350e"))
+	s2.Put(9, 1, key(150, "f"), []byte("150f")) // below the bound: must not appear
+	var got []string
+	err := s2.RangeFrom(9, 1, AppendUint32BE(nil, 200), func(body, value []byte) (bool, error) {
+		got = append(got, string(value))
+		return true, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"200b", "350e", "400d"}
+	if len(got) != len(want) {
+		t.Fatalf("RangeFrom: got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("RangeFrom[%d] = %q, want %q (all: %v)", i, got[i], want[i], got)
+		}
+	}
+	// A nil bound is a plain Range.
+	n := 0
+	_ = s2.RangeFrom(9, 1, nil, func(_, _ []byte) (bool, error) { n++; return true, nil })
+	if n != 5 {
+		t.Fatalf("RangeFrom(nil) visited %d rows, want 5", n)
+	}
+}

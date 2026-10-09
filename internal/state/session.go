@@ -666,8 +666,34 @@ func (s *Session) Range(table TableID, index IndexID, prefix []byte, fn func(bod
 	// rule, so Pebble's exclusive UpperBound dropped them. Mainnet
 	// limit-order matching (and every other secondary-index prefix
 	// scan) silently saw zero candidates as a result.
-	upper := nextPrefix(lower)
+	return s.rangeBounds(lower, nextPrefix(lower), fn)
+}
 
+// RangeFrom iterates every entry of [table, index] whose body is >= lowerBody,
+// in key order, to the end of the index. A nil lowerBody is Range(nil).
+//
+// This exists for the per-block expiration sweeps. They walk a by-time index
+// from its start and delete what has expired, which is the worst access
+// pattern for an LSM: every deleted row leaves a point tombstone in front of
+// the live ones until compaction catches up, and a Range(nil) has to step
+// over all of them before it reaches the first live key. On the mainnet
+// delegation-return index that scan had grown to a third of the whole apply
+// loop by block 14M. Seeking straight to the earliest pending time (the
+// Database's expiration hint, which every inserting Put lowers) lands past
+// the tombstones, so the cost is back to O(rows due).
+func (s *Session) RangeFrom(table TableID, index IndexID, lowerBody []byte, fn func(body, value []byte) (bool, error)) error {
+	if len(lowerBody) == 0 {
+		return s.Range(table, index, nil, fn)
+	}
+	lower := EncodeKey(table, index, lowerBody)
+	upper := nextPrefix(EncodePrefix(table, index))
+	return s.rangeBounds(lower, upper, fn)
+}
+
+// rangeBounds is the shared body of Range and RangeFrom: iterate the
+// physical key range [lower, upper) merging the backend with this Session's
+// overlay.
+func (s *Session) rangeBounds(lower, upper []byte, fn func(body, value []byte) (bool, error)) error {
 	// Pooled Pebble iterator: allocate once per Session, reuse via
 	// SetBounds for all subsequent Ranges. Avoids the per-call NewIter
 	// cost (which dominated CPU under the per-block hook hot path).
