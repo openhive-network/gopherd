@@ -45,7 +45,25 @@ func (customJSONEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		if !ctx.Hardforks.Has(hardfork.HF26) {
 			return nil
 		}
-		return applyRCCustomJSON(ctx, *cj)
+		if ctx.InControl {
+			return applyRCCustomJSON(ctx, *cj)
+		}
+		// hive_evaluator.cpp:355-370: custom_json_evaluator catches every
+		// fc::exception the "rc" interpreter throws and rethrows it only
+		// when is_in_control(). Inside a block the operation becomes a
+		// no-op, and generic_custom_operation_interpreter::apply_operations
+		// ran it under its own undo session, so whatever it had already
+		// written is rolled back. That covers ALL failures, not just the
+		// payload checks: a missing delegatee, an over-delegation, the
+		// "same amount already exists" case. A block hived accepted with
+		// such a delegate_rc inside must not fail here.
+		sp := ctx.DB.Snapshot()
+		if err := applyRCCustomJSON(ctx, *cj); err != nil {
+			ctx.DB.Restore(sp)
+			return nil
+		}
+		ctx.DB.DiscardSavepoint(sp)
+		return nil
 	}
 	// All other custom_json IDs are plugin-data only (no chain state
 	// effect). Mirrors hived's behavior — custom_operation_interpreter
@@ -214,14 +232,14 @@ func applyDelegateRC(ctx *Context, cj op.CustomJSON, args json.RawMessage) error
 		}
 	}
 
-	// Payload validation failures are TX-FATAL only at head admission.
-	// In-block custom_json payloads that fail rc_custom_operation
-	// validate/deserialize did NOT fail the tx in hived (proof: block
-	// 69,612,950 carries a delegatee "ogechukwu-martha\t" with a
-	// trailing tab — hived included the tx, so the payload was treated
-	// as a no-op). Mirror: pre-mutation validation errors become no-ops
-	// when not InControl. Mid-apply asserts (missing delegatee account)
-	// stay fatal — those are unconditional in hived's replay too.
+	// Every failure below is TX-FATAL only at head admission: inside a
+	// block hived's custom_json_evaluator swallows the exception and the
+	// interpreter's undo session reverts the op (see customJSONEvaluator.Apply,
+	// which wraps this call in a savepoint when !InControl). Proof on
+	// mainnet: block 69,612,950 carries a delegatee "ogechukwu-martha\t"
+	// with a trailing tab — hived included the tx as a no-op. reject()
+	// short-circuits the payload checks so a not-in-control apply does
+	// not even reach the state reads; the savepoint covers the rest.
 	reject := func(format string, args ...any) error {
 		if !ctx.InControl {
 			return nil
@@ -411,14 +429,18 @@ func applyDelegateRC(ctx *Context, cj op.CustomJSON, args json.RawMessage) error
 
 	// 7. After-the-fact delta_total check — enforced only InControl.
 	// C++'s `from_delegable_rc >= delta_total` assert (rc_utility.cpp:107)
-	// is technically active in hived's replay too, but it evaluates
-	// against the full RC model (per-tx resource charging, 5-day regen);
-	// our partial model diverges (first false rejection: anhdaden146 at
-	// 68,691,291 — Go said 626G available, hived's true state allowed
-	// 1T). Every delegate_rc inside a block already passed the assert
-	// under hived's true RC state — the block's presence is the proof —
-	// so replay applies the delegation unconditionally. Revisit if the
-	// RC subsystem is ever fully ported.
+	// is unconditional, and inside a block its failure is swallowed by
+	// custom_json_evaluator (the op becomes a no-op). But a hived witness
+	// generates its block in control, so a delegate_rc that reached a
+	// mainnet block passed this assert under hived's RC state at the time.
+	// Re-evaluating it here against OUR mana can only go wrong in one
+	// direction: a small RC divergence turns a delegation hived applied
+	// into a no-op (first such false rejection seen: anhdaden146 at
+	// 68,691,291 — Go said 626G available, hived's state allowed 1T).
+	// Applying it unconditionally in a block is therefore the convergent
+	// choice, and the same reasoning covers the create-with-0 and
+	// same-amount skips above. Revisit once a post-HF26 paired replay
+	// shows the RC state matching.
 	if ctx.InControl {
 		fromDelegableMax := maximumRC(&from, true)
 		fromDelegable := fromDelegableMax
