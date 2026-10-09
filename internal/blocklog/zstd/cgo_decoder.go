@@ -99,6 +99,13 @@ import (
 type cgoDecoder struct {
 	dctx     *C.ZSTD_DCtx
 	dictKeep []byte // pinned dict bytes (held to satisfy by-reference load)
+	// scratch is the decompression target, reused across calls. Hived frames
+	// carry no content size, so the output has to be over-provisioned; doing
+	// that with a fresh 64 KiB (and then copying the result out) made this
+	// function 84% of all bytes allocated during a from-genesis sync, i.e.
+	// most of the GC load. A decoder is used by one goroutine at a time
+	// (pooled per dictionary), so the buffer can simply live here.
+	scratch []byte
 }
 
 // cgoDecoderPool holds a per-Decompressor cache of cgoDecoders.
@@ -204,55 +211,47 @@ const maxDecompressCap = 16 << 20
 // caller-supplied output buffer (a fresh slice or pooled). On dst capacity
 // overflow we retry with a doubled buffer, up to maxDecompressCap.
 func (d *cgoDecoder) decompress(payload []byte, dst []byte) ([]byte, error) {
-	if cap(dst) < 65536 {
-		dst = make([]byte, 0, 65536)
+	if cap(d.scratch) < 65536 {
+		d.scratch = make([]byte, 65536)
 	}
 	for {
-		dst = dst[:cap(dst)]
+		buf := d.scratch[:cap(d.scratch)]
 		var srcPtr unsafe.Pointer
 		if len(payload) > 0 {
 			srcPtr = unsafe.Pointer(&payload[0])
 		}
 		rc := C.go_decompress_dctx(d.dctx,
-			unsafe.Pointer(&dst[0]), C.size_t(len(dst)),
+			unsafe.Pointer(&buf[0]), C.size_t(len(buf)),
 			srcPtr, C.size_t(len(payload)))
 		if C.go_zstd_is_err(rc) != 0 {
 			errMsg := C.GoString(C.go_zstd_err_name(rc))
-			// `Destination buffer is too small`: grow and retry until the
-			// ceiling. Without a high-enough ceiling, large blocks decode-
-			// fail permanently and (over p2p) stall the sync on that block.
+			// Grow and retry on a too-small target, up to maxDecompressCap:
+			// mainnet's maximum_block_size is witness-tunable up to 2 MiB and
+			// a few historical blocks decompress to several hundred KiB.
 			if (errMsg == "Destination buffer is too small" ||
-				errMsg == "Destination buffer too small") && cap(dst) < maxDecompressCap {
-				newCap := cap(dst) * 2
+				errMsg == "Destination buffer too small") && cap(d.scratch) < maxDecompressCap {
+				newCap := cap(d.scratch) * 2
 				if newCap > maxDecompressCap {
 					newCap = maxDecompressCap
 				}
-				dst = make([]byte, 0, newCap)
+				d.scratch = make([]byte, newCap)
 				continue
 			}
 			return nil, fmt.Errorf("blocklog/zstd: ZSTD_decompressDCtx: %s", errMsg)
 		}
-		out := dst[:int(rc)]
-		// RIGHT-SIZE before handing the slice out. dst is at least 64 KiB (and
-		// doubles up to 16 MiB), but a mainnet block is typically 5-15 KiB, so
-		// the returned slice pins a backing array many times its own length.
-		// Anything that retains a decompressed block — the recent-block ring,
-		// the fork db, an in-flight apply job — therefore retains the WHOLE
-		// buffer, not the block.
-		//
-		// Measured: 2.52 GB of live heap (49.8% of the process) attributed to
-		// this function after 8h at the tip, growing ~1.79 GiB/day, and
-		// 601 MB / 9600 blocks = ~62 KB per block, i.e. almost exactly the
-		// 64 KiB floor rather than the real block size.
-		//
-		// Copying costs one small memcpy per block and lets the big buffer be
-		// reused or collected immediately. Only done when the waste is worth
-		// it, so the fast path for genuinely large blocks is untouched.
-		if cap(out)-len(out) > 8192 && cap(out) > 2*len(out) {
-			exact := make([]byte, len(out))
-			copy(exact, out)
-			out = exact
+		n := int(rc)
+		// Hand out exactly the block, in the caller's buffer when it fits
+		// (a pooled slice) and in a right-sized allocation otherwise. Anything
+		// that retains a decompressed block — the recent-block ring, the fork
+		// db, an in-flight apply job — then retains the block, not the
+		// scratch buffer.
+		var out []byte
+		if cap(dst) >= n {
+			out = dst[:n]
+		} else {
+			out = make([]byte, n)
 		}
+		copy(out, buf[:n])
 		runtime.KeepAlive(payload)
 		runtime.KeepAlive(d.dictKeep)
 		return out, nil
