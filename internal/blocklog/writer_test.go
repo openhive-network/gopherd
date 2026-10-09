@@ -472,3 +472,58 @@ func TestWriterReopenContinues(t *testing.T) {
 		}
 	}
 }
+
+// TestWriterAppendCompressedStoresPeerPayload pins the path a syncing node
+// takes for a block that arrived compressed from a peer: the payload goes
+// into the block_log verbatim with the dictionary it names, and reads back
+// as the original block. An uncompressed writer refuses it.
+func TestWriterAppendCompressedStoresPeerPayload(t *testing.T) {
+	dir := t.TempDir()
+	mainPath := filepath.Join(dir, legacyFileName)
+	w, err := OpenForWrite(mainPath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := bytes.Repeat([]byte("delegate_rc"), 300)
+	dictNum, hasDict := bz.BestDictNumberForBlock(1)
+	c := bz.NewCompressorWithLevel(3) // a peer's level, not ours
+	var payload []byte
+	if hasDict {
+		payload, err = c.Compress(raw, dictNum)
+	} else {
+		payload, err = c.CompressNoDict(raw)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.AppendCompressed(payload, dictNum, hasDict); err != nil {
+		t.Fatalf("AppendCompressed: %v", err)
+	}
+	if w.HeadBlock() != 1 {
+		t.Fatalf("HeadBlock = %d, want 1", w.HeadBlock())
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Open(mainPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	got, err := r.Block(1)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if !bytes.Equal(got, raw) {
+		t.Fatalf("read back %d bytes, differs from the %d-byte original", len(got), len(raw))
+	}
+
+	plain, err := OpenForWrite(filepath.Join(t.TempDir(), legacyFileName), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer plain.Close()
+	if err := plain.AppendCompressed(payload, dictNum, hasDict); err == nil {
+		t.Fatal("AppendCompressed accepted on an uncompressed block_log")
+	}
+}

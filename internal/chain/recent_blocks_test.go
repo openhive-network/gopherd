@@ -111,3 +111,28 @@ func TestRecentBlocksReplaceSameNum(t *testing.T) {
 		t.Errorf("ByNum(7): got %q want v2", got)
 	}
 }
+
+// TestRecentBlocksCompressedByNum pins the hand-off from the p2p layer to the
+// block_log writer: a block stored with both forms yields its compressed
+// payload for the matching id only, and a block that arrived raw yields none.
+func TestRecentBlocksCompressedByNum(t *testing.T) {
+	r := NewRecentBlocks(4)
+	raw := []byte("raw block bytes")
+	comp := []byte("zstd payload")
+	id := block.ID{1, 2, 3}
+	r.PutWithCompressed(10, id, raw, comp, 7, false)
+	if got := r.ByNum(10); !bytes.Equal(got, raw) {
+		t.Fatalf("ByNum = %q, want the raw bytes", got)
+	}
+	payload, dictNum, hasDict, ok := r.CompressedByNum(10, id)
+	if !ok || !bytes.Equal(payload, comp) || dictNum != 7 || !hasDict {
+		t.Fatalf("CompressedByNum = %q,%d,%v,%v", payload, dictNum, hasDict, ok)
+	}
+	if _, _, _, ok := r.CompressedByNum(10, block.ID{9}); ok {
+		t.Fatal("CompressedByNum matched a different block id")
+	}
+	r.Put(11, block.ID{4}, raw)
+	if _, _, _, ok := r.CompressedByNum(11, block.ID{4}); ok {
+		t.Fatal("CompressedByNum returned a payload for a block that arrived raw")
+	}
+}

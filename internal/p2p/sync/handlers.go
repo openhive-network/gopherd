@@ -709,6 +709,12 @@ func (d *Delegate) handleBlock(p *node.Peer, body []byte) {
 // handleBlock (BlockMessage path) and handleCompressedBlock
 // (CompressedBlockMessage path).
 func (d *Delegate) handleBlockBytes(p *node.Peer, signedBlockBytes []byte, bid block.ID) {
+	d.handleBlockBytesWire(p, signedBlockBytes, bid, nil)
+}
+
+// handleBlockBytesWire is handleBlockBytes for a block that arrived
+// compressed: wire carries the payload so the block_log can reuse it.
+func (d *Delegate) handleBlockBytesWire(p *node.Peer, signedBlockBytes []byte, bid block.ID, wire *wireCompressed) {
 	// Trace: derive the authoritative block num from the bytes and compare
 	// to the wire bid we were handed, so a zero/mismatched bid that would
 	// route the block to the wrong apply slot is visible.
@@ -818,6 +824,7 @@ func (d *Delegate) handleBlockBytes(p *node.Peer, signedBlockBytes []byte, bid b
 		srcPeer:            p,
 		preVerifiedSigner:  signer,
 		preRecoveredTxKeys: txKeys,
+		wire:               wire,
 	}
 	select {
 	case d.applyQ <- job:

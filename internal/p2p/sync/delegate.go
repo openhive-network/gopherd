@@ -823,11 +823,39 @@ type MempoolReader interface {
 	PendingRaw(id [20]byte) []byte
 }
 
+// wireCompressed is the zstd form a block arrived in over p2p
+// (compressed_block_message): hived's block_log payload for that block,
+// dictionary and all. Kept with the job so the local block_log can store it
+// as-is instead of recompressing the raw bytes at level 15 on the apply
+// loop — hived does the same through full_block_type's compressed buffer.
+type wireCompressed struct {
+	bytes   []byte
+	dictNum uint8
+	hasDict bool
+}
+
+func (w *wireCompressed) payload() []byte {
+	if w == nil {
+		return nil
+	}
+	return w.bytes
+}
+
+func (w *wireCompressed) dict() (uint8, bool) {
+	if w == nil {
+		return 0, false
+	}
+	return w.dictNum, w.hasDict
+}
+
 type applyJob struct {
 	blockNum uint32
 	rawBlock []byte
 	id       block.ID
 	srcPeer  *node.Peer
+	// wire is the compressed form the block arrived in, nil when it came
+	// uncompressed. See wireCompressed.
+	wire *wireCompressed
 	// preVerifiedSigner, when non-zero, is the witness signing key
 	// recovered from the block's WitnessSignature on the per-peer
 	// receive goroutine (which is parallel across peers, unlike the

@@ -114,6 +114,42 @@ func (r *RecentBlocks) PutCompressed(blockNum uint32, id block.ID, compressed []
 }
 
 // putEntry is the common map-update path shared by Put + PutCompressed.
+// PutWithCompressed stores both forms of a block: the raw bytes that were
+// applied and the zstd payload they were decompressed from (the peer's
+// block_log form). CompressedByNum hands the latter to the block_log writer.
+func (r *RecentBlocks) PutWithCompressed(blockNum uint32, id block.ID, raw, compressed []byte, dictNum uint8, noDict bool) {
+	if r == nil || r.cap == 0 {
+		return
+	}
+	r.putEntry(blockNum, id, &recentEntry{
+		id:         id,
+		raw:        raw,
+		compressed: compressed,
+		dictNum:    dictNum,
+		noDict:     noDict,
+	})
+}
+
+// CompressedByNum returns the compressed form stored for blockNum when the
+// cached entry is the block with this id and arrived compressed.
+func (r *RecentBlocks) CompressedByNum(blockNum uint32, id block.ID) (payload []byte, dictNum uint8, hasDict bool, ok bool) {
+	if r == nil || r.cap == 0 {
+		return nil, 0, false, false
+	}
+	r.mu.RLock()
+	e := r.entries[blockNum]
+	r.mu.RUnlock()
+	if e == nil || e.id != id {
+		return nil, 0, false, false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.compressed == nil {
+		return nil, 0, false, false
+	}
+	return e.compressed, e.dictNum, !e.noDict, true
+}
+
 func (r *RecentBlocks) putEntry(blockNum uint32, id block.ID, e *recentEntry) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
