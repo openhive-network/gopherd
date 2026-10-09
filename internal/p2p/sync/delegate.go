@@ -420,7 +420,10 @@ type Delegate struct {
 	droppedReorder   atomic.Uint64
 	// blocksHeld / blocksRefusedFuture come from the inbound timestamp
 	// window (early_block.go).
-	blocksHeld           atomic.Uint64
+	blocksHeld atomic.Uint64
+	// opsTolerated counts operations that failed inside a historical block
+	// and were skipped under TolerateFailingOps (logged per block).
+	opsTolerated         atomic.Uint64
 	blocksRefusedFuture  atomic.Uint64
 	inhibitedFetches     atomic.Uint64
 	outstandingThrottled atomic.Uint64

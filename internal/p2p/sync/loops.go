@@ -1,7 +1,9 @@
 package sync
 
 import (
+	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"gopherd/internal/chain"
@@ -656,11 +658,21 @@ func (d *Delegate) applyLoop() {
 				CompressedPayload:         job.wire.payload(),
 			}
 			opts.CompressedDictNum, opts.CompressedHasDict = job.wire.dict()
-			if _, err := d.chain.ApplyBlock(job.rawBlock, job.blockNum, opts, nil); err != nil {
+			var blockStats chain.Stats
+			if _, err := d.chain.ApplyBlock(job.rawBlock, job.blockNum, opts, &blockStats); err != nil {
 				d.logf("apply_block %d failed: %v", job.blockNum, err)
 				// Drop and continue — gossip / next INV will re-deliver
 				// if the chain is on a recoverable fork.
 				continue
+			}
+			if blockStats.OpsSkipped > 0 {
+				// A tolerated failure is either one of hived's known replay
+				// quirks or OUR state having drifted from hived's — and the
+				// second looks exactly like the first unless it is written
+				// down. One line per block, with hived's would-be error.
+				d.opsTolerated.Add(blockStats.OpsSkipped)
+				d.logf("apply_block %d: tolerated %d failing op(s) (historical block): %s",
+					job.blockNum, blockStats.OpsSkipped, skipReasonsSummary(blockStats.SkipReasons))
 			}
 			if d.cfg.LogWorkTiming {
 				// Per-block apply "work" time (comparable to hived's block-
@@ -993,3 +1005,20 @@ const (
 	// redundant fetch.
 	maxKnownPerPeer = 200_000
 )
+
+// skipReasonsSummary renders a Stats.SkipReasons map as "reason×count, ...".
+func skipReasonsSummary(reasons map[string]uint64) string {
+	if len(reasons) == 0 {
+		return "(no reason recorded)"
+	}
+	keys := make([]string, 0, len(reasons))
+	for k := range reasons {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%s×%d", k, reasons[k]))
+	}
+	return strings.Join(parts, ", ")
+}
