@@ -65,6 +65,11 @@ func coldCompression() pebble.Compression {
 	return pebble.NoCompression
 }
 
+// ColdCacheBytes is the pebble block-cache size for the cold tier opened by
+// openColdKV. Set it before the cold tier is created (the node's
+// --cold-cache-mb flag does). Default 1 GiB, the historical hard-coded value.
+var ColdCacheBytes int64 = 1 << 30
+
 func openColdKV(dir string) (*coldKV, error) {
 	owned := false
 	if dir == "" {
@@ -80,9 +85,12 @@ func openColdKV(dir string) (*coldKV, error) {
 		}
 	}
 	db, err := pebble.Open(dir, &pebble.Options{
-		// Large cache so promote-back reads hit memory; the cold tier is
-		// write-heavy at eviction and read on promotion.
-		Cache: pebble.NewCache(1 << 30), // 1 GiB
+		// Cache so promote-back reads hit memory; the cold tier is
+		// write-heavy at eviction and read on promotion. Sized by
+		// ColdCacheBytes: pebble keeps this in manually managed memory,
+		// outside the Go heap and so outside --mem-limit-gib, and on a
+		// memory-capped node every GiB here is a GiB the heap cannot use.
+		Cache: pebble.NewCache(ColdCacheBytes),
 		// Big memtable + headroom so the eviction write stream rarely stalls
 		// on flush; this is the dominant cost when eviction engages.
 		MemTableSize:                128 << 20, // 128 MiB
