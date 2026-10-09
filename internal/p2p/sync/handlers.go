@@ -780,7 +780,15 @@ func (d *Delegate) handleBlockBytesWire(p *node.Peer, signedBlockBytes []byte, b
 	// We pass the block ID so duplicate deliveries (the same block from
 	// multiple peers, common during catch-up where peers redundantly
 	// answer the same fetch_items) hit the cache and skip the recovery.
-	signer := recoverBlockSignerCached(signedBlockBytes, d.signerCache, bid)
+	// Historical blocks (header >5min behind the wall clock) are applied
+	// with SkipBlockSignature, so recovering the witness key here would be
+	// thrown away: one secp256k1 recovery per block, 14% of all CPU during
+	// a from-genesis sync. Only live blocks get the pre-recovery.
+	ts := blockTimestamp(signedBlockBytes)
+	var signer crypto.PublicKey
+	if !isHistoricalBlock(ts) {
+		signer = recoverBlockSignerCached(signedBlockBytes, d.signerCache, bid)
+	}
 
 	// Pre-recover every transaction's signer pubkey set in parallel on
 	// this same goroutine. Internal to RecoverBlockTxSignerKeys is a
@@ -797,7 +805,6 @@ func (d *Delegate) handleBlockBytesWire(p *node.Peer, signedBlockBytes []byte, b
 	// receive goroutine during a long catch-up. Cache lookup still
 	// fires; only the recovery itself is gated.
 	var txKeys [][]crypto.PublicKey
-	ts := blockTimestamp(signedBlockBytes)
 	if !isHistoricalBlock(ts) {
 		txKeys = recoverTxKeysCached(signedBlockBytes, bid.Num(), d.txSigCache, bid)
 	}
