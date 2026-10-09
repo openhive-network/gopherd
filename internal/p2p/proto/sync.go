@@ -344,7 +344,11 @@ func (m *CompressedBlockMessage) Unmarshal(src []byte) error {
 	if m.HasDictionary {
 		m.DictionaryNumber = src[1]
 	}
-	m.CompressedBytes = append([]byte(nil), src[2:]...)
+	// Alias rather than copy: the transport hands every message its own
+	// freshly allocated body, and the sync layer keeps this payload alive
+	// for the block_log anyway, so the copy only doubled the per-block
+	// allocation. Callers must not reuse src after Unmarshal.
+	m.CompressedBytes = src[2:]
 	return nil
 }
 
