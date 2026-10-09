@@ -509,6 +509,13 @@ type ApplyOptions struct {
 	CompressedDictNum uint8
 	CompressedHasDict bool
 
+	// RawBlockRetained tells ApplyBlock that rawBlock is a fresh slice the
+	// caller will neither reuse nor modify, so the recent-block cache can keep
+	// it as-is instead of copying every block (15% of all bytes allocated
+	// during a p2p sync, and GC was half the CPU). Leave false for callers
+	// that decode into scratch buffers (the replay command's prefetcher).
+	RawBlockRetained bool
+
 	SkipTransactionSignatures bool
 	// SkipBlockSignature bypasses the witness's block-level signature
 	// check (mirrors hived's skip_witness_signature). Same rationale
@@ -1466,7 +1473,10 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	// to peers requesting `fetch_items`. Done after commit so callers
 	// only see entries for blocks that successfully landed.
 	if d.recent != nil {
-		raw := append([]byte(nil), rawBlock...)
+		raw := rawBlock
+		if !opts.RawBlockRetained {
+			raw = append([]byte(nil), rawBlock...)
+		}
 		if opts.CompressedPayload != nil {
 			d.recent.PutWithCompressed(blockNum, dgpo.HeadBlockID, raw, opts.CompressedPayload, opts.CompressedDictNum, !opts.CompressedHasDict)
 		} else {

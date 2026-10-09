@@ -313,6 +313,9 @@ type flags struct {
 	// coldCacheMB sizes the cold tier's pebble block cache (manual memory,
 	// outside the Go heap and the soft memory limit).
 	coldCacheMB int
+	// emitVOps keeps chain.Database's virtual-op stream on. Nothing in the
+	// node consumes it yet, so it defaults to off.
+	emitVOps bool
 	// persistStateDir keeps the typed stores in an mmap-backed persiststore so a
 	// restart resumes at head. This is the structural answer to "why does hived
 	// restart instantly and we don't": hived mmaps chainbase and is immediately
@@ -481,6 +484,7 @@ func parseNodeFlags(args []string) flags {
 	fs.StringVar(&f.coldDir, "cold-dir", "", "directory for the cold tier (used when --comment-resident-cap>0). With --cold-backend=persist it must be stable across restarts")
 	fs.StringVar(&f.coldBackend, "cold-backend", "", "cold-tier backend: \"\"/mmap|pebble|persist")
 	fs.IntVar(&f.evictBudget, "evict-budget", 20000, "max comments evicted per block when over the resident cap")
+	fs.BoolVar(&f.emitVOps, "emit-vops", false, "build the per-block virtual-operation stream while applying blocks (chain.LastBlockVOps). No node API serves it yet, so it is off by default; it costs allocation on the apply path")
 	fs.IntVar(&f.coldCacheMB, "cold-cache-mb", 1024, "pebble block-cache size in MB for the cold tier (--cold-backend=pebble). This is manually managed memory OUTSIDE the Go heap, so it does not count against --mem-limit-gib; together with --cache-mb and the memtables it is what sits between the Go limit and a cgroup cap")
 	fs.IntVar(&f.memLimitGiB, "mem-limit-gib", 0, "if >0, set the Go soft memory limit (debug.SetMemoryLimit) to this many GiB. NOTE: raising this SLOWS SNAPSHOT LOADING — the heap competes with the OS page cache over a ~26 GB snapshot file. Measured on a 31 GB box, same snapshot: 22 GiB -> 155s (166 MB/s), 12 GiB -> 108s (238 MB/s), 12 GiB with the file already cached -> 65s (394 MB/s). Leave headroom for the page cache rather than handing it all to Go")
 	fs.Parse(args)
@@ -604,7 +608,11 @@ func newApp(cfg flags) (*app, error) {
 			// Scratch cold backends (pebble, mmap) are rebuilt by the same
 			// replay; a persist cold tier is meant to survive restarts and
 			// is left alone.
-			if wiped, err := wipeScratchColdTier(cfg.coldDir, cfg.coldBackend); err != nil {
+			// Not when a snapshot or persist-state is being loaded: those
+			// resume at head and need the cold tier that was flushed with them.
+			if cfg.loadSnapshot != "" || cfg.persistStateDir != "" {
+				// keep
+			} else if wiped, err := wipeScratchColdTier(cfg.coldDir, cfg.coldBackend); err != nil {
 				return nil, fmt.Errorf("wipe stale cold tier at %s: %w", cfg.coldDir, err)
 			} else if wiped {
 				fmt.Fprintf(os.Stderr, "gopherd node: recovery from block_log — wiped stale cold tier %s (rebuilt by the replay)\n", cfg.coldDir)
@@ -841,6 +849,10 @@ func newApp(cfg flags) (*app, error) {
 		}
 	}
 	cdb := chain.New(stateDB)
+	// The per-block virtual-op stream is on by default in chain.Database, but
+	// nothing in the node reads it (no API exposes it yet); building it was
+	// ~7% of all bytes allocated during a sync. Off unless asked for.
+	cdb.SetVOpEmission(cfg.emitVOps)
 	// Enable the recent-block cache so afterApply can pull each freshly-
 	// applied block's raw bytes back out and stream them into the writer.
 	// Without this, RecentBlockBytes returns nil and our block_log stays
@@ -1165,6 +1177,7 @@ func (a *app) recover() error {
 			SkipBlockSignature:        true,
 			SkipTransactionSignatures: true,
 			Sync:                      false,
+			RawBlockRetained:          true, // Reader.Block allocates per call
 		}, nil); err != nil {
 			return fmt.Errorf("recover: apply block %d: %w", n, err)
 		}
