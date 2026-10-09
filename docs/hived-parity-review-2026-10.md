@@ -147,6 +147,23 @@ curves, DHF, delegations at scale and HF28/HF29 behaviour still rest on the
 code review and the fixture tests. The block_log stops at 8,221,695; a longer
 log is the one input needed to extend this.
 
+## G. Live p2p sync from genesis (2026-10-09)
+
+A passive mainnet sync into `/media/drov/D/gopherd_data` (pebble state,
+compressed block_log, pebble cold tier, 20 GiB cgroup cap). What it found, all
+fixed and pushed the same day:
+
+| Status | Finding |
+|---|---|
+| [x] | **Stale cold tier survives a restart.** With a local block_log the node wipes pebble and replays from genesis to rebuild the volatile typed stores, but kept the cold tier, so the replay promoted comments and votes in their shape at the OLD head. Visible as `claim_reward_balance: insufficient balance: "a-alice" reward_hbd 0, claim 19` at block 18,166,003: hived paid that comment 0.019 HBD at 18,165,076 (author_history confirms), the recovery replay paid 0. A standalone `replay` of the same block_log with a fresh cold directory matched hived (0 errors to 18.17M). Scratch cold tiers are now wiped on that path. |
+| [x] | **Tolerated op failures were invisible.** Historical blocks apply with TolerateFailingOps (hived's replay quirks); a failure caused by our own drift was only counted. Now logged per block with hived's would-be error. |
+| [x] | **Apply loop CPU**: expiration sweeps walked millions of pebble tombstones from the index start (31% of apply; now seek to the hint), level-15 zstd recompression of every block on the apply goroutine (50%; now the peer's compressed payload is stored as hived does), witness-key recovery for blocks whose signature check is skipped (14% of CPU), a fresh 64 KiB buffer per decompressed block (84% of all allocation, half of all CPU in GC). Live apply went from 300-1,000 to 2,800-4,600 blocks/s through 2017. |
+| [x] | **Off-heap memory**: pebble's state cache, the cold tier's hard-coded 1 GiB cache and 128 MiB memtables sit outside `--mem-limit-gib`; anonymous memory reached 19.9 GiB under a 20 GiB cap. `--cold-cache-mb` added; run with a 12 GiB Go limit and 512/256 MB caches. |
+
+Verified along the way: the memory-backend replay of the local block_log to
+18,166,003 applies every op cleanly, so consensus through December 2017
+(HF19 era) agrees with hived at least for every operation's own checks.
+
 ## Confirmed matches (where there was reason to doubt)
 
 HF29 ALLOW_MODIFY_LAST_RECURRENT_TRANSFER, FIX_LIMIT_ORDER_ASSETS,
