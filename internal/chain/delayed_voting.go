@@ -50,7 +50,9 @@ func processDelayedVoting(s *state.Session, blockTime, blockNum uint32, d *Datab
 	// without sorting+touching all ~1.4M accounts every block (which collapsed
 	// replay from ~8000 to ~2 blk/s once HF24 activated ~block 47.6M). The index
 	// is a conservative superset; we drop entries here once their queue empties.
-	for _, name := range objects.DelayedVoteCandidates(s) {
+	// Only the accounts whose front bucket has matured (hived walks
+	// by_delayed_voting and stops at the first unexpired one).
+	for _, name := range objects.DelayedVoteCandidatesDue(s, blockTime, objects.DelayedVotingTotalIntervalSec) {
 		a, err := objects.GetAccount(s, name)
 		if err != nil {
 			objects.DropDelayedVoteCandidate(s, name)
