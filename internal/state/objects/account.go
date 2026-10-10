@@ -692,6 +692,12 @@ func DelayedVoteNoneDue(s *state.Session, blockTime, intervalSec uint32) bool {
 	return EnsureAccountStore(s).DelayedVoteNoneDue(blockTime, intervalSec)
 }
 
+// DelayedVoteCandidatesDue returns, by name, the candidates whose front bucket
+// has matured by blockTime — the only accounts processDelayedVoting touches.
+func DelayedVoteCandidatesDue(s *state.Session, blockTime, intervalSec uint32) []string {
+	return EnsureAccountStore(s).DelayedVoteCandidatesDue(blockTime, intervalSec)
+}
+
 // RecomputeDelayedVoteMin refreshes the min-front-time lower bound after a scan.
 func RecomputeDelayedVoteMin(s *state.Session) {
 	EnsureAccountStore(s).RecomputeDelayedVoteMin()

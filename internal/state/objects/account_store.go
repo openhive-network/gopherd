@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/tidwall/btree"
+
 	"gopherd/internal/protocol/auth"
 	"gopherd/internal/state"
 )
@@ -112,7 +114,7 @@ type AccountStore struct {
 	// allocation that ranked third in the alloc profile.
 	freeAccount []*Account
 
-	// delayedVoteSet indexes accounts that (might) have pending HF24+
+	// delayedVoteFront/delayedVoteByTime index accounts that have pending HF24+
 	// delayed-vote buckets, so the per-block processDelayedVoting hook
 	// iterates only THOSE accounts instead of sorting+scanning all ~1.4M
 	// every block (which collapsed replay from 8000 to ~2 blk/s once HF24
@@ -124,19 +126,17 @@ type AccountStore struct {
 	// Stale entries (e.g. from a rolled-back tx) are harmless — the hook
 	// rechecks the account's actual DelayedVotes and drops empties. Not
 	// persisted in the snapshot (rebuilt on load); not consensus state.
-	delayedVoteSet map[string]struct{}
-
-	// minFrontTime is a conservative LOWER BOUND on the oldest (front)
-	// delayed-vote bucket time across all candidates. 0 = unknown (force a
-	// scan). Since a bucket matures at front.Time + INTERVAL, if
-	// minFrontTime + INTERVAL > blockTime then NOTHING is due and
-	// processDelayedVoting can skip the O(candidates) scan entirely — the
-	// common case, since maturations are spread over the 30-day window.
-	// Kept a lower bound: adding a candidate lowers it toward the true min;
-	// removals leave it loose (still ≤ true min = safe, just triggers an
-	// occasional extra scan). RecomputeDelayedVoteMin refreshes it to the
-	// exact min after each scan. Not consensus state; rebuilt on load.
-	minFrontTime uint32
+	//
+	// Since 2026-10-10 the set is ORDERED: delayedVoteByTime keys every
+	// candidate by its front bucket's time (hived's by_delayed_voting index),
+	// and delayedVoteFront remembers the key each name is filed under so a
+	// change of front re-keys it. processDelayedVoting then visits only the
+	// accounts whose front has matured instead of every candidate (~100k
+	// accounts per block by 2021, 10% of the apply loop). The index is kept
+	// exact through Put/Mutate/RestoreToPoint/UnmarshalSnapshot, so a stale
+	// key can only be for an account that no longer exists.
+	delayedVoteFront  map[string]uint32
+	delayedVoteByTime *btree.BTreeG[delayedVoteKey]
 
 	// govExpLB is a conservative LOWER BOUND on the earliest non-zero
 	// GovernanceVoteExpiration across all accounts — the O(1)-skip gate for
@@ -223,9 +223,10 @@ func EnsureAccountStore(s *state.Session) *AccountStore {
 
 func newAccountStore() *AccountStore {
 	return &AccountStore{
-		primary:        make(map[string]*Account, 4096),
-		undoLog:        make([]accountUndo, 0, 64),
-		delayedVoteSet: make(map[string]struct{}),
+		primary:           make(map[string]*Account, 4096),
+		undoLog:           make([]accountUndo, 0, 64),
+		delayedVoteFront:  make(map[string]uint32),
+		delayedVoteByTime: newDelayedVoteTree(),
 	}
 }
 
@@ -234,14 +235,7 @@ func newAccountStore() *AccountStore {
 // prunes empties). Cheap: a slice-len check on every Put/Mutate, a map insert
 // only for the rare account that actually has delayed votes.
 func (s *AccountStore) noteDelayedVotes(name string, a *Account) {
-	if len(a.DelayedVotes) > 0 {
-		s.delayedVoteSet[name] = struct{}{}
-		// Keep minFrontTime a lower bound on all candidates' front-bucket
-		// times so processDelayedVoting can O(1)-skip when nothing is due.
-		if front := a.DelayedVotes[0].Time; s.minFrontTime == 0 || front < s.minFrontTime {
-			s.minFrontTime = front
-		}
-	}
+	s.indexDelayedVotes(name, a)
 	// Same trick for governance-vote expiration: keep govExpLB a lower bound
 	// on the earliest non-zero expiration so removeExpiredGovernanceVotes can
 	// O(1)-skip blocks where nothing is due (post-HF25 it otherwise sorted +
@@ -356,49 +350,91 @@ func (s *AccountStore) RangePrimaryUnordered(fn func(a *Account) (bool, error)) 
 	return nil
 }
 
-// DelayedVoteNoneDue reports whether NO candidate's front bucket can have
-// matured by blockTime (based on the minFrontTime lower bound), letting
-// processDelayedVoting skip its scan. intervalSec = maturation interval.
-// Conservative: a false negative (returns false when nothing is actually
-// due) only causes an extra scan; it never skips a due account.
+// delayedVoteKey orders delayed-vote candidates by front bucket time, then
+// name (hived's by_delayed_voting index).
+type delayedVoteKey struct {
+	front uint32
+	name  string
+}
+
+func delayedVoteKeyLess(a, b delayedVoteKey) bool {
+	if a.front != b.front {
+		return a.front < b.front
+	}
+	return a.name < b.name
+}
+
+func newDelayedVoteTree() *btree.BTreeG[delayedVoteKey] {
+	return btree.NewBTreeGOptions[delayedVoteKey](delayedVoteKeyLess, btree.Options{NoLocks: true})
+}
+
+// indexDelayedVotes files name under its current front bucket time, re-keying
+// if the front moved and removing it when the queue is empty. Called from
+// every write path (Put, Mutate, undo, snapshot load) so the index is exact.
+func (s *AccountStore) indexDelayedVotes(name string, a *Account) {
+	if len(a.DelayedVotes) == 0 {
+		s.dropDelayedVote(name)
+		return
+	}
+	front := a.DelayedVotes[0].Time
+	if old, ok := s.delayedVoteFront[name]; ok {
+		if old == front {
+			return
+		}
+		s.delayedVoteByTime.Delete(delayedVoteKey{front: old, name: name})
+	}
+	s.delayedVoteByTime.Set(delayedVoteKey{front: front, name: name})
+	s.delayedVoteFront[name] = front
+}
+
+func (s *AccountStore) dropDelayedVote(name string) {
+	if old, ok := s.delayedVoteFront[name]; ok {
+		s.delayedVoteByTime.Delete(delayedVoteKey{front: old, name: name})
+		delete(s.delayedVoteFront, name)
+	}
+}
+
+// DelayedVoteNoneDue reports whether no candidate's front bucket has matured
+// by blockTime (front + intervalSec <= blockTime), i.e. processDelayedVoting
+// has nothing to do. O(1): the earliest front is the tree's first key.
 func (s *AccountStore) DelayedVoteNoneDue(blockTime, intervalSec uint32) bool {
-	if len(s.delayedVoteSet) == 0 {
+	first, ok := s.delayedVoteByTime.Min()
+	if !ok {
 		return true
 	}
-	if s.minFrontTime == 0 {
-		return false // unknown bound — must scan
-	}
-	// due iff front + interval <= blockTime  ⟺  front <= blockTime - interval.
-	// Nothing due iff minFrontTime (lower bound) > blockTime - interval.
-	return blockTime >= intervalSec && s.minFrontTime > blockTime-intervalSec
+	return blockTime < intervalSec || first.front > blockTime-intervalSec
 }
 
-// RecomputeDelayedVoteMin refreshes minFrontTime to the exact minimum
-// front-bucket time across candidates (dropping any whose queue emptied).
-// Called after processDelayedVoting scans, so the next blocks can skip.
-func (s *AccountStore) RecomputeDelayedVoteMin() {
-	var min uint32
-	for n := range s.delayedVoteSet {
-		a := s.primary[n]
-		if a == nil || len(a.DelayedVotes) == 0 {
-			delete(s.delayedVoteSet, n)
-			continue
-		}
-		if front := a.DelayedVotes[0].Time; min == 0 || front < min {
-			min = front
-		}
-	}
-	s.minFrontTime = min
-}
+// RecomputeDelayedVoteMin is kept for callers written against the old
+// lower-bound design; the ordered index needs no refresh.
+func (s *AccountStore) RecomputeDelayedVoteMin() {}
 
-// DelayedVoteCandidates returns the indexed account names (those that may have
-// pending delayed votes) in ascending order — the small set processDelayedVoting
-// iterates instead of all accounts. Sorted for deterministic processing order.
+// DelayedVoteCandidates returns every indexed account name in ascending order.
 func (s *AccountStore) DelayedVoteCandidates() []string {
-	out := make([]string, 0, len(s.delayedVoteSet))
-	for n := range s.delayedVoteSet {
+	out := make([]string, 0, len(s.delayedVoteFront))
+	for n := range s.delayedVoteFront {
 		out = append(out, n)
 	}
+	sort.Strings(out)
+	return out
+}
+
+// DelayedVoteCandidatesDue returns, sorted by name, the candidates whose front
+// bucket has matured by blockTime. It walks the time-ordered index from the
+// front and stops at the first bucket that has not matured.
+func (s *AccountStore) DelayedVoteCandidatesDue(blockTime, intervalSec uint32) []string {
+	if blockTime < intervalSec {
+		return nil
+	}
+	cutoff := blockTime - intervalSec
+	var out []string
+	s.delayedVoteByTime.Scan(func(k delayedVoteKey) bool {
+		if k.front > cutoff {
+			return false
+		}
+		out = append(out, k.name)
+		return true
+	})
 	sort.Strings(out)
 	return out
 }
@@ -406,7 +442,7 @@ func (s *AccountStore) DelayedVoteCandidates() []string {
 // DropDelayedVoteCandidate removes name from the index (called by
 // processDelayedVoting once the account's queue is confirmed empty).
 func (s *AccountStore) DropDelayedVoteCandidate(name string) {
-	delete(s.delayedVoteSet, name)
+	s.dropDelayedVote(name)
 }
 
 // SnapshotPoint returns the current undo-log length.
@@ -448,13 +484,16 @@ func (s *AccountStore) RestoreToPoint(snap int) {
 				s.freeAccount = append(s.freeAccount, cur)
 				delete(s.primary, e.name)
 			}
+			s.dropDelayedVote(e.name)
 		case 1: // undo overwrite
 			if cur, ok := s.primary[e.name]; ok {
 				*cur = e.snap
+				s.indexDelayedVotes(e.name, cur)
 			}
 		case 2: // undo delete
 			*e.slot = e.snap
 			s.primary[e.name] = e.slot
+			s.indexDelayedVotes(e.name, e.slot)
 		}
 		e.slot = nil
 	}
@@ -703,8 +742,8 @@ func (s *AccountStore) UnmarshalSnapshot(r io.Reader) error {
 	count := binary.LittleEndian.Uint32(hdr[4:8])
 	s.primary = make(map[string]*Account, count)
 	s.undoLog = s.undoLog[:0]
-	s.delayedVoteSet = make(map[string]struct{}) // reseeded from the scan below
-	s.minFrontTime = 0                           // unknown until first scan recomputes
+	s.delayedVoteFront = make(map[string]uint32) // reseeded from the scan below
+	s.delayedVoteByTime = newDelayedVoteTree()
 	for i := uint32(0); i < count; i++ {
 		nameLen, err := binary.ReadUvarint(br)
 		if err != nil {
@@ -729,9 +768,7 @@ func (s *AccountStore) UnmarshalSnapshot(r io.Reader) error {
 		cp := acc
 		nm := string(nameBuf)
 		s.primary[nm] = &cp
-		if len(cp.DelayedVotes) > 0 {
-			s.delayedVoteSet[nm] = struct{}{} // reseed the delayed-vote index
-		}
+		s.indexDelayedVotes(nm, &cp) // reseed the delayed-vote index
 	}
 	return nil
 }
