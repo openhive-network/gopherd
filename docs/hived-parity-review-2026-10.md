@@ -160,6 +160,16 @@ fixed and pushed the same day:
 | [x] | **Apply loop CPU**: expiration sweeps walked millions of pebble tombstones from the index start (31% of apply; now seek to the hint), level-15 zstd recompression of every block on the apply goroutine (50%; now the peer's compressed payload is stored as hived does), witness-key recovery for blocks whose signature check is skipped (14% of CPU), a fresh 64 KiB buffer per decompressed block (84% of all allocation, half of all CPU in GC). Live apply went from 300-1,000 to 2,800-4,600 blocks/s through 2017. |
 | [x] | **Off-heap memory**: pebble's state cache, the cold tier's hard-coded 1 GiB cache and 128 MiB memtables sit outside `--mem-limit-gib`; anonymous memory reached 19.9 GiB under a 20 GiB cap. `--cold-cache-mb` added; run with a 12 GiB Go limit and 512/256 MB caches. |
 
+Outcome (2026-10-10 18:31 UTC): the node reached the live tip from genesis in
+one pass of about 26 hours of running time. Head 110,658,880 with block id
+06988540af52036e033861cfc235bc9ea8309629, identical to api.hive.blog at the
+same height, so the node is on the canonical branch. Zero tolerated op
+failures from the clean rebuild at 18.9M onward and zero live-block
+rejections at the tip; HF17 through HF28 all applied. Compressed block_log
+540 GB (peer payloads are level-3 zstd), cold tier 79 GB, 14.9 GB anonymous
+memory under a 20 GiB cap. Sustained apply rate 1,100 to 3,500 blocks/s
+depending on the era.
+
 Verified along the way: the memory-backend replay of the local block_log to
 18,166,003 applies every op cleanly, so consensus through December 2017
 (HF19 era) agrees with hived at least for every operation's own checks.
