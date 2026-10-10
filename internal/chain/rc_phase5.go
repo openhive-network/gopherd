@@ -211,27 +211,14 @@ func resetRCPendingDataForBlock(s *state.Session) {
 func flushRCPendingToBucket(s *state.Session) {
 	pending := objects.GetRCPendingData(s)
 	// Find the newest bucket (highest seqno).
-	maxSeqno := uint32(0)
-	found := false
-	_ = s.Range(objects.RCUsageBucketTable, state.PrimaryIndex, nil,
-		func(_, val []byte) (bool, error) {
-			b, err := objects.ReadRCUsageBucket(val)
-			if err != nil {
-				return true, nil
-			}
-			if !found || b.BucketSeqno > maxSeqno {
-				maxSeqno = b.BucketSeqno
-				found = true
-			}
-			return true, nil
-		})
+	_, maxSeqno, found := objects.RCUsageBucketSeqnoWindow(s)
 	if found {
 		newest, err := objects.GetRCUsageBucket(s, maxSeqno)
 		if err == nil {
 			for i := 0; i < objects.RCNumResources; i++ {
 				newest.Used[i] += pending.PendingUsage[i]
 			}
-			objects.PutRCUsageBucket(s, &newest)
+			objects.UpdateRCUsageBucket(s, &newest)
 		}
 	}
 	pending.ResetPendingUsage()
