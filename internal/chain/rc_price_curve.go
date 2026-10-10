@@ -2,10 +2,13 @@ package chain
 
 import (
 	"fmt"
+	"math"
 	"math/big"
+	"math/bits"
 	"os"
 	"sync/atomic"
 
+	"gopherd/internal/math128"
 	"gopherd/internal/protocol/network"
 	"gopherd/internal/state"
 	"gopherd/internal/state/objects"
@@ -54,28 +57,67 @@ func computeCostOfResource(curve objects.PriceCurve, currentPool, resourceCount,
 		}
 		return 0
 	}
-	num := new(big.Int).SetInt64(rcRegen)
-	num.Mul(num, new(big.Int).SetUint64(curve.CoeffA))
+	// hived's uint128 arithmetic, done with math/bits: this runs once per
+	// resource per transaction and the math/big version was 18% of all bytes
+	// allocated during a mainnet sync. A quotient that does not fit int64
+	// prices at 0, as before (hived would assert).
+	num := math128.Mul64Wide(uint64(rcRegen), curve.CoeffA)
+	num = u128Rsh(num, uint(curve.Shift))
+	// "err on the side of rounding not in the user's favor"
+	num = num.Add64(1)
 	// hived shifts BEFORE multiplying by resource_count: rc_regen * coeff_a
 	// already risks overflowing 128 bits on its own.
-	num.Rsh(num, uint(curve.Shift))
-	// "err on the side of rounding not in the user's favor"
-	num.Add(num, big.NewInt(1))
-	num.Mul(num, new(big.Int).SetInt64(resourceCount))
-
-	denom := new(big.Int).SetUint64(curve.CoeffB)
+	num, overflow := u128Mul64Checked(num, uint64(resourceCount))
+	if overflow {
+		return 0
+	}
+	denomLo, carry := bits.Add64(curve.CoeffB, 0, 0)
 	// A negative pool does not push the price beyond p_max: p(x) = p(0) for x<0.
 	if currentPool > 0 {
-		denom.Add(denom, new(big.Int).SetInt64(currentPool))
+		denomLo, carry = bits.Add64(curve.CoeffB, uint64(currentPool), 0)
 	}
-	if denom.Sign() == 0 {
+	denom := math128.U128{Hi: carry, Lo: denomLo}
+	if denom.IsZero() {
 		return 0
 	}
-	out := new(big.Int).Quo(num, denom)
-	if !out.IsInt64() {
-		return 0
+	q, _ := math128.U192{Mid: num.Hi, Lo: num.Lo}.QuoRem(denom)
+	if q > math.MaxInt64-1 {
+		return 0 // saturated or not representable; the big.Int version returned 0 here too
 	}
-	return out.Int64() + 1
+	return int64(q) + 1
+}
+
+// u128Rsh shifts a right by s bits (s < 128).
+func u128Rsh(a math128.U128, s uint) math128.U128 {
+	switch {
+	case s == 0:
+		return a
+	case s >= 128:
+		return math128.U128{}
+	case s >= 64:
+		return math128.U128{Lo: a.Hi >> (s - 64)}
+	default:
+		return math128.U128{Hi: a.Hi >> s, Lo: a.Lo>>s | a.Hi<<(64-s)}
+	}
+}
+
+// u128Mul64Checked multiplies and reports whether the product exceeded 128 bits.
+func u128Mul64Checked(a math128.U128, b uint64) (math128.U128, bool) {
+	lhi, llo := bits.Mul64(a.Lo, b)
+	hhi, hlo := bits.Mul64(a.Hi, b)
+	hi, c := bits.Add64(lhi, hlo, 0)
+	return math128.U128{Hi: hi, Lo: llo}, hhi != 0 || c != 0
+}
+
+// rcRegenShare is hived's `uint128_to_int64((uint128(rc_regen) * weight) /
+// divisor)`: this resource's slice of the regeneration. ok is false when the
+// result does not fit int64 (hived asserts; the caller skips the resource).
+func rcRegenShare(rcRegen int64, weight, divisor uint64) (int64, bool) {
+	q := math128.Mul64Wide(uint64(rcRegen), weight).DivU64(divisor)
+	if q.Hi != 0 || q.Lo > math.MaxInt64 {
+		return 0, false
+	}
+	return int64(q.Lo), true
 }
 
 // rcCostOfUsage prices a transaction's per-resource usage against the current
@@ -111,13 +153,10 @@ func rcCostOfUsage(s *state.Session, usage [objects.RCNumResources]int64) int64 
 		// Usage is scaled by resource_unit BEFORE costing.
 		scaled := usage[i] * int64(entry.Dynamics.ResourceUnit)
 
-		share := new(big.Int).SetInt64(rcRegen)
-		share.Mul(share, new(big.Int).SetUint64(uint64(pool.ResourceWeights[i])))
-		share.Quo(share, new(big.Int).SetUint64(divisor))
-		if !share.IsInt64() {
+		regenShare, ok := rcRegenShare(rcRegen, uint64(pool.ResourceWeights[i]), divisor)
+		if !ok {
 			continue
 		}
-		regenShare := share.Int64()
 		if regenShare <= 0 {
 			continue
 		}
@@ -154,14 +193,8 @@ func rcCostOfUsageDetailed(s *state.Session, usage [objects.RCNumResources]int64
 	for i := 0; i < objects.RCNumResources; i++ {
 		entry := params.Entries[i]
 		scaled := usage[i] * int64(entry.Dynamics.ResourceUnit)
-		share := new(big.Int).SetInt64(rcRegen)
-		share.Mul(share, new(big.Int).SetUint64(uint64(pool.ResourceWeights[i])))
-		share.Quo(share, new(big.Int).SetUint64(divisor))
-		if !share.IsInt64() {
-			continue
-		}
-		regenShare := share.Int64()
-		if regenShare <= 0 {
+		regenShare, ok := rcRegenShare(rcRegen, uint64(pool.ResourceWeights[i]), divisor)
+		if !ok || regenShare <= 0 {
 			continue
 		}
 		per[i] = computeCostOfResource(entry.Curve, pool.PoolArray[i], scaled, regenShare)
