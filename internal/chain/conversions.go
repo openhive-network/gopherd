@@ -89,13 +89,23 @@ func processConversions(s *state.Session, blockTime uint32, hooks *blockHookScra
 	// Collateralized requests. Two-pass walk: first collect matures
 	// (RangeAll snapshots values), then settle. Per-row deletion during
 	// Range would invalidate the iterator.
+	// Skip the walk when the earliest pending conversion (tracked as an
+	// expiration hint, lowered by every PutCollateralizedConvert) is still
+	// in the future — ranging every open request each block was 7% of the
+	// apply loop in 2021.
 	var matured []objects.CollateralizedConvert
-	_ = objects.RangeAllCollateralizedConvert(s, func(c objects.CollateralizedConvert) bool {
-		if c.Conversion <= blockTime {
-			matured = append(matured, c)
-		}
-		return true
-	})
+	collNext := ^uint32(0)
+	if hint, ok := s.GetExpHint(objects.CollateralizedConvertTable, state.PrimaryIndex); !ok || hint <= blockTime {
+		_ = objects.RangeAllCollateralizedConvert(s, func(c objects.CollateralizedConvert) bool {
+			if c.Conversion <= blockTime {
+				matured = append(matured, c)
+			} else if c.Conversion < collNext {
+				collNext = c.Conversion
+			}
+			return true
+		})
+		s.SetExpHint(objects.CollateralizedConvertTable, state.PrimaryIndex, collNext)
+	}
 	for i := range matured {
 		req := &matured[i]
 		requiredHIVE, excess, sErr := evaluator.SettleCollateralizedConvert(s, req, blockTime)

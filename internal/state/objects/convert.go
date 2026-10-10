@@ -147,6 +147,10 @@ func ReadCollateralizedConvert(src []byte) (CollateralizedConvert, error) {
 
 func PutCollateralizedConvert(s *state.Session, c *CollateralizedConvert) {
 	s.Put(CollateralizedConvertTable, state.PrimaryIndex, collConvertKey(c.Owner, c.RequestID), AppendCollateralizedConvert(nil, c))
+	// Earliest-pending hint for processConversions' per-block skip.
+	if c.Conversion != 0 {
+		s.NudgeExpHint(CollateralizedConvertTable, state.PrimaryIndex, c.Conversion)
+	}
 }
 
 func HasCollateralizedConvert(s *state.Session, owner auth.AccountName, requestID uint32) (bool, error) {
