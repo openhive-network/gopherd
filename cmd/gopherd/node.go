@@ -545,6 +545,12 @@ type app struct {
 	// p2p subsystem to bring the in-memory typed-stores back in sync
 	// with the persisted DGPO. 0 = cold start, no recovery needed.
 	recoverFrom uint32
+	// recoverStart is the first block recover() applies: 1 for a cold
+	// rebuild, snapshotHead+1 when the state was loaded from a snapshot.
+	// Replaying from genesis onto a loaded snapshot applied block 1's state
+	// over block 26.8M's and failed at block 1092 (then wrote a "block-1091"
+	// snapshot of the mess).
+	recoverStart uint32
 
 	// progress tracking — afterApply rate-limits its log line to one
 	// emission per progressInterval (or per progressBlocks blocks).
@@ -666,6 +672,9 @@ func newApp(cfg flags) (*app, error) {
 	// set matches the producing process. Skips genesis.Apply because
 	// the snapshot already carries the bootstrapped state.
 	loadedFromSnapshot := false
+	// snapshotHead is the block a --load-snapshot state is at; recovery from
+	// the local block_log then starts at snapshotHead+1, not at genesis.
+	snapshotHead := uint32(0)
 	var cold objects.ColdStore
 	var commentStore *objects.CommentStore
 	var voteStore *objects.CommentVoteStore
@@ -813,6 +822,7 @@ func newApp(cfg flags) (*app, error) {
 		fmt.Fprintf(os.Stderr, "gopherd node: snapshot loaded — block %d, %.1fs total\n",
 			man.BlockNum, time.Since(procStart).Seconds())
 		loadedFromSnapshot = true
+		snapshotHead = man.BlockNum
 	}
 	if !loadedFromSnapshot {
 		if err := genesis.ApplyForNetwork(stateDB, cfg.initWitnesses); err != nil {
@@ -921,6 +931,7 @@ func newApp(cfg flags) (*app, error) {
 		writer:           w,
 		blockLogPath:     blockLogPath,
 		recoverFrom:      recoverFrom,
+		recoverStart:     snapshotHead + 1,
 		logger:           newAppLogger(os.Stderr),
 		progressBlocks:   1000,
 		progressInterval: time.Second,
@@ -1166,9 +1177,21 @@ func (a *app) recover() error {
 	if target == 0 {
 		return nil
 	}
-	a.logger.printf("recover: replaying %d blocks from local block_log (typed-stores rebuild)", target)
+	start := a.recoverStart
+	if start < 1 {
+		start = 1
+	}
+	if start > target {
+		a.logger.printf("recover: loaded state is at block %d, block_log head is %d — nothing to replay", start-1, target)
+		return nil
+	}
+	if start > 1 {
+		a.logger.printf("recover: replaying blocks %d..%d from local block_log (delta since the loaded snapshot)", start, target)
+	} else {
+		a.logger.printf("recover: replaying %d blocks from local block_log (typed-stores rebuild)", target)
+	}
 	startedAt := time.Now()
-	for n := uint32(1); n <= target; n++ {
+	for n := start; n <= target; n++ {
 		raw, err := r.Block(n)
 		if err != nil {
 			return fmt.Errorf("recover: read block %d: %w", n, err)
@@ -1214,7 +1237,7 @@ func (a *app) recover() error {
 		}
 	}
 	dt := time.Since(startedAt).Seconds()
-	a.logger.printf("recover: caught up to block %d in %.1fs (%.0f bps)", target, dt, float64(target)/dt)
+	a.logger.printf("recover: caught up to block %d in %.1fs (%.0f bps)", target, dt, float64(target-start+1)/dt)
 	return nil
 }
 
