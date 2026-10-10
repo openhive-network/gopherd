@@ -97,7 +97,12 @@ func ReadRCPendingData(src []byte) (RCPendingData, error) {
 
 // PutRCPendingData stores the singleton.
 func PutRCPendingData(s *state.Session, d *RCPendingData) {
-	s.Put(RCPendingDataTable, state.PrimaryIndex, rcPendingDataKey, AppendRCPendingData(nil, d))
+	// Written once per transaction from HF20 on. Encoding into a nil slice
+	// grew it through five doublings each time — 10% of all bytes allocated
+	// during a mainnet sync — so reuse the Session's serialization scratch,
+	// which Put copies out of.
+	s.SerScratch = AppendRCPendingData(s.SerScratch[:0], d)
+	s.Put(RCPendingDataTable, state.PrimaryIndex, rcPendingDataKey, s.SerScratch)
 }
 
 // GetRCPendingData fetches the singleton, returning a zero value if it
