@@ -157,26 +157,20 @@ func finalizeRCPoolsForBlock(s *state.Session, now uint32) {
 	// Buckets: the newest (highest seqno) is active; by_timestamp rbegin()
 	// in hived. When it is a full HIVE_RC_BUCKET_TIME_LENGTH old, the OLDEST
 	// bucket is reset and becomes the new active one.
+	// Oldest and newest bucket, as hived reads them off by_timestamp
+	// (rc_utility.cpp:777-781): two point reads keyed by the seqno window.
+	// Scanning the primary rows instead walked every pebble version of the
+	// active bucket, which is rewritten each block (88% of the apply loop
+	// after HF20 on a mainnet sync).
 	var newest, oldest objects.RCUsageBucket
 	have := false
-	_ = s.Range(objects.RCUsageBucketTable, state.PrimaryIndex, nil,
-		func(_, val []byte) (bool, error) {
-			b, err := objects.ReadRCUsageBucket(val)
-			if err != nil {
-				return true, nil
-			}
-			if !have {
-				newest, oldest, have = b, b, true
-				return true, nil
-			}
-			if b.BucketSeqno > newest.BucketSeqno {
-				newest = b
-			}
-			if b.BucketSeqno < oldest.BucketSeqno {
-				oldest = b
-			}
-			return true, nil
-		})
+	if oSeq, nSeq, ok := objects.RCUsageBucketSeqnoWindow(s); ok {
+		o, oerr := objects.GetRCUsageBucket(s, oSeq)
+		n, nerr := objects.GetRCUsageBucket(s, nSeq)
+		if oerr == nil && nerr == nil {
+			oldest, newest, have = o, n, true
+		}
+	}
 	if !have {
 		// First block with RC active: seed the window (hived creates the
 		// HIVE_RC_WINDOW_BUCKET_COUNT buckets at HF20 bootstrap).
@@ -255,7 +249,11 @@ func finalizeRCPoolsForBlock(s *state.Session, now uint32) {
 	for i := 0; i < objects.RCNumResources; i++ {
 		active.Used[i] += usage[i]
 	}
-	objects.PutRCUsageBucket(s, &active)
+	if reset {
+		objects.PutRCUsageBucket(s, &active) // new bucket: row + index entry
+	} else {
+		objects.UpdateRCUsageBucket(s, &active)
+	}
 
 	pending.ResetPendingUsage()
 	objects.PutRCPendingData(s, &pending)

@@ -380,3 +380,37 @@ func TestRCUsageBucketRoundTrip(t *testing.T) {
 		t.Error("by_seqno still present after delete")
 	}
 }
+
+// TestRCUsageBucketSeqnoWindow pins the index-based window read that
+// finalizeRCPoolsForBlock uses in place of scanning every bucket row: the
+// smallest and largest live seqno, unaffected by per-block UpdateRCUsageBucket
+// calls (which leave the index alone) and following deletions.
+func TestRCUsageBucketSeqnoWindow(t *testing.T) {
+	s := state.NewSession(state.OpenMem())
+	if _, _, ok := RCUsageBucketSeqnoWindow(s); ok {
+		t.Fatal("window reported on an empty table")
+	}
+	for seq := uint32(5); seq <= 28; seq++ {
+		PutRCUsageBucket(s, &RCUsageBucket{BucketSeqno: seq, Created: seq * 3600})
+	}
+	o, n, ok := RCUsageBucketSeqnoWindow(s)
+	if !ok || o != 5 || n != 28 {
+		t.Fatalf("window = %d..%d,%v want 5..28", o, n, ok)
+	}
+	// Per-block update of the newest bucket: no index write, same window.
+	b, _ := GetRCUsageBucket(s, 28)
+	b.Used[0] += 7
+	UpdateRCUsageBucket(s, &b)
+	if got, _ := GetRCUsageBucket(s, 28); got.Used[0] != 7 {
+		t.Fatalf("update not visible: %+v", got)
+	}
+	if o, n, _ = RCUsageBucketSeqnoWindow(s); o != 5 || n != 28 {
+		t.Fatalf("window after update = %d..%d", o, n)
+	}
+	// Rotation: drop the oldest, add a new newest.
+	DeleteRCUsageBucket(s, 5)
+	PutRCUsageBucket(s, &RCUsageBucket{BucketSeqno: 29})
+	if o, n, _ = RCUsageBucketSeqnoWindow(s); o != 6 || n != 29 {
+		t.Fatalf("window after rotation = %d..%d want 6..29", o, n)
+	}
+}

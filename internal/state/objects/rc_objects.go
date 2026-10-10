@@ -829,6 +829,37 @@ func PutRCUsageBucket(s *state.Session, b *RCUsageBucket) {
 		rcUsageBucketKey(b.BucketSeqno), nil)
 }
 
+// UpdateRCUsageBucket rewrites an existing bucket's row without touching its
+// by-seqno index entry. The active bucket is updated every block; rewriting
+// the index key as well piled up a version of it per block in pebble's
+// memtable and L0, and every scan of the index then stepped through all of
+// them (finalizeRCPoolsForBlock was 88% of the apply loop after HF20).
+func UpdateRCUsageBucket(s *state.Session, b *RCUsageBucket) {
+	s.Put(RCUsageBucketTable, state.PrimaryIndex,
+		rcUsageBucketKey(b.BucketSeqno), AppendRCUsageBucket(nil, b))
+}
+
+// RCUsageBucketSeqnoWindow returns the oldest and newest bucket seqnos from
+// the by-seqno index — hived's `bucket_idx.begin()` / `rbegin()`
+// (rc_utility.cpp:777-781). ok is false when no bucket exists. The index is
+// written once per bucket's life, so this walk sees 24 keys, not the
+// per-block rewrites of the active bucket's row.
+func RCUsageBucketSeqnoWindow(s *state.Session) (oldest, newest uint32, ok bool) {
+	_ = s.Range(RCUsageBucketTable, RCUsageBucketBySeqnoIndex, nil,
+		func(body, _ []byte) (bool, error) {
+			if len(body) < 4 {
+				return true, nil
+			}
+			seq := uint32(body[0])<<24 | uint32(body[1])<<16 | uint32(body[2])<<8 | uint32(body[3])
+			if !ok {
+				oldest, ok = seq, true
+			}
+			newest = seq
+			return true, nil
+		})
+	return oldest, newest, ok
+}
+
 // GetRCUsageBucket fetches the bucket by seqno.
 func GetRCUsageBucket(s *state.Session, seqno uint32) (RCUsageBucket, error) {
 	v, err := s.Get(RCUsageBucketTable, state.PrimaryIndex, rcUsageBucketKey(seqno))
