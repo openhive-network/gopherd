@@ -164,15 +164,15 @@ func (c *Conn) Send(typeTag proto.MessageType, body []byte) error {
 // of body), determine total size, then read the rest.
 func (c *Conn) Receive() (proto.MessageType, []byte, error) {
 	const firstBlock = AESBlockSize
-	if len(c.recvBuf) < firstBlock {
+	if cap(c.recvBuf) < firstBlock {
 		c.recvBuf = make([]byte, firstBlock)
 	}
 	cipherFirst := c.recvBuf[:firstBlock]
 	if _, err := io.ReadFull(c.raw, cipherFirst); err != nil {
 		return 0, nil, err
 	}
-	plainFirst := make([]byte, firstBlock)
-	c.decrypter.CryptBlocks(plainFirst, cipherFirst)
+	var plainFirst [firstBlock]byte
+	c.decrypter.CryptBlocks(plainFirst[:], cipherFirst)
 
 	size := uint32(plainFirst[0]) | uint32(plainFirst[1])<<8 |
 		uint32(plainFirst[2])<<16 | uint32(plainFirst[3])<<24
@@ -183,26 +183,36 @@ func (c *Conn) Receive() (proto.MessageType, []byte, error) {
 		return 0, nil, proto.ErrMessageTooLarge
 	}
 
-	// First 8 bytes of body live in the tail of the first block.
+	// First 8 bytes of body live in the tail of the first block. The body is
+	// the ONE allocation per message: it is handed to the caller, who keeps
+	// it (block payloads live until the block is applied and logged). The
+	// ciphertext goes through the connection's reusable scratch buffer and
+	// is decrypted straight into the body, which has room for the last
+	// block's padding. The previous three fresh buffers per message
+	// (ciphertext, plaintext, body) were a third of all bytes allocated
+	// during a sync.
 	const leftover = firstBlock - proto.HeaderSize
-	body := make([]byte, size)
-	copy(body, plainFirst[proto.HeaderSize:])
-
+	remaining := 0
+	paddedRemaining := 0
 	if size > leftover {
-		// Round up the unread portion to a multiple of 16.
-		remaining := int(size) - leftover
-		paddedRemaining := ((remaining + AESBlockSize - 1) / AESBlockSize) * AESBlockSize
-		cipherTail := make([]byte, paddedRemaining)
+		remaining = int(size) - leftover
+		paddedRemaining = ((remaining + AESBlockSize - 1) / AESBlockSize) * AESBlockSize
+	}
+	bodyBuf := make([]byte, leftover+paddedRemaining)
+	copy(bodyBuf, plainFirst[proto.HeaderSize:])
+	if paddedRemaining > 0 {
+		if cap(c.recvBuf) < paddedRemaining {
+			c.recvBuf = make([]byte, paddedRemaining)
+		}
+		cipherTail := c.recvBuf[:paddedRemaining]
 		if _, err := io.ReadFull(c.raw, cipherTail); err != nil {
 			return 0, nil, err
 		}
-		plainTail := make([]byte, paddedRemaining)
-		c.decrypter.CryptBlocks(plainTail, cipherTail)
-		copy(body[leftover:], plainTail[:remaining])
+		c.decrypter.CryptBlocks(bodyBuf[leftover:], cipherTail)
 	}
 	// (Trailing padding bytes inside the last block are the 0-fill the
-	// sender added; we just drop them by not copying them into body.)
-	return typeTag, body, nil
+	// sender added; the returned slice stops before them.)
+	return typeTag, bodyBuf[:size], nil
 }
 
 // Close shuts down the underlying TCP socket. Idempotent.
