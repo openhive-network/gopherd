@@ -24,7 +24,7 @@ func (s *Server) registerCondenserAPI() {
 	s.reg.Register("condenser_api.get_accounts", s.mGetAccounts(true))
 	s.reg.Register("condenser_api.get_witness_by_account", s.mGetWitnessByAccount(true))
 	s.reg.Register("condenser_api.get_block", s.mGetBlock(true))
-	s.reg.Register("condenser_api.get_block_header", s.mGetBlockHeader())
+	s.reg.Register("condenser_api.get_block_header", s.mGetBlockHeader(true))
 	s.reg.Register("condenser_api.get_account_count", s.mGetAccountCount())
 	s.reg.Register("condenser_api.lookup_accounts", s.mLookupAccounts())
 	s.reg.Register("condenser_api.get_order_book", s.mGetOrderBook(true))
