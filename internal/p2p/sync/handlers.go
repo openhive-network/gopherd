@@ -93,6 +93,15 @@ func (d *Delegate) OnTransactionReceived(p *node.Peer, body []byte) {
 	if d.cfg.Mempool == nil || len(body) == 0 {
 		return
 	}
+	advert := block.ID(crypto.RIPEMD160(body))
+	if st := d.peerStateFor(p); st != nil {
+		st.mu.Lock()
+		_, asked := st.known[advert]
+		st.mu.Unlock()
+		if !asked {
+			d.txUnrequested.Add(1)
+		}
+	}
 	if err := d.cfg.Mempool.AddPendingRaw(body); err != nil {
 		// A duplicate is normal traffic (every transaction is advertised by
 		// several peers) and must not inflate the accepted count — that is what
@@ -111,7 +120,7 @@ func (d *Delegate) OnTransactionReceived(p *node.Peer, body []byte) {
 	// transaction id. Getting this wrong is not a cosmetic mismatch — peers
 	// fetch what we advertise, hash the body their own way, find an id they
 	// never asked for, and drop the connection.
-	d.queueTxAdvert(block.ID(crypto.RIPEMD160(body)))
+	d.queueTxAdvert(advert)
 }
 
 // OnAddressesReceived satisfies the node.Delegate typed hook for the

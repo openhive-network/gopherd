@@ -394,8 +394,16 @@ type Delegate struct {
 	txInvOffered atomic.Uint64
 	txFetched    atomic.Uint64
 	txDuplicate  atomic.Uint64
-	txServed     atomic.Uint64
-	txRelayed    atomic.Uint64
+	// txUnrequested counts transaction bodies whose identity — ripemd160 over
+	// the whole signed transaction, as hived computes it — was never advertised
+	// to us by the peer that sent them. hived peers send a body only in answer
+	// to a fetch of the id they advertised, so this stays at zero exactly when
+	// our identity matches theirs. That is the live check for the bug that got
+	// relay disabled: advertising under the wrong identity is what made peers
+	// drop us with "You sent me a message that I didn't request".
+	txUnrequested atomic.Uint64
+	txServed      atomic.Uint64
+	txRelayed     atomic.Uint64
 	// inhibitFetching is set when applyQLen >= high-water and cleared
 	// when it drops below low-water. While set, sendFetchItems is a
 	// no-op. Toggle is performed by the applyLoop on each dequeue and
@@ -1209,6 +1217,8 @@ type Stats struct {
 	TxServed     uint64
 	TxRelayed    uint64
 	TxDuplicate  uint64
+	// TxUnrequested — see Delegate.txUnrequested. Must stay 0.
+	TxUnrequested uint64
 	// InvIgnoredCatchup is the cumulative count of tip-inventory adverts
 	// dropped by handleInv's catch-up gate (hived-1.28.7 storm fix). Nonzero
 	// and climbing == we're behind and correctly ignoring tip INV; stops
@@ -1295,6 +1305,7 @@ func (d *Delegate) Stats() Stats {
 		TxEvicted:              uint64(mempoolEvicted),
 		TxOverflowed:           uint64(mempoolOverflow),
 		TxDuplicate:            d.txDuplicate.Load(),
+		TxUnrequested:          d.txUnrequested.Load(),
 		TxServed:               d.txServed.Load(),
 		TxRelayed:              d.txRelayed.Load(),
 		MempoolDepth:           mempoolDepth,
