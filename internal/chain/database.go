@@ -254,6 +254,9 @@ func New(s *state.Database) *Database {
 	// State opened from a snapshot may already be past a vote-driven
 	// hardfork; the table must know before the first pending-tx check.
 	syncDynamicHardforks(d.session)
+	// State built before the RC parameters matched hived's carries the old,
+	// approximated values; correct them before anything prices a transaction.
+	alignRCResourceParams(d.session)
 	return d
 }
 
