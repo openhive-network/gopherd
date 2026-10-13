@@ -32,8 +32,7 @@
 package chain
 
 import (
-	"encoding/json"
-
+	"gopherd/internal/chain/evaluator"
 	"gopherd/internal/protocol/auth"
 	"gopherd/internal/protocol/op"
 	"gopherd/internal/state"
@@ -146,73 +145,37 @@ func countDifferentialCustomJSON(s *state.Session, o op.Op) [objects.RCNumResour
 	if cj.ID != "rc" {
 		return diff
 	}
-	from, delegatees, maxRC, ok := parseDelegateRCPayload(cj.JSON)
-	if !ok || maxRC == 0 {
+	// One visit per interpreted operation: hived runs the differential from
+	// on_pre_apply_custom_operation, which fires for each delegate_rc of a
+	// batched payload.
+	ops, err := evaluator.ParseRCCustomJSON(cj.JSON, false)
+	if err != nil {
 		return diff
 	}
-	if has, _ := objects.HasAccount(s, auth.AccountName(from)); !has {
-		return diff
+	for i := range ops {
+		diff[objects.RCStateBytes] += delegateRCDifferential(s, &ops[i])
 	}
-	var usage int64
-	for _, to := range delegatees {
-		if has, _ := objects.HasAccount(s, auth.AccountName(to)); !has {
-			// C++ returns false (no diff) if any delegatee missing.
-			return [objects.RCNumResources]int64{}
-		}
-		// Existing delegation row contributes its full size to diff.
-		if _, err := objects.GetRCDirectDelegation(s,
-			auth.AccountName(from), auth.AccountName(to)); err == nil {
-			usage += rcDirectDelegationNodeSize * lastingStateByte
-		}
-	}
-	diff[objects.RCStateBytes] = usage
 	return diff
 }
 
-// parseDelegateRCPayload is a tolerant JSON parser for the delegate_rc
-// payload format. Mirrors applyDelegateRC's input handling — both the
-// object form and the tuple form are accepted.
-//
-// The outer wrapper is ["delegate_rc", <inner>] or [0, <inner>]. The
-// inner is either {"from":..., "delegatees":[...], "max_rc":N}, or
-// the tuple [from, [delegatees], max_rc, {}].
-func parseDelegateRCPayload(payload string) (from string, delegatees []string, maxRC int64, ok bool) {
-	var raw []json.RawMessage
-	if err := json.Unmarshal([]byte(payload), &raw); err != nil || len(raw) != 2 {
-		return "", nil, 0, false
+func delegateRCDifferential(s *state.Session, p *evaluator.DelegateRCParams) int64 {
+	if p.MaxRC == 0 {
+		return 0
 	}
-	// Verify name == "delegate_rc" or 0
-	var name string
-	if err := json.Unmarshal(raw[0], &name); err != nil {
-		var n int
-		if err2 := json.Unmarshal(raw[0], &n); err2 != nil || n != 0 {
-			return "", nil, 0, false
+	if has, _ := objects.HasAccount(s, auth.AccountName(p.From)); !has {
+		return 0
+	}
+	var usage int64
+	for _, to := range p.Delegatees {
+		if has, _ := objects.HasAccount(s, auth.AccountName(to)); !has {
+			// C++ returns false (no diff) if any delegatee missing.
+			return 0
 		}
-	} else if name != "delegate_rc" {
-		return "", nil, 0, false
+		// Existing delegation row contributes its full size to diff.
+		if _, err := objects.GetRCDirectDelegation(s,
+			auth.AccountName(p.From), auth.AccountName(to)); err == nil {
+			usage += rcDirectDelegationNodeSize * lastingStateByte
+		}
 	}
-	// Try object form
-	var p struct {
-		From       string   `json:"from"`
-		Delegatees []string `json:"delegatees"`
-		MaxRC      int64    `json:"max_rc"`
-	}
-	if err := json.Unmarshal(raw[1], &p); err == nil && p.From != "" {
-		return p.From, p.Delegatees, p.MaxRC, true
-	}
-	// Tuple form: [from, [delegatees], max_rc, {}]
-	var tup []json.RawMessage
-	if err := json.Unmarshal(raw[1], &tup); err != nil || len(tup) < 3 {
-		return "", nil, 0, false
-	}
-	if err := json.Unmarshal(tup[0], &p.From); err != nil {
-		return "", nil, 0, false
-	}
-	if err := json.Unmarshal(tup[1], &p.Delegatees); err != nil {
-		return "", nil, 0, false
-	}
-	if err := json.Unmarshal(tup[2], &p.MaxRC); err != nil {
-		return "", nil, 0, false
-	}
-	return p.From, p.Delegatees, p.MaxRC, true
+	return usage
 }
