@@ -61,31 +61,36 @@ against hived's line by line — including the divergences that remain open.
 
 ### Hardware
 
-Figures below are **measured** on the reference box (12 cores, 31 GB RAM, NVMe)
-running a tip-following node with `--comment-resident-cap=500000`,
-`--mem-limit-gib=12`, `--cache-mb=512`:
+Figures below are **measured** on mainnet on 2026-10-13 (head ~110.7M), on a
+24-thread box with 46 GB RAM and an NVMe SSD, running a tip-following node with
+`--comment-resident-cap=2000000 --mem-limit-gib=12 --cache-mb=512
+--cold-backend=pebble --cold-cache-mb=256`, under a 20 GB cgroup cap:
 
 | Resource | Measured | Notes |
 |---|---|---|
-| RSS at tip | **4.3 GB**, flat over 11h+ | bounded by `--comment-resident-cap` and `--mem-limit-gib` |
-| Cold tier | 68 GB | grows with the comment corpus; watch it |
-| State dir | 1.7 GB | |
-| Snapshot | 27 GB | keep it — it is needed to restart |
-| Startup from snapshot | 65–156 s | page-cache and `--mem-limit-gib` dependent |
-| Catch-up rate | ~8,750 blocks/min | ~20 min to absorb a 5-day-old snapshot |
+| RSS at tip | **8.1 GB** | Go heap 6.4 GB in use; 11.7 GB high-water, reached while loading a snapshot |
+| Page cache | ~9 GB | pebble and cold-tier reads; reclaimable, but startup time depends on it |
+| CPU at tip | 3–9% of one core | following the head, no RPC load |
+| State (pebble) | 2.2 GB | |
+| Cold tier | 100 GB | grows with the comment corpus; transiently ~150 GB while a snapshot loads |
+| Snapshot | 35 GB | 33 GB of it is the comment store; keep the latest one |
+| Snapshot write | 6–9.5 min | on shutdown (SIGTERM); give the service a stop timeout of an hour |
+| Snapshot load | **1h45m** | the comment store re-spills into the cold tier at ~5 MB/s |
+| Catch-up after load | ~20 s for 2.8 h of blocks | 120–330 blocks/s from peers |
 
 Recommended for a tip-following node:
 
-- **4+ cores**, **16 GB RAM**, **NVMe or SSD**, **150 GB free disk**.
-- 8 GB RAM is likely sufficient given the 4.3 GB working set, but is **untested**
-  — leave headroom for the OS page cache, which dominates startup time.
+- **4+ cores**, **24 GB RAM** (16 GB for the node plus page cache),
+  **NVMe or SSD**, **200 GB free disk** without a block_log.
 - A spinning disk is not recommended and is untested. The cold tier is a
   random-access LSM store.
 
-Additional, only if you replay from genesis rather than warm-starting:
+Additional, only if you keep a block_log (needed to replay from genesis):
 
-- A full `block_log` is **149 GB** (plus a 583 MB index). `--no-block-log`
-  avoids writing one at all on a snapshot warm start.
+- A block_log written by a p2p sync is **539 GB** (plus an 845 MB index) at
+  110.7M blocks. It stores each block as the peer sent it — zstd level 3, not
+  the level-15 recompression hived applies — so it is larger than hived's.
+  `--no-block-log` avoids writing one on a snapshot warm start.
 
 ## Installation
 
@@ -143,7 +148,7 @@ Restarting needs **both** that snapshot and the same `--cold-dir`. Snapshots are
 not self-contained unless the cold tier goes with them.
 
 Without a snapshot, a node builds state by replaying a `block_log` from genesis,
-which takes hours and 149 GB of log.
+which takes about 20 hours and a 539 GB log (see Hardware).
 
 ### Flags that matter more than the rest
 
@@ -156,7 +161,7 @@ which takes hours and 149 GB of log.
   *partial* block_log starting at snapshot-head+1, and the restart path replays
   that partial log from its own block 1 against empty typed stores.
 - `--mem-limit-gib` — counter-intuitive: **raising it slows startup.** The Go
-  heap competes with the page cache over a ~26 GB snapshot. Same snapshot,
+  heap competes with the page cache over the snapshot. Same ~26 GB snapshot,
   measured: 22 GiB → 155 s, 12 GiB → 108 s, 12 GiB warm cache → 65 s.
 - `--extra-seed` — repeatable, and accepts a comma-separated list. Worth pinning
   specific peers: 5 of 24 peers supplied 83% of our earliest transaction
