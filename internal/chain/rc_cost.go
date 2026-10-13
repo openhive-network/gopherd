@@ -1,6 +1,7 @@
 package chain
 
 import (
+	"gopherd/internal/chain/evaluator"
 	"gopherd/internal/protocol/auth"
 	"gopherd/internal/protocol/hardfork"
 	"gopherd/internal/protocol/op"
@@ -298,9 +299,19 @@ func stateBytesForOp(o op.Op, now uint32) int64 {
 		// payload was interpreted.
 		cj := o.AsCustomJSON()
 		if cj.ID == "rc" {
-			if _, delegatees, maxRC, ok := parseDelegateRCPayload(cj.JSON); ok && maxRC != 0 {
-				return rcDelegateRCBaseSize * int64(len(delegatees))
+			// Per interpreted operation, as handle_custom_op_usage runs from
+			// each delegate_rc's post-apply notification.
+			ops, err := evaluator.ParseRCCustomJSON(cj.JSON, false)
+			if err != nil {
+				return 0
 			}
+			var usage int64
+			for i := range ops {
+				if ops[i].MaxRC != 0 {
+					usage += rcDelegateRCBaseSize * int64(len(ops[i].Delegatees))
+				}
+			}
+			return usage
 		}
 		return 0
 	}
@@ -325,8 +336,8 @@ func extraExecTimeForOp(o op.Op) int64 {
 	case op.TagCustomJSON:
 		cj := o.AsCustomJSON()
 		if cj.ID == "rc" {
-			if _, _, _, ok := parseDelegateRCPayload(cj.JSON); ok {
-				return rcDelegateRCTimeNS
+			if ops, err := evaluator.ParseRCCustomJSON(cj.JSON, false); err == nil {
+				return rcDelegateRCTimeNS * int64(len(ops))
 			}
 		}
 	}

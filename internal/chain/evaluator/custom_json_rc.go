@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"math"
 	"math/bits"
+	"sort"
+	"strconv"
 
 	"gopherd/internal/protocol/auth"
 	"gopherd/internal/protocol/hardfork"
@@ -71,35 +73,249 @@ func (customJSONEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	return nil
 }
 
-// applyRCCustomJSON parses the "rc" payload and dispatches the named
-// sub-operation. Currently supports `delegate_rc`.
+// applyRCCustomJSON interprets an "rc" custom_json and applies every
+// delegate_rc it carries. Mirrors generic_custom_operation_interpreter::apply
+// and apply_operations (generic_custom_operation_interpreter.hpp:184-251):
+//
+//   - the payload is ONE operation or a LIST of them — a list is recognised by
+//     its first element being an array. Wallets batch dozens of delegations
+//     into one custom_json this way, e.g.
+//     [["delegate_rc",{...}],["delegate_rc",{...}]];
+//   - every operation is validated before any is applied;
+//   - the union of their required posting authorities must equal the
+//     custom_json's required_posting_auths, and since delegate_rc needs no
+//     active authority, required_auths must be empty;
+//   - the operations then apply in order, all-or-nothing: hived runs them in
+//     one undo session, and any failure undoes the whole batch.
+//
+// Every failure is returned. customJSONEvaluator decides what it means: fatal
+// at admission and block production, a rolled-back no-op inside a block.
 func applyRCCustomJSON(ctx *Context, cj op.CustomJSON) error {
-	// Format: ["op_name", {...args...}]
-	var raw []json.RawMessage
-	if err := json.Unmarshal([]byte(cj.JSON), &raw); err != nil {
-		// Tolerate malformed JSON — hived also no-ops on bad payload.
-		return nil
+	ops, err := ParseRCCustomJSON(cj.JSON, ctx.InControl)
+	if err != nil {
+		return err
 	}
-	if len(raw) != 2 {
-		return nil
-	}
-	// op tag may be either the string "delegate_rc" or the numeric
-	// variant index (0 for delegate_rc). Both forms appear in the
-	// C++ tests (string for HIVE_RC_CUSTOM_OPERATION_ID, numeric for the
-	// "alternative legacy" form).
-	var name string
-	if err := json.Unmarshal(raw[0], &name); err != nil {
-		// try numeric
-		var n int
-		if err2 := json.Unmarshal(raw[0], &n); err2 == nil && n == 0 {
-			name = "delegate_rc"
-		} else {
-			return nil
+	for i := range ops {
+		if err := validateDelegateRC(&ops[i]); err != nil {
+			return err
 		}
 	}
-	switch name {
-	case "delegate_rc":
-		return applyDelegateRC(ctx, cj, raw[1])
+	posting := make(map[string]struct{}, len(cj.RequiredPostingAuths))
+	for _, a := range cj.RequiredPostingAuths {
+		posting[string(a)] = struct{}{}
+	}
+	inner := make(map[string]struct{}, len(ops))
+	for i := range ops {
+		inner[ops[i].From] = struct{}{}
+	}
+	if len(cj.RequiredAuths) != 0 || !sameAccountSet(inner, posting) {
+		return fmt.Errorf("delegate_rc: required authorities of the custom_json do not match its operations")
+	}
+	for i := range ops {
+		if err := applyDelegateRC(ctx, &ops[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func sameAccountSet(a, b map[string]struct{}) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k := range a {
+		if _, ok := b[k]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// DelegateRCParams is one decoded delegate_rc_operation. Delegatees hold the
+// flat_set the operation declares: deduplicated and in sorted order.
+type DelegateRCParams struct {
+	From       string
+	Delegatees []string
+	MaxRC      int64
+}
+
+// ParseRCCustomJSON decodes the payload of an "rc" custom_json into its
+// delegate_rc operations, accepting every form hived does
+// (custom_op_from_variant, generic_custom_operation_interpreter.hpp:60-145):
+// a single operation or a list; each one either the legacy pair
+// [name_or_id, value] or the object {"type": name_or_id, "value": value}. The
+// legacy name is "delegate_rc", the object form's "delegate_rc_operation", and
+// the numeric id 0. Pairs and objects with extra elements are refused in
+// control and tolerated otherwise, as hived does.
+//
+// RC cost accounting parses the same payload, so it uses this too: what is
+// charged then always matches what is applied.
+func ParseRCCustomJSON(payload string, inControl bool) ([]DelegateRCParams, error) {
+	var top json.RawMessage
+	if err := json.Unmarshal([]byte(payload), &top); err != nil {
+		return nil, fmt.Errorf("rc custom_json: %w", err)
+	}
+	elems := []json.RawMessage{top}
+	var list []json.RawMessage
+	if isJSONArray(top) && json.Unmarshal(top, &list) == nil && len(list) > 0 && isJSONArray(list[0]) {
+		elems = list
+	}
+	out := make([]DelegateRCParams, 0, len(elems))
+	for _, e := range elems {
+		p, err := parseRCCustomOp(e, inControl)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+func parseRCCustomOp(e json.RawMessage, inControl bool) (DelegateRCParams, error) {
+	var tag, value json.RawMessage
+	if isJSONArray(e) {
+		var pair []json.RawMessage
+		if err := json.Unmarshal(e, &pair); err != nil {
+			return DelegateRCParams{}, fmt.Errorf("rc custom_json: %w", err)
+		}
+		if len(pair) != 2 && (inControl || len(pair) < 2) {
+			return DelegateRCParams{}, fmt.Errorf("rc custom_json: expected pair of values: [ operation_name_or_id, operation ]")
+		}
+		tag, value = pair[0], pair[1]
+		if err := checkRCOpTag(tag, "delegate_rc"); err != nil {
+			return DelegateRCParams{}, err
+		}
+	} else {
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal(e, &obj); err != nil {
+			return DelegateRCParams{}, fmt.Errorf("rc custom_json: input data have to be treated as object")
+		}
+		var okT, okV bool
+		tag, okT = obj["type"]
+		value, okV = obj["value"]
+		if !okT || !okV {
+			return DelegateRCParams{}, fmt.Errorf("rc custom_json: type and value fields are required")
+		}
+		if len(obj) != 2 && inControl {
+			return DelegateRCParams{}, fmt.Errorf("rc custom_json: expected pair of values: { \"type\":operation_name_or_id, \"value\":operation }")
+		}
+		if err := checkRCOpTag(tag, "delegate_rc_operation"); err != nil {
+			return DelegateRCParams{}, err
+		}
+	}
+	return decodeDelegateRC(value)
+}
+
+// checkRCOpTag accepts the operation's numeric id (0, the only member of
+// rc_custom_operation) or its name in the given serialization.
+func checkRCOpTag(tag json.RawMessage, name string) error {
+	var n json.Number
+	if err := json.Unmarshal(tag, &n); err == nil {
+		if n.String() != "0" {
+			return fmt.Errorf("rc custom_json: invalid operation id %s", n)
+		}
+		return nil
+	}
+	var str string
+	if err := json.Unmarshal(tag, &str); err != nil || str != name {
+		return fmt.Errorf("rc custom_json: invalid operation name %s", tag)
+	}
+	return nil
+}
+
+// decodeDelegateRC reads delegate_rc_operation's reflected fields. Unknown
+// fields (extensions) are ignored and missing ones keep their zero value, as
+// fc's from_variant does; validateDelegateRC then refuses what is invalid.
+// max_rc is an int64, which fc reads from a JSON number or a numeric string.
+// The tuple form [from, [delegatees], max_rc, extensions] is accepted as well.
+func decodeDelegateRC(value json.RawMessage) (DelegateRCParams, error) {
+	var p DelegateRCParams
+	var fromRaw, delRaw, maxRaw json.RawMessage
+	if isJSONArray(value) {
+		var tup []json.RawMessage
+		if err := json.Unmarshal(value, &tup); err != nil || len(tup) < 3 {
+			return p, fmt.Errorf("delegate_rc: malformed operation")
+		}
+		fromRaw, delRaw, maxRaw = tup[0], tup[1], tup[2]
+	} else {
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal(value, &obj); err != nil {
+			return p, fmt.Errorf("delegate_rc: malformed operation: %w", err)
+		}
+		fromRaw, delRaw, maxRaw = obj["from"], obj["delegatees"], obj["max_rc"]
+	}
+	if fromRaw != nil {
+		if err := json.Unmarshal(fromRaw, &p.From); err != nil {
+			return p, fmt.Errorf("delegate_rc: from: %w", err)
+		}
+	}
+	if delRaw != nil {
+		var ds []string
+		if err := json.Unmarshal(delRaw, &ds); err != nil {
+			return p, fmt.Errorf("delegate_rc: delegatees: %w", err)
+		}
+		sort.Strings(ds)
+		for i, d := range ds {
+			if i == 0 || d != ds[i-1] {
+				p.Delegatees = append(p.Delegatees, d)
+			}
+		}
+	}
+	if maxRaw != nil {
+		v, err := jsonInt64(maxRaw)
+		if err != nil {
+			return p, fmt.Errorf("delegate_rc: max_rc: %w", err)
+		}
+		p.MaxRC = v
+	}
+	return p, nil
+}
+
+func jsonInt64(raw json.RawMessage) (int64, error) {
+	var n json.Number
+	if err := json.Unmarshal(raw, &n); err == nil {
+		return n.Int64()
+	}
+	var str string
+	if err := json.Unmarshal(raw, &str); err != nil {
+		return 0, err
+	}
+	return strconv.ParseInt(str, 10, 64)
+}
+
+func isJSONArray(raw json.RawMessage) bool {
+	for _, c := range raw {
+		switch c {
+		case ' ', '\t', '\n', '\r':
+			continue
+		}
+		return c == '['
+	}
+	return false
+}
+
+// validateDelegateRC is delegate_rc_operation::validate
+// (hive_custom_operations.cpp:12-32).
+func validateDelegateRC(p *DelegateRCParams) error {
+	if !auth.IsValidAccountName(p.From) {
+		return fmt.Errorf("delegate_rc: invalid from account name %q", p.From)
+	}
+	if len(p.Delegatees) == 0 {
+		return fmt.Errorf("delegate_rc: must provide at least one delegatee")
+	}
+	if len(p.Delegatees) > maxAccountsPerDelegationOp {
+		return fmt.Errorf("delegate_rc: cannot delegate to more than %d accounts", maxAccountsPerDelegationOp)
+	}
+	for _, d := range p.Delegatees {
+		if !auth.IsValidAccountName(d) {
+			return fmt.Errorf("delegate_rc: invalid delegatee account name %q", d)
+		}
+		if d == p.From {
+			return fmt.Errorf("delegate_rc: cannot delegate to self %q", d)
+		}
+	}
+	if p.MaxRC < 0 {
+		return fmt.Errorf("delegate_rc: max_rc cannot be negative")
 	}
 	return nil
 }
@@ -189,110 +405,25 @@ func mul128Div64(a, b, c uint64) uint64 {
 	return q
 }
 
-// applyDelegateRC handles a delegate_rc payload — set the delegation
-// from `from` to each `delegatees` to `max_rc`. Mirrors
+// applyDelegateRC applies one validated delegate_rc_operation: set the
+// delegation from p.From to each delegatee to p.MaxRC. Mirrors
 // delegate_rc_evaluator::do_apply (libraries/chain/rc/rc_utility.cpp).
 //
-// Validations (FC_ASSERT in C++):
-//  1. op.validate(): from is valid account name, delegatees non-empty,
-//     delegatees.size() <= HIVE_RC_MAX_ACCOUNTS_PER_DELEGATION_OP,
-//     delegatee != from, max_rc >= 0.
-//  2. from must appear in required_posting_auths.
+// Checks (FC_ASSERT in C++), after validateDelegateRC and the authority check
+// in applyRCCustomJSON:
 //  3. min_delegation check: if max_rc != 0 and is_in_control,
 //     max_rc >= (account_creation_fee/3) * vesting_share_price.
 //  4. All delegatees must exist.
 //  5. Creating delegation with max_rc==0 is forbidden.
 //  6. Setting delegation to the same value is forbidden.
 //  7. Total delta cannot exceed from_delegable_rc.
-func applyDelegateRC(ctx *Context, cj op.CustomJSON, args json.RawMessage) error {
-	// The args may be either the canonical object form
-	//   { "from":..., "delegatees":[...], "max_rc":... }
-	// or the legacy tuple-array form
-	//   [ "alice", ["bob","carol"], N, {} ]
-	// (the latter appears in apply_many_different). Try object first.
-	var p struct {
-		From       string   `json:"from"`
-		Delegatees []string `json:"delegatees"`
-		MaxRC      int64    `json:"max_rc"`
-	}
-	if err := json.Unmarshal(args, &p); err != nil || p.From == "" {
-		// Try array form
-		var tup []json.RawMessage
-		if err := json.Unmarshal(args, &tup); err != nil || len(tup) < 3 {
-			return nil
-		}
-		if err := json.Unmarshal(tup[0], &p.From); err != nil {
-			return nil
-		}
-		if err := json.Unmarshal(tup[1], &p.Delegatees); err != nil {
-			return nil
-		}
-		if err := json.Unmarshal(tup[2], &p.MaxRC); err != nil {
-			return nil
-		}
-	}
-
-	// Every failure below is TX-FATAL only at head admission: inside a
-	// block hived's custom_json_evaluator swallows the exception and the
-	// interpreter's undo session reverts the op (see customJSONEvaluator.Apply,
-	// which wraps this call in a savepoint when !InControl). Proof on
-	// mainnet: block 69,612,950 carries a delegatee "ogechukwu-martha\t"
-	// with a trailing tab — hived included the tx as a no-op. reject()
-	// short-circuits the payload checks so a not-in-control apply does
-	// not even reach the state reads; the savepoint covers the rest.
-	reject := func(format string, args ...any) error {
-		if !ctx.InControl {
-			return nil
-		}
-		return fmt.Errorf(format, args...)
-	}
-
-	// 1. op.validate()
-	if p.From == "" {
-		return reject("delegate_rc: from is empty")
-	}
-	if !auth.IsValidAccountName(p.From) {
-		return reject("delegate_rc: invalid from account name %q", p.From)
-	}
-	if p.MaxRC < 0 {
-		return reject("delegate_rc: max_rc cannot be negative")
-	}
-	if len(p.Delegatees) == 0 {
-		return reject("delegate_rc: must provide at least one delegatee")
-	}
-	if len(p.Delegatees) > maxAccountsPerDelegationOp {
-		return reject("delegate_rc: cannot delegate to more than %d accounts", maxAccountsPerDelegationOp)
-	}
-	// Deduplicate (flat_set semantics).
-	seen := make(map[string]struct{}, len(p.Delegatees))
-	uniq := make([]string, 0, len(p.Delegatees))
-	for _, d := range p.Delegatees {
-		if d == p.From {
-			return reject("delegate_rc: cannot delegate to self %q", d)
-		}
-		if !auth.IsValidAccountName(d) {
-			return reject("delegate_rc: invalid delegatee account name %q", d)
-		}
-		if _, ok := seen[d]; ok {
-			continue
-		}
-		seen[d] = struct{}{}
-		uniq = append(uniq, d)
-	}
-	p.Delegatees = uniq
-
-	// 2. Posting-auth gate. hived's rc_custom_operation requires
-	// required_posting_auths to be EXACTLY {from} — size == 1 and the
-	// sole entry equals from. (rc_custom_operation_interpreter at
-	// libraries/chain/rc/rc_utility.cpp:725 dispatches through the
-	// generic_custom_operation_interpreter, which enforces
-	// op.required_posting_auths == {signer} before do_apply runs.)
-	// Membership-only acceptance let multi-account custom_jsons with
-	// `from` plus other auths pass; hived rejects them.
-	if len(cj.RequiredPostingAuths) != 1 || string(cj.RequiredPostingAuths[0]) != p.From {
-		return reject("delegate_rc: required_posting_auths must be exactly {%q}", p.From)
-	}
-
+//
+// Inside a block a failure here is not fatal: hived's custom_json_evaluator
+// swallows the exception and the interpreter's undo session reverts the whole
+// custom_json (see customJSONEvaluator.Apply). Proof on mainnet: block
+// 69,612,950 carries a delegatee "ogechukwu-martha\t" with a trailing tab —
+// hived included the tx as a no-op.
+func applyDelegateRC(ctx *Context, p *DelegateRCParams) error {
 	// 3. min_delegation check — C++ gates it on `_db.is_in_control()`
 	// (rc_utility.cpp:49-55): enforced only when a tx is first admitted
 	// at the head. Blocks legitimately contain below-minimum delegations
