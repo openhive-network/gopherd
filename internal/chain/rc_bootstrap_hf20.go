@@ -219,6 +219,12 @@ func initRCBootstrapHF20(s *state.Session, blockTime uint32) {
 			}, r.aPointNum, r.aPointDenom, r.uPointNum, r.uPointDenom),
 		}
 	}
+	// Everything but new_accounts takes hived's generated values verbatim; the
+	// derivation above only stands in for new_accounts, whose dynamics
+	// set_pool_params replaces with the witness-voted subsidy params anyway.
+	for res, entry := range hivedRCResourceParams {
+		rp.Entries[res] = entry
+	}
 	if !objects.HasRCResourceParam(s) {
 		objects.PutRCResourceParam(s, &rp)
 	}
