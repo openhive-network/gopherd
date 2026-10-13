@@ -251,6 +251,13 @@ func cmdNode(args []string) int {
 		fmt.Fprintln(os.Stderr, "gopherd node: --produce requires --fork-switching (a produced block must stay reversible so the node can reorg off it if the network chooses another block for that slot)")
 		return 2
 	}
+	if cfg.produceReal && !cfg.p2pServe {
+		// A passive node never advertises inventory nor serves blocks (see
+		// Config.Serve), so a block it produces would be applied locally and
+		// then never leave the box: the slot is missed with no error logged.
+		fmt.Fprintln(os.Stderr, "gopherd node: --produce requires --p2p-serve (a passive node never advertises or serves blocks, so its produced blocks would never reach the network)")
+		return 2
+	}
 	if cfg.produceReal && cfg.produceDryRun {
 		fmt.Fprintln(os.Stderr, "gopherd node: --produce and --produce-dry-run are mutually exclusive")
 		return 2
