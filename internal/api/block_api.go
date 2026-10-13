@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 
 	"gopherd/internal/api/jsonrpc"
 	"gopherd/internal/fcraw"
@@ -12,7 +13,7 @@ import (
 )
 
 func (s *Server) registerBlockAPI() {
-	s.reg.Register("block_api.get_block_header", s.mGetBlockHeader())
+	s.reg.Register("block_api.get_block_header", s.mGetBlockHeader(false))
 	s.reg.Register("block_api.get_block", s.mGetBlock(false))
 }
 
@@ -44,17 +45,58 @@ func blockNumParam(params json.RawMessage) (uint32, error) {
 	return obj.BlockNum, nil
 }
 
-func blockHeaderResult(sh block.SignedHeader) map[string]interface{} {
+func blockHeaderResult(sh block.SignedHeader, legacy bool) (map[string]interface{}, error) {
+	exts, err := headerExtensionsJSON(sh.Extensions, legacy)
+	if err != nil {
+		return nil, err
+	}
 	return map[string]interface{}{
 		"previous":                hex.EncodeToString(sh.Previous[:]),
 		"timestamp":               timeString(sh.Timestamp),
 		"witness":                 sh.Witness,
 		"transaction_merkle_root": hex.EncodeToString(sh.TransactionMerkleRoot[:]),
-		"extensions":              []interface{}{},
-	}
+		"extensions":              exts,
+	}, nil
 }
 
-func (s *Server) mGetBlockHeader() jsonrpc.Handler {
+// headerExtensionsJSON renders block_header_extensions the way hived does.
+// block_api uses the named form, {"type":"version","value":"1.28.8"}
+// (extended_variant_creator_functor, operation_util.hpp:147); condenser_api
+// converts to legacy_block_header_extensions, which serializes by tag:
+// [1,"1.28.8"] (condenser_api_legacy_objects.hpp:35). A hardfork vote's value
+// is FC_REFLECT(hardfork_version_vote, (hf_version)(hf_time)).
+func headerExtensionsJSON(raw []byte, legacy bool) ([]interface{}, error) {
+	exts, err := block.ParseHeaderExtensions(raw)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]interface{}, 0, len(exts))
+	for _, e := range exts {
+		var name string
+		var value interface{}
+		switch e.Tag {
+		case block.HeaderExtVoid:
+			name, value = "void_t", map[string]interface{}{}
+		case block.HeaderExtVersion:
+			name, value = "version", versionString(e.Version)
+		case block.HeaderExtHardforkVersionVote:
+			name, value = "hardfork_version_vote", map[string]interface{}{
+				"hf_version": versionString(e.HardforkVersion),
+				"hf_time":    timeString(e.HardforkVersionTime),
+			}
+		default:
+			return nil, fmt.Errorf("unknown block header extension tag %d", e.Tag)
+		}
+		if legacy {
+			out = append(out, []interface{}{int(e.Tag), value})
+		} else {
+			out = append(out, map[string]interface{}{"type": name, "value": value})
+		}
+	}
+	return out, nil
+}
+
+func (s *Server) mGetBlockHeader(legacy bool) jsonrpc.Handler {
 	return func(_ context.Context, params json.RawMessage) (interface{}, error) {
 		n, err := blockNumParam(params)
 		if err != nil {
@@ -70,7 +112,11 @@ func (s *Server) mGetBlockHeader() jsonrpc.Handler {
 		if err != nil {
 			return nil, jsonrpc.Errorf(jsonrpc.CodeServerError, "decode block %d: %v", n, err)
 		}
-		return map[string]interface{}{"header": blockHeaderResult(sh)}, nil
+		hdr, err := blockHeaderResult(sh, legacy)
+		if err != nil {
+			return nil, jsonrpc.Errorf(jsonrpc.CodeServerError, "decode block %d: %v", n, err)
+		}
+		return map[string]interface{}{"header": hdr}, nil
 	}
 }
 
@@ -138,7 +184,10 @@ func (s *Server) mGetBlock(legacy bool) jsonrpc.Handler {
 		for i := range txs {
 			txsOut = append(txsOut, txResult(txs[i], legacy))
 		}
-		blk := blockHeaderResult(sh)
+		blk, err := blockHeaderResult(sh, legacy)
+		if err != nil {
+			return nil, jsonrpc.Errorf(jsonrpc.CodeServerError, "decode block %d: %v", n, err)
+		}
 		blk["witness_signature"] = hex.EncodeToString(sh.WitnessSignature[:])
 		blk["transactions"] = txsOut
 		bid := block.ConstructID(raw[:hdrLen], n)
