@@ -826,8 +826,8 @@ func newApp(cfg flags) (*app, error) {
 				fmt.Fprintf(os.Stderr, "gopherd node: cold sidecar written for block %d\n", man.BlockNum)
 			}
 		}
-		fmt.Fprintf(os.Stderr, "gopherd node: snapshot loaded — block %d, %.1fs total\n",
-			man.BlockNum, time.Since(procStart).Seconds())
+		fmt.Fprintf(os.Stderr, "gopherd node: snapshot loaded — block %d, %s total\n",
+			man.BlockNum, snap.HumanDuration(time.Since(procStart)))
 		loadedFromSnapshot = true
 		snapshotHead = man.BlockNum
 	}
@@ -1147,8 +1147,8 @@ func (a *app) saveShutdownSnapshot() {
 		a.logger.printf("WARN shutdown snapshot at %d failed: %v", head, serr)
 		return
 	}
-	a.logger.printf("shutdown snapshot %s at block %d in %.1fs — restart with --load-snapshot=%s to resume here",
-		path, head, time.Since(start).Seconds(), path)
+	a.logger.printf("shutdown snapshot %s at block %d in %s — restart with --load-snapshot=%s to resume here",
+		path, head, snap.HumanDuration(time.Since(start)), path)
 }
 
 // recover replays blocks 1..a.recoverFrom from the local block_log
