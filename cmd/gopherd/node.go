@@ -1170,7 +1170,7 @@ func (a *app) recover() error {
 	}
 	r, err := blocklog.Open(a.blockLogPath)
 	if err != nil {
-		return fmt.Errorf("recover: open block_log: %w", err)
+		return fmt.Errorf("replay: open block_log: %w", err)
 	}
 	defer r.Close()
 	target := a.recoverFrom
@@ -1178,7 +1178,7 @@ func (a *app) recover() error {
 		// pebble previously persisted further than the local block_log.
 		// Replay only what the block_log can give us; the remaining
 		// gap will close once the p2p layer pulls the missing blocks.
-		a.logger.printf("recover: warning persisted DGPO head %d > block_log head %d; replaying only %d blocks", a.recoverFrom, r.Head(), r.Head())
+		a.logger.printf("replay: warning — state says head %d but the block_log ends at %d; replaying only %d blocks, peers supply the rest", a.recoverFrom, r.Head(), r.Head())
 		target = r.Head()
 	}
 	if target == 0 {
@@ -1189,19 +1189,19 @@ func (a *app) recover() error {
 		start = 1
 	}
 	if start > target {
-		a.logger.printf("recover: loaded state is at block %d, block_log head is %d — nothing to replay", start-1, target)
+		a.logger.printf("replay: state is already at block %s, the end of the block_log — nothing to replay", groupDigits(uint64(start-1)))
 		return nil
 	}
 	if start > 1 {
-		a.logger.printf("recover: replaying blocks %d..%d from local block_log (delta since the loaded snapshot)", start, target)
+		a.logger.printf("replay: replaying blocks %s to %s from the local block_log (the part after the loaded snapshot)", groupDigits(uint64(start)), groupDigits(uint64(target)))
 	} else {
-		a.logger.printf("recover: replaying %d blocks from local block_log (typed-stores rebuild)", target)
+		a.logger.printf("replay: rebuilding state from genesis — replaying %s blocks from the local block_log", groupDigits(uint64(target)))
 	}
-	startedAt := time.Now()
+	progress := newReplayProgress(start, target, time.Now())
 	for n := start; n <= target; n++ {
 		raw, err := r.Block(n)
 		if err != nil {
-			return fmt.Errorf("recover: read block %d: %w", n, err)
+			return fmt.Errorf("replay: read block %d: %w", n, err)
 		}
 		if _, err := a.chain.ApplyBlock(raw, n, chain.ApplyOptions{
 			SkipBlockSignature:        true,
@@ -1209,7 +1209,7 @@ func (a *app) recover() error {
 			Sync:                      false,
 			RawBlockRetained:          true, // Reader.Block allocates per call
 		}, nil); err != nil {
-			return fmt.Errorf("recover: apply block %d: %w", n, err)
+			return fmt.Errorf("replay: apply block %d: %w", n, err)
 		}
 		// Spill frozen comments/votes to the cold tier DURING recovery too.
 		// recover() runs before the afterApply callback is wired, so without
@@ -1230,21 +1230,18 @@ func (a *app) recover() error {
 				a.fatalf("cold tier lost a write — refusing to apply further blocks: %v", cwErr)
 			}
 		}
-		if n%5000 == 0 {
-			elapsed := time.Since(startedAt).Seconds()
-			rate := float64(n) / elapsed
-			a.logger.printf("recover: head=%d (%.0f bps)", n, rate)
+		if n%replayProgressEvery == 0 {
+			a.logger.printf("%s", progress.line(n, raw, time.Now()))
 		}
 	}
 	// Flush any partial batch so the next start sees a consistent
 	// head if it crashes here.
 	if a.chain.CommitBatchSize() > 1 {
 		if err := a.chain.FlushBatch(true); err != nil {
-			return fmt.Errorf("recover: flush: %w", err)
+			return fmt.Errorf("replay: flush: %w", err)
 		}
 	}
-	dt := time.Since(startedAt).Seconds()
-	a.logger.printf("recover: caught up to block %d in %.1fs (%.0f bps)", target, dt, float64(target-start+1)/dt)
+	a.logger.printf("%s", progress.done(time.Now()))
 	return nil
 }
 

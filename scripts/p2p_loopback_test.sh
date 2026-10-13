@@ -87,7 +87,7 @@ log "start A: serve on $A_P2P (recovers to $N_A, fills 2048-block ring)"
   --p2p-endpoint="$A_P2P" --p2p-serve >"$A_LOG" 2>&1 &
 A_PID=$!
 for _ in $(seq 1 60); do
-  grep -q "recover: caught up to block $N_A" "$A_LOG" 2>/dev/null && \
+  grep -q "replay: done" "$A_LOG" 2>/dev/null && \
     grep -q "starting (seeds=" "$A_LOG" 2>/dev/null && break
   kill -0 "$A_PID" 2>/dev/null || { tail -20 "$A_LOG"; fail "node A exited early"; }
   sleep 0.5
