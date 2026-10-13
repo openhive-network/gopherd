@@ -74,11 +74,29 @@ func (p *progressReader) report(now time.Time) {
 	if mbps > 0 {
 		remain := float64(p.total-p.read) / (1 << 20) / mbps
 		if remain >= 0 {
-			eta = fmt.Sprintf("~%ds left", int(remain+0.5))
+			eta = "~" + HumanDuration(time.Duration(remain*float64(time.Second))) + " left"
 		}
 	}
 	fmt.Fprintf(os.Stderr, "snapshot: loading %s — %.0f%% (%.1f/%.1f GB, %.0f MB/s, %s)\n",
 		p.name, pct,
 		float64(p.read)/(1<<30), float64(p.total)/(1<<30), mbps, eta)
 	p.shown = true
+}
+
+// HumanDuration renders a load/save time the way a person reads it: "42s",
+// "6m21s", "1h10m". Seconds are dropped once the duration passes an hour,
+// where they are noise next to the estimate's own error.
+func HumanDuration(d time.Duration) string {
+	d = d.Round(time.Second)
+	h := d / time.Hour
+	m := (d % time.Hour) / time.Minute
+	s := (d % time.Minute) / time.Second
+	switch {
+	case h > 0:
+		return fmt.Sprintf("%dh%02dm", h, m)
+	case m > 0:
+		return fmt.Sprintf("%dm%02ds", m, s)
+	default:
+		return fmt.Sprintf("%ds", s)
+	}
 }

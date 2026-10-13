@@ -513,8 +513,8 @@ func logPhase(verb, name string, bytes int64, dur time.Duration) {
 		return
 	}
 	mbps := float64(bytes) / (1 << 20) / dur.Seconds()
-	fmt.Fprintf(os.Stderr, "snapshot: %s %s — %.1f MB in %.1fs (%.0f MB/s)\n",
-		verb, name, float64(bytes)/(1<<20), dur.Seconds(), mbps)
+	fmt.Fprintf(os.Stderr, "snapshot: %s %s — %.1f MB in %s (%.0f MB/s)\n",
+		verb, name, float64(bytes)/(1<<20), HumanDuration(dur), mbps)
 }
 
 // writeMem dumps every (key, value) in the K/V backend to path. Same
