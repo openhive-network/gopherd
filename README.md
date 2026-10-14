@@ -92,6 +92,32 @@ Additional, only if you keep a block_log (needed to replay from genesis):
   the level-15 recompression hived applies — so it is larger than hived's.
   `--no-block-log` avoids writing one on a snapshot warm start.
 
+Replay from genesis (same box and flags, 2026-10-13/14, 110.7M blocks from a
+local block_log, transaction signatures skipped as hived's replay does):
+
+| Measure | Value |
+|---|---|
+| Total time | **19h50m**, 1,550 blocks/s average |
+| Memory | 14.1 GiB RSS (anon) at its peak, late in the chain; the cgroup sat at its 20 GB cap with page cache |
+| Cold tier at the end | 39 GB (it grows back toward ~100 GB after a snapshot load) |
+
+The rate depends on the era, not on how far along the replay is (average per
+10M blocks):
+
+| Blocks | Era | Blocks/s |
+|---|---|---|
+| 0M–10M | 2016–17 | 18,480 |
+| 10M–20M | 2017–18 | 2,980 |
+| 20M–30M | 2018–19 | 2,250 |
+| 30M–40M | 2019–20 | 2,920 |
+| 40M–50M | 2020 | 4,070 |
+| 50M–60M | 2021 | 2,220 |
+| 60M–70M | 2021–22 | 1,050 |
+| 70M–80M | 2022–23 | 860 |
+| 80M–90M | 2023–24 | 680 |
+| 90M–100M | 2024–25 | 1,290 |
+| 100M–110M | 2025–26 | 1,200 |
+
 ## Installation
 
 ```sh
