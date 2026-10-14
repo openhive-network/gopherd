@@ -1550,6 +1550,7 @@ func (a *app) run() error {
 	go func() {
 		t := time.NewTicker(5 * time.Second)
 		defer t.Stop()
+		tick := 0
 		for {
 			select {
 			case <-stopCh:
@@ -1558,6 +1559,11 @@ func (a *app) run() error {
 				s := syncDel.Stats()
 				if w := syncDel.TxAdvertWinners(5); len(w) > 0 {
 					a.logger.printf("TX-FIRST (peers closest to where transactions enter): %v", w)
+				}
+				if tick++; tick%12 == 0 {
+					if r := syncDel.TxRejectReasons(5); len(r) > 0 {
+						a.logger.printf("TX-REJECT (why fetched transactions were refused, since start): %v", r)
+					}
 				}
 				awN, awMean, awMax, awOver := a.chain.AdmitLockWaitStats()
 				a.logger.printf("STATS peers=%d qdepth=%d/%d inhibit=%v outstanding=%d distinct=%d inflight=%d throttled=%d qfull=%d reorderDrop=%d invIgnored=%d syncIDsRefused=%d invRx=%d tipStallKicks=%d tipSync=%d comp(rx=%d zstd=%d hit=%d err=%d) mempool(inv=%d fetch=%d acc=%d dup=%d rej=%d evict=%d ovf=%d depth=%d relay=%d served=%d unrequested=%d) admitWait(n=%d meanMs=%d maxMs=%d over100ms=%d) forkdb=%d rcStaleMax=%d",
