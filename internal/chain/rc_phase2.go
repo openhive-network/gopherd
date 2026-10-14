@@ -33,6 +33,7 @@ package chain
 import (
 	"math/bits"
 
+	"gopherd/internal/protocol/hardfork"
 	"gopherd/internal/state"
 	"gopherd/internal/state/objects"
 )
@@ -48,68 +49,11 @@ const (
 	rcStatsReportFreqBlocks uint32 = 28800
 )
 
-// rcMaxAccountsPerDelegationOp mirrors HIVE_RC_MAX_ACCOUNTS_PER_DELEGATION_OP.
-const rcMaxAccountsPerDelegationOp = 100
-
-// processRCExpiredDelegations drains rc_expired_delegation_object rows.
-// Hived drains every block (rc_plugin::on_finish_block →
-// resource_credits::handle_expired_delegations at rc_utility.cpp:598):
-// the row is a continuation token saying "this account still has
-// over-delegation that needs clipping". Pre-fix gopherd gated drains
-// on ExpiryTime (a 5-day timer) and then refunded DelegatedRCOut by
-// the row amount — both wrong:
-//
-//   - The 5-day gate let rows linger indefinitely; hived clears them
-//     every block as the remove_threshold allows.
-//   - The DelegatedRCOut refund double-decremented: gopherd's
-//     HandleVestingWithdrawalRCImpact already clips rc_direct_delegation
-//     rows AND decrements the delegator's DelegatedRCOut by the same
-//     totalExpired amount. Refunding here ran the same delta twice.
-//     (Symptom was masked by the `< 0 → 0` clamp.)
-//
-// Current behavior: drain every block. Since gopherd's
-// HandleVestingWithdrawalRCImpact already performs the full clip in
-// one pass (no per-block remove_limit), the row carries no further
-// work — just delete it. The row remains for snapshot/state-dump
-// parity with hived's rc_expired_delegation_index, and for future
-// callers that may need to record residue when the clip pass hits a
-// remove_threshold.
-//
-// Rate-limit retained at rcMaxAccountsPerDelegationOp (100) per block
-// to bound per-block scan cost.
-//
-// Mirrors hive::chain::resource_credits::handle_expired_delegations.
+// processRCExpiredDelegations is resource_credits::handle_expired_delegations,
+// run every block from HF26, before the pools are finalized (database.cpp:2370).
+// See objects.ProcessRCExpiredDelegations.
 func processRCExpiredDelegations(s *state.Session, now uint32) {
-	type entry struct {
-		row objects.RCExpiredDelegation
-	}
-	var batch []entry
-	_ = s.Range(objects.RCExpiredDelegationTable, state.PrimaryIndex, nil,
-		func(_, val []byte) (bool, error) {
-			r, err := objects.ReadRCExpiredDelegation(val)
-			if err != nil {
-				return true, nil
-			}
-			batch = append(batch, entry{row: r})
-			if len(batch) >= rcMaxAccountsPerDelegationOp {
-				return false, nil
-			}
-			return true, nil
-		})
-	for _, e := range batch {
-		acct, err := objects.GetAccount(s, e.row.From)
-		if err == nil {
-			// Bump last_max_rc to reflect post-clip state.
-			acct.LastMaxRC = acct.VestingShares - acct.DelegatedVestingShares +
-				acct.ReceivedVestingShares - acct.DelegatedRCOut + acct.DelegatedRCIn
-			if acct.LastMaxRC < 0 {
-				acct.LastMaxRC = 0
-			}
-			objects.RegenerateRCMana(&acct, now)
-			objects.PutAccount(s, &acct)
-		}
-		objects.DeleteRCExpiredDelegation(s, e.row.From)
-	}
+	objects.ProcessRCExpiredDelegations(s, now)
 }
 
 // finalizeRCPoolsForBlock ports resource_credits::finalize_block
@@ -377,7 +321,9 @@ func HandleVestingWithdrawalRCImpactForTest(s *state.Session, a *objects.Account
 // finalize sequence. Called from rcFinalizeBlock (which retains the
 // existing pre-HF20 fast-skip).
 func rcFinalizeBlockPhase2(s *state.Session, blockNum, blockTime uint32) {
-	processRCExpiredDelegations(s, blockTime)
+	if hardfork.SetForBlock(blockNum).Has(hardfork.HF26) {
+		processRCExpiredDelegations(s, blockTime)
+	}
 	// resource_credits::finalize_block runs from HF20 (rc_utility.cpp:767),
 	// not HF26: the pools, window and weights evolve continuously from the
 	// RC bootstrap. Gating this on HF26 left gopherd.s pools parked at

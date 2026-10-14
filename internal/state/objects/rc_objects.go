@@ -35,9 +35,11 @@ package objects
 import (
 	"errors"
 	"fmt"
+	"sort"
 
 	"gopherd/internal/fcraw"
 	"gopherd/internal/protocol/auth"
+	"gopherd/internal/protocol/network"
 	"gopherd/internal/state"
 )
 
@@ -700,10 +702,9 @@ func DeleteRCDirectDelegationFull(s *state.Session, from, to auth.AccountName) {
 // during a single-block overflow sweep. New direct delegations from
 // `from` are blocked while this row exists.
 //
-// The C++ object stores only (from, expired_delegation). We carry an
-// ExpiryTime so Phase 2's gradual drain hook has a stable handle for
-// time-based pacing — strictly additive (the field defaults to 0 if a
-// caller doesn't fill it).
+// The C++ object stores only (from, expired_delegation) and is drained in id
+// order. ExpiryTime holds that order: a creation sequence, not a time (the
+// field name and encoding are kept for snapshot compatibility).
 type RCExpiredDelegation struct {
 	From             auth.AccountName
 	RemainingExpired int64
@@ -885,180 +886,217 @@ func DeleteRCUsageBucket(s *state.Session, seqno uint32) {
 // before it's reclaimed.
 const RCDelegationReturnPeriodSec uint32 = 5 * 24 * 60 * 60
 
-// HandleVestingWithdrawalRCImpact is called when an account's effective
-// vesting decreases (vesting-withdrawal chunk, vesting-delegation
-// reduction, etc.). It recomputes the account's max_rc; if outgoing
-// delegations now exceed the new max, the surplus is "expired" — an
-// RCExpiredDelegation row is created (or extended) and the account's
-// DelegatedRCOut is reduced. Affected rc_direct_delegation rows are
-// clipped oldest-first. Each receiver's DelegatedRCIn and current mana
-// are also reduced to mirror the lost delegation.
+// HandleVestingWithdrawalRCImpact is hived's
+// update_account_after_vest_change(account, now, true, true): the call made
+// after an operation moved the account's VESTS (fill_vesting_withdraw,
+// delegate_vesting_shares on both sides). Outgoing RC delegations that no
+// longer fit under the new maximum are cut first, then last_max_rc is
+// recomputed and any new headroom credited to current mana.
 //
 // Caller responsibility: invoke this AFTER mutating VestingShares (or
 // ReceivedVestingShares / DelegatedVestingShares) and BEFORE PutAccount.
-// The account's LastMaxRC + RCManaCurrent are updated in place.
-//
-// Mirrors C++ rc_plugin::update_after_vest_change(account, true, true)
-// = (fill_new_mana=true, check_for_rc_delegation_overflow=true), the
-// post_apply visitor invokes on fill_vesting_withdraw_operation and
-// delegate_vesting_shares_operation.
-// RCClipEnabled gates HandleVestingWithdrawalRCImpact's over-delegation
-// clip pass. True by default (unit tests / head validation); replay sets
-// it false — see the comment at the clip site.
-var RCClipEnabled = true
-
+// The account's DelegatedRCOut, LastMaxRC and RCManaCurrent are updated in
+// place; the delegatees' accounts are read and written through s, so the
+// caller must not hold an unsaved copy of any of them.
 func HandleVestingWithdrawalRCImpact(s *state.Session, a *Account, now uint32) {
-	// Regenerate FIRST, against the OLD maximum — hived warns loudly
-	// ("Account not regenerated prior to RC change") if a vest change lands on
-	// a stale manabar, because the regeneration would then be computed against
-	// the new ceiling.
-	// Capture the previous ceiling BEFORE regenerating: RegenerateRCMana
-	// itself assigns LastMaxRC = MaximumRC(), so reading it afterwards yields
-	// the NEW maximum and the delta below is always zero. (That is exactly how
-	// the first version of this fix silently did nothing — the account still
-	// showed 0.0% mana after funding.)
-	oldMaxRC := a.LastMaxRC
-	// This whole function IS hived's update_account_after_vest_change: it is
-	// the post_apply visitor on fill_vesting_withdraw, so the vests have
-	// already moved by the time it runs. The regeneration inside it is the one
-	// hived does there, not a pre-change regenerate_rc_mana — identical
-	// arithmetic, but it belongs to the other counter.
-	// database_vesting.cpp:280 passes (from_account, now, true, true).
-	UpdateAccountAfterVestChange(a, now, true)
+	UpdateAccountAfterVestChangeChecked(s, a, now, true)
+}
 
-	// hived: `int64_t new_last_max_rc = account.get_maximum_rc().value;`
-	// (rc_utility.cpp, update_account_after_vest_change). It derives the new
-	// cache from the SAME function its assertion later compares against, so
-	// the two cannot disagree.
-	//
-	// This used to hand-roll the expression instead:
-	//
-	//	eff := VestingShares - DelegatedVestingShares + ReceivedVestingShares
-	//	LastMaxRC = eff - DelegatedRCOut + DelegatedRCIn
-	//
-	// which differs from MaximumRC() twice over — it omits RCAdjustment, and
-	// its `eff` does not subtract the next scheduled withdrawal slice the way
-	// EffectiveVestingSharesExclWithdraw does. This function runs on
-	// fill_vesting_withdraw, i.e. on an account that by definition HAS an
-	// active withdrawal, so that second difference was non-zero on essentially
-	// every call: the cache was left disagreeing with its own reader, and the
-	// next regeneration anywhere saw a stale value.
-	//
-	// Measured, it was the single largest source — 46.4% of all stale-cache
-	// hits, plus the downstream hits at the read-only transaction path that
-	// inherited the bad value.
+// UpdateAccountAfterVestChangeChecked is update_account_after_vest_change
+// with _check_for_rc_delegation_overflow = true (rc_utility.cpp:407-500).
+// fillNewMana is false only for withdraw_vesting, as in hived.
+func UpdateAccountAfterVestChangeChecked(s *state.Session, a *Account, now uint32, fillNewMana bool) {
+	CheckRCDelegationOverflow(s, a, now)
+	UpdateAccountAfterVestChange(a, now, fillNewMana)
 	a.LastMaxRC = a.MaximumRC()
+}
 
-	// `eff` survives for the over-delegation clip below, which is a DIFFERENT
-	// hived quantity: get_maximum_rc(only_delegable=true), i.e. without
-	// DelegatedRCIn. Folding the two together would change the clip decision,
-	// and the clip already carries its own replay-parity caveat.
-	eff := a.VestingShares - a.DelegatedVestingShares + a.ReceivedVestingShares
-	if eff < 0 {
-		eff = 0
+// rcDelegableMax is account_object::get_maximum_rc(only_delegable = true):
+// effective VESTS (less the next power-down step) minus RC already delegated.
+// Unlike MaximumRC it is not clamped at zero and leaves out rc_adjustment and
+// received RC, which cannot be passed on.
+func (a *Account) rcDelegableMax() int64 {
+	v := a.VestingShares - a.DelegatedVestingShares + a.ReceivedVestingShares
+	if a.VestingWithdrawRate > 0 && a.ToWithdraw > a.Withdrawn {
+		next := a.VestingWithdrawRate
+		if rem := a.ToWithdraw - a.Withdrawn; next > rem {
+			next = rem
+		}
+		v -= next
 	}
+	return v - a.DelegatedRCOut
+}
 
-	// The positive max-RC delta is credited to current mana INSIDE
-	// UpdateAccountAfterVestChange (fill_new_mana=true), exactly once, as
-	// rc_utility.cpp:468-488 does. An earlier version of this function
-	// credited `LastMaxRC - oldMaxRC` again here, on top of that: every
-	// power-up, withdrawal fill and delegation change handed the account the
-	// new headroom twice (visible whenever current + delta < max). oldMaxRC
-	// is kept only for the trace below.
-	_ = oldMaxRC
-
-	// Over-delegated? Only when DelegatedRCOut > eff.
-	if a.DelegatedRCOut <= eff {
+// CheckRCDelegationOverflow is the delegation-overflow half of
+// update_account_after_vest_change (rc_utility.cpp:425-465). When the account
+// has delegated more RC than its VESTS now cover, delegations are cut down or
+// removed until the excess is gone, at most HIVE_GLOBAL_REMOVE_THRESHOLD
+// removals per call. Whatever is left goes into the account's
+// rc_expired_delegation row, which handle_expired_delegations keeps draining
+// in later blocks. delegated_rc drops by the whole excess at once.
+//
+// Before this port the cut compared against VESTS without the power-down
+// step, so accounts that started a power down kept delegations hived had
+// removed, and it was skipped altogether in the replay command.
+func CheckRCDelegationOverflow(s *state.Session, a *Account, now uint32) {
+	if a.DelegatedRCOut <= 0 {
 		return
 	}
-	// Replay-parity guard: hived's clip decision runs against its FULL
-	// RC model (incl. max_rc_creation_adjustment and exact mana); our
-	// partial model understates the delegable max and clipped
-	// delegations hived kept (jarvie delete-of-missing at 68,769,486).
-	// During replay the op stream itself keeps delegation state
-	// convergent, so we skip the clip pass entirely; it stays active
-	// for head-of-chain validation (fixtures/live).
-	if !RCClipEnabled {
+	overflow := -a.rcDelegableMax()
+	if overflow <= 0 {
 		return
 	}
-	overflow := a.DelegatedRCOut - eff
-
-	type clip struct {
-		to     auth.AccountName
-		amount int64
+	initial := overflow
+	guard := NewRemoveGuard(network.GlobalRemoveThreshold)
+	RemoveRCDelegations(s, &overflow, a.Name, now, guard)
+	if overflow > 0 {
+		if prev, err := GetRCExpiredDelegation(s, a.Name); err == nil {
+			prev.RemainingExpired += overflow
+			PutRCExpiredDelegation(s, &prev)
+		} else {
+			PutRCExpiredDelegation(s, &RCExpiredDelegation{
+				From:             a.Name,
+				RemainingExpired: overflow,
+				ExpiryTime:       nextRCExpiredDelegationSeq(s),
+			})
+		}
 	}
-	var clips []clip
-	remaining := overflow
+	a.DelegatedRCOut -= initial
+}
+
+// RemoveRCDelegations is resource_credits::remove_delegations
+// (rc_utility.cpp:658-696): walk the delegator's RC delegations in
+// by_from_to order, shrinking each by what is still owed or removing it when
+// it is no larger, and charge the recipient. A removal the guard refuses
+// stops the walk; shrinking is free. overflow is reduced by what was taken.
+//
+// by_from_to sorts recipients by account id, i.e. creation order. gopherd has
+// no account ids, so (Created, name) stands in for it, as it does for the
+// governance-vote sweep.
+func RemoveRCDelegations(s *state.Session, overflow *int64, from auth.AccountName, now uint32, g *RemoveGuard) {
+	type row struct {
+		d       RCDirectDelegation
+		created uint32
+	}
+	var rows []row
 	_ = s.Range(RCDirectDelegationTable, state.PrimaryIndex,
-		state.AppendAccountName(nil, a.Name),
+		state.AppendAccountName(nil, from),
 		func(_, val []byte) (bool, error) {
-			if remaining <= 0 {
-				return false, nil
-			}
 			d, err := ReadRCDirectDelegation(val)
 			if err != nil {
 				return true, nil
 			}
-			if d.From != a.Name {
+			if d.From != from {
 				return false, nil
 			}
-			take := int64(d.DelegatedRC)
-			if take > remaining {
-				take = remaining
-			}
-			clips = append(clips, clip{to: d.To, amount: take})
-			remaining -= take
+			rows = append(rows, row{d: d})
 			return true, nil
 		})
-
-	totalExpired := int64(0)
-	for _, c := range clips {
-		row, err := GetRCDirectDelegation(s, a.Name, c.to)
-		if err != nil {
-			continue
+	for i := range rows {
+		if to, err := GetAccount(s, rows[i].d.To); err == nil {
+			rows[i].created = to.Created
 		}
-		newAmt := int64(row.DelegatedRC) - c.amount
-		if newAmt <= 0 {
-			DeleteRCDirectDelegationFull(s, a.Name, c.to)
+	}
+	sort.SliceStable(rows, func(i, j int) bool {
+		if rows[i].created != rows[j].created {
+			return rows[i].created < rows[j].created
+		}
+		return rows[i].d.To < rows[j].d.To
+	})
+	for _, r := range rows {
+		if *overflow <= 0 {
+			return
+		}
+		d := r.d
+		delta := *overflow
+		if int64(d.DelegatedRC) < delta {
+			delta = int64(d.DelegatedRC)
+		}
+		if d.DelegatedRC > uint64(delta) {
+			d.DelegatedRC -= uint64(delta)
+			PutRCDirectDelegationFull(s, &d)
 		} else {
-			row.DelegatedRC = uint64(newAmt)
-			PutRCDirectDelegationFull(s, &row)
+			if !g.step() {
+				return
+			}
+			DeleteRCDirectDelegationFull(s, d.From, d.To)
 		}
-		to, err := GetAccount(s, c.to)
-		if err == nil {
-			to.DelegatedRCIn -= c.amount
-			if to.DelegatedRCIn < 0 {
-				to.DelegatedRCIn = 0
-			}
-			to.RCManaCurrent -= c.amount
-			if to.RCManaCurrent < 0 {
-				to.RCManaCurrent = 0
-			}
-			toEff := to.VestingShares - to.DelegatedVestingShares + to.ReceivedVestingShares
-			to.LastMaxRC = toEff - to.DelegatedRCOut + to.DelegatedRCIn
-			if to.LastMaxRC < 0 {
-				to.LastMaxRC = 0
-			}
+		if to, err := GetAccount(s, d.To); err == nil {
+			// The recipient was not part of the operation, so its mana is
+			// regenerated before the delegation changes.
+			UpdateAccountAfterRCDelegation(&to, now, -delta, true)
 			PutAccount(s, &to)
 		}
-		totalExpired += c.amount
+		*overflow -= delta
 	}
+}
 
-	a.DelegatedRCOut -= totalExpired
-	if a.DelegatedRCOut < 0 {
-		a.DelegatedRCOut = 0
+// UpdateAccountAfterRCDelegation is
+// resource_credits::update_account_after_rc_delegation (rc_utility.cpp:369):
+// the recipient's received RC moves by delta, and so do its current mana
+// (floored at zero) and last_max_rc, which is the maximum before the change
+// plus delta.
+func UpdateAccountAfterRCDelegation(a *Account, now uint32, delta int64, regenerate bool) {
+	maxRC := a.MaximumRC()
+	if regenerate {
+		RegenerateRCMana(a, now)
 	}
-	// Same reasoning as above: derive from the reader, never restate it.
-	a.LastMaxRC = a.MaximumRC()
+	a.RCManaCurrent += delta
+	if a.RCManaCurrent < 0 {
+		a.RCManaCurrent = 0
+	}
+	a.LastMaxRC = maxRC + delta
+	a.DelegatedRCIn += delta
+}
 
-	if totalExpired > 0 {
-		prev, _ := GetRCExpiredDelegation(s, a.Name)
-		PutRCExpiredDelegation(s, &RCExpiredDelegation{
-			From:             a.Name,
-			RemainingExpired: prev.RemainingExpired + totalExpired,
-			ExpiryTime:       now + RCDelegationReturnPeriodSec,
+// ProcessRCExpiredDelegations is resource_credits::handle_expired_delegations
+// (rc_utility.cpp:617-656), run once per block from HF26: keep cutting the
+// delegations of accounts whose overflow did not fit under one call's removal
+// limit, oldest row first, sharing one HIVE_GLOBAL_REMOVE_THRESHOLD budget
+// across the block. A row is deleted once its overflow is paid off.
+func ProcessRCExpiredDelegations(s *state.Session, now uint32) {
+	var rows []RCExpiredDelegation
+	_ = s.Range(RCExpiredDelegationTable, state.PrimaryIndex, nil,
+		func(_, val []byte) (bool, error) {
+			if r, err := ReadRCExpiredDelegation(val); err == nil {
+				rows = append(rows, r)
+			}
+			return true, nil
 		})
+	if len(rows) == 0 {
+		return
 	}
+	// hived iterates by object id, i.e. creation order; ExpiryTime holds that
+	// sequence (see RCExpiredDelegation).
+	sort.SliceStable(rows, func(i, j int) bool { return rows[i].ExpiryTime < rows[j].ExpiryTime })
+	guard := NewRemoveGuard(network.GlobalRemoveThreshold)
+	for _, r := range rows {
+		overflow := r.RemainingExpired
+		RemoveRCDelegations(s, &overflow, r.From, now, guard)
+		if overflow > 0 {
+			r.RemainingExpired = overflow
+			PutRCExpiredDelegation(s, &r)
+			return
+		}
+		DeleteRCExpiredDelegation(s, r.From)
+		if guard.Done() {
+			return
+		}
+	}
+}
+
+// nextRCExpiredDelegationSeq gives a new rc_expired_delegation row a sequence
+// above every live one, so rows drain in creation order like hived's ids.
+func nextRCExpiredDelegationSeq(s *state.Session) uint32 {
+	var max uint32
+	_ = s.Range(RCExpiredDelegationTable, state.PrimaryIndex, nil,
+		func(_, val []byte) (bool, error) {
+			if r, err := ReadRCExpiredDelegation(val); err == nil && r.ExpiryTime > max {
+				max = r.ExpiryTime
+			}
+			return true, nil
+		})
+	return max + 1
 }
 
 // -----------------------------------------------------------------------------

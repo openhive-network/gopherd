@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"gopherd/internal/protocol/asset"
+	"gopherd/internal/protocol/auth"
 	"gopherd/internal/protocol/hardfork"
 	"gopherd/internal/protocol/op"
 	"gopherd/internal/state"
@@ -134,18 +135,17 @@ func (withdrawVestingEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	// hand out, and hived deliberately does not subtract the negative delta
 	// from mana the account already earned.
 	//
-	// NOT PORTED: hived also passes _check_for_rc_delegation_overflow = true,
-	// which expires outgoing RC delegations that no longer fit under the new
-	// maximum. gopherd's clip lives in HandleVestingWithdrawalRCImpact and is
-	// not wired here. Updating the ceiling without it is still strictly closer
-	// to hived than the previous behaviour of not updating it at all.
+	// _check_for_rc_delegation_overflow is true here too: starting a power
+	// down takes the next step out of the delegable VESTS at once, and hived
+	// cuts the RC delegations that no longer fit right away. Without it,
+	// accounts that powered down kept RC delegations mainnet had removed.
 	a.ToWithdraw = w.VestingShares.Amount
 	a.Withdrawn = 0
 	// AFTER the fields move: the new ceiling is read from
 	// EffectiveVestingSharesExclWithdraw, which depends on ToWithdraw and
 	// Withdrawn. hived's call is likewise outside the modify block.
 	if ctx.Hardforks.Has(hardfork.HF20) {
-		objects.UpdateAccountAfterVestChange(&a, ctx.HeadBlockTime, false)
+		objects.UpdateAccountAfterVestChangeChecked(ctx.DB, &a, ctx.HeadBlockTime, false)
 	}
 	objects.PutAccount(ctx.DB, &a)
 	objects.PutVestingWithdrawalSchedule(ctx.DB, a.NextVestingWithdrawal, w.Account)
@@ -525,12 +525,22 @@ func (delegateVestingSharesEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	// just rose (lowering their effective_vests), and (b) the delegatee's
 	// ReceivedVestingShares may have fallen back to 0 (lowering their
 	// effective_vests if they redelegated as RC).
-	if ctx.Hardforks.Has(hardfork.HF20) {
-		objects.HandleVestingWithdrawalRCImpact(ctx.DB, &delegator, ctx.HeadBlockTime)
-		objects.HandleVestingWithdrawalRCImpact(ctx.DB, &delegatee, ctx.HeadBlockTime)
-	}
+	//
+	// Each check reads and writes the accounts its delegations go to, so both
+	// sides are saved first and re-read: the delegator's cut may charge the
+	// delegatee, and an in-memory copy written afterwards would undo it.
 	objects.PutAccount(ctx.DB, &delegator)
 	objects.PutAccount(ctx.DB, &delegatee)
+	if ctx.Hardforks.Has(hardfork.HF20) {
+		for _, name := range []auth.AccountName{delegator.Name, delegatee.Name} {
+			acc, err := objects.GetAccount(ctx.DB, name)
+			if err != nil {
+				return fmt.Errorf("delegate_vesting_shares: reload %q: %w", name, err)
+			}
+			objects.HandleVestingWithdrawalRCImpact(ctx.DB, &acc, ctx.HeadBlockTime)
+			objects.PutAccount(ctx.DB, &acc)
+		}
+	}
 
 	if d.VestingShares.Amount == 0 {
 		objects.DeleteVestingDelegation(ctx.DB, d.Delegator, d.Delegatee)
