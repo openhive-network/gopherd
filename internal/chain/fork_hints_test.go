@@ -28,6 +28,9 @@ func TestOptsForOtherStripsPerBlockHints(t *testing.T) {
 	in := ApplyOptions{
 		PreVerifiedBlockSigner: key,
 		PreRecoveredTxKeys:     [][]crypto.PublicKey{{key}},
+		CompressedPayload:      []byte{1, 2, 3},
+		CompressedDictNum:      99,
+		CompressedHasDict:      true,
 		// Non-hint options must survive: they describe HOW to apply, not WHICH
 		// block was pre-verified.
 		Reversible:                true,
@@ -42,6 +45,9 @@ func TestOptsForOtherStripsPerBlockHints(t *testing.T) {
 	}
 	if out.PreRecoveredTxKeys != nil {
 		t.Fatal("PreRecoveredTxKeys survived; another block's tx keys would be used")
+	}
+	if out.CompressedPayload != nil || out.CompressedDictNum != 0 || out.CompressedHasDict {
+		t.Fatal("CompressedPayload survived; the block_log would store the pushed block's bytes for this one")
 	}
 	if !out.Reversible || !out.SkipTransactionSignatures || !out.EnforceRC || !out.ValidateOwnBlock {
 		t.Fatal("non-hint options were dropped; only the per-block hints may be cleared")

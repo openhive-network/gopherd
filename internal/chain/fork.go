@@ -239,9 +239,19 @@ func (d *Database) childOf(head block.ID) *forkNode {
 // block supplied it. Every buffered (out-of-order) block and every block
 // re-applied during a reorg went through this path, so valid blocks were
 // rejected at the tip whenever arrival order slipped.
+//
+// CompressedPayload is the same kind of per-block field: the zstd form the
+// pushed block arrived in, which the block_log writer stores verbatim. Left in
+// place, every buffered block drained behind the pushed one was written to the
+// block_log as a copy of it — 920 copies of block 110,745,205 after a catch-up
+// from a snapshot, found when the next replay rejected entry 110,745,206 as a
+// duplicate transaction. Without it the writer compresses the block's own raw
+// bytes.
 func optsForOther(opts ApplyOptions) ApplyOptions {
 	opts.PreVerifiedBlockSigner = crypto.PublicKey{}
 	opts.PreRecoveredTxKeys = nil
+	opts.CompressedPayload = nil
+	opts.CompressedDictNum, opts.CompressedHasDict = 0, false
 	return opts
 }
 

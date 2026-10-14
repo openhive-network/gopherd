@@ -167,6 +167,61 @@ func TestPushLiveBlockOutOfOrder(t *testing.T) {
 	}
 }
 
+// TestPushLiveBlockDrainKeepsOwnCompressedForm: a block drained from the fork
+// DB behind a pushed block must not inherit the pushed block's compressed
+// payload. The block_log writer stores that payload verbatim, so inheriting it
+// wrote copies of the pushed block in place of the drained ones.
+func TestPushLiveBlockDrainKeepsOwnCompressedForm(t *testing.T) {
+	db, err := state.Open(t.TempDir(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := genesis.Apply(db); err != nil {
+		t.Fatal(err)
+	}
+	{
+		s := state.NewSession(db)
+		objects.PutAccount(s, &objects.Account{Name: "alice", Balance: 1000})
+		objects.PutAccount(s, &objects.Account{Name: "bob", Balance: 0})
+		_ = s.Commit(false)
+	}
+	c := New(db)
+	c.EnableRecentBlockCache(16)
+	opts := ApplyOptions{SkipTransactionSignatures: true, SkipBlockSignature: true, SkipDedupAndTaPOS: true}
+	buildAt := func(num, ts uint32, prev block.ID, amount int64) ([]byte, block.ID) {
+		st := tx.SignedTransaction{Transaction: tx.Transaction{
+			Operations: op.Ops(op.Transfer{From: "alice", To: "bob", Amount: hiveAsset(amount), Memo: "m"}),
+			Expiration: network.GenesisTimeUnix + 600,
+		}}
+		hdr := block.SignedHeader{Header: block.Header{Timestamp: ts, Witness: "initminer", Previous: prev, Extensions: []byte{0x00}}}
+		out := block.MarshalSignedHeader(nil, &hdr)
+		out = append(out, 1)
+		out = tx.AppendSignedTransaction(out, &st)
+		_, hl, _ := block.UnmarshalSignedHeader(out)
+		return out, block.ConstructID(out[:hl], num)
+	}
+	gid, _ := c.HeadBlockID()
+	r1, id1 := buildAt(1, network.GenesisTimeUnix+3, gid, 100)
+	r2, id2 := buildAt(2, network.GenesisTimeUnix+6, id1, 50)
+
+	if o, err := c.PushLiveBlock(r2, 2, opts); err != nil || o != PushBuffered {
+		t.Fatalf("early block2 outcome=%v err=%v want buffered", o, err)
+	}
+	withPayload := opts
+	withPayload.CompressedPayload = []byte("block 1 zstd form")
+	withPayload.CompressedDictNum, withPayload.CompressedHasDict = 99, true
+	if o, err := c.PushLiveBlock(r1, 1, withPayload); err != nil || o != PushExtended {
+		t.Fatalf("block1 outcome=%v err=%v want extended", o, err)
+	}
+	if p, _, _, ok := c.RecentCompressedBlock(1, id1); !ok || string(p) != "block 1 zstd form" {
+		t.Fatalf("block 1 lost its own compressed form: ok=%v payload=%q", ok, p)
+	}
+	if p, _, _, ok := c.RecentCompressedBlock(2, id2); ok {
+		t.Fatalf("drained block 2 carries a compressed form %q; the block_log would store block 1's bytes for it", p)
+	}
+}
+
 // TestReversibleFinalizeCallbacks verifies the Phase-2 side-effect routing: a
 // reversible (uncommitted tip) block fires NEITHER onBlockApplied NOR
 // onBlockFinalized; FinalizeReversible fires onBlockFinalized (with the block's
