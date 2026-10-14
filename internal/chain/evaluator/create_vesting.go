@@ -193,8 +193,10 @@ func createVestingImpl(s *state.Session, accountName string, hiveSatoshi int64, 
 			// Gaining VESTS raises max_rc, and hived credits that increase to
 			// current mana immediately (update_account_after_vest_change,
 			// database.cpp:1039) so the account can use the new RC right away.
+			// No delegation-overflow check: gaining VESTS cannot create one,
+			// and hived's call here leaves it off.
 			if manabarHF20 {
-				objects.HandleVestingWithdrawalRCImpact(s, a, dgpoRef.Time)
+				objects.UpdateAccountAfterVestChange(a, dgpoRef.Time, true)
 			}
 		}
 		aSlot = a

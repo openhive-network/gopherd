@@ -5,6 +5,7 @@ import (
 
 	"gopherd/internal/protocol/auth"
 	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/protocol/network"
 	"gopherd/internal/protocol/op"
 	"gopherd/internal/state"
 	"gopherd/internal/state/objects"
@@ -30,11 +31,11 @@ func rcAdvanceBlocks(f *Fixture, n int) {
 	}
 }
 
-// TestRCUpdateOutdelOverflow exercises the
-// direct_rc_delegation.cpp::update_outdel_overflow shape: after a
-// delegate_vesting_shares chops alice's effective vesting below her
-// outstanding RC delegations, the surplus is expired (the by-from row
-// gets clipped and the surplus moves into the expired-delegation queue).
+// TestRCUpdateOutdelOverflow: when alice's VESTS drop below what she has
+// delegated as RC, update_account_after_vest_change cuts the excess from her
+// delegations in recipient order — the first one shrinks, the second is left
+// alone — and charges the recipient. Everything fit under the removal limit,
+// so no rc_expired_delegation row is left behind.
 //
 // Phase 2 hook validated: handleVestingWithdrawalRCImpact.
 func TestRCUpdateOutdelOverflow(t *testing.T) {
@@ -45,7 +46,6 @@ func TestRCUpdateOutdelOverflow(t *testing.T) {
 	f.GenerateBlock()
 
 	aliceVests := f.Vests("alice")
-	// alice delegates ~80% of her vests across bob+dave
 	per := aliceVests * 4 / 10
 	if err := f.ApplyOp(rcDelegationCustomOp("alice", []string{"bob"}, per)); err != nil {
 		t.Fatalf("delegate to bob: %v", err)
@@ -53,114 +53,104 @@ func TestRCUpdateOutdelOverflow(t *testing.T) {
 	if err := f.ApplyOp(rcDelegationCustomOp("alice", []string{"dave"}, per)); err != nil {
 		t.Fatalf("delegate to dave: %v", err)
 	}
-	if got := f.Account_("alice").DelegatedRCOut; got != per*2 {
-		t.Fatalf("alice.DelegatedRCOut: got %d, want %d", got, per*2)
-	}
+	bobIn := f.Account_("bob").DelegatedRCIn
 
-	// Synthetically slash alice's vesting so the delegations now exceed
-	// her cap, then run the Phase 2 RC-impact handler. This mirrors the
-	// effect of a single vesting-withdrawal chunk in the C++ test.
+	// Take `per` VESTS away: delegable = vests - per - 2*per, an overflow of
+	// 2*per - (vests - per).
 	s := state.NewSession(f.State)
 	alice, _ := objects.GetAccount(s, "alice")
-	// Drop alice's vests to half the delegated amount — should clip
-	// the first delegation oldest-first.
-	cut := per // remove `per` units of vesting
-	alice.VestingShares -= cut
-	// Re-run the hook (would normally be invoked from processOneWithdrawal).
+	alice.VestingShares -= per
+	overflow := 2*per - (aliceVests - per)
 	handleVestingWithdrawalRCImpactForTest(s, &alice, f.HeadBlockTime())
 	objects.PutAccount(s, &alice)
 	if err := s.Commit(false); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
 
-	// Post-condition: alice.DelegatedRCOut + expired = per*2 - cut (some
-	// of the delegations got clipped, the rest moved to expired-row).
-	post := f.Account_("alice")
-	if post.DelegatedRCOut > post.VestingShares {
-		t.Fatalf("alice.DelegatedRCOut (%d) exceeds VestingShares (%d) after handler",
-			post.DelegatedRCOut, post.VestingShares)
+	if got, want := f.Account_("alice").DelegatedRCOut, 2*per-overflow; got != want {
+		t.Fatalf("alice.DelegatedRCOut: got %d, want %d", got, want)
 	}
-
-	// An RCExpiredDelegation row should now exist for alice.
-	s = state.NewSession(f.State)
-	if !objects.HasRCExpiredDelegation(s, auth.AccountName("alice")) {
-		t.Fatalf("expected RCExpiredDelegation row for alice after vest reduction")
+	if d, ok := rcDelegation(f, "alice", "bob"); !ok || int64(d.DelegatedRC) != per-overflow {
+		t.Fatalf("alice->bob should shrink to %d, got %+v ok=%v", per-overflow, d, ok)
 	}
-	exp, err := objects.GetRCExpiredDelegation(s, "alice")
-	if err != nil {
-		t.Fatalf("get expired: %v", err)
+	if d, ok := rcDelegation(f, "alice", "dave"); !ok || int64(d.DelegatedRC) != per {
+		t.Fatalf("alice->dave should be untouched at %d, got %+v ok=%v", per, d, ok)
 	}
-	if exp.RemainingExpired <= 0 {
-		t.Fatalf("expired.RemainingExpired must be > 0, got %d", exp.RemainingExpired)
+	if got, want := f.Account_("bob").DelegatedRCIn, bobIn-overflow; got != want {
+		t.Fatalf("bob.DelegatedRCIn: got %d, want %d", got, want)
 	}
-	if exp.ExpiryTime == 0 {
-		t.Fatalf("expired.ExpiryTime must be set")
+	if objects.HasRCExpiredDelegation(state.NewSession(f.State), "alice") {
+		t.Fatalf("the whole overflow fit under the removal limit; no expired row expected")
 	}
 }
 
-// TestRCUpdateOutdelOverflowManyAccounts mirrors
-// direct_rc_delegation.cpp::update_outdel_overflow_many_accounts. The
-// expired-row drain is rate-limited at 100 entries per block; we seed
-// 150 rows and verify processRCExpiredDelegations only drains 100 in
-// one pass.
+// TestRCUpdateOutdelOverflowManyAccounts follows hived's
+// direct_rc_delegation.cpp::update_outdel_overflow_many_accounts: alice
+// delegates 10 RC to each of 250 accounts and then loses all her VESTS. One
+// call may remove only HIVE_GLOBAL_REMOVE_THRESHOLD (200) delegations; the
+// other 50 stay behind an rc_expired_delegation row that the per-block drain
+// clears. delegated_rc drops to zero at once.
 func TestRCUpdateOutdelOverflowManyAccounts(t *testing.T) {
+	const actors = 250
+	limit := int(network.GlobalRemoveThreshold)
 	f := New(t)
 	f.HardforksUpTo(hardfork.HF26)
+	f.Actors("alice")
+	f.FundVesting("alice", 10_000)
 	f.GenerateBlock()
 
-	// Seed 150 expired rows directly. Each row is for a unique
-	// from-account; the per-block batch cap is 100, so two blocks of
-	// processing should be required to drain all 150.
 	s := state.NewSession(f.State)
 	now := f.HeadBlockTime()
-	for i := 0; i < 150; i++ {
-		name := makeAcctName(i)
-		objects.PutAccount(s, &objects.Account{Name: auth.AccountName(name),
-			VestingShares: 1_000_000, DelegatedRCOut: 100})
-		objects.PutRCExpiredDelegation(s, &objects.RCExpiredDelegation{
-			From:             auth.AccountName(name),
-			RemainingExpired: 100,
-			ExpiryTime:       now - 10, // already expired
-		})
+	alice, _ := objects.GetAccount(s, "alice")
+	for i := 0; i < actors; i++ {
+		name := auth.AccountName(makeAcctName(i))
+		objects.PutAccount(s, &objects.Account{Name: name, DelegatedRCIn: 10, LastMaxRC: 10, RCManaCurrent: 10, RCManaLastUpdate: now})
+		objects.PutRCDirectDelegationFull(s, &objects.RCDirectDelegation{From: "alice", To: name, DelegatedRC: 10})
 	}
+	alice.DelegatedRCOut = actors * 10
+	alice.VestingShares = 0
+	handleVestingWithdrawalRCImpactForTest(s, &alice, now)
+	objects.PutAccount(s, &alice)
 	if err := s.Commit(false); err != nil {
-		t.Fatalf("seed: %v", err)
+		t.Fatalf("commit: %v", err)
 	}
 
-	// Run the hook once.
+	count := func() int {
+		n := 0
+		_ = state.NewSession(f.State).Range(objects.RCDirectDelegationTable, state.PrimaryIndex,
+			state.AppendAccountName(nil, "alice"), func(_, _ []byte) (bool, error) { n++; return true, nil })
+		return n
+	}
+	if got := f.Account_("alice").DelegatedRCOut; got != 0 {
+		t.Fatalf("alice.DelegatedRCOut: got %d, want 0", got)
+	}
+	if got := count(); got != actors-limit {
+		t.Fatalf("delegations left after the first call: got %d, want %d", got, actors-limit)
+	}
+	if _, ok := rcDelegation(f, "alice", makeAcctName(0)); ok {
+		t.Fatalf("the first recipient's delegation should be removed first")
+	}
+	if _, ok := rcDelegation(f, "alice", makeAcctName(actors-1)); !ok {
+		t.Fatalf("the last recipient's delegation should still be waiting")
+	}
+	if got := f.Account_(makeAcctName(0)).DelegatedRCIn; got != 0 {
+		t.Fatalf("removed recipient keeps received RC: %d", got)
+	}
+	exp, err := objects.GetRCExpiredDelegation(state.NewSession(f.State), "alice")
+	if err != nil || exp.RemainingExpired != int64(actors-limit)*10 {
+		t.Fatalf("expired row: %+v err=%v, want remaining %d", exp, err, (actors-limit)*10)
+	}
+
 	s = state.NewSession(f.State)
 	processRCExpiredDelegationsForTest(s, now)
 	if err := s.Commit(false); err != nil {
 		t.Fatalf("drain: %v", err)
 	}
-
-	// Count remaining.
-	s = state.NewSession(f.State)
-	remaining := 0
-	_ = s.Range(objects.RCExpiredDelegationTable, state.PrimaryIndex, nil,
-		func(_, _ []byte) (bool, error) {
-			remaining++
-			return true, nil
-		})
-	if remaining != 50 {
-		t.Fatalf("expected 50 rows remaining after rate-limited drain, got %d", remaining)
+	if got := count(); got != 0 {
+		t.Fatalf("delegations left after the drain: got %d", got)
 	}
-
-	// Run again — should drain the rest.
-	s = state.NewSession(f.State)
-	processRCExpiredDelegationsForTest(s, now)
-	if err := s.Commit(false); err != nil {
-		t.Fatalf("drain2: %v", err)
-	}
-	s = state.NewSession(f.State)
-	remaining = 0
-	_ = s.Range(objects.RCExpiredDelegationTable, state.PrimaryIndex, nil,
-		func(_, _ []byte) (bool, error) {
-			remaining++
-			return true, nil
-		})
-	if remaining != 0 {
-		t.Fatalf("expected 0 rows after second drain, got %d", remaining)
+	if objects.HasRCExpiredDelegation(state.NewSession(f.State), "alice") {
+		t.Fatalf("expired row should be gone once paid off")
 	}
 }
 
@@ -428,5 +418,49 @@ func rcAdvancedTransferOp(from, to string, idx int) op.Operation {
 		To:     auth.AccountName(to),
 		Amount: HIVE(1),
 		Memo:   "rc-advanced-" + string(rune('0'+idx%10)),
+	}
+}
+
+// TestRCPowerDownCutsDelegations: withdraw_vesting calls
+// update_account_after_vest_change(account, now, false, true), and starting a
+// power down takes the next weekly step out of the delegable VESTS at once. An
+// account that had delegated nearly all of its RC loses the excess from its
+// delegations immediately, not at the first withdrawal. gopherd used to skip
+// the check here, keeping delegations mainnet had removed (ajaxwest's to the
+// voi* accounts after its power down).
+func TestRCPowerDownCutsDelegations(t *testing.T) {
+	f := New(t)
+	f.HardforksUpTo(hardfork.HF26)
+	f.Actors("alice", "bob")
+	f.FundVesting("alice", 10_000)
+	f.GenerateBlock()
+
+	vests := f.Vests("alice")
+	delegated := vests * 95 / 100 // the 1/13 step pushes this past the VESTS
+	if err := f.ApplyOp(rcDelegationCustomOp("alice", []string{"bob"}, delegated)); err != nil {
+		t.Fatalf("delegate to bob: %v", err)
+	}
+	if err := f.ApplyOp(op.WithdrawVesting{Account: "alice", VestingShares: VESTS(vests)}); err != nil {
+		t.Fatalf("withdraw_vesting: %v", err)
+	}
+
+	a := f.Account_("alice")
+	step := a.VestingWithdrawRate
+	if step <= 0 {
+		t.Fatalf("power down did not start: rate=%d", step)
+	}
+	want := delegated
+	if over := delegated - (vests - step); over > 0 {
+		want = delegated - over
+	}
+	if want == delegated {
+		t.Fatalf("test setup: the power-down step (%d) should push %d delegated past %d VESTS", step, delegated, vests)
+	}
+	d, ok := rcDelegation(f, "alice", "bob")
+	if !ok || int64(d.DelegatedRC) != want {
+		t.Fatalf("alice->bob after power down: got %+v ok=%v, want %d", d, ok, want)
+	}
+	if a.DelegatedRCOut != want {
+		t.Fatalf("alice.DelegatedRCOut: got %d, want %d", a.DelegatedRCOut, want)
 	}
 }

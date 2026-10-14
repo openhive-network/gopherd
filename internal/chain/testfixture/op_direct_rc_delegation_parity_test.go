@@ -5,6 +5,7 @@ import (
 
 	"gopherd/internal/protocol/auth"
 	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/protocol/network"
 	"gopherd/internal/protocol/op"
 	"gopherd/internal/state"
 	"gopherd/internal/state/objects"
@@ -624,10 +625,21 @@ func TestUpdateOutdelOverflowDelegateePerformance(t *testing.T) {
 		t.Fatalf("delegate_vesting_shares→bob remove: %v", err)
 	}
 
-	// All delegations should be gone.
+	// delegated_rc drops by the whole overflow at once; the delegations
+	// themselves go at most HIVE_GLOBAL_REMOVE_THRESHOLD per block, the rest
+	// waiting in bob's rc_expired_delegation row (hived's test generates
+	// blocks for the same reason: "we might wait couple of blocks due to
+	// limit on delegation removal").
 	bob := f.Account_("bob")
 	if bob.DelegatedRCOut != 0 {
 		t.Fatalf("bob.DelegatedRCOut after cascade: got %d, want 0", bob.DelegatedRCOut)
+	}
+	if !objects.HasRCExpiredDelegation(state.NewSession(f.State), "bob") {
+		t.Fatalf("1000 removals exceed one call's limit; bob should have an expired-delegation row")
+	}
+	rcAdvanceBlocks(f, numDelegatees/int(network.GlobalRemoveThreshold))
+	if objects.HasRCExpiredDelegation(state.NewSession(f.State), "bob") {
+		t.Fatalf("bob's expired-delegation row should be drained after %d blocks", numDelegatees/int(network.GlobalRemoveThreshold))
 	}
 	for i := 0; i < numDelegatees; i++ {
 		name := makeAcctName(i)
