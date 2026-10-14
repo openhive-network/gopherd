@@ -112,6 +112,7 @@ func (d *Delegate) OnTransactionReceived(p *node.Peer, body []byte) {
 			return
 		}
 		d.txRejected.Add(1)
+		d.noteTxReject(err)
 		return
 	}
 	d.txAccepted.Add(1)

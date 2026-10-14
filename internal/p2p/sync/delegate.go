@@ -7,6 +7,7 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -386,6 +387,11 @@ type Delegate struct {
 	// one is tracked.
 	txAccepted atomic.Uint64
 	txRejected atomic.Uint64
+	// rejectWhy tallies txRejected by reason, digits folded, so a high reject
+	// count can be told apart: ordinary late arrivals (already in a block,
+	// expired) from a validation gopherd gets wrong.
+	rejectWhyMu sync.Mutex
+	rejectWhy   map[string]int
 	// txInvOffered / txFetched bracket the step BEFORE admission. Without them,
 	// "accepted=0, rejected=0" is ambiguous between three different faults:
 	// peers never advertise transactions to us, we never ask for the bodies, or
@@ -1352,6 +1358,74 @@ func (d *Delegate) noteTxAdvertWinner(p *node.Peer, id block.ID) {
 
 // TxAdvertWinners returns peers ranked by how often they were FIRST to offer a
 // transaction, best first. These are the peers worth pinning as seeds.
+// noteTxReject counts one mempool rejection under its reason.
+func (d *Delegate) noteTxReject(err error) {
+	why := rejectReason(err.Error())
+	d.rejectWhyMu.Lock()
+	defer d.rejectWhyMu.Unlock()
+	if d.rejectWhy == nil {
+		d.rejectWhy = make(map[string]int)
+	}
+	if _, ok := d.rejectWhy[why]; !ok && len(d.rejectWhy) >= 64 {
+		why = "other"
+	}
+	d.rejectWhy[why]++
+}
+
+// rejectReason reduces a rejection error to its kind: the mempool's wrapper
+// prefixes are dropped, numbers become "N", and the text is cut at 70 bytes.
+func rejectReason(msg string) string {
+	for _, p := range []string{"witness.AddPendingRaw: rejected: ", "witness.AddPendingRaw: "} {
+		if i := strings.Index(msg, p); i >= 0 {
+			msg = msg[i+len(p):]
+			break
+		}
+	}
+	var b strings.Builder
+	digit := false
+	for _, r := range msg {
+		if r >= '0' && r <= '9' {
+			if !digit {
+				b.WriteByte('N')
+			}
+			digit = true
+			continue
+		}
+		digit = false
+		b.WriteRune(r)
+		if b.Len() >= 70 {
+			break
+		}
+	}
+	return b.String()
+}
+
+// TxRejectReasons returns the top rejection reasons since start, most
+// frequent first, as "reason=count(pct%)".
+func (d *Delegate) TxRejectReasons(top int) []string {
+	d.rejectWhyMu.Lock()
+	defer d.rejectWhyMu.Unlock()
+	type kv struct {
+		why string
+		n   int
+	}
+	all := make([]kv, 0, len(d.rejectWhy))
+	total := 0
+	for w, n := range d.rejectWhy {
+		all = append(all, kv{w, n})
+		total += n
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].n > all[j].n })
+	if len(all) > top {
+		all = all[:top]
+	}
+	out := make([]string, 0, len(all))
+	for _, e := range all {
+		out = append(out, fmt.Sprintf("%q=%d(%.0f%%)", e.why, e.n, 100*float64(e.n)/float64(total)))
+	}
+	return out
+}
+
 func (d *Delegate) TxAdvertWinners(top int) []string {
 	d.advertWinMu.Lock()
 	defer d.advertWinMu.Unlock()
