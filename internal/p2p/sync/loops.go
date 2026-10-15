@@ -317,6 +317,8 @@ func (d *Delegate) pruneLoop() {
 				sts = append(sts, st)
 			}
 			d.mu.Unlock()
+			nowNs := time.Now().UnixNano()
+			d.pruneTxFetch(nowNs)
 			freed := 0
 			for _, st := range sts {
 				st.mu.Lock()
@@ -345,6 +347,11 @@ func (d *Delegate) pruneLoop() {
 					// re-fetch; unbounded growth costs the process.
 					if len(st.known) > maxKnownPerPeer {
 						delete(st.known, bid)
+					}
+				}
+				for id, at := range st.askedTx {
+					if nowNs-at > int64(txFetchTTL) {
+						delete(st.askedTx, id)
 					}
 				}
 				for bid := range st.outstanding {

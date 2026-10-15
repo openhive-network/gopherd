@@ -96,12 +96,15 @@ func (d *Delegate) OnTransactionReceived(p *node.Peer, body []byte) {
 	advert := block.ID(crypto.RIPEMD160(body))
 	if st := d.peerStateFor(p); st != nil {
 		st.mu.Lock()
-		_, asked := st.known[advert]
+		_, asked := st.askedTx[advert]
+		delete(st.askedTx, advert)
+		st.known[advert] = struct{}{}
 		st.mu.Unlock()
 		if !asked {
 			d.txUnrequested.Add(1)
 		}
 	}
+	d.noteTxArrived(advert, time.Now().UnixNano())
 	if err := d.cfg.Mempool.AddPendingRaw(body); err != nil {
 		// A duplicate is normal traffic (every transaction is advertised by
 		// several peers) and must not inflate the accepted count — that is what
@@ -271,12 +274,13 @@ func (d *Delegate) handleInv(p *node.Peer, body []byte) {
 			// Deliberately NOT routed through the block outstanding/in-flight
 			// budget: those are keyed by block id and sized for a block
 			// backlog, and mixing transaction ids into them would corrupt the
-			// catch-up accounting. Per-peer `known` is dedup enough — a
-			// transaction body is small and arrives once.
-			if _, seen := st.known[bid]; seen {
+			// catch-up accounting. Transactions have their own global
+			// table instead (txFetch): one peer is asked, the others'
+			// adverts are only remembered in `known` so we never relay the
+			// transaction back to them.
+			if !d.claimTxFetch(st, p, bid, nowNs) {
 				continue
 			}
-			st.known[bid] = struct{}{}
 			// Which peer told us about this transaction FIRST?
 			//
 			// Peer COUNT is not the lever — 12 -> 24 peers left inbound lateness
@@ -299,6 +303,20 @@ func (d *Delegate) handleInv(p *node.Peer, body []byte) {
 	}
 	d.sendFetchItems(p, msg.ItemType, missing)
 	d.poke()
+}
+
+// claimTxFetch decides whether to fetch a transaction peer p just advertised,
+// and records the request if so. Called with st.mu held.
+func (d *Delegate) claimTxFetch(st *peerState, p *node.Peer, id block.ID, nowNs int64) bool {
+	if _, seen := st.known[id]; seen {
+		return false
+	}
+	st.known[id] = struct{}{}
+	if !d.tryReserveTxFetch(id, p, nowNs) {
+		return false
+	}
+	st.askedTx[id] = nowNs
+	return true
 }
 
 // handleFetchBlockchainItemIDs is the catch-up RECEIVER side: peer is
@@ -1014,6 +1032,10 @@ func (d *Delegate) sendFetchItems(p *node.Peer, itemType uint32, hashes []proto.
 				// fetch under back-pressure, so a later round must be free
 				// to re-request it (from any peer).
 				d.removeInflight(block.ID(h))
+				if itemType == proto.ItemTypeTrx {
+					delete(st.askedTx, block.ID(h))
+					d.releaseTxFetch(block.ID(h), p)
+				}
 			}
 			st.mu.Unlock()
 			if released > 0 {

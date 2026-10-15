@@ -498,6 +498,15 @@ type Delegate struct {
 	// acquired LAST (after d.mu / st.mu) to keep a strict lock order.
 	inflightMu sync.Mutex
 	inflight   map[block.ID]inflightEntry
+	// txFetch is the GLOBAL fetch table for transactions, keyed by advert id
+	// (ripemd160 of the whole signed transaction). hived fetches each item
+	// from ONE peer (node.cpp _items_to_fetch) and asks another only if that
+	// one does not deliver; the per-peer `known` dedup alone fetched every
+	// transaction once per advertising peer — 3.5M fetches for 220k unique
+	// admissions, every extra copy then refused by the mempool. Guarded by
+	// txFetchMu, which is taken under no other lock.
+	txFetchMu sync.Mutex
+	txFetch   map[block.ID]txFetchEntry
 
 	// tipStallKicks counts how many times the kicker re-seeded because we were
 	// stalled AT THE TIP (head not advancing, nothing in flight) rather than
@@ -603,6 +612,12 @@ type peerState struct {
 	// not yet received. Lets the catch-up controller avoid asking the
 	// same peer twice.
 	outstanding map[block.ID]struct{}
+	// askedTx holds the transaction advert ids we fetched from this peer,
+	// with the request time. It answers "did we ask this peer?" for the
+	// unrequested counter; `known` cannot, because pruneLoop forgets
+	// transaction ids there within 15 s (they fail its block-height test),
+	// sometimes before the body is back. Pruned by age instead.
+	askedTx map[block.ID]int64
 	// peerHeadNum is the last head_block_num we observed from this
 	// peer (via blockchain_item_ids_inventory or block arrivals).
 	peerHeadNum uint32
@@ -629,6 +644,7 @@ func newPeerState() *peerState {
 	st := &peerState{
 		known:       make(map[block.ID]struct{}, 256),
 		outstanding: make(map[block.ID]struct{}, 64),
+		askedTx:     make(map[block.ID]int64, 64),
 	}
 	st.rateWindowStart.Store(time.Now().UnixNano())
 	return st
@@ -749,6 +765,73 @@ func (d *Delegate) tryReserveInflight(bid block.ID, p *node.Peer, nowNs int64) b
 		return true
 	}
 	return false
+}
+
+// txFetchEntry records which peer a transaction was requested from, when,
+// and whether its body has arrived (from anyone).
+type txFetchEntry struct {
+	peer    *node.Peer
+	sinceNs int64
+	got     bool
+}
+
+// txFetchTTL is how long a transaction stays in txFetch. It only has to
+// outlive the burst of adverts for one transaction (all peers advertise
+// within seconds); ten minutes is ~4k entries at mainnet rates.
+const txFetchTTL = 10 * time.Minute
+
+// tryReserveTxFetch claims the advert id for peer p. It returns false when
+// the body is already here or another peer was asked less than
+// reRequestStale ago; a slow holder loses the claim to the next advertiser.
+func (d *Delegate) tryReserveTxFetch(id block.ID, p *node.Peer, nowNs int64) bool {
+	d.txFetchMu.Lock()
+	defer d.txFetchMu.Unlock()
+	if d.txFetch == nil {
+		d.txFetch = make(map[block.ID]txFetchEntry, 4096)
+	}
+	e, ok := d.txFetch[id]
+	if ok && (e.got || e.peer == p || nowNs-e.sinceNs < int64(reRequestStale)) {
+		return false
+	}
+	d.txFetch[id] = txFetchEntry{peer: p, sinceNs: nowNs}
+	return true
+}
+
+// noteTxArrived marks the advert id as delivered, so later adverts of it
+// are not fetched.
+func (d *Delegate) noteTxArrived(id block.ID, nowNs int64) {
+	d.txFetchMu.Lock()
+	defer d.txFetchMu.Unlock()
+	if d.txFetch == nil {
+		d.txFetch = make(map[block.ID]txFetchEntry, 4096)
+	}
+	e, ok := d.txFetch[id]
+	if !ok {
+		e.sinceNs = nowNs
+	}
+	e.got = true
+	d.txFetch[id] = e
+}
+
+// releaseTxFetch gives up p's claim on an undelivered transaction, so the
+// next advert of it is fetched again.
+func (d *Delegate) releaseTxFetch(id block.ID, p *node.Peer) {
+	d.txFetchMu.Lock()
+	defer d.txFetchMu.Unlock()
+	if e, ok := d.txFetch[id]; ok && !e.got && e.peer == p {
+		delete(d.txFetch, id)
+	}
+}
+
+// pruneTxFetch drops txFetch entries older than txFetchTTL.
+func (d *Delegate) pruneTxFetch(nowNs int64) {
+	d.txFetchMu.Lock()
+	defer d.txFetchMu.Unlock()
+	for id, e := range d.txFetch {
+		if nowNs-e.sinceNs > int64(txFetchTTL) {
+			delete(d.txFetch, id)
+		}
+	}
 }
 
 // removeInflight clears bid's global reservation. Idempotent. Called when
