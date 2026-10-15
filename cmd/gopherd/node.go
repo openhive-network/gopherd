@@ -1201,6 +1201,15 @@ func (a *app) recover() error {
 		a.logger.printf("replay: rebuilding state from genesis — replaying %s blocks from the local block_log", groupDigits(uint64(target)))
 	}
 	progress := newReplayProgress(start, target, time.Now())
+	// No fsync at the batch boundaries while replaying: a replay that dies
+	// starts over (from genesis or the snapshot), so the synced K/V buys
+	// nothing, and each fsync waits for the ext4 journal behind the cold
+	// tier's compaction writes - a quarter of the replay's wall time at
+	// ~27M. The flush after the loop syncs once.
+	if a.chain.CommitBatchSize() > 1 && a.cfg.commitBatchFsync {
+		a.chain.SetCommitBatch(a.chain.CommitBatchSize(), false)
+		defer a.chain.SetCommitBatch(a.chain.CommitBatchSize(), true)
+	}
 	for n := start; n <= target; n++ {
 		raw, err := r.Block(n)
 		if err != nil {
