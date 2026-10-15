@@ -40,6 +40,8 @@ type CuratorPay struct {
 	// by voter account_id (creation order), NOT by voter name. See
 	// distributeCuratorPool.
 	Created uint32
+	// Seq is the voter's account Seq (account_id + 1), the exact tie-break.
+	Seq uint64
 }
 
 // cashoutSibling is a per-cashout sibling record used in the pre-HF17

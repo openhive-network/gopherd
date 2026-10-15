@@ -33,8 +33,12 @@ func Apply(db *state.Database) error {
 		return err
 	}
 
+	// Account Seq follows hived's creation order in init_genesis
+	// (database_init.cpp:197-245): miners, null, temp, initminer, steem.
+	genesisSeq := map[string]uint64{"miners": 1, "null": 2, "temp": 3, MainnetInitminer: 4, "steem": 5}
 	objects.PutAccount(s, &objects.Account{
 		Name:                 MainnetInitminer,
+		Seq:                  genesisSeq[MainnetInitminer],
 		Created:              network.GenesisTimeUnix,
 		Mined:                true, // every genesis account is "mined" in hived (account_object.hpp:148)
 		MemoKey:              memoKey,
@@ -77,6 +81,7 @@ func Apply(db *state.Database) error {
 		// trivial to mirror.
 		objects.PutAccount(s, &objects.Account{
 			Name:                 name,
+			Seq:                  genesisSeq[name],
 			Created:              network.GenesisTimeUnix,
 			VotingManaCurrent:    0,
 			VotingManaLastUpdate: network.GenesisTimeUnix,
@@ -108,6 +113,7 @@ func Apply(db *state.Database) error {
 	}
 	objects.PutAccount(s, &objects.Account{
 		Name:                 "steem",
+		Seq:                  genesisSeq["steem"],
 		Created:              network.GenesisTimeUnix,
 		VotingManaCurrent:    10000,
 		VotingManaLastUpdate: network.GenesisTimeUnix,
@@ -121,6 +127,7 @@ func Apply(db *state.Database) error {
 		LastOwnerUpdate:     network.GenesisTimeUnix,
 		PreviousOwnerUpdate: network.GenesisTimeUnix,
 	})
+	objects.SetAccountSeqCounter(s, uint64(len(genesisSeq)))
 
 	// Genesis witness object for initminer — mirrors hived's
 	// init_genesis_witnesses (database.cpp::init_genesis_witnesses).
