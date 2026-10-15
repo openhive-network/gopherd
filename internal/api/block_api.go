@@ -106,6 +106,9 @@ func (s *Server) mGetBlockHeader(legacy bool) jsonrpc.Handler {
 		if raw == nil {
 			// Not in the recent-block cache; historical read needs the block_log
 			// reader wired to the API (follow-up).
+			if legacy {
+				return nil, nil
+			}
 			return map[string]interface{}{"header": nil}, nil
 		}
 		sh, _, err := block.UnmarshalSignedHeader(raw)
@@ -115,6 +118,11 @@ func (s *Server) mGetBlockHeader(legacy bool) jsonrpc.Handler {
 		hdr, err := blockHeaderResult(sh, legacy)
 		if err != nil {
 			return nil, jsonrpc.Errorf(jsonrpc.CodeServerError, "decode block %d: %v", n, err)
+		}
+		if legacy {
+			// condenser_api returns the optional header itself, not the
+			// block_api wrapper (condenser_api.cpp get_block_header: .header).
+			return hdr, nil
 		}
 		return map[string]interface{}{"header": hdr}, nil
 	}
@@ -174,6 +182,9 @@ func (s *Server) mGetBlock(legacy bool) jsonrpc.Handler {
 		}
 		raw := s.chain.RecentBlockBytes(n)
 		if raw == nil {
+			if legacy {
+				return nil, nil
+			}
 			return map[string]interface{}{"block": nil}, nil
 		}
 		sh, txs, hdrLen, perr := parseBlock(raw)
