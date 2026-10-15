@@ -970,12 +970,12 @@ func CheckRCDelegationOverflow(s *state.Session, a *Account, now uint32) {
 // it is no larger, and charge the recipient. A removal the guard refuses
 // stops the walk; shrinking is free. overflow is reduced by what was taken.
 //
-// by_from_to sorts recipients by account id, i.e. creation order. gopherd has
-// no account ids, so (Created, name) stands in for it, as it does for the
-// governance-vote sweep.
+// by_from_to sorts recipients by account id, i.e. creation order: Account.Seq
+// (see AccountCreatedBefore for state that predates it).
 func RemoveRCDelegations(s *state.Session, overflow *int64, from auth.AccountName, now uint32, g *RemoveGuard) {
 	type row struct {
 		d       RCDirectDelegation
+		seq     uint64
 		created uint32
 	}
 	var rows []row
@@ -994,14 +994,12 @@ func RemoveRCDelegations(s *state.Session, overflow *int64, from auth.AccountNam
 		})
 	for i := range rows {
 		if to, err := GetAccount(s, rows[i].d.To); err == nil {
-			rows[i].created = to.Created
+			rows[i].seq, rows[i].created = to.Seq, to.Created
 		}
 	}
 	sort.SliceStable(rows, func(i, j int) bool {
-		if rows[i].created != rows[j].created {
-			return rows[i].created < rows[j].created
-		}
-		return rows[i].d.To < rows[j].d.To
+		a, b := &rows[i], &rows[j]
+		return AccountCreatedBefore(a.seq, a.created, a.d.To, b.seq, b.created, b.d.To)
 	})
 	for _, r := range rows {
 		if *overflow <= 0 {

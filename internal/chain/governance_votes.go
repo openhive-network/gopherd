@@ -52,6 +52,7 @@ func removeExpiredGovernanceVotes(s *state.Session, blockTime, blockNum uint32, 
 		// expiration and created reproduce hived's by_governance_vote_expiration_ts
 		// ordering — see the sort below.
 		expiration uint32
+		seq        uint64
 		created    uint32
 	}
 	var due []expired
@@ -100,27 +101,20 @@ func removeExpiredGovernanceVotes(s *state.Session, blockTime, blockNum uint32, 
 	// due account was processed anyway; with a budget the ORDER decides which
 	// accounts get deferred, so it has to match.
 	//
-	// gopherd has no account_id. Account.Created stands in for it — hived
-	// assigns ids in creation order, so ordering by creation TIME agrees with
-	// ordering by id for any two accounts created in different blocks. The
-	// residue is accounts created within the same block, where this falls back
-	// to name and hived would use the id. That is the same proxy already
-	// validated for the liquidity-reward tie-break (7838fd8), and it is the
-	// best available until accounts carry a creation sequence.
+	// account_id is Account.Seq; AccountCreatedBefore falls back to
+	// (creation time, name) on state built before accounts carried it.
 	for i := range due {
 		if a, err := objects.GetAccount(s, due[i].name); err == nil {
 			due[i].expiration = a.GovernanceVoteExpiration
-			due[i].created = a.Created
+			due[i].seq, due[i].created = a.Seq, a.Created
 		}
 	}
 	sort.Slice(due, func(i, j int) bool {
-		if due[i].expiration != due[j].expiration {
-			return due[i].expiration < due[j].expiration
+		a, b := &due[i], &due[j]
+		if a.expiration != b.expiration {
+			return a.expiration < b.expiration
 		}
-		if due[i].created != due[j].created {
-			return due[i].created < due[j].created
-		}
-		return due[i].name < due[j].name
+		return objects.AccountCreatedBefore(a.seq, a.created, auth.AccountName(a.name), b.seq, b.created, auth.AccountName(b.name))
 	})
 	if envGhivediffGovExp != "" {
 		for _, e := range due {

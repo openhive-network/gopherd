@@ -74,6 +74,7 @@ func payLiquidityReward(s *state.Session, blockNum, blockTime uint32, d *Databas
 		weight  [16]byte
 		owner   string
 		created uint32
+		seq     uint64
 	}
 	var best candidate
 	_ = s.Range(objects.LiquidityRewardBalanceTable, objects.LiquidityRewardByWeightIndex, nil,
@@ -92,13 +93,13 @@ func payLiquidityReward(s *state.Session, blockNum, blockTime uint32, d *Databas
 			cmp := bytesCompare16(w, best.weight)
 			if best.owner == "" || cmp > 0 {
 				a, _ := objects.GetAccount(s, owner)
-				best = candidate{weight: w, owner: owner, created: a.Created}
+				best = candidate{weight: w, owner: owner, created: a.Created, seq: a.Seq}
 				return true, nil
 			}
 			if cmp == 0 {
 				a, _ := objects.GetAccount(s, owner)
-				if a.Created < best.created || (a.Created == best.created && owner < best.owner) {
-					best = candidate{weight: w, owner: owner, created: a.Created}
+				if objects.AccountCreatedBefore(a.Seq, a.Created, auth.AccountName(owner), best.seq, best.created, auth.AccountName(best.owner)) {
+					best = candidate{weight: w, owner: owner, created: a.Created, seq: a.Seq}
 				}
 			}
 			return true, nil

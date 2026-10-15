@@ -9,6 +9,7 @@
 package objects
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 
@@ -27,6 +28,12 @@ type Account struct {
 	Name auth.AccountName
 	// Created is the time_point_sec at which this account was created.
 	Created uint32
+	// Seq is hived's account_object id plus one: accounts numbered in
+	// creation order, which is the order several hived indexes iterate in
+	// (by_from_to of RC delegations, curator ties, governance expiration).
+	// PutAccount assigns it on an account's first write. 0 means unknown:
+	// state built before the field existed; see AccountCreatedBefore.
+	Seq uint64
 	// Balance is the liquid HIVE balance, in satoshis (1e-3 HIVE).
 	Balance int64
 	// HBDBalance is the liquid HBD balance, in satoshis (1e-3 HBD).
@@ -315,6 +322,7 @@ func AppendAccount(dst []byte, a *Account) []byte {
 	dst = appendI64LE(dst, a.RCAdjustment)
 	dst = appendU32LE(dst, a.LastAccountRecoveryTime)
 	dst = appendI64LE(dst, a.PendingClaimedAccounts) // wide (see legacy 2-byte slot)
+	dst = appendI64LE(dst, int64(a.Seq))
 	return dst
 }
 
@@ -586,6 +594,15 @@ func ReadAccount(src []byte) (Account, error) {
 	if a.PendingClaimedAccounts, err = r.ReadInt64(); err != nil {
 		return a, fmt.Errorf("account.pending_claimed_accounts_wide: %w", err)
 	}
+	// Seq — later schema addition; rows written before it read as 0.
+	if r.AtEnd() {
+		return a, nil
+	}
+	if seq, err := r.ReadInt64(); err != nil {
+		return a, fmt.Errorf("account.seq: %w", err)
+	} else {
+		a.Seq = uint64(seq)
+	}
 	if !r.AtEnd() {
 		return a, errors.New("account: trailing bytes after decode (schema mismatch?)")
 	}
@@ -605,7 +622,57 @@ func PutAccount(s *state.Session, a *Account) {
 		specPutAccount(s, a)
 		return
 	}
-	EnsureAccountStore(s).Put(a)
+	st := EnsureAccountStore(s)
+	if a.Seq == 0 {
+		if _, exists := st.GetRef(a.Name); !exists {
+			a.Seq = NextAccountSeq(s)
+		}
+	}
+	st.Put(a)
+}
+
+// AccountSeqTable holds the singleton account sequence counter: the Seq of
+// the most recently created account.
+const AccountSeqTable state.TableID = 40
+
+var accountSeqKey = []byte{0}
+
+// NextAccountSeq allocates the next account Seq (chainbase's next id + 1).
+func NextAccountSeq(s *state.Session) uint64 {
+	n := AccountSeqCounter(s) + 1
+	SetAccountSeqCounter(s, n)
+	return n
+}
+
+// AccountSeqCounter returns the Seq of the most recently created account.
+func AccountSeqCounter(s *state.Session) uint64 {
+	v, err := s.Get(AccountSeqTable, state.PrimaryIndex, accountSeqKey)
+	if err != nil || len(v) != 8 {
+		return 0
+	}
+	return binary.LittleEndian.Uint64(v)
+}
+
+// SetAccountSeqCounter stores the counter; genesis uses it after numbering
+// its accounts in hived's order.
+func SetAccountSeqCounter(s *state.Session, n uint64) {
+	var b [8]byte
+	binary.LittleEndian.PutUint64(b[:], n)
+	s.Put(AccountSeqTable, state.PrimaryIndex, accountSeqKey, b[:])
+}
+
+// AccountCreatedBefore orders two accounts the way hived's account ids do.
+// Without a Seq on both sides (state from before the field) it falls back to
+// creation time, then name, which agrees except for accounts created in the
+// same block.
+func AccountCreatedBefore(aSeq uint64, aCreated uint32, aName auth.AccountName, bSeq uint64, bCreated uint32, bName auth.AccountName) bool {
+	if aSeq != 0 && bSeq != 0 {
+		return aSeq < bSeq
+	}
+	if aCreated != bCreated {
+		return aCreated < bCreated
+	}
+	return aName < bName
 }
 
 // GetAccount fetches the account named name. Returns ErrNotFound if absent.
