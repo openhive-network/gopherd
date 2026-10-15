@@ -276,7 +276,7 @@ func (d *Database) SelectPendingTransactions(
 			// transaction was being charged for its predecessors.
 			resetRCDifferentialForTx(session, blockNum)
 			rcErr := applyRCForTx(session, &res.SignedTx, blockNum, headBlockTime,
-				int64(res.SignedEnd-res.UnsignedStart), true /* enforce */, hf)
+				int64(res.SignedEnd-res.UnsignedStart), true /* enforce */, false, hf)
 			if rcErr != nil {
 				// Log the payer and the shortfall. Our RC cost accounting is
 				// APPROXIMATE and measurably STRICTER than hived's: the block

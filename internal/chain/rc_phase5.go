@@ -82,7 +82,11 @@ func ResourceUserOf(stx *tx.SignedTransaction) string {
 //   - Mutates payer Account (RCManaCurrent / RCManaLastUpdate).
 //   - No-op if Operations is empty or the tx pays no cost (the C++
 //     subsidized path).
-func applyRCForTx(s *state.Session, stx *tx.SignedTransaction, blockNum, blockTime uint32, txSize int64, enforce bool, hf hardfork.Set) error {
+//
+// stats is set on the block-apply paths and folds the transaction into the
+// pending rc_stats (hived: is_validating_block() || is_replaying_block(),
+// rc_utility.cpp:852); a production trial or admission check leaves it unset.
+func applyRCForTx(s *state.Session, stx *tx.SignedTransaction, blockNum, blockTime uint32, txSize int64, enforce, stats bool, hf hardfork.Set) error {
 	if !hf.Has(hardfork.HF20) {
 		return nil
 	}
@@ -123,9 +127,17 @@ func applyRCForTx(s *state.Session, stx *tx.SignedTransaction, blockNum, blockTi
 	pending.AddPendingUsage(usage, costPerResource)
 	objects.PutRCPendingData(s, &pending)
 
+	info := objects.RCTxInfo{Usage: usage, Cost: costPerResource, Op: -1}
+	if len(stx.Operations) == 1 {
+		info.Op = int(stx.Operations[0].Tag)
+	}
+
 	// 4. Charge the payer's manabar.
 	payer := ResourceUserOf(stx)
 	if payer == "" {
+		if stats {
+			objects.AddRCStats(s, &info)
+		}
 		// hived HF29 (6dc8d6fd8, rc_utility.cpp:507) promoted this from a
 		// NOTIFYALERT to an assertion:
 		//
@@ -144,13 +156,14 @@ func applyRCForTx(s *state.Session, stx *tx.SignedTransaction, blockNum, blockTi
 		}
 		return nil
 	}
-	if cost <= 0 {
+	if cost <= 0 && !stats {
 		return nil
 	}
 	a, err := objects.GetAccount(s, payer)
 	if err != nil {
 		return nil
 	}
+	info.Max = a.MaximumRC()
 	objects.RegenerateRCMana(&a, blockTime)
 	// util::manabar::use_mana (manabar.hpp:87-95) saturates at min_mana,
 	// and rc_utility.cpp:604 calls it with the default, i.e. 0. There is no
@@ -184,6 +197,10 @@ func applyRCForTx(s *state.Session, stx *tx.SignedTransaction, blockNum, blockTi
 	}
 	a.RCManaCurrent = objects.UseMana(a.RCManaCurrent, cost, minMana)
 	objects.PutAccount(s, &a)
+	if stats {
+		info.RC = a.RCManaCurrent
+		objects.AddRCStats(s, &info)
+	}
 	return nil
 }
 
@@ -241,7 +258,7 @@ func ResetRCPendingDataForBlockForTest(s *state.Session) {
 // which is otherwise unreachable: HF29 has no activation block, so no blockNum
 // can ever produce a Set containing it.
 func ApplyRCForTxForTest(s *state.Session, stx *tx.SignedTransaction, blockNum, blockTime uint32, txSize int64, enforce bool, hf hardfork.Set) error {
-	return applyRCForTx(s, stx, blockNum, blockTime, txSize, enforce, hf)
+	return applyRCForTx(s, stx, blockNum, blockTime, txSize, enforce, true, hf)
 }
 
 // resetRCDifferentialForTx is the pre-apply tx hook (HF20+). Clears the

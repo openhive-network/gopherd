@@ -299,13 +299,20 @@ func TestRCPoolPendingDataReset(t *testing.T) {
 		t.Fatalf("archive.Budget[2]: got %d, want 3", arch.Budget[2])
 	}
 
-	// Pending should be reset (Regen back to 0).
+	// The archive keeps the window's starting block (get_starting_block).
+	if arch.BlockNum != 100 {
+		t.Fatalf("archive.BlockNum: got %d, want the window start 100", arch.BlockNum)
+	}
+
+	// Pending restarts from the global regen at the boundary
+	// (reset_stats( rc_pool, block_num, global_regen )).
 	pendingNow, err := objects.GetRCStats(s, objects.RCStatsIDPending)
 	if err != nil {
 		t.Fatalf("pending missing after reset: %v", err)
 	}
-	if pendingNow.Regen != 0 {
-		t.Fatalf("pending.Regen after reset: got %d, want 0", pendingNow.Regen)
+	dgpo, _ := objects.GetDGPO(s)
+	if want := dgpo.TotalVestingShares / (int64(objects.RCRegenTimeSec) / 3); pendingNow.Regen != want {
+		t.Fatalf("pending.Regen after reset: got %d, want %d", pendingNow.Regen, want)
 	}
 	if pendingNow.BlockNum != 28800 {
 		t.Fatalf("pending.BlockNum after reset: got %d, want 28800", pendingNow.BlockNum)

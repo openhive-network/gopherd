@@ -230,16 +230,15 @@ func rcPoolDecay(dyn objects.ResourceDynamics, pool int64) int64 {
 	return int64(result)
 }
 
-// finalizeRCStats archives the pending rc_stats_object row into the
-// archive slot at the day boundary. The pending row is then reset to
-// zero so the next reporting window starts fresh.
+// finalizeRCStats closes the reporting window every rcStatsReportFreqBlocks
+// (HIVE_RC_STATS_REPORT_FREQUENCY = HIVE_BLOCKS_PER_DAY): the pending stats
+// become the archive that rc_api reports, and the pending row restarts from
+// the pool as it stands after this block's update. Mirrors
+// resource_credits::handle_auto_report (rc_utility.cpp:698), which runs at
+// the end of finalize_block, after the pools are updated.
 //
-// Trigger: blockNum > 0 && blockNum % (HIVE_RC_STATS_REPORT_FREQUENCY /
-// HIVE_BLOCK_INTERVAL) == 0 — i.e. once every 9600 blocks (3-sec
-// interval × 28800 sec). We approximate with blockNum %
-// (rcStatsReportFreqSec/3) == 0 to match the C++ pacing.
-//
-// Mirrors hive::chain::rc_plugin::on_finish_block stats archival.
+// The archive keeps the window's STARTING block, as hived's does
+// (get_starting_block), not the block that closed it.
 func finalizeRCStats(s *state.Session, blockNum uint32) {
 	const blocksPerReport = rcStatsReportFreqBlocks
 	if blockNum == 0 || blockNum%blocksPerReport != 0 {
@@ -247,19 +246,20 @@ func finalizeRCStats(s *state.Session, blockNum uint32) {
 	}
 	pending, err := objects.GetRCStats(s, objects.RCStatsIDPending)
 	if err != nil {
-		// Nothing to archive (table empty at first crossing).
+		pending = objects.RCStats{}
+	}
+	objects.FoldRCStats(s, &pending)
+	objects.PutRCStats(s, objects.RCStatsIDArchive, &pending)
+
+	pool, err := objects.GetRCPool(s)
+	if err != nil {
 		return
 	}
-	// Promote pending → archive.
-	archive := pending
-	archive.BlockNum = blockNum
-	objects.PutRCStats(s, objects.RCStatsIDArchive, &archive)
-	// Reset pending. Preserve the running Stamp so per-day chains link.
-	stamp := pending.Stamp
-	objects.PutRCStats(s, objects.RCStatsIDPending, &objects.RCStats{
-		BlockNum: blockNum,
-		Stamp:    stamp,
-	})
+	var regen int64
+	if dgpo, err := objects.GetDGPO(s); err == nil {
+		regen = dgpo.TotalVestingShares / rcRegenBlocks
+	}
+	objects.ResetRCStats(s, &pending, blockNum, regen, &pool)
 }
 
 // handleVestingWithdrawalRCImpact is called when an account's effective
