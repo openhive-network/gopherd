@@ -281,6 +281,9 @@ func cmdNode(args []string) int {
 		return 1
 	}
 	defer app.close()
+	// pprof comes up before any replay: a replay from genesis runs for hours
+	// and is the part most worth profiling.
+	app.startPprof()
 
 	if cfg.sourceBlockLog != "" {
 		// Self-replay path. No peers, no sync — just stream blocks from
@@ -1254,6 +1257,20 @@ func (a *app) recover() error {
 // chain.Database.SetOnBlockApplied which we intercept to (1) write to the
 // block_log writer + (2) compare against --verify-against if set + (3)
 // short-circuit at --target-block.
+// startPprof serves net/http/pprof at --pprof-addr, if set. DefaultServeMux
+// carries the handlers registered by the net/http/pprof import.
+func (a *app) startPprof() {
+	if a.cfg.pprofAddr == "" {
+		return
+	}
+	go func() {
+		a.logger.printf("pprof listening on %s (heap: /debug/pprof/heap)", a.cfg.pprofAddr)
+		if err := http.ListenAndServe(a.cfg.pprofAddr, nil); err != nil {
+			a.logger.printf("WARN pprof server: %v", err)
+		}
+	}()
+}
+
 func (a *app) run() error {
 	seeds := []string{}
 	if !a.cfg.disableMainSeeds {
@@ -1313,16 +1330,6 @@ func (a *app) run() error {
 
 	// Read-only JSON-RPC API (opt-in). Serves committed state; independent of
 	// the p2p layer. Bind loopback unless deliberately exposed.
-	if a.cfg.pprofAddr != "" {
-		go func() {
-			// DefaultServeMux carries the pprof handlers registered by the
-			// net/http/pprof import.
-			a.logger.printf("pprof listening on %s (heap: /debug/pprof/heap)", a.cfg.pprofAddr)
-			if err := http.ListenAndServe(a.cfg.pprofAddr, nil); err != nil {
-				a.logger.printf("WARN pprof server: %v", err)
-			}
-		}()
-	}
 	if a.cfg.apiEndpoint != "" {
 		// get_key_references answers from a public-key index. State replayed or
 		// snapshotted before that index existed carries no rows, and a
