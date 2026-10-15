@@ -1121,7 +1121,7 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 				// update_global_dynamic_data runs after the tx loop). Regenerating on
 				// the new block.s time credited every payer three extra seconds.
 				rcErr := applyRCForTx(session, &txRes.SignedTx, blockNum, headBlockTime,
-					int64(txRes.SignedEnd-txRes.UnsignedStart), opts.EnforceRC, hf)
+					int64(txRes.SignedEnd-txRes.UnsignedStart), opts.EnforceRC, true, hf)
 				if rcErr != nil {
 					txFailed = true
 					failOp = "tx-insufficient-rc"
