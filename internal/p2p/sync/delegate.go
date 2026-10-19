@@ -1436,8 +1436,17 @@ func (d *Delegate) noteTxAdvertWinner(p *node.Peer, id block.ID) {
 	if c := p.Conn(); c != nil && c.RemoteAddr() != nil {
 		addr = c.RemoteAddr().String()
 	}
+	// Inbound peers come back from a new ephemeral port on every reconnect,
+	// so the key set grows for as long as the node runs; cap it like the
+	// TX-REJECT tally.
+	if _, ok := d.advertWins[addr]; !ok && len(d.advertWins) >= advertWinsCap {
+		addr = "other"
+	}
 	d.advertWins[addr]++
 }
+
+// advertWinsCap bounds the TX-FIRST tally's distinct peer addresses.
+const advertWinsCap = 256
 
 // TxAdvertWinners returns peers ranked by how often they were FIRST to offer a
 // transaction, best first. These are the peers worth pinning as seeds.
