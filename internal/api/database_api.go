@@ -216,6 +216,11 @@ func (s *Server) mGetDGPO(legacy bool) jsonrpc.Handler {
 			if e != nil {
 				return e
 			}
+			// Fast confirmations move the LIB between blocks; the DGPO only
+			// catches up at the next applied block.
+			if lib := s.chain.FastLIB(); lib > d.LastIrreversibleBlockNum && lib <= d.HeadBlockNumber {
+				d.LastIrreversibleBlockNum = lib
+			}
 			out = dgpoResult(d, legacy)
 			return nil
 		}); err != nil {

@@ -17,8 +17,8 @@ const hundredPercentBP uint32 = 10000
 // hive::chain::database::update_last_irreversible_block
 // (libraries/chain/database.cpp:2868). Pre-fast-confirm (HF26-) it computes
 // LIB as the (75%) median of the active witness schedule's
-// last_confirmed_block_num values. Post-fast-confirm uses witness
-// fast-confirm transactions, not modeled here yet.
+// last_confirmed_block_num values. Once fast confirmations arrive it also
+// takes the fork-database search over them (fast_confirm.go).
 //
 // LIB is monotonically non-decreasing — never moves backwards.
 func (d *Database) updateLastIrreversibleBlock(s *state.Session) {
@@ -79,6 +79,21 @@ func (d *Database) updateLastIrreversibleBlock(s *state.Session) {
 		offset = len(confirmed) - 1
 	}
 	newLIB := confirmed[offset]
+	// Live, with fast confirmations arriving, hived searches its fork database
+	// instead (database.cpp:3054). Replay sees no confirmations and keeps the
+	// median above, as hived's replay does.
+	if f := d.fastLIB.Load(); f > newLIB {
+		newLIB = f
+	}
+	if len(d.fcApproved) > 0 {
+		old := max(newLIB, dgpoRef.LastIrreversibleBlockNum)
+		if f := d.fastConfirmLIB(wsRef.CurrentShuffledWitnesses, dgpoRef.HeadBlockNumber, old); f > newLIB {
+			newLIB = f
+			d.dropSettledApprovals(f)
+		}
+	}
+	newLIB = min(newLIB, dgpoRef.HeadBlockNumber)
+	d.fastLIB.Store(0)
 	if newLIB > dgpoRef.LastIrreversibleBlockNum {
 		objects.MutateDGPO(s, func(p *objects.DynamicGlobalProperty) {
 			p.LastIrreversibleBlockNum = newLIB

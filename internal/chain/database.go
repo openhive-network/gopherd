@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"gopherd/internal/chain/evaluator"
 	"gopherd/internal/crypto"
@@ -186,6 +187,16 @@ type Database struct {
 	// resolve tip forks. nil until the first PushLiveBlock. Single-owner (the
 	// applyLoop goroutine); no lock of its own.
 	fork *forkDB
+
+	// Fast confirmation (fast_confirm.go): the recently applied main-branch
+	// blocks (written under the applyMu write lock), each scheduled witness's
+	// newest approval (fcMu, or the write lock), and the LIB those approvals
+	// reached since the last applied block.
+	fcRing     [fcRingSize]fcBlock
+	fcMu       sync.Mutex
+	fcApproved map[string]block.ID
+	fastLIB    atomic.Uint32
+	fcAccepted atomic.Uint64
 
 	// forkPrunedBelow is the horizon the fork DAG has already been pruned to,
 	// so the O(n) sweep runs only when the irreversible block actually moves.
@@ -1429,6 +1440,9 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 
 	// LIB recompute runs after the new schedule + producer-confirm are
 	// in place. Mirrors database.cpp:2870 update_last_irreversible_block.
+	if dgpoRef, ok := objects.GetDGPORef(session); ok {
+		d.noteAppliedForFastConfirm(blockNum, block.ID(dgpoRef.HeadBlockID), hdr.Witness)
+	}
 	d.updateLastIrreversibleBlock(session)
 
 	// Re-read dgpo so the returned value reflects per-block hook

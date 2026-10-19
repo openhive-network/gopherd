@@ -779,6 +779,14 @@ func (p *Plugin) AddPendingRaw(body []byte) error {
 	if len(res.SignedTx.Operations) == 0 {
 		return errors.New("witness.AddPendingRaw: tx has no operations")
 	}
+	// A fast-confirm never enters the mempool: hived's chain_plugin hands it
+	// to process_fast_confirm_transaction instead (chain_plugin.cpp:1103).
+	if p.Chain != nil && chain.IsFastConfirmTx(&res.SignedTx) {
+		if err := p.Chain.ProcessFastConfirm(body); err != nil {
+			return fmt.Errorf("witness.AddPendingRaw: fast-confirm: %w", err)
+		}
+		return nil
+	}
 	if p.Chain != nil {
 		if verr := p.Chain.ValidateIncomingTx(body); verr != nil {
 			// Record the rejection AGAINST THE TXID so CompareProducedBlock can
