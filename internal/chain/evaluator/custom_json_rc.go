@@ -8,6 +8,7 @@ import (
 	"math/bits"
 	"sort"
 	"strconv"
+	"strings"
 
 	"gopherd/internal/protocol/auth"
 	"gopherd/internal/protocol/hardfork"
@@ -226,7 +227,8 @@ func checkRCOpTag(tag json.RawMessage, name string) error {
 // decodeDelegateRC reads delegate_rc_operation's reflected fields. Unknown
 // fields (extensions) are ignored and missing ones keep their zero value, as
 // fc's from_variant does; validateDelegateRC then refuses what is invalid.
-// max_rc is an int64, which fc reads from a JSON number or a numeric string.
+// max_rc is an int64, which fc reads from a JSON number or a numeric string
+// (see jsonInt64).
 // The tuple form [from, [delegatees], max_rc, extensions] is accepted as well.
 func decodeDelegateRC(value json.RawMessage) (DelegateRCParams, error) {
 	var p DelegateRCParams
@@ -271,16 +273,48 @@ func decodeDelegateRC(value json.RawMessage) (DelegateRCParams, error) {
 	return p, nil
 }
 
+// jsonInt64 reads an int64 the way fc does (json.cpp number_from_stream, then
+// variant::as_int64). A number with a fraction is a double, truncated toward
+// zero: delegate_rc max_rc 8082000000.000001 is a delegation of 8082000000 on
+// mainnet, and refusing it left gopherd without those delegations. A positive
+// integer is read as uint64 and cast. An exponent makes fc read the token as a
+// string, which then fails the integer cast, so it is refused here too.
 func jsonInt64(raw json.RawMessage) (int64, error) {
+	// json.Number would also take a quoted "1.5"; fc casts a string strictly.
 	var n json.Number
-	if err := json.Unmarshal(raw, &n); err == nil {
-		return n.Int64()
+	if err := json.Unmarshal(raw, &n); err == nil && !isJSONString(raw) {
+		s := n.String()
+		switch {
+		case strings.ContainsAny(s, "eE"):
+			return 0, fmt.Errorf("couldn't parse int64_t from %q", s)
+		case strings.Contains(s, "."):
+			f, err := strconv.ParseFloat(s, 64)
+			if err != nil {
+				return 0, err
+			}
+			return int64(f), nil
+		case strings.HasPrefix(s, "-"):
+			return strconv.ParseInt(s, 10, 64)
+		}
+		u, err := strconv.ParseUint(s, 10, 64)
+		return int64(u), err
 	}
 	var str string
 	if err := json.Unmarshal(raw, &str); err != nil {
 		return 0, err
 	}
 	return strconv.ParseInt(str, 10, 64)
+}
+
+func isJSONString(raw json.RawMessage) bool {
+	for _, c := range raw {
+		switch c {
+		case ' ', '\t', '\n', '\r':
+			continue
+		}
+		return c == '"'
+	}
+	return false
 }
 
 func isJSONArray(raw json.RawMessage) bool {
