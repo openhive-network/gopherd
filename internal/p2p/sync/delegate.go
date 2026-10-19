@@ -1135,6 +1135,13 @@ func (d *Delegate) PublishBlock(rawBlock []byte, blockNum uint32) error {
 }
 
 // queueTxAdvert records a newly admitted transaction for relay.
+// AdvertiseTx relays a transaction this node created itself (our own
+// fast-confirms), by the same identity as a relayed one. The caller must have
+// made it servable through the mempool's PendingRaw first.
+func (d *Delegate) AdvertiseTx(body []byte) {
+	d.queueTxAdvert(block.ID(crypto.RIPEMD160(body)))
+}
+
 func (d *Delegate) queueTxAdvert(id block.ID) {
 	if !d.cfg.Serve || !d.cfg.RelayTransactions {
 		return // passive, or relay disabled

@@ -103,7 +103,7 @@ func (d *Database) ProcessFastConfirm(raw []byte) error {
 	}
 
 	witness := string(approve.Witness)
-	sched, ok := d.irreversibilitySchedule(session, dgpo.HeadBlockNumber)
+	sched, ok := irreversibilitySchedule(session, dgpo.HeadBlockNumber)
 	if !ok || !containsName(sched, witness) {
 		return nil // not on the schedule: ignored
 	}
@@ -133,7 +133,7 @@ func (d *Database) ProcessFastConfirm(raw []byte) error {
 // irreversibilitySchedule returns the witnesses whose opinions decide
 // irreversibility: get_witness_schedule_object_for_irreversibility
 // (database.cpp:2928), the FUTURE schedule from HF26.
-func (d *Database) irreversibilitySchedule(s *state.Session, headNum uint32) ([]auth.AccountName, bool) {
+func irreversibilitySchedule(s *state.Session, headNum uint32) ([]auth.AccountName, bool) {
 	wsRef, ok := objects.GetWitnessScheduleRef(s)
 	if !ok {
 		return nil, false
@@ -147,6 +147,14 @@ func (d *Database) irreversibilitySchedule(s *state.Session, headNum uint32) ([]
 		return nil, false
 	}
 	return wsRef.CurrentShuffledWitnesses, true
+}
+
+// IrreversibilitySchedule is irreversibilitySchedule for callers outside the
+// chain package that hold a read session (the witness plugin, deciding whom
+// to fast-confirm for). nil when there is no schedule yet.
+func IrreversibilitySchedule(s *state.Session, headNum uint32) []auth.AccountName {
+	sched, _ := irreversibilitySchedule(s, headNum)
+	return sched
 }
 
 func containsName(names []auth.AccountName, name string) bool {
