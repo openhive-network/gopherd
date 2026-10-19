@@ -151,11 +151,24 @@ func (c *Conn) Send(typeTag proto.MessageType, body []byte) error {
 	defer c.sendMu.Unlock()
 	ciphertext := make([]byte, len(padded))
 	c.encrypter.CryptBlocks(ciphertext, padded)
+	// A peer that stops reading would otherwise block this write, and every
+	// sender queued behind sendMu, forever: the heartbeat that should drop
+	// it is itself stuck in Send. Net.Conns without deadlines (net.Pipe in
+	// tests) just ignore this.
+	_ = c.raw.SetWriteDeadline(time.Now().Add(sendTimeout))
 	if _, err := c.raw.Write(ciphertext); err != nil {
+		// The CBC stream is out of step after a partial write, so the
+		// connection is unusable; closing it ends the read loop too, which
+		// tears the peer down.
+		_ = c.raw.Close()
 		return err
 	}
 	return nil
 }
+
+// sendTimeout bounds one message write. The largest message is a block of
+// at most 2 MB, which even a slow peer takes far less than this to accept.
+const sendTimeout = 2 * time.Minute
 
 // Receive reads + decrypts one message. Returns (msgType, body, err).
 //
