@@ -430,7 +430,8 @@ func (d *Database) validateIncomingTxLocked(raw []byte) error {
 	// the reason to exclude them; the reason is that no block may carry one.
 	//
 	// (The AuthorityWitness category is still implemented and correct. It is
-	// what a fast-confirm handler would need, if we implement one.)
+	// what ProcessFastConfirm verifies them with; the witness plugin routes a
+	// single-op fast-confirm there before it can reach this check.)
 	for i := range res.SignedTx.Operations {
 		if OpExcludedFromBlocks(res.SignedTx.Operations[i].Tag) {
 			return fmt.Errorf("op %d: %s is a fast-confirm message and may never be included in a block (hive_evaluator.cpp:615)",
