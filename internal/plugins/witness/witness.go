@@ -1181,9 +1181,19 @@ func (p *Plugin) maybeProduceBlock() error {
 		blockNum, prod.Account, nextSlotTime, len(rawBlock), selInfo)
 	p.mu.Lock()
 	p.produced++
-	p.pending = p.pending[:0] // drain the mempool
+	p.drainPendingLocked()
 	p.mu.Unlock()
 	return nil
+}
+
+// drainPendingLocked empties the mempool after a produced block. The id and
+// advert indexes go with it: every removal path walks pending, so entries
+// left in them were never freed and their ids could not be re-admitted.
+// Caller holds p.mu.
+func (p *Plugin) drainPendingLocked() {
+	p.pending = p.pending[:0]
+	clear(p.pendingIDs)
+	clear(p.pendingByAdvert)
 }
 
 // dryRunProduce builds + signs a block and verifies it WITHOUT applying or
