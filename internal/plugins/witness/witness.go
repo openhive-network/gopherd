@@ -149,7 +149,13 @@ type Plugin struct {
 	// that fetches what we advertised gets served. Advertising something we
 	// cannot then provide is what gets a node dropped.
 	pendingByAdvert map[[20]byte][]byte
-	dry             DryRunStats
+	// fastConfirms holds the bodies of recently accepted fast-confirm
+	// transactions by advert id. They never enter the mempool but are relayed
+	// like any accepted transaction, so they must be servable too; the ring
+	// (fastConfirmOrder) keeps the newest fastConfirmKeep of them.
+	fastConfirms     map[[20]byte][]byte
+	fastConfirmOrder [][20]byte
+	dry              DryRunStats
 	// lastDrySlot dedupes dry-run production: the loop ticks every 500ms but a
 	// slot is 3s, so without this one slot would yield ~6 identical blocks.
 	lastDrySlot uint32
@@ -701,7 +707,34 @@ func (p *Plugin) DryRunMatchRate() (matched, compared int) {
 func (p *Plugin) PendingRaw(advertID [20]byte) []byte {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.pendingByAdvert[advertID]
+	if raw, ok := p.pendingByAdvert[advertID]; ok {
+		return raw
+	}
+	return p.fastConfirms[advertID]
+}
+
+// fastConfirmKeep is how many relayed fast-confirms stay servable: 21
+// witnesses approve every block, so 512 is about 8 blocks of them, well past
+// the time a peer takes to fetch what we advertised.
+const fastConfirmKeep = 512
+
+// keepFastConfirm makes an accepted fast-confirm servable to peers.
+func (p *Plugin) keepFastConfirm(body []byte) {
+	id := AdvertIDOf(body)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.fastConfirms == nil {
+		p.fastConfirms = make(map[[20]byte][]byte, fastConfirmKeep)
+	}
+	if _, dup := p.fastConfirms[id]; dup {
+		return
+	}
+	p.fastConfirms[id] = append([]byte(nil), body...) // the p2p buffer is reused
+	p.fastConfirmOrder = append(p.fastConfirmOrder, id)
+	if len(p.fastConfirmOrder) > fastConfirmKeep {
+		delete(p.fastConfirms, p.fastConfirmOrder[0])
+		p.fastConfirmOrder = append(p.fastConfirmOrder[:0], p.fastConfirmOrder[1:]...)
+	}
 }
 
 // PendingCount reports the current mempool depth.
@@ -785,6 +818,7 @@ func (p *Plugin) AddPendingRaw(body []byte) error {
 		if err := p.Chain.ProcessFastConfirm(body); err != nil {
 			return fmt.Errorf("witness.AddPendingRaw: fast-confirm: %w", err)
 		}
+		p.keepFastConfirm(body)
 		return nil
 	}
 	if p.Chain != nil {
