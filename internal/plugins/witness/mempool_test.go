@@ -432,3 +432,25 @@ func TestPendingRawServesByAdvertID(t *testing.T) {
 		t.Fatal("still serving an evicted transaction — the advert index is out of lockstep")
 	}
 }
+
+// TestDrainAfterProduceClearsIndexes: the post-production drain emptied the
+// queue but left its id and advert indexes, which no removal path reaches
+// once the queue no longer holds the entry. They grew for as long as the node
+// produced, and the stale ids refused re-admission.
+func TestDrainAfterProduceClearsIndexes(t *testing.T) {
+	p := newMempoolPlugin(t)
+	a, aid := rawTx(t, "drained", 1<<30)
+	if !p.AddPendingTx(a, aid, 1<<30) {
+		t.Fatal("seed insert refused")
+	}
+	p.mu.Lock()
+	p.drainPendingLocked()
+	n, ids, adverts := len(p.pending), len(p.pendingIDs), len(p.pendingByAdvert)
+	p.mu.Unlock()
+	if n != 0 || ids != 0 || adverts != 0 {
+		t.Fatalf("after drain: pending=%d pendingIDs=%d pendingByAdvert=%d, want all 0", n, ids, adverts)
+	}
+	if !p.AddPendingTx(a, aid, 1<<30) {
+		t.Fatal("drained transaction could not be re-admitted")
+	}
+}
