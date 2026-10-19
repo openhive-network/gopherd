@@ -224,7 +224,16 @@ func newCommentStore() *CommentStore {
 // SetColdByRootEnabled controls whether eviction/spill writes the by-root cold
 // index. Set false once HF17 is active (post-HF17 never reads it). See the field
 // doc. Idempotent; cheap to call per block.
-func (s *CommentStore) SetColdByRootEnabled(b bool) { s.coldByRootEnabled = b }
+//
+// Turning it off also drops coldRoot: its only reader is that pre-HF17 walk,
+// and a snapshot load past HF17 used to fill it with one entry per cold
+// thread (~3 GB at block 110M) that stayed for the life of the process.
+func (s *CommentStore) SetColdByRootEnabled(b bool) {
+	if !b && len(s.coldRoot) > 0 {
+		s.coldRoot = make(map[commentPK]int)
+	}
+	s.coldByRootEnabled = b
+}
 
 // SetColdTier attaches (or detaches, with nil) the on-disk cold tier. Must be
 // called before any eviction. Unset → pure in-RAM behavior.

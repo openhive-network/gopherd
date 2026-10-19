@@ -813,6 +813,14 @@ func newApp(cfg flags) (*app, error) {
 				}
 			}
 		}
+		// Past HF17 the by-root cold index is never read (SetColdByRootEnabled);
+		// left on, the load writes every cold comment twice and keeps a
+		// per-thread count map of several GB.
+		if commentStore != nil {
+			if bn, berr := snapshotManifestBlock(cfg.loadSnapshot); berr == nil && hardfork.SetForBlock(bn+1).Has(hardfork.HF17) {
+				commentStore.SetColdByRootEnabled(false)
+			}
+		}
 		fmt.Fprintf(os.Stderr, "gopherd node: loading snapshot from %s (%s)...\n",
 			cfg.loadSnapshot, humanDirSize(cfg.loadSnapshot))
 		man, err := snap.Load(stateDB, cfg.loadSnapshot)

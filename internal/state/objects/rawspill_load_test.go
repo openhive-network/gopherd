@@ -180,3 +180,20 @@ func TestSelfContainedSnapshotRawSpillLoad(t *testing.T) {
 		})
 	}
 }
+
+// TestColdByRootOffDropsColdRoot: the per-thread cold counts only serve the
+// pre-HF17 by-root walk, so switching the index off releases them instead of
+// carrying them for the life of the process.
+func TestColdByRootOffDropsColdRoot(t *testing.T) {
+	cs := newCommentStore()
+	cs.coldRoot[newCommentPK("alice", "root")] = 3
+	cs.SetColdByRootEnabled(true)
+	if len(cs.coldRoot) != 1 {
+		t.Fatal("enabling disturbed coldRoot")
+	}
+	cs.SetColdByRootEnabled(false)
+	if len(cs.coldRoot) != 0 {
+		t.Fatalf("coldRoot kept %d entries after the by-root index was turned off", len(cs.coldRoot))
+	}
+	cs.SetColdByRootEnabled(false) // the per-block call stays cheap and safe
+}
