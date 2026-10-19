@@ -121,8 +121,11 @@ func recoverBlockSignerCached(rawBlock []byte, cache *signerCache, hintID block.
 //
 // Capacity is bounded by the same eviction strategy as signerCache (drop
 // oldest 1/4 when full). Each cached value is a slice of slices of
-// 33-byte PublicKeys; even at 100 txs × 4 sigs that's ~14 KB per block,
-// so 8192 entries cap memory at ~115 MB worst case.
+// 33-byte PublicKeys, up to ~14 KB per block. It is only filled for
+// non-historical blocks, where copies arrive within seconds and a fork
+// switch re-pushes at most the fork database's window (~66 blocks), so 256
+// blocks (~13 min) is plenty. The old 8192 took 6.8 h at the head to fill
+// and then held ~100 MB.
 type txSigCache struct {
 	mu    sync.RWMutex
 	cap   int
@@ -130,7 +133,7 @@ type txSigCache struct {
 	keys  map[block.ID][][]crypto.PublicKey
 }
 
-const txSigCacheCap = 8192
+const txSigCacheCap = 256
 
 func newTxSigCache() *txSigCache {
 	return &txSigCache{
