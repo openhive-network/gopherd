@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"errors"
+	"fmt"
 	"testing"
 
 	"gopherd/internal/crypto"
@@ -452,5 +453,31 @@ func TestDrainAfterProduceClearsIndexes(t *testing.T) {
 	}
 	if !p.AddPendingTx(a, aid, 1<<30) {
 		t.Fatal("drained transaction could not be re-admitted")
+	}
+}
+
+// TestKeptFastConfirmsAreServable: a relayed fast-confirm is advertised like
+// any accepted transaction, so PendingRaw must serve it although it never
+// enters the mempool, and only the newest fastConfirmKeep stay.
+func TestKeptFastConfirmsAreServable(t *testing.T) {
+	p := newMempoolPlugin(t)
+	body := func(i int) []byte { return []byte(fmt.Sprintf("fast-confirm-%d", i)) }
+	first := body(0)
+	p.keepFastConfirm(first)
+	first[0] = 'X' // the caller's buffer is reused
+	if got := p.PendingRaw(AdvertIDOf(body(0))); string(got) != string(body(0)) {
+		t.Fatalf("served %q, want %q", got, body(0))
+	}
+	for i := 1; i <= fastConfirmKeep; i++ {
+		p.keepFastConfirm(body(i))
+	}
+	if p.PendingRaw(AdvertIDOf(body(0))) != nil {
+		t.Fatal("oldest fast-confirm still served past the cap")
+	}
+	if p.PendingRaw(AdvertIDOf(body(fastConfirmKeep))) == nil {
+		t.Fatal("newest fast-confirm not served")
+	}
+	if len(p.fastConfirms) != fastConfirmKeep || len(p.fastConfirmOrder) != fastConfirmKeep {
+		t.Fatalf("kept %d/%d, want %d", len(p.fastConfirms), len(p.fastConfirmOrder), fastConfirmKeep)
 	}
 }
