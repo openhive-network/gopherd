@@ -127,6 +127,14 @@ type Plugin struct {
 	// counted separately (DryRunStats.Ours).
 	DryRunEverySlot bool
 
+	// FastConfirm makes BuildFastConfirms sign approvals of each fresh block
+	// for our scheduled producers, as hived's witness plugin does by default.
+	// Off unless asked for: it publishes votes under the witness's name.
+	FastConfirm bool
+	// lastFastConfirmNum is the newest block approved; only the apply loop
+	// touches it.
+	lastFastConfirmNum uint32
+
 	mu sync.Mutex
 	// pending is the mempool: whole signed transactions, held as their VERBATIM
 	// wire bytes.

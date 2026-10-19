@@ -346,6 +346,7 @@ type flags struct {
 	// action taken by an unproven implementation.
 	witnessKeyFile   string
 	produceReal      bool
+	fastConfirm      bool
 	produceDryRun    bool
 	produceEverySlot bool
 	// relayTransactions turns on transaction relay. Off by default: the first
@@ -461,6 +462,7 @@ func parseNodeFlags(args []string) flags {
 	fs.BoolVar(&f.relayTransactions, "relay-transactions", false, "Relay transactions to peers (advertise by hived's legacy message hash + serve bodies on request). Without it the node only CONSUMES transactions, arriving at the end of every propagation chain — measured as holding 2 pending at build time where the producing witness held 28-33. Default off because the first implementation advertised the wrong identity and got us dropped 234 times; re-enable deliberately and watch for \"You sent me a message that I didn't request\".")
 	fs.StringVar(&f.witnessKeyFile, "witness-keys", "", "file of `account WIF` lines (one per witness). Keys go in a file, not a flag, so they aren't exposed in ps output. Requires --produce or --produce-dry-run")
 	fs.BoolVar(&f.produceReal, "produce", false, "REAL block production: when the schedule names one of our witnesses AND the chain's registered signing key for it matches the key we hold, build, sign, APPLY and BROADCAST the block. If the key does not match, log it and skip the slot (mirrors hived, which will not emit a block the network would reject). Requires --witness-keys; mutually exclusive with --produce-dry-run")
+	fs.BoolVar(&f.fastConfirm, "fast-confirm", false, "with --produce, sign and broadcast a witness_block_approve for every fresh block while one of our witnesses is on the schedule and its registered signing key matches ours, as hived's witness plugin does. It lets the network make blocks irreversible within a second. Off by default: it publishes votes under the witness's name")
 	fs.BoolVar(&f.produceDryRun, "produce-dry-run", false, "exercise the full block-production pipeline (schedule -> assemble -> merkle -> sign -> self-verify -> timing) and DISCARD every block. Never applies, never broadcasts. Use this to measure the pipeline without touching the network; --produce is the real mode")
 	fs.BoolVar(&f.produceEverySlot, "produce-dry-run-every-slot", false, "with --produce-dry-run, build a block EVERY slot instead of only when the schedule names one of our witnesses. On mainnet we are never scheduled, so this is what produces measurable data; such blocks are built for our own account and logged as SIMULATED")
 	fs.StringVar(&f.persistStateDir, "persist-state-dir", "", "ZERO-SNAPSHOT RESTART: keep all non-cold typed state in a persiststore container here — mmap-backed, like hived's chainbase shared_memory.bin. Saved on clean exit/SIGTERM. ⚠️ DOES NOT DELIVER A FAST RESTART AT MAINNET SCALE (measured 2026-08-10): on the pebble cold tier the load re-spills the entire ~25GB comment corpus, and a resume was still running at 22 MINUTES with RSS climbing to 25.6GiB — slower than the ~24min snapshot load it replaces. Only PersistCold implements durableColdTier (which would skip that re-spill), and building a persist cold tier showed ~10x write amplification (260GB written for a 25.6GB corpus) so it is not usable yet either. Leave this OFF unless you are working on exactly this. Takes precedence over --load-snapshot")
@@ -1330,6 +1332,7 @@ func (a *app) run() error {
 		a.witness = witness.New(a.chain, a.state, producers)
 		a.witness.DryRun = a.cfg.produceDryRun
 		a.witness.DryRunEverySlot = a.cfg.produceEverySlot
+		a.witness.FastConfirm = a.cfg.produceReal && a.cfg.fastConfirm
 		if a.cfg.produceDryRun {
 			// Dry run needs no broadcaster and starts immediately: it never
 			// publishes anything, so it does not depend on the p2p node.
@@ -1539,7 +1542,25 @@ func (a *app) run() error {
 			w.CompareProducedBlock(num, chain.BlockTransactionIDs(raw))
 		}
 	}
-	syncDel := p2psync.New(syncCfg, a.chain)
+	// Our own fast-confirms: approve each fresh block, apply the approval to
+	// our LIB like a received one, and advertise it to peers.
+	var syncDel *p2psync.Delegate
+	if a.witness != nil && a.witness.FastConfirm {
+		w, prev := a.witness, syncCfg.OnBlockApplied
+		syncCfg.OnBlockApplied = func(raw []byte, num uint32, src *p2pnode.Peer) {
+			if prev != nil {
+				prev(raw, num, src)
+			}
+			for _, body := range w.BuildFastConfirms(raw, num, time.Now()) {
+				if err := w.AddPendingRaw(body); err != nil {
+					a.logger.printf("fast-confirm for block %d refused by our own chain: %v", num, err)
+					continue
+				}
+				syncDel.AdvertiseTx(body)
+			}
+		}
+	}
+	syncDel = p2psync.New(syncCfg, a.chain)
 	a.p2p.SetDelegate(syncDel)
 	if err := a.p2p.Start(); err != nil {
 		return fmt.Errorf("p2p start: %w", err)
