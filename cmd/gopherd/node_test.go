@@ -452,6 +452,35 @@ func TestWipeScratchColdTier(t *testing.T) {
 	}
 }
 
+// TestNextBlockLink: a block_log entry is accepted only when its previous is
+// the block before it, so a missing entry (every later block one slot early)
+// stops the replay instead of applying blocks under the wrong numbers.
+func TestNextBlockLink(t *testing.T) {
+	mk := func(prev block.ID, ts uint32) []byte {
+		sh := block.SignedHeader{Header: block.Header{Previous: prev, Timestamp: ts, Witness: "initminer", Extensions: []byte{0}}}
+		return block.MarshalSignedHeader(nil, &sh)
+	}
+	b1 := mk(block.ID{}, 3)
+	id1, err := nextBlockLink(b1, 1, block.ID{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b2 := mk(id1, 6)
+	id2, err := nextBlockLink(b2, 2, id1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b3 := mk(id2, 9)
+	// Block 2 missing: block 3 read from position 2.
+	if _, err := nextBlockLink(b3, 2, id1); err == nil {
+		t.Fatal("block 3 accepted in block 2's slot")
+	}
+	// Block 2 written twice.
+	if _, err := nextBlockLink(b2, 3, id2); err == nil {
+		t.Fatal("a repeated block 2 accepted as block 3")
+	}
+}
+
 // TestAfterApplyRefusesOutOfPlaceBlock: the block_log writer only takes the
 // block after its head; anything else is refused before it is written.
 func TestAfterApplyRefusesOutOfPlaceBlock(t *testing.T) {
