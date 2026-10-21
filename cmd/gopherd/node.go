@@ -1040,6 +1040,16 @@ func (a *app) close() {
 		a.p2p.Stop()
 		a.p2p = nil
 	}
+	// The fork-aware tip is applied but not finalized, so it is not in the
+	// block_log yet: the flush below would persist it and the snapshot would
+	// save it, and the next start would append the following block in its
+	// slot. Undo it instead; peers supply it again after the restart.
+	if a.chain != nil {
+		if num, _, _, ok := a.chain.ReversiblePending(); ok {
+			a.chain.UndoReversible()
+			a.logger.printf("shutdown: undid reversible tip block %d (not yet in the block_log)", num)
+		}
+	}
 	// Flush any partial batched-commit before closing pebble — otherwise
 	// up to commitBatch blocks of K/V state would be lost. The block_log
 	// is independent so the bytes survive regardless, but the persisted
