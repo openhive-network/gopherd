@@ -302,6 +302,10 @@ func cmdNode(args []string) int {
 		fmt.Fprintf(os.Stderr, "gopherd node: %v\n", err)
 		return 1
 	}
+	if t := cfg.targetBlock; t > 0 && app.chain != nil && headAtLeast(app.chain, t) {
+		app.logger.printf("reached --target-block %d in the local replay; stopping", t)
+		return 0
+	}
 
 	if err := app.run(); err != nil {
 		fmt.Fprintf(os.Stderr, "gopherd node: %v\n", err)
@@ -1194,6 +1198,11 @@ func (a *app) recover() error {
 		a.logger.printf("replay: warning — state says head %d but the block_log ends at %d; replaying only %d blocks, peers supply the rest", a.recoverFrom, r.Head(), r.Head())
 		target = r.Head()
 	}
+	if t := a.cfg.targetBlock; t > 0 && t < target {
+		// --target-block also bounds the local replay, so a snapshot can be
+		// brought to an exact height without peers (state diffs).
+		target = t
+	}
 	if target == 0 {
 		return nil
 	}
@@ -2038,4 +2047,9 @@ func (a *app) headBlockOrZero() uint32 {
 		return 0
 	}
 	return h
+}
+
+func headAtLeast(c *chain.Database, n uint32) bool {
+	h, err := c.HeadBlock()
+	return err == nil && h >= n
 }
