@@ -175,6 +175,17 @@ func verifyBlockSignatureWithCache(s *state.Session, hdr *block.SignedHeader, ra
 	return nil
 }
 
+// CheckMerkleRoot reports whether a raw signed block's transactions hash to
+// the merkle root in its header (for blocks taken from outside the chain, such
+// as the ones a block_log repair fetches from peers).
+func CheckMerkleRoot(rawBlock []byte, blockNum uint32) error {
+	hdr, hdrLen, err := block.UnmarshalSignedHeader(rawBlock)
+	if err != nil {
+		return err
+	}
+	return validateMerkleRoot(&hdr, rawBlock, hdrLen, blockNum)
+}
+
 // validateMerkleRoot rebuilds the merkle root from the transactions in
 // rawBlock[hdrLen:] and compares with hdr.TransactionMerkleRoot.
 func validateMerkleRoot(hdr *block.SignedHeader, rawBlock []byte, hdrLen int, blockNum uint32) error {

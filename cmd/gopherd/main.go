@@ -29,6 +29,9 @@ Commands:
   validate-blocklog <block_log_path>     parse every block + every transaction
                                          and validate computed merkle roots
                                          match each block header
+  fill-blocklog --from=N [--write] <block_log>
+                                         fetch blocks missing from a block_log
+                                         from peers and put them back in place
   compare-blocklog <ref> <other> [from] [to]
                                          byte-compare blocks between two block_logs
                                          (e.g. a live daemon's vs the canonical ref)
@@ -103,6 +106,8 @@ func main() {
 		os.Exit(cmdValidateMainnet(os.Args[2:]))
 	case "validate-blocklog":
 		os.Exit(cmdValidateBlocklog(os.Args[2:]))
+	case "fill-blocklog":
+		os.Exit(cmdFillBlocklog(os.Args[2:]))
 	case "compare-blocklog":
 		os.Exit(cmdCompareBlocklog(os.Args[2:]))
 	case "debug-block":
