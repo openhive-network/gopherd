@@ -36,6 +36,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"sync/atomic"
 
 	"gopherd/internal/fcraw"
 	"gopherd/internal/protocol/auth"
@@ -843,10 +844,38 @@ func UpdateRCUsageBucket(s *state.Session, b *RCUsageBucket) {
 // RCUsageBucketSeqnoWindow returns the oldest and newest bucket seqnos from
 // the by-seqno index — hived's `bucket_idx.begin()` / `rbegin()`
 // (rc_utility.cpp:777-781). ok is false when no bucket exists. The index is
-// written once per bucket's life, so this walk sees 24 keys, not the
+// written once per bucket's life, so this walk sees 24 live keys, not the
 // per-block rewrites of the active bucket's row.
+//
+// Every hourly rotation deletes the oldest seqno, though, so the start of the
+// index is one tombstone per hour since HF20 (~55k by 2026), and a scan from
+// the beginning stepped over all of them each block: 70% of the apply loop
+// late in a genesis replay. The window is contiguous (seeded 1..24, each
+// rotation deletes the oldest and adds newest+1), so once the oldest seqno is
+// known, seeking to it is exact as long as the seqno below it is absent.
 func RCUsageBucketSeqnoWindow(s *state.Session) (oldest, newest uint32, ok bool) {
-	_ = s.Range(RCUsageBucketTable, RCUsageBucketBySeqnoIndex, nil,
+	if h := rcBucketOldestHint.Load(); h > 1 {
+		below, err := s.Has(RCUsageBucketTable, RCUsageBucketBySeqnoIndex, rcUsageBucketKey(h-1))
+		if err == nil && !below {
+			oldest, newest, ok = scanRCUsageBucketIndex(s, rcUsageBucketKey(h))
+		}
+	}
+	if !ok {
+		oldest, newest, ok = scanRCUsageBucketIndex(s, nil)
+	}
+	if ok {
+		rcBucketOldestHint.Store(oldest)
+	}
+	return oldest, newest, ok
+}
+
+// rcBucketOldestHint is the oldest bucket seqno last seen: only a seek
+// position, checked against the index before use, so a stale value (undone
+// block, another Database in tests) costs a full scan, never a wrong answer.
+var rcBucketOldestHint atomic.Uint32
+
+func scanRCUsageBucketIndex(s *state.Session, from []byte) (oldest, newest uint32, ok bool) {
+	_ = s.RangeFrom(RCUsageBucketTable, RCUsageBucketBySeqnoIndex, from,
 		func(body, _ []byte) (bool, error) {
 			if len(body) < 4 {
 				return true, nil

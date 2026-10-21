@@ -414,3 +414,45 @@ func TestRCUsageBucketSeqnoWindow(t *testing.T) {
 		t.Fatalf("window after rotation = %d..%d want 6..29", o, n)
 	}
 }
+
+// TestRCUsageBucketSeqnoWindowAcrossRotations: the seek hint never changes
+// the answer, whether the window moved up (rotations), back down (a hint
+// above the true oldest, as after an undone rotation), or the hint was left
+// by an unrelated window.
+func TestRCUsageBucketSeqnoWindowAcrossRotations(t *testing.T) {
+	db, err := state.Open(t.TempDir(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s := state.NewSession(db)
+	for i := uint32(1); i <= 24; i++ {
+		PutRCUsageBucket(s, &RCUsageBucket{BucketSeqno: i})
+	}
+	check := func(wantOld, wantNew uint32) {
+		t.Helper()
+		o, n, ok := RCUsageBucketSeqnoWindow(s)
+		if !ok || o != wantOld || n != wantNew {
+			t.Fatalf("window = %d..%d (%v), want %d..%d", o, n, ok, wantOld, wantNew)
+		}
+	}
+	check(1, 24)
+	for r := uint32(1); r <= 100; r++ {
+		DeleteRCUsageBucket(s, r)
+		PutRCUsageBucket(s, &RCUsageBucket{BucketSeqno: r + 24})
+		if r%10 == 0 {
+			if err := s.Commit(false); err != nil {
+				t.Fatal(err)
+			}
+			s = state.NewSession(db)
+		}
+		check(r+1, r+24)
+	}
+	// Undo the last rotation by hand: the hint (101) is now above oldest.
+	DeleteRCUsageBucket(s, 124)
+	PutRCUsageBucket(s, &RCUsageBucket{BucketSeqno: 100})
+	check(100, 123)
+	// A hint far above any bucket falls back to the full scan.
+	rcBucketOldestHint.Store(5000)
+	check(100, 123)
+}
