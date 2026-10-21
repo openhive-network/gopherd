@@ -9,6 +9,7 @@ import (
 
 	"gopherd/internal/blocklog"
 	"gopherd/internal/chain"
+	"gopherd/internal/protocol/block"
 	"gopherd/internal/state"
 	"gopherd/internal/state/genesis"
 )
@@ -448,5 +449,21 @@ func TestWipeScratchColdTier(t *testing.T) {
 	}
 	if wiped, err := wipeScratchColdTier("", "pebble"); err != nil || wiped {
 		t.Fatalf("empty cold dir: wiped=%v err=%v", wiped, err)
+	}
+}
+
+// TestAfterApplyRefusesOutOfPlaceBlock: the block_log writer only takes the
+// block after its head; anything else is refused before it is written.
+func TestAfterApplyRefusesOutOfPlaceBlock(t *testing.T) {
+	app, err := newApp(flags{dataDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("newApp: %v", err)
+	}
+	defer app.close()
+	if err := app.afterApply([]byte{0}, 2, block.ID{}); err == nil {
+		t.Fatal("block 2 appended to an empty block_log")
+	}
+	if h := app.writer.HeadBlock(); h != 0 {
+		t.Fatalf("block_log head %d after a refused append, want 0", h)
 	}
 }

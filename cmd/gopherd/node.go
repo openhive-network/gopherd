@@ -306,6 +306,14 @@ func cmdNode(args []string) int {
 		app.logger.printf("reached --target-block %d in the local replay; stopping", t)
 		return 0
 	}
+	// Peers continue from the state's head and the writer appends at the
+	// block_log's: if they differ, every block lands in the wrong slot.
+	if app.writer != nil && app.chain != nil {
+		if h, err := app.chain.HeadBlock(); err == nil && h != app.writer.HeadBlock() {
+			fmt.Fprintf(os.Stderr, "gopherd node: state is at block %d but the block_log ends at block %d; load a snapshot at or below the block_log's head, or fill the block_log first\n", h, app.writer.HeadBlock())
+			return 1
+		}
+	}
 
 	if err := app.run(); err != nil {
 		fmt.Fprintf(os.Stderr, "gopherd node: %v\n", err)
@@ -1668,6 +1676,13 @@ func (a *app) afterApply(rawBlock []byte, blockNum uint32, id block.ID) error {
 		}
 	}
 	if a.writer != nil {
+		// The block_log is indexed by position: a block that is not the next
+		// one would sit in another block's slot and shift every later block.
+		if h := a.writer.HeadBlock(); blockNum != h+1 {
+			err := fmt.Errorf("append block %d: the block_log ends at block %d", blockNum, h)
+			a.fatalf("%v — refusing to write it out of place", err)
+			return err
+		}
 		// A block that arrived compressed from a peer is already in block_log
 		// form; store that payload instead of recompressing the raw bytes at
 		// level 15 here, on the apply goroutine (it was half its CPU).
