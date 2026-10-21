@@ -1247,10 +1247,25 @@ func (a *app) recover() error {
 		a.chain.SetCommitBatch(a.chain.CommitBatchSize(), false)
 		defer a.chain.SetCommitBatch(a.chain.CommitBatchSize(), true)
 	}
+	// Each entry must link to the one before it (to the snapshot's head for
+	// the first): the replay takes a block's number from its position, so a
+	// missing or extra entry would otherwise apply every later block under
+	// the wrong number without any error.
+	var prev block.ID
+	if start > 1 {
+		dgpo, err := a.chain.GetDGPO()
+		if err != nil {
+			return fmt.Errorf("replay: read head: %w", err)
+		}
+		prev = block.ID(dgpo.HeadBlockID)
+	}
 	for n := start; n <= target; n++ {
 		raw, err := r.Block(n)
 		if err != nil {
 			return fmt.Errorf("replay: read block %d: %w", n, err)
+		}
+		if prev, err = nextBlockLink(raw, n, prev); err != nil {
+			return fmt.Errorf("replay: %w", err)
 		}
 		if _, err := a.chain.ApplyBlock(raw, n, chain.ApplyOptions{
 			SkipBlockSignature:        true,
@@ -2077,4 +2092,18 @@ func (a *app) headBlockOrZero() uint32 {
 func headAtLeast(c *chain.Database, n uint32) bool {
 	h, err := c.HeadBlock()
 	return err == nil && h >= n
+}
+
+// nextBlockLink checks that raw, read from block_log position n, names prev as
+// its previous block, and returns its own id.
+func nextBlockLink(raw []byte, n uint32, prev block.ID) (block.ID, error) {
+	sh, hdrLen, err := block.UnmarshalSignedHeader(raw)
+	if err != nil {
+		return block.ID{}, fmt.Errorf("block_log entry %d: %w", n, err)
+	}
+	if sh.Previous != prev {
+		return block.ID{}, fmt.Errorf("block_log entry %d does not follow block %d (its previous is %x, block %d is %x): the block_log is missing a block or has an extra one here",
+			n, n-1, sh.Previous[:], n-1, prev[:])
+	}
+	return block.ConstructID(raw[:hdrLen], n), nil
 }
