@@ -103,7 +103,7 @@ func (v *rcCountVisitor) visit(o op.Op, now uint32) {
 // CountResources mirrors hive::plugins::rc::count_resources(signed_transaction).
 //
 // txSize is the on-wire byte size of the signed transaction; numSignatures
-// is len(tx.Signatures). When the transaction qualifies for the
+// is tx.NumSignatures(). When the transaction qualifies for the
 // "single subsidized op" rule, the result is left at the differential
 // usage (clamped at 0) — no history/market_bytes, no per-tx state base,
 // no execution time. Otherwise the per-resource sum mirrors the C++
@@ -122,7 +122,7 @@ func CountResources(stx *tx.SignedTransaction, txSize int64, now uint32, result 
 	}
 	subsidized := v.subsidizedOp &&
 		len(stx.Operations) == 1 &&
-		uint32(len(stx.Signatures)) <= v.subsidizedSignatures
+		uint32(stx.NumSignatures()) <= v.subsidizedSignatures
 	if subsidized {
 		// Transaction is RC-free. C++ clamps the (already-negative)
 		// differential_usage to 0 and returns.
@@ -142,7 +142,7 @@ func CountResources(stx *tx.SignedTransaction, txSize int64, now uint32, result 
 	result[objects.RCStateBytes] += v.stateBytesCount +
 		transactionBaseStateBytes*transactionExpirationHours(stx.Expiration, now)
 	// per-tx execution time includes the base + signature verification.
-	verifyTime := verifyAuthorityTimeNS * int64(len(stx.Signatures))
+	verifyTime := verifyAuthorityTimeNS * int64(stx.NumSignatures())
 	result[objects.RCExecutionTime] += v.executionTimeCount + transactionExecTimeNS + verifyTime
 
 	// Clamp negatives — differential_usage initialization could leave
