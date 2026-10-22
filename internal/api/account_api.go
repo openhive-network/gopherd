@@ -32,7 +32,7 @@ func authorityResult(a auth.Authority) map[string]interface{} {
 
 func manabar(current int64, lastUpdate uint32) map[string]interface{} {
 	return map[string]interface{}{
-		"current_mana":     strconv.FormatInt(current, 10),
+		"current_mana":     current, // a JSON number, as hived prints int64
 		"last_update_time": lastUpdate,
 	}
 }

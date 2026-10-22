@@ -84,7 +84,7 @@ func TestRCAPI(t *testing.T) {
 		t.Fatalf("alice delegated_rc = %v want 500", a0["delegated_rc"])
 	}
 	mb := a0["rc_manabar"].(map[string]interface{})
-	if mb["current_mana"] != "12345" {
+	if mb["current_mana"] != float64(12345) {
 		t.Fatalf("alice rc_manabar.current_mana = %v want 12345", mb["current_mana"])
 	}
 
