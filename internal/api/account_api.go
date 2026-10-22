@@ -91,7 +91,7 @@ func accountResult(a objects.Account, au objects.AccountAuthority, legacy bool) 
 		"delegated_vesting_shares":      vs(a.DelegatedVestingShares),
 		"received_vesting_shares":       vs(a.ReceivedVestingShares),
 		"vesting_withdraw_rate":         vs(a.VestingWithdrawRate),
-		"next_vesting_withdrawal":       timeString(a.NextVestingWithdrawal),
+		"next_vesting_withdrawal":       nextVestingWithdrawalString(a.NextVestingWithdrawal),
 		"withdrawn":                     a.Withdrawn,
 		"to_withdraw":                   a.ToWithdraw,
 		"witnesses_voted_for":           a.WitnessesVotedFor,
@@ -208,4 +208,14 @@ func (s *Server) mLookupAccounts() jsonrpc.Handler {
 		})
 		return names, nil
 	}
+}
+
+// nextVestingWithdrawalString renders next_vesting_withdrawal. gopherd stores
+// 0 for "no power-down scheduled" where hived stores time_point_sec::maximum(),
+// which fc prints as "1969-12-31T23:59:59".
+func nextVestingWithdrawalString(sec uint32) string {
+	if sec == 0 {
+		return "1969-12-31T23:59:59"
+	}
+	return timeString(sec)
 }
