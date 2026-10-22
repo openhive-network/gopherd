@@ -155,8 +155,8 @@ var execTimeNS = map[op.Tag]int64{
 // transaction_time. Added once per tx regardless of op count.
 const transactionExecTimeNS int64 = 2821 + 386 + 3415
 
-// verifyAuthorityTimeNS — per-signature exec time. We don't count
-// signatures during replay, but the constant is needed for live mode.
+// verifyAuthorityTimeNS — per-signature exec time, charged for every
+// signature the transaction carries (replay included).
 const verifyAuthorityTimeNS int64 = 94165
 
 // stateBytesForOp returns the state_bytes resource usage of one operation,

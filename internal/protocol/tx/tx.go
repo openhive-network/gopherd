@@ -50,6 +50,15 @@ type Transaction struct {
 type SignedTransaction struct {
 	Transaction
 	Signatures [][SignatureSize]byte
+	// SkippedSignatures counts the signatures ReadSignedTransactionSkipSigs
+	// stepped over without keeping; RC still charges for each of them.
+	SkippedSignatures int
+}
+
+// NumSignatures is the number of signatures the transaction carried on the
+// wire, kept or skipped.
+func (st *SignedTransaction) NumSignatures() int {
+	return len(st.Signatures) + st.SkippedSignatures
 }
 
 // Digest is the 32-byte sha256 of the serialized transaction (no signatures).
@@ -132,6 +141,7 @@ func readSignedTransactionImpl(r *fcraw.Reader, skipSigs bool) (ReadResult, erro
 		if err := r.Skip(int(count) * SignatureSize); err != nil {
 			return res, fmt.Errorf("tx.signatures(skip): %w", err)
 		}
+		res.SignedTx.SkippedSignatures = int(count)
 	} else {
 		if err := r.CheckCount(count, SignatureSize); err != nil {
 			return res, fmt.Errorf("tx.signatures: %w", err)
