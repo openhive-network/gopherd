@@ -174,7 +174,10 @@ Restarting needs **both** that snapshot and the same `--cold-dir`. Snapshots are
 not self-contained unless the cold tier goes with them.
 
 Without a snapshot, a node builds state by replaying a `block_log` from genesis,
-which takes about 20 hours and a 539 GB log (see Hardware).
+which takes about 20 hours and a 539 GB log (see Hardware), or by fetching every
+block from peers: `scripts/p2p_sync_genesis.sh` starts that as a memory-capped
+user service (`systemctl --user status gopherd-sync`) that writes its own
+block_log, so a restart replays locally instead of re-fetching.
 
 ### Flags that matter more than the rest
 
@@ -309,8 +312,9 @@ curl -s -X POST http://127.0.0.1:8090 -H 'Content-Type: application/json' \
   cycles. Sub-hour windows produce spurious slopes *in both directions*. Fit a
   regression over ≥2 h of **steady-state-only** samples (exclude catch-up) and
   compare the drift to the residual noise before concluding anything.
-- **Disk:** check free space before long runs; `bin/disk_guard.sh` and the
-  disk-monitor timer exist for this.
+- **Disk:** check free space (`df -h`) before long runs. A from-genesis sync
+  that keeps its block_log needs ~540 GB for the log alone at 110M blocks;
+  nothing in the node stops on a full disk gracefully.
 
 ## Layout
 
