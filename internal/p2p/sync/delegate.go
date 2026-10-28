@@ -16,6 +16,7 @@ import (
 	"gopherd/internal/chain"
 	"gopherd/internal/crypto"
 	"gopherd/internal/p2p/node"
+	"gopherd/internal/p2p/proto"
 	"gopherd/internal/protocol/block"
 )
 
@@ -446,6 +447,14 @@ type Delegate struct {
 	// we're behind and flatlines the instant we reach the live tip — a direct,
 	// observable signal that the gate is doing its job and self-clearing.
 	invIgnoredCatchup atomic.Uint64
+
+	// emptySyncIDsReplies counts fetch_blockchain_item_ids requests answered
+	// with an EMPTY inventory because this node is passive (Serve off) or
+	// behind the tip. See replyNoSyncItems.
+	emptySyncIDsReplies atomic.Uint64
+	// sendOverride, when set (tests only), receives every reply that
+	// replyNoSyncItems would otherwise write to the peer's transport.
+	sendOverride func(p *node.Peer, typ proto.MessageType, body []byte) error
 
 	// syncIDsRefusedCatchup counts fetch_blockchain_item_ids requests refused by
 	// handleFetchBlockchainItemIDs's catch-up gate. Like invIgnoredCatchup it
@@ -1327,6 +1336,11 @@ type Stats struct {
 	// working; nonzero growth at a steady tip is a bug.
 	SyncIDsRefusedCatchup uint64
 
+	// EmptySyncIDsReplies is the cumulative count of fetch_blockchain_item_ids
+	// requests answered with an empty inventory (passive node, or behind the
+	// tip). One per peer handshake is normal; see replyNoSyncItems.
+	EmptySyncIDsReplies uint64
+
 	// TipStallKicks is the cumulative count of tip-stall re-seeds (head stuck
 	// with nothing in flight while at the tip). 0 on a healthy live node;
 	// climbing means blocks are being dropped at head+1 and we are sawtoothing.
@@ -1391,6 +1405,7 @@ func (d *Delegate) Stats() Stats {
 		GlobalInflight:         inflight,
 		InvIgnoredCatchup:      d.invIgnoredCatchup.Load(),
 		SyncIDsRefusedCatchup:  d.syncIDsRefusedCatchup.Load(),
+		EmptySyncIDsReplies:    d.emptySyncIDsReplies.Load(),
 		TipStallKicks:          d.tipStallKicks.Load(),
 		InvReceived:            d.invReceived.Load(),
 		TipSyncHandshakes:      d.tipSyncHandshakes.Load(),
