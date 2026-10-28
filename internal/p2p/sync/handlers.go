@@ -325,8 +325,10 @@ func (d *Delegate) claimTxFetch(st *peerState, p *node.Peer, id block.ID, nowNs 
 // IDs immediately after the synopsis-implied head, up to MaxBlocksPerInv.
 func (d *Delegate) handleFetchBlockchainItemIDs(p *node.Peer, body []byte) {
 	// Passive (fetch-only) node: never serve our block-id synopsis to peers.
-	// See Config.Serve.
+	// See Config.Serve. We still ANSWER, with an empty inventory — see
+	// replyNoSyncItems for why silence is not an option.
 	if !d.cfg.Serve {
+		d.replyNoSyncItems(p, body)
 		return
 	}
 	// CATCH-UP GATE. Never hand out block IDs while we are behind the tip.
@@ -357,11 +359,11 @@ func (d *Delegate) handleFetchBlockchainItemIDs(p *node.Peer, body []byte) {
 	//
 	// broadcastInv already refuses to PUSH inventory while behind (loops.go,
 	// isCatchingUp) — without this the node declined to push and then served the
-	// same unservable IDs when PULLED. Answering nothing is the established
-	// behaviour for a node that cannot serve (the !cfg.Serve gate above returns
-	// silently too): the peer simply asks another peer.
+	// same unservable IDs when PULLED. The refusal is an EMPTY inventory, not
+	// silence: see replyNoSyncItems.
 	if d.isCatchingUp() {
 		d.syncIDsRefusedCatchup.Add(1)
+		d.replyNoSyncItems(p, body)
 		return
 	}
 	var msg proto.FetchBlockchainItemIDsMessage
@@ -472,6 +474,73 @@ func (d *Delegate) handleFetchBlockchainItemIDs(p *node.Peer, body []byte) {
 	if err := p.Send(proto.BlockchainItemIDsInventoryMessageType, encoded); err != nil {
 		d.logf("blockchain_item_ids_inventory send: %v", err)
 	}
+}
+
+// replyNoSyncItems answers a fetch_blockchain_item_ids we will not (or cannot)
+// serve with an EMPTY blockchain_item_ids_inventory_message: no ids, no
+// remaining count. It claims nothing, so it can never set up the "you are
+// missing a sync item you claim to have" disconnect that the Serve and
+// catch-up gates exist to prevent.
+//
+// Answering is not optional. hived calls start_synchronizing_with_peer on
+// every connection it completes, inbound or outbound (node.cpp
+// new_peer_just_added), which sends us this request and stamps
+// item_ids_requested_from_peer. Its terminate_inactive_connections_loop then
+// disconnects any peer whose request is still unanswered after
+// active_ignored_request_timeout (6 s, node_configuration.hpp):
+//
+//	"Disconnecting peer ${peer} because they didn't respond to my request for
+//	 sync item ids after my synopsis"
+//
+// Measured on the 2026-10-28 from-genesis sync with the old silent gate: 334
+// drops in six minutes across 12 peers, every connection lasting ~10 s, each
+// one a fresh handshake and a re-issued fetch from our side, and a reconnect
+// storm against the seed nodes.
+//
+// The empty reply is exactly what hived itself sends when it has nothing for
+// the requester (node.cpp on_fetch_blockchain_item_ids_message, the
+// peer_is_on_an_unreachable_fork branch: "we reply with an empty list as if we
+// had an empty blockchain; we don't want to disconnect because they may be
+// able to provide us with blocks on their chain"). On the receiving side
+// hived's on_blockchain_item_ids_inventory_message reads an empty list with
+// total_remaining 0 as "peer said we're up-to-date, entering normal operation
+// with this peer" and keeps the connection.
+//
+// p may be nil in unit tests that exercise the gates alone.
+func (d *Delegate) replyNoSyncItems(p *node.Peer, body []byte) {
+	if p == nil {
+		return
+	}
+	// Echo the requested item type (always blocks on Hive); fall back to
+	// blocks if the request did not even decode.
+	itemType := proto.ItemTypeBlock
+	var req proto.FetchBlockchainItemIDsMessage
+	if err := req.Unmarshal(body); err == nil {
+		itemType = req.ItemType
+	}
+	reply := proto.BlockchainItemIDsInventoryMessage{
+		TotalRemainingItemCount: 0,
+		ItemType:                itemType,
+		ItemHashesAvailable:     nil,
+	}
+	encoded, err := reply.Marshal()
+	if err != nil {
+		d.logf("blockchain_item_ids_inventory (empty) encode: %v", err)
+		return
+	}
+	d.emptySyncIDsReplies.Add(1)
+	if err := d.sendTo(p, proto.BlockchainItemIDsInventoryMessageType, encoded); err != nil {
+		d.logf("blockchain_item_ids_inventory (empty) send: %v", err)
+	}
+}
+
+// sendTo routes a reply through the test seam when one is installed, else to
+// the peer's transport.
+func (d *Delegate) sendTo(p *node.Peer, typ proto.MessageType, body []byte) error {
+	if d.sendOverride != nil {
+		return d.sendOverride(p, typ, body)
+	}
+	return p.Send(typ, body)
 }
 
 // handleBlockchainItemIDsInventory is the catch-up REQUESTER side: peer

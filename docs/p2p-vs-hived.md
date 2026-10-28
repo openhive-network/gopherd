@@ -58,6 +58,7 @@ empty — i.e. every newly connected peer.
 | 7 | Transaction inventory | advertises txs | never advertises txs (no mempool relay) | Divergent, safe |
 | 8 | Serving blocks | from block database | from 2048-block in-memory ring | Divergent, bounded |
 | 9 | Unknown item requested | `item_not_available` | `item_not_available`, **no** num-based fallback | Matches (ours explicitly safer) |
+| 10 | `fetch_blockchain_item_ids` we cannot serve | always answered; nothing to give = **empty** inventory (`on_fetch_blockchain_item_ids_message`, unreachable-fork branch) | was **silence** when passive or behind; hived drops an unanswered request after 6 s (`active_ignored_request_timeout`), so every peer churned ~10 s after handshake (334 drops in 6 min, 2026-10-28). Now an empty inventory, as hived | **Closed** (`replyNoSyncItems`) |
 
 ---
 
@@ -142,7 +143,10 @@ than the tip. That wording is why the defect survived two readings of
    a replayed backlog.
 3. **Fail silent.** If we cannot keep up, nothing qualifies and we advertise
    nothing until we are back at the tip. Silence is always safe; staleness is
-   not.
+   not. The one exception is a direct `fetch_blockchain_item_ids`: that must
+   be *answered*, with an empty inventory (row 10), because hived treats an
+   unanswered request as a dead peer. An empty answer claims nothing, so it is
+   as safe as silence and keeps the connection.
 4. **Never serve a different block than the one requested**, by any fallback.
 
 Regression tests: `internal/p2p/sync/advertise_age_test.go` (7 cases). Three were

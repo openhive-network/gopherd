@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"gopherd/internal/p2p/node"
 	"gopherd/internal/p2p/proto"
 )
 
@@ -56,11 +57,86 @@ func TestSyncIDsRefusedWhileCatchingUp(t *testing.T) {
 	}
 
 	before := d.syncIDsRefusedCatchup.Load()
-	// A nil peer is the assertion: the gate must return BEFORE it reaches
-	// p.Send. If the gate is removed this panics rather than silently passing.
-	d.handleFetchBlockchainItemIDs(nil, body)
+	fake, sent := captureReplies(d)
+	d.handleFetchBlockchainItemIDs(fake, body)
 	if got := d.syncIDsRefusedCatchup.Load() - before; got != 1 {
 		t.Fatalf("syncIDsRefusedCatchup +%d, want +1 — a node behind the tip must not offer block ids it cannot back", got)
+	}
+	// Refusing means an EMPTY inventory, not silence: hived drops a peer that
+	// leaves its fetch_blockchain_item_ids unanswered for 6 s.
+	assertSingleEmptyInventory(t, *sent)
+}
+
+// A passive node (Serve off) must answer too, and with nothing in it. Before
+// this, the gate returned without a reply and every hived peer dropped the
+// node ~6 s after the handshake (2026-10-28 from-genesis sync: 334 drops in six
+// minutes, every connection ~10 s old).
+func TestPassiveNodeAnswersSyncIDsWithEmptyInventory(t *testing.T) {
+	c := newStubChain()
+	now := uint32(time.Now().Unix())
+	const head = 108_000_000
+	for n := uint32(head - 199); n <= head; n++ {
+		c.seed(n, syntheticBlock(n, now))
+	}
+	d := newWithChain(Config{Serve: false, MaxBlocksPerInv: 200}, c)
+	d.headBlockHint.Store(head)
+
+	msg := proto.FetchBlockchainItemIDsMessage{
+		ItemType:           proto.ItemTypeBlock,
+		BlockchainSynopsis: []proto.ItemHash{proto.ItemHash(makeStubID(head - 100))},
+	}
+	body, err := msg.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake, sent := captureReplies(d)
+	d.handleFetchBlockchainItemIDs(fake, body)
+	assertSingleEmptyInventory(t, *sent)
+	if got := d.emptySyncIDsReplies.Load(); got != 1 {
+		t.Fatalf("emptySyncIDsReplies=%d, want 1", got)
+	}
+	if got := d.syncIDsRefusedCatchup.Load(); got != 0 {
+		t.Fatalf("syncIDsRefusedCatchup=%d, want 0: the passive gate is not the catch-up gate", got)
+	}
+}
+
+type capturedReply struct {
+	typ  proto.MessageType
+	body []byte
+}
+
+// captureReplies installs the send seam and returns a fake peer plus the list
+// of everything the delegate tried to send it.
+func captureReplies(d *Delegate) (*node.Peer, *[]capturedReply) {
+	fake := new(node.Peer)
+	sent := new([]capturedReply)
+	d.sendOverride = func(p *node.Peer, typ proto.MessageType, body []byte) error {
+		if p != fake {
+			panic("reply sent to the wrong peer")
+		}
+		*sent = append(*sent, capturedReply{typ: typ, body: body})
+		return nil
+	}
+	return fake, sent
+}
+
+func assertSingleEmptyInventory(t *testing.T, sent []capturedReply) {
+	t.Helper()
+	if len(sent) != 1 {
+		t.Fatalf("sent %d messages, want exactly 1 (an empty blockchain_item_ids_inventory)", len(sent))
+	}
+	if sent[0].typ != proto.BlockchainItemIDsInventoryMessageType {
+		t.Fatalf("sent %v, want blockchain_item_ids_inventory", sent[0].typ)
+	}
+	var reply proto.BlockchainItemIDsInventoryMessage
+	if err := reply.Unmarshal(sent[0].body); err != nil {
+		t.Fatalf("reply does not decode: %v", err)
+	}
+	if reply.ItemType != proto.ItemTypeBlock {
+		t.Errorf("reply item_type=%d, want %d (echo the request)", reply.ItemType, proto.ItemTypeBlock)
+	}
+	if len(reply.ItemHashesAvailable) != 0 || reply.TotalRemainingItemCount != 0 {
+		t.Fatalf("reply lists %d ids with %d remaining; a gated node must claim NOTHING", len(reply.ItemHashesAvailable), reply.TotalRemainingItemCount)
 	}
 }
 
