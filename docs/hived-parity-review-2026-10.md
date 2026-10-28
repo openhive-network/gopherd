@@ -108,9 +108,9 @@ Totals: 20 matching, 7 divergent, 16 never emitted. No API exposes the stream
 
 | Status | Item |
 |---|---|
-| [ ] | Untracked `cmd/dgpodump`, `cmd/scanbenef` import `hived-go/...`; `go build ./...` fails. |
+| [x] | Untracked `cmd/dgpodump`, `cmd/scanbenef` import `hived-go/...`; `go build ./...` fails. Import paths corrected on disk (2026-10-28); the tools stay untracked. |
 | [x] | initminer account not flagged `mined` (hived flags every genesis account). API-only. |
-| [ ] | Stale comments: `database.go:194-202,623-631` claim ApplyBlock enforces the custom-op block limit (it does not; `enforceCustomOpBlockLimit` has no caller); `hardfork29.go` / `hardfork_testnet.go` claim mainnet does not register HF29 (hived registers it unconditionally). |
+| [x] | Stale comments: `database.go` claimed ApplyBlock enforces the custom-op block limit (it did not; `enforceCustomOpBlockLimit` had no caller). Removed with its per-block counter (2026-10-28): hived checks `HIVE_CUSTOM_OP_BLOCK_LIMIT` in `_push_transaction` (admission and production), never in `_apply_block`, so block apply must not enforce it; gopherd applies it in mempool selection. The HF29 half of this row was wrong: hived's `database_hardfork.cpp:112-117` registers HF29 only under `#ifdef USE_ALTERNATE_CHAIN_ID` (checked in both local checkouts), exactly as `hardfork.go` / `hardfork_testnet.go` say. |
 | [~] | rc_stats period fixed to 28800 blocks; `rcFinalizeBlock` runs after `processHardforks` (hived before; HF20 block only); `RCDelegationExpiration` 5-day refund table has no hived counterpart and no caller. |
 | [x] | Early-block hold cap (hived 0b6f8d091) already ported (`internal/p2p/sync/early_block.go:32`). |
 | [x] | `GlobalRemoveThreshold = 200` is faithful: hived's `set_remove_threshold` has no non-test caller. |
