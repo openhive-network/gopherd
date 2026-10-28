@@ -202,16 +202,6 @@ type Database struct {
 	// so the O(n) sweep runs only when the irreversible block actually moves.
 	forkPrunedBelow uint32
 
-	// customOpCountByAccount tracks per-account count of custom /
-	// custom_json / custom_binary ops applied in the CURRENT block.
-	// HIVE_CUSTOM_OP_BLOCK_LIMIT (=5) caps it: the 6th custom op for the
-	// same account in the same block fails the tx. Mirrors
-	// database.cpp::_pending_tx_custom_op_count, scoped to a single
-	// block apply rather than the pre-block pending pool — for canonical
-	// block_log replay the two are equivalent. Reset at the top of
-	// ApplyBlock; mutated inside the tx loop by enforceCustomOpBlockLimit.
-	customOpCountByAccount map[auth.AccountName]uint8
-
 	// vops is the per-block virtual-operation buffer (see block_vops.go).
 	// Reset at the top of every ApplyBlock; readers grab it via
 	// LastBlockVOps() under the applyMu RLock.
@@ -255,10 +245,9 @@ func (d *Database) VOpEmissionEnabled() bool { return !d.vopsOff }
 // New wraps an opened state.Database for block application.
 func New(s *state.Database) *Database {
 	d := &Database{
-		state:                  s,
-		session:                state.NewSession(s),
-		lcbCache:               make(map[string]uint32, 32),
-		customOpCountByAccount: make(map[auth.AccountName]uint8, 8),
+		state:    s,
+		session:  state.NewSession(s),
+		lcbCache: make(map[string]uint32, 32),
 	}
 	// Emission on by default — see the vopsOff field for why that polarity.
 	d.vopEmit = d.newVOpEmitter()
@@ -666,29 +655,23 @@ func indexOfByte(s string, c byte) int {
 // Mirrors HIVE_CUSTOM_OP_BLOCK_LIMIT (libraries/protocol/config.hpp =5).
 const customOpBlockLimit uint8 = 5
 
-// enforceCustomOpBlockLimit walks the tx's operations, finds every
-// custom* op, gathers the impacted accounts (per-op required auths),
-// and increments d.customOpCountByAccount. If any account's count
-// exceeds customOpBlockLimit the tx is rejected and the increments
-// rolled back so subsequent txs in the same block see no effect from
-// this failed tx.
-//
-// Mirrors libraries/chain/database.cpp::_push_transaction lines 631-640
-// — counts are committed to the block-wide map only on success.
-func (d *Database) enforceCustomOpBlockLimit(signed *tx.SignedTransaction) error {
-	return applyCustomOpBlockLimit(d.customOpCountByAccount, signed)
-}
-
 // applyCustomOpBlockLimit enforces hived's per-account custom-operation cap for
-// ONE block, against a caller-supplied counter. Split out so BLOCK ASSEMBLY can
-// apply the identical rule against its own counter without touching the chain's.
+// ONE block, against a caller-supplied counter.
 //
-// Selection did not enforce this and it is very likely why block 108912883 was
-// rejected: we packed 579 transactions (65KB) where the real block held 90, and
-// a witness may only include customOpBlockLimit custom ops per account per
-// block. Everything past that makes the block INVALID, so the network refuses
-// it — while our own node, which enforces the limit only in ApplyBlock, had no
-// complaint about assembling it.
+// Where hived applies it matters: database.cpp::_push_transaction keeps
+// _pending_tx_custom_op_count while ADMITTING transactions to the pending pool
+// and while a witness PRODUCES a block, and clears it in clear_pending. It is
+// never consulted in _apply_block, so a block that carries more than five
+// custom ops for one account is valid once signed, and ApplyBlock must not
+// reject it. gopherd therefore enforces the cap only where hived does on the
+// producing side: block assembly (mempool_select.go) runs this against its own
+// per-block counter.
+//
+// Selection did not enforce this originally and it is very likely why block
+// 108912883 was rejected: we packed 579 transactions (65KB) where the real
+// block held 90, and a witness may only include customOpBlockLimit custom ops
+// per account per block. Everything past that makes the block INVALID, so the
+// network refuses it — while our own node had no complaint about assembling it.
 //
 // It also explains the mempool divergence: hived refuses the excess at
 // admission, so its pool stays near one block's worth (~117 observed), while
@@ -942,12 +925,6 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	txCount, err := r.ReadVarUint()
 	if err != nil {
 		return objects.DynamicGlobalProperty{}, fmt.Errorf("apply_block %d tx_count: %w", blockNum, err)
-	}
-	// Reset the per-block custom-op-per-account counters. See struct
-	// field doc — mirrors database.cpp's clear of _pending_tx_custom_op_count
-	// on block apply / pop / clear_pending.
-	for k := range d.customOpCountByAccount {
-		delete(d.customOpCountByAccount, k)
 	}
 	// Truncate the per-block virtual-op buffer (see block_vops.go).
 	d.resetVOps()
