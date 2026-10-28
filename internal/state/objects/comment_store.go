@@ -1121,6 +1121,11 @@ var commentStoreSnapshotMagic = [4]byte{'C', 'M', 'N', 'T'}
 // v1 snapshots still load through the exact-count path.
 const commentStoreSnapshotVersion uint32 = 2
 
+// maxCommentSnapshotRecords bounds the header's record count before it is
+// used to presize anything. Mainnet is at ~2×10^8 comments; a count above
+// 2^30 can only come from a corrupt header.
+const maxCommentSnapshotRecords uint32 = 1 << 30
+
 // commentStoreSnapshotVersionCounted is the legacy format whose record stream
 // is delimited by the header count rather than a terminator.
 const commentStoreSnapshotVersionCounted uint32 = 1
@@ -1284,6 +1289,13 @@ func (s *CommentStore) UnmarshalSnapshot(r io.Reader) error {
 		// count is the resident hint; add the cold hint so the presizing below
 		// (which expects a both-tiers total, as v1's count was) stays right.
 		count += binary.LittleEndian.Uint32(coldHintBuf[:])
+	}
+	// The hints size maps and the cold tier's key index up front, so a garbage
+	// header (truncated, or a v1 stream mislabelled v2) would turn into a
+	// multi-hundred-GB allocation and an OOM kill instead of an error. Mainnet
+	// holds ~200M comments at 110M blocks; anything past 2^30 is corruption.
+	if count > maxCommentSnapshotRecords {
+		return fmt.Errorf("comment_store: header claims %d records (resident+cold), above the %d sanity limit: corrupt snapshot header", count, maxCommentSnapshotRecords)
 	}
 	var durableD durableColdTier
 	if durableSnap {

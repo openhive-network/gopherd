@@ -18,9 +18,14 @@ import (
 func buildCommentSnapshotStream(recs [][]byte) []byte {
 	var buf bytes.Buffer
 	buf.Write(commentStoreSnapshotMagic[:])
-	var hdr [8]byte
+	// v2 header: version | resident hint | cold hint, then uvarint-length
+	// records, then a zero-length terminator (mirrors MarshalSnapshot). A v2
+	// header WITHOUT the cold-hint word made the loader read the first
+	// record's bytes as the hint and presize for ~1.8 billion rows.
+	var hdr [12]byte
 	binary.LittleEndian.PutUint32(hdr[0:4], commentStoreSnapshotVersion)
 	binary.LittleEndian.PutUint32(hdr[4:8], uint32(len(recs)))
+	binary.LittleEndian.PutUint32(hdr[8:12], 0)
 	buf.Write(hdr[:])
 	var varBuf [binary.MaxVarintLen64]byte
 	for _, rec := range recs {
@@ -28,6 +33,7 @@ func buildCommentSnapshotStream(recs [][]byte) []byte {
 		buf.Write(varBuf[:n])
 		buf.Write(rec)
 	}
+	buf.WriteByte(0) // end-of-stream terminator
 	return buf.Bytes()
 }
 
