@@ -22,6 +22,12 @@
 #   tail -f $WORK/sync.log                 # progress (STATS lines)
 #   systemctl --user stop gopherd-sync     # SIGTERM -> shutdown snapshot
 #
+# Restart: rerunning the script resumes from the newest complete shutdown
+# snapshot in $WORK/snapshots (block-<N>/ with a manifest.json) and replays the
+# local block_log only past N. Without one it replays the block_log from
+# genesis. SNAPSHOT=/path/block-N picks a snapshot; SNAPSHOT=none forces the
+# genesis replay.
+#
 # Measured on a 12-core / 31 GB desktop (2026-10): see README "Hardware".
 set -euo pipefail
 
@@ -47,6 +53,17 @@ fi
 
 DATA="$WORK/data"; COLD="$WORK/cold"; SNAPS="$WORK/snapshots"; LOG="$WORK/sync.log"
 mkdir -p "$DATA" "$COLD" "$SNAPS"
+# Newest complete shutdown snapshot (the manifest is written last, so a
+# directory without one is a save that did not finish).
+if [ -z "${SNAPSHOT:-}" ]; then
+  SNAPSHOT=$(find "$SNAPS" -mindepth 2 -maxdepth 2 -name manifest.json -path '*/block-*/manifest.json' -printf '%h\n' 2>/dev/null |
+    sed -nE 's#^(.*/block-([0-9]+))$#\2 \1#p' | sort -n | tail -1 | cut -d' ' -f2- || true)
+fi
+LOAD_ARGS=()
+if [ -n "$SNAPSHOT" ] && [ "$SNAPSHOT" != none ]; then
+  [ -f "$SNAPSHOT/manifest.json" ] || { echo "no manifest.json in $SNAPSHOT" >&2; exit 1; }
+  LOAD_ARGS=(--load-snapshot="$SNAPSHOT")
+fi
 # Run a private copy so a later `make build` cannot touch the running binary.
 cp "$BIN" "$WORK/gopherd"
 
@@ -56,6 +73,7 @@ cat <<BANNER
  unit      : $UNIT (systemctl --user ...)
  serve     : OFF  (never --p2p-serve)
  block_log : ON   ($DATA/blockchain; restart replays it)
+ resume    : ${SNAPSHOT:-none (replay the block_log from genesis)}
  mem       : $MEM_MAX cgroup / ${MEM_LIMIT_GIB}GiB Go limit ; caches $CACHE_MB+$COLD_CACHE_MB MB
  peers     : <=$MAX_PEERS outbound, compiled-in seeds
  api       : $API   pprof: $PPROF
@@ -80,6 +98,7 @@ exec systemd-run --user --unit="$UNIT" --collect \
     --cache-mb="$CACHE_MB" \
     --max-outbound-peers="$MAX_PEERS" \
     --shutdown-snapshot-dir="$SNAPS" \
+    "${LOAD_ARGS[@]}" \
     --api-endpoint="$API" \
     --pprof-addr="$PPROF" \
     $EXTRA_ARGS
