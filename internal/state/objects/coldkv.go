@@ -317,13 +317,42 @@ func (i *coldIter) next() { i.it.Next() }
 // Close releases the iterator.
 func (i *coldIter) Close() error { return i.it.Close() }
 
-// Close flushes and closes the store, removing the directory if we created it.
-func (c *coldKV) Close() error {
+// Flush makes everything written so far durable on disk: the open eviction
+// batch is applied and the memtables are flushed to SSTs.
+//
+// The tier runs with DisableWAL, so a memtable is the ONLY copy of its rows
+// until it is flushed, and pebble's Close does not flush it. Without this, a
+// clean shutdown silently dropped the last memtables of evicted comments (up
+// to 128 MiB each), and anything that reopened the directory — a cold-reuse
+// restart, a checkpoint — saw a tier with holes in it.
+func (c *coldKV) Flush() error {
 	if c == nil || c.db == nil {
 		return nil
 	}
 	c.flushBatch()
+	if c.writeErr != nil {
+		return c.writeErr
+	}
+	return c.db.Flush()
+}
+
+// Close flushes and closes the store, removing the directory if we created it.
+// A store we did not create is flushed first so the directory holds every row
+// it was given (see Flush).
+func (c *coldKV) Close() error {
+	if c == nil || c.db == nil {
+		return nil
+	}
+	var ferr error
+	if c.owned {
+		c.flushBatch()
+	} else {
+		ferr = c.Flush()
+	}
 	err := c.db.Close()
+	if err == nil {
+		err = ferr
+	}
 	c.db = nil
 	if c.owned && c.dir != "" {
 		_ = os.RemoveAll(c.dir)

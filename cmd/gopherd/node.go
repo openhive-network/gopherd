@@ -1170,7 +1170,7 @@ func (a *app) saveShutdownSnapshot() {
 	}
 	// Flush the cold tier first so its on-disk contents match the snapshot —
 	// a restart pairs --load-snapshot with the same --cold-dir.
-	if cc, ok := a.cold.(objects.CompactableCold); ok && cc != nil {
+	if cc, ok := a.cold.(interface{ Flush() error }); ok && cc != nil {
 		if ferr := cc.Flush(); ferr != nil {
 			a.logger.printf("WARN shutdown snapshot: cold flush: %v", ferr)
 		}

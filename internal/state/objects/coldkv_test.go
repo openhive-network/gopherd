@@ -100,3 +100,35 @@ func TestPrefixUpperBound(t *testing.T) {
 		}
 	}
 }
+
+// TestColdKVCloseKeepsUnflushedRows: the tier runs without a WAL, so rows that
+// only reached a memtable used to vanish at Close. A reopened directory must
+// hold every row written before a clean Close, batched or not.
+func TestColdKVCloseKeepsUnflushedRows(t *testing.T) {
+	dir := t.TempDir()
+	c, err := openColdKV(dir)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	kSet := tableKey(coldTableCommentPrimary, []byte("alice/direct"))
+	kBatch := tableKey(coldTableCommentPrimary, []byte("bob/batched"))
+	if err := c.set(kSet, []byte("v1")); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	c.bset(kBatch, []byte("v2")) // left in the open batch on purpose
+	if err := c.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	c2, err := openColdKV(dir)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer c2.Close()
+	for k, want := range map[string]string{string(kSet): "v1", string(kBatch): "v2"} {
+		v, ok := c2.get([]byte(k))
+		if !ok || string(v) != want {
+			t.Fatalf("after reopen %q: ok=%v v=%q, want %q", k, ok, v, want)
+		}
+	}
+}
