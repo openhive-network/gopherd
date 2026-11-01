@@ -647,7 +647,12 @@ func (s *CommentVoteStore) CountForComment(author auth.AccountName, permlink str
 
 var commentVoteStoreSnapshotMagic = [4]byte{'C', 'V', 'O', 'T'}
 
-const commentVoteStoreSnapshotVersion uint32 = 1
+// Version 2 adds, to a durable-cold stream only, a cold bookkeeping trailer
+// (coldCount; see cold_accounting.go) after the records, so the load does not
+// walk the whole cold tier to rebuild it.
+const commentVoteStoreSnapshotVersion uint32 = 2
+
+const commentVoteStoreSnapshotVersionNoTrailer uint32 = 1
 
 // MarshalSnapshot serializes the primary CommentVote map to w. Format
 // mirrors witness_store: magic | version | count | (varuint(key)|key|varuint(rec)|AppendCommentVote(rec))*
@@ -719,6 +724,9 @@ func (s *CommentVoteStore) MarshalSnapshot(w io.Writer) error {
 				return err
 			}
 		}
+		if durableCold {
+			return s.marshalColdAccounting(w)
+		}
 		return nil
 	}
 
@@ -766,7 +774,7 @@ func (s *CommentVoteStore) UnmarshalSnapshot(r io.Reader) error {
 		return fmt.Errorf("comment_vote_store: read header: %w", err)
 	}
 	ver := binary.LittleEndian.Uint32(hdr[0:4])
-	if ver != commentVoteStoreSnapshotVersion {
+	if ver != commentVoteStoreSnapshotVersion && ver != commentVoteStoreSnapshotVersionNoTrailer {
 		return fmt.Errorf("comment_vote_store: unsupported version %d", ver)
 	}
 	countField := binary.LittleEndian.Uint32(hdr[4:8])
@@ -809,6 +817,9 @@ func (s *CommentVoteStore) UnmarshalSnapshot(r io.Reader) error {
 		// Rebuild byComment.
 		cKey := newCommentPK(cv.Author, cv.Permlink)
 		s.byComment[cKey] = append(s.byComment[cKey], &cp)
+	}
+	if durableD != nil && ver >= commentVoteStoreSnapshotVersion {
+		return s.unmarshalColdAccounting(br)
 	}
 	if durableD != nil {
 		s.rebuildColdAccountingFromDurable(durableD)
