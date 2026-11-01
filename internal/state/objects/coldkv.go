@@ -361,6 +361,15 @@ func (c *coldKV) Flush() error {
 // Close flushes and closes the store, removing the directory if we created it.
 // A store we did not create is flushed first so the directory holds every row
 // it was given (see Flush).
+//
+// When nothing has been written since the tier was last checkpointed for a
+// snapshot (or opened from a stamped directory), the closed directory is
+// stamped with that snapshot's token. This is the clean-shutdown case: the
+// node saves its shutdown snapshot, closes the tier, and the next start finds
+// a cold dir that already IS that snapshot's cold half, so it opens it as it
+// stands — no restore, no re-spill. openColdKV removes the stamp again before
+// the first write, so a crash afterwards leaves a directory no snapshot will
+// accept.
 func (c *coldKV) Close() error {
 	if c == nil || c.db == nil {
 		return nil
@@ -371,9 +380,13 @@ func (c *coldKV) Close() error {
 	} else {
 		ferr = c.Flush()
 	}
+	tok := c.Token()
 	err := c.db.Close()
 	if err == nil {
 		err = ferr
+	}
+	if err == nil && !c.owned && tok != "" {
+		err = WriteColdID(c.dir, tok)
 	}
 	c.db = nil
 	if c.owned && c.dir != "" {
