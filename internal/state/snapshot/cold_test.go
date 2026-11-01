@@ -174,3 +174,61 @@ func TestSaveForcedSelfContainedStreamsCold(t *testing.T) {
 	}
 	checkColdState(t, dst)
 }
+
+// TestCleanShutdownColdReusedInPlace: closing the tier right after the save
+// stamps the live cold dir with the snapshot's token, so the next start uses
+// it as it stands. Opening it removes the stamp before anything can write,
+// and a tier that was written to closes unstamped.
+func TestCleanShutdownColdReusedInPlace(t *testing.T) {
+	base := t.TempDir()
+	live := filepath.Join(base, "cold")
+	src := newColdSource(t, live)
+	path, err := Save(src.db, filepath.Join(base, "snaps"), 100, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := src.cold.Close(); err != nil {
+		t.Fatal(err)
+	}
+	tok, _ := SnapshotColdToken(path)
+	if got := objects.ReadColdID(live); got != tok || tok == "" {
+		t.Fatalf("live cold dir stamped %q, snapshot token %q", got, tok)
+	}
+	how, err := PrepareColdDir(path, live)
+	if err != nil || how != ColdPrepReused {
+		t.Fatalf("prepare: %v, %v", how, err)
+	}
+
+	dst := state.OpenMem()
+	t.Cleanup(func() { _ = dst.Close() })
+	cold := attachCold(t, dst, live)
+	if objects.ReadColdID(live) != "" {
+		t.Fatal("stamp still on disk after open: a crash now would leave it trusted")
+	}
+	if _, err := Load(dst, path); err != nil {
+		t.Fatalf("load over the reused dir: %v", err)
+	}
+	checkColdState(t, dst)
+
+	// The node moves on: an eviction writes to the tier.
+	s := state.NewSession(dst)
+	cs := objects.EnsureCommentStore(s)
+	objects.PutComment(s, &objects.Comment{Author: "carol", Permlink: "later", WasPaid: true})
+	if err := s.Commit(false); err != nil {
+		t.Fatal(err)
+	}
+	if !cs.Evict("carol", "later") {
+		t.Fatal("evict")
+	}
+	if err := cold.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := objects.ReadColdID(live); got != "" {
+		t.Fatalf("written-to tier closed stamped %q", got)
+	}
+	// The old snapshot no longer matches the live dir, so it is restored.
+	how, err = PrepareColdDir(path, live)
+	if err != nil || how != ColdPrepRestored {
+		t.Fatalf("prepare after divergence: %v, %v", how, err)
+	}
+}

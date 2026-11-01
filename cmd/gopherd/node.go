@@ -1107,7 +1107,11 @@ func (a *app) close() {
 	// instead of rebuilding from that snapshot.
 	persistHead := a.savePersistState()
 	if a.cold != nil {
-		_ = a.cold.Close()
+		if cerr := a.cold.Close(); cerr != nil {
+			a.logger.printf("WARN cold tier close: %v", cerr)
+		} else if tok := objects.ReadColdID(a.cfg.coldDir); a.cfg.coldDir != "" && tok != "" {
+			a.logger.printf("cold tier %s closed matching the shutdown snapshot — the next --load-snapshot of it opens the tier in place", a.cfg.coldDir)
+		}
 		a.cold = nil
 		// Stamp the cold tier with the head persist-state was written at, but
 		// only AFTER Close() has flushed it. A persist-state resume is a PAIR —
