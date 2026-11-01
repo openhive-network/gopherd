@@ -1119,7 +1119,15 @@ var commentStoreSnapshotMagic = [4]byte{'C', 'M', 'N', 'T'}
 // map rehashing, never correctness.
 //
 // v1 snapshots still load through the exact-count path.
-const commentStoreSnapshotVersion uint32 = 2
+//
+// Version 3 adds, to a durable-cold stream only (snapColdDurableFlag), a cold
+// bookkeeping trailer after the terminator: coldTotal, the bloom and coldRoot
+// (see cold_accounting.go), so the load does not walk the whole cold tier to
+// rebuild them. A v2 durable stream still loads through that walk.
+const commentStoreSnapshotVersion uint32 = 3
+
+// commentStoreSnapshotVersionTerminated is v2: terminator, no trailer.
+const commentStoreSnapshotVersionTerminated uint32 = 2
 
 // maxCommentSnapshotRecords bounds the header's record count before it is
 // used to presize anything. Mainnet is at ~2×10^8 comments; a count above
@@ -1220,7 +1228,13 @@ func (s *CommentStore) MarshalSnapshot(w io.Writer) error {
 				return err
 			}
 		}
-		return writeTerminator()
+		if err := writeTerminator(); err != nil {
+			return err
+		}
+		if durableCold {
+			return s.marshalColdAccounting(w)
+		}
+		return nil
 	}
 
 	// Two tiers, written back-to-back (NOT merge-sorted). The resident set is
@@ -1272,7 +1286,7 @@ func (s *CommentStore) UnmarshalSnapshot(r io.Reader) error {
 		return fmt.Errorf("comment_store: read header: %w", err)
 	}
 	ver := binary.LittleEndian.Uint32(hdr[0:4])
-	if ver != commentStoreSnapshotVersion && ver != commentStoreSnapshotVersionCounted {
+	if ver != commentStoreSnapshotVersion && ver != commentStoreSnapshotVersionTerminated && ver != commentStoreSnapshotVersionCounted {
 		return fmt.Errorf("comment_store: unsupported version %d", ver)
 	}
 	countField := binary.LittleEndian.Uint32(hdr[4:8])
@@ -1280,7 +1294,7 @@ func (s *CommentStore) UnmarshalSnapshot(r io.Reader) error {
 	count := countField &^ snapColdDurableFlag
 	// v2 ends the stream with a terminator; its counts are presize hints only.
 	// v1 has no terminator and `count` is the exact record contract.
-	terminated := ver == commentStoreSnapshotVersion
+	terminated := ver != commentStoreSnapshotVersionCounted
 	if terminated {
 		var coldHintBuf [4]byte
 		if _, err := io.ReadFull(br, coldHintBuf[:]); err != nil {
@@ -1406,6 +1420,11 @@ func (s *CommentStore) UnmarshalSnapshot(r io.Reader) error {
 		if s.residentCap > 0 {
 			s.evictQueue = append(s.evictQueue, key)
 		}
+	}
+	if durableD != nil && ver >= commentStoreSnapshotVersion {
+		// v3: the bookkeeping the omitted cold-record stream would have
+		// produced was saved with it.
+		return s.unmarshalColdAccounting(br)
 	}
 	if durableD != nil {
 		// Rebuild coldTotal + coldRoot from the durable cold tier's restored
