@@ -64,6 +64,12 @@ func cmdStateDump(args []string) int {
 			return 1
 		}
 		if st.IsDir() {
+			release, aerr := snapshot.AttachSnapshotCold(db, *loadSnap)
+			if aerr != nil {
+				fmt.Fprintf(os.Stderr, "state-dump: attach snapshot cold tier: %v\n", aerr)
+				return 1
+			}
+			defer release()
 			if _, err := snapshot.Load(db, *loadSnap); err != nil {
 				fmt.Fprintf(os.Stderr, "state-dump: load snapshot dir: %v\n", err)
 				return 1

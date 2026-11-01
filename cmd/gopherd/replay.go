@@ -213,6 +213,24 @@ func cmdReplay(args []string) int {
 	var commentStoreForEvict *objects.CommentStore
 	var voteStoreForEvict *objects.CommentVoteStore
 	var cold objects.ColdStore
+	// A snapshot that keeps its cold rows in a pebble checkpoint loads over a
+	// cold dir prepared from it (see snapshot.PrepareColdDir).
+	if *loadSnapshot != "" && *persistStateDir == "" {
+		if fi, err := os.Stat(*loadSnapshot); err == nil && fi.IsDir() {
+			if tok, err := snapshot.SnapshotColdToken(*loadSnapshot); err == nil && tok != "" {
+				if *residentCap <= 0 || *coldBackend != "pebble" || *coldDir == "" {
+					fmt.Fprintf(os.Stderr, "replay: %s keeps its cold tier in a pebble checkpoint: run with --comment-resident-cap>0 --cold-backend=pebble --cold-dir\n", *loadSnapshot)
+					return 2
+				}
+				how, perr := snapshot.PrepareColdDir(*loadSnapshot, *coldDir)
+				if perr != nil {
+					fmt.Fprintf(os.Stderr, "replay: prepare cold tier: %v\n", perr)
+					return 1
+				}
+				fmt.Printf("replay: cold tier %s %s\n", *coldDir, how)
+			}
+		}
+	}
 	if *residentCap > 0 {
 		backendName := *coldBackend
 		if backendName == "" && *coldMmap {

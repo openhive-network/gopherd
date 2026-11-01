@@ -156,7 +156,7 @@ func TestColdKVCheckpointRestore(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(ck), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Checkpoint(ck); err != nil {
+	if err := c.Checkpoint(ck, "tok-1"); err != nil {
 		t.Fatalf("checkpoint: %v", err)
 	}
 	if !IsColdCheckpoint(ck) {
