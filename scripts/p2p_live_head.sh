@@ -18,30 +18,34 @@
 #     trap; a restart just reloads the snapshot.
 #
 # ---------------------------------------------------------------------------
-# DEV CYCLE (measured 2026-08-10 — no fast path exists yet)
+# DEV CYCLE
 #
 #   go build -o bin/gopherd ./cmd/gopherd     # NOT `go build ./...` — that
 #                                             # does not update bin/
-#   kill -TERM $(pgrep -x gopherd)            # ~3 min shutdown snapshot
-#   <this script>                             # ~24 min snapshot load
+#   kill -TERM $(pgrep -x gopherd)            # shutdown snapshot, seconds
+#   SNAPSHOT=$SNAP_DIR/block-<N> <this script>
 #
-# ⚠️ There is NO fast restart today. persist-state was supposed to provide one
-# and does not: on the pebble cold tier it re-spills the entire comment corpus
-# on load (a resume was still running at 22 minutes, i.e. slower than the
-# snapshot it replaces), and the durable backend that would avoid that has ~10x
-# write amplification (see COLD_BACKEND). Making restarts fast is open work, not
-# a flag you can turn on.
+# On the pebble cold tier (the default) a shutdown snapshot carries the cold
+# tier as a pebble checkpoint and stamps the closed COLD dir as matching it,
+# so restarting from that snapshot with the SAME COLD opens the tier in place
+# (15 s load at 28.1M, measured 2026-11-01). Any other COLD is replaced from
+# the snapshot's checkpoint. Older self-contained snapshots still stream the
+# corpus: their load clears COLD and ingests it as SSTs. Do not wipe COLD
+# yourself, and leave COLD_REUSE=0: it predates the checkpoint and is
+# ignored for a checkpointed snapshot.
+#
+# persist-state is unchanged by this and still unmeasured; leave it off.
 #
 # Set SNAP_DIR= (empty) to skip the shutdown snapshot on throwaway runs — but
 # then a restart re-syncs from whatever older snapshot you point at.
 #
 # DO NOT wipe DATA/COLD when resuming from persist-state — the cold tier holds
-# comments/votes and is half of the pair. Wipe both ONLY for a snapshot load.
+# comments/votes and is half of the pair.
 # ---------------------------------------------------------------------------
 #
 # Restarting from a SNAPSHOT: wipe DATA first (stale pebble K/V from the
-# previous run is only partially overwritten by a snapshot load). Cheapest
-# correct snapshot restart is a fresh DATA + fresh COLD.
+# previous run is only partially overwritten by a snapshot load). Keep COLD
+# (see above).
 set -euo pipefail
 
 BIN="${BIN:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/gopherd}"

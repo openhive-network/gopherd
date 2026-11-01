@@ -34,7 +34,7 @@ transactions, making Hive a genuinely multi-client network.
 | Block production | Working. Dry run and real production both validated on mainnet; real production is key-gated. |
 | Fork switching | Implemented, default off (`--fork-switching`). |
 | Testnet | Joins **hived's** testnet: syncs, matches block IDs, and produces blocks hived accepts. See `docs/testnet.md`. |
-| Zero-snapshot fast restart | **Not delivered.** `--persist-state-dir` exists but is slower than a snapshot load at mainnet scale. |
+| Fast restart | Working on the pebble cold tier: a clean stop saves a snapshot that carries the cold tier as a pebble checkpoint, and the restart reopens the cold dir in place (15 s at 28.1M; see "Getting a snapshot"). `--persist-state-dir` is unchanged and still unmeasured with it. |
 
 ### Safety note on serving
 
@@ -76,6 +76,10 @@ Figures below are **measured** on mainnet on 2026-10-13 (head ~110.7M), on a
 | Snapshot | 35 GB | 33 GB of it is the comment store; keep the latest one |
 | Snapshot write | 6–9.5 min | on shutdown (SIGTERM); give the service a stop timeout of an hour |
 | Snapshot load | **1h45m** | the comment store re-spills into the cold tier at ~5 MB/s |
+
+The three snapshot rows above predate the checkpointed snapshots described
+under "Getting a snapshot", which no longer stream the cold comments. They
+have not been re-measured at the head yet.
 | Catch-up after load | ~20 s for 2.8 h of blocks | 120–330 blocks/s from peers |
 
 Recommended for a tip-following node:
@@ -170,14 +174,42 @@ gopherd node ... --shutdown-snapshot-dir=/path/snapshots
 # SIGTERM (not kill -9) -> writes /path/snapshots/block-<head>/
 ```
 
-Restarting needs **both** that snapshot and the same `--cold-dir`. Snapshots are
-not self-contained unless the cold tier goes with them.
+With `--cold-backend=pebble` the snapshot carries the cold tier as a pebble
+checkpoint in `block-<head>/cold/`: hard-linked SSTs, so it takes seconds and
+shares disk with the live tier until compaction rewrites those files (budget up
+to a full cold tier per snapshot you keep). `comment_store.bin` holds only the
+resident comments. On a clean stop the closed `--cold-dir` is stamped as
+matching that snapshot, and the restart opens it as it stands. Any other cold
+dir (after a crash, a different snapshot, a new machine) is replaced from the
+checkpoint, which is also seconds on the same filesystem. A load over a cold
+dir that matches neither is refused.
+
+Measured at block 28,102,130 on the from-genesis sync's own 19 GB shutdown
+snapshot (12-core box, `--comment-resident-cap=2000000 --mem-limit-gib=9`):
+
+| | Load | Shutdown save |
+|---|---|---|
+| before (cold rows streamed both ways) | 3m51s | 1m30s |
+| self-contained snapshot, now ingested as SSTs | 2m35s | 9s |
+| checkpointed snapshot, cold dir reused in place | **15 s** | 4 s |
+| checkpointed snapshot, checkpoint restored into an empty cold dir | 11 s | 4 s |
+
+A replay from 2.75M to 3.5M with a 50,000-comment resident cap gives a
+byte-identical `state-jsonl --comments` dump on all three paths (old binary,
+reused cold dir, restored checkpoint).
+
+Older snapshots, and ones saved with `replay --snapshot-self-contained`, still
+stream every cold comment. Loading one clears the pebble cold dir first and
+ingests the cold comments as sorted SSTs rather than pushing them through
+memtables and compaction. Read-only tools (`state-jsonl`, `state-dump`) attach
+a scratch copy of a snapshot's checkpoint by themselves.
 
 Without a snapshot, a node builds state by replaying a `block_log` from genesis,
 which takes about 20 hours and a 539 GB log (see Hardware), or by fetching every
 block from peers: `scripts/p2p_sync_genesis.sh` starts that as a memory-capped
 user service (`systemctl --user status gopherd-sync`) that writes its own
-block_log, so a restart replays locally instead of re-fetching.
+block_log. Rerunning the script resumes from its newest shutdown snapshot and
+replays the local block_log only past it.
 
 ### Flags that matter more than the rest
 
