@@ -40,6 +40,11 @@ func cmdStateWS(args []string) int {
 		objects.EnsureTransactionStore(boot)
 		objects.EnsureVestingWithdrawalScheduleStore(boot)
 		objects.EnsureWitnessScheduleStore(boot)
+		release, aerr := snap.AttachSnapshotCold(db, os.Args[1])
+		if aerr != nil {
+			panic(aerr)
+		}
+		defer release()
 		if _, err := snap.Load(db, os.Args[1]); err != nil {
 			panic(err)
 		}

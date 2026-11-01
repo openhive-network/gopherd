@@ -37,6 +37,13 @@ type coldKV struct {
 	// wb accumulates eviction-pass writes; committed by flushBatch (end of
 	// pass) or implicitly before any read (reads don't see an open batch).
 	wb *pebble.Batch
+	// token names the exact contents of the tier: set when the tier is opened
+	// from a directory stamped with a cold ID (a snapshot's checkpoint, or a
+	// clean shutdown), or when Checkpoint captures it. dirty is set by the
+	// first write after that, at which point the tier no longer matches any
+	// snapshot and the token stops counting (see Token).
+	token string
+	dirty bool
 }
 
 // Cold-tier table prefixes. One shared Pebble instance, namespaced by a
@@ -72,6 +79,7 @@ var ColdCacheBytes int64 = 1 << 30
 
 func openColdKV(dir string) (*coldKV, error) {
 	owned := false
+	token := ""
 	if dir == "" {
 		d, err := os.MkdirTemp("", "ghive-cold-")
 		if err != nil {
@@ -83,6 +91,15 @@ func openColdKV(dir string) (*coldKV, error) {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, err
 		}
+		// Take the directory's cold ID and remove the file before anything
+		// can write: from here on the only record that this tier matches a
+		// snapshot is the in-memory token, which a write invalidates, and a
+		// crash leaves an unstamped directory that no snapshot will accept.
+		t, terr := takeColdID(dir)
+		if terr != nil {
+			return nil, terr
+		}
+		token = t
 	}
 	db, err := pebble.Open(dir, &pebble.Options{
 		// Cache so promote-back reads hit memory; the cold tier is
@@ -114,7 +131,7 @@ func openColdKV(dir string) (*coldKV, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &coldKV{db: db, dir: dir, owned: owned}, nil
+	return &coldKV{db: db, dir: dir, owned: owned, token: token}, nil
 }
 
 // bset/bdel/flushBatch provide a batched write path for the eviction pass.
@@ -124,6 +141,7 @@ func openColdKV(dir string) (*coldKV, error) {
 // uncommitted batch, so flushBatch() MUST be called at the end of the eviction
 // pass (a block boundary) before any subsequent promote-back read.
 func (c *coldKV) bset(key, val []byte) {
+	c.dirty = true
 	if c.wb == nil {
 		c.wb = c.db.NewBatch()
 	}
@@ -134,6 +152,7 @@ func (c *coldKV) bset(key, val []byte) {
 }
 
 func (c *coldKV) bdel(key []byte) {
+	c.dirty = true
 	if c.wb == nil {
 		c.wb = c.db.NewBatch()
 	}
@@ -226,16 +245,19 @@ func (c *coldKV) has(key []byte) bool {
 
 // set writes a value for a full key (NoSync).
 func (c *coldKV) set(key, val []byte) error {
+	c.dirty = true
 	return c.db.Set(key, val, pebble.NoSync)
 }
 
 // del removes a full key (NoSync).
 func (c *coldKV) del(key []byte) error {
+	c.dirty = true
 	return c.db.Delete(key, pebble.NoSync)
 }
 
 // deletePrefix removes every key with the given (table-prefixed) prefix.
 func (c *coldKV) deletePrefix(prefix []byte) error {
+	c.dirty = true
 	if c.wb != nil {
 		c.flushBatch()
 	}

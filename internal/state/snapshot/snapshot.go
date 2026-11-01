@@ -86,6 +86,31 @@ type Manifest struct {
 	MemFile    string           `json:"mem_file"`
 	MemSHA256  string           `json:"mem_sha256"`
 	Subsystems []SubsystemEntry `json:"subsystems"`
+	// ColdCheckpoint, when set, is the directory (relative to the snapshot)
+	// holding a pebble checkpoint of the cold tier, and ColdToken the ID it is
+	// stamped with. The comment and vote streams then hold only the resident
+	// set: the cold rows are in the checkpoint, and loading needs a cold tier
+	// carrying the same token (see PrepareColdDir).
+	ColdCheckpoint string `json:"cold_checkpoint,omitempty"`
+	ColdToken      string `json:"cold_token,omitempty"`
+}
+
+// ColdCheckpointDir is where Save puts the cold tier checkpoint.
+const ColdCheckpointDir = "cold"
+
+// coldCheckpointer is the comment store's view of the shared cold tier.
+type coldCheckpointer interface {
+	CheckpointCold(dir string) (string, error)
+	ColdToken() string
+}
+
+func findColdCheckpointer(db *state.Database) coldCheckpointer {
+	for _, name := range db.SubsystemNames() {
+		if cc, ok := db.GetSubsystem(name).(coldCheckpointer); ok {
+			return cc
+		}
+	}
+	return nil
 }
 
 // SubsystemEntry records one subsystem file in the manifest.
@@ -210,6 +235,25 @@ func saveOnce(db *state.Database, dir string, blockNum uint32, headBlockID strin
 		return "", fmt.Errorf("snapshot: mkdir tmp: %w", err)
 	}
 
+	// Capture the cold tier first, as a pebble checkpoint (hard links, seconds).
+	// When that works the comment and vote stores see a durable tier and write
+	// only their resident sets; the tens of GB of cold rows stay in SSTs that
+	// are already on disk. When it does not (another backend, or a failure),
+	// they stream every cold row as before, so the snapshot is complete either
+	// way.
+	var coldToken string
+	if cc := findColdCheckpointer(db); cc != nil {
+		ckStart := time.Now()
+		tok, err := cc.CheckpointCold(filepath.Join(tmpDir, ColdCheckpointDir))
+		switch {
+		case err != nil:
+			fmt.Fprintf(os.Stderr, "snapshot: cold checkpoint failed, streaming the cold rows instead: %v\n", err)
+		case tok != "":
+			coldToken = tok
+			fmt.Fprintf(os.Stderr, "snapshot: cold tier checkpointed in %s\n", HumanDuration(time.Since(ckStart)))
+		}
+	}
+
 	// Write the K/V dump and every subsystem file CONCURRENTLY — the files
 	// are independent, and the store marshalers only READ their (paused)
 	// stores, so the small stores + mem.bin overlap with the giant
@@ -281,6 +325,9 @@ func saveOnce(db *state.Database, dir string, blockNum uint32, headBlockID strin
 		MemSHA256:   memSHA,
 		Subsystems:  subEntries,
 	}
+	if coldToken != "" {
+		man.ColdCheckpoint, man.ColdToken = ColdCheckpointDir, coldToken
+	}
 	if err := writeManifest(filepath.Join(tmpDir, "manifest.json"), &man); err != nil {
 		return "", fmt.Errorf("snapshot: write manifest: %w", err)
 	}
@@ -319,6 +366,18 @@ func Load(db *state.Database, snapDir string) (*Manifest, error) {
 	}
 	if man.Format != Format {
 		return nil, fmt.Errorf("snapshot: format %d not supported (want %d)", man.Format, Format)
+	}
+
+	// A snapshot that keeps its cold rows in a checkpoint loads only over a
+	// cold tier holding exactly those rows. Anything else would load the
+	// resident half over the wrong cold half, and nothing downstream would
+	// notice: Hive blocks carry no state root.
+	if man.ColdToken != "" && config.Env("GOPHERD_SNAPSHOT_SKIP_COMMENTS") != "1" {
+		cc := findColdCheckpointer(db)
+		if cc == nil || cc.ColdToken() != man.ColdToken {
+			return nil, fmt.Errorf("snapshot: %s keeps its cold rows in the pebble checkpoint %s, and the attached cold tier is not that checkpoint (attach a pebble cold tier prepared with PrepareColdDir)",
+				snapDir, filepath.Join(snapDir, man.ColdCheckpoint))
+		}
 	}
 
 	// Resolve every subsystem up front so registration errors surface before

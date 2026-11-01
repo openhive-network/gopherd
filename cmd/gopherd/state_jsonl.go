@@ -100,6 +100,12 @@ func cmdStateJSONL(args []string) int {
 	if *snapDir != "" {
 		db = state.OpenMem()
 		registerAllStores(db)
+		release, aerr := snapshot.AttachSnapshotCold(db, *snapDir)
+		if aerr != nil {
+			fmt.Fprintf(os.Stderr, "state-jsonl: attach snapshot cold tier: %v\n", aerr)
+			return 1
+		}
+		defer release()
 		if _, err := snapshot.Load(db, *snapDir); err != nil {
 			fmt.Fprintf(os.Stderr, "state-jsonl: load snapshot %s: %v\n", *snapDir, err)
 			return 1

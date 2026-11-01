@@ -777,6 +777,27 @@ func newApp(cfg flags) (*app, error) {
 		// Attach the cold tier BEFORE loading so the multi-GB comment +
 		// vote corpus spills to disk during the load instead of piling
 		// up resident (a full-chain snapshot loaded all-resident OOMs).
+		// A snapshot that keeps its cold rows in a pebble checkpoint needs a
+		// pebble cold dir holding exactly that tier: the one a clean shutdown
+		// left stamped, or the checkpoint restored over it (hard links).
+		snapColdToken, terr := snap.SnapshotColdToken(cfg.loadSnapshot)
+		if terr != nil {
+			stateDB.Close()
+			return nil, fmt.Errorf("load-snapshot %s: %w", cfg.loadSnapshot, terr)
+		}
+		if snapColdToken != "" {
+			if cfg.residentCap <= 0 || (cfg.coldBackend != "pebble") {
+				stateDB.Close()
+				return nil, fmt.Errorf("load-snapshot %s keeps its cold tier in a pebble checkpoint: run with --comment-resident-cap>0 --cold-backend=pebble --cold-dir", cfg.loadSnapshot)
+			}
+			prepStart := time.Now()
+			how, perr := snap.PrepareColdDir(cfg.loadSnapshot, cfg.coldDir)
+			if perr != nil {
+				stateDB.Close()
+				return nil, fmt.Errorf("prepare cold tier: %w", perr)
+			}
+			fmt.Fprintf(os.Stderr, "gopherd node: cold tier %s %s (%s)\n", cfg.coldDir, how, snap.HumanDuration(time.Since(prepStart)))
+		}
 		if cfg.residentCap > 0 {
 			backendName := cfg.coldBackend
 			if backendName == "persist" && cfg.coldDir == "" {
@@ -813,7 +834,7 @@ func newApp(cfg flags) (*app, error) {
 		// disagree with it (e.g. a test setting the var after init). The two
 		// halves must agree — sidecar-loaded bookkeeping is only correct if the
 		// per-record rebuild is actually being skipped.
-		if cfg.residentCap > 0 && cfg.coldDir != "" && objects.ColdReuseEnabled() {
+		if cfg.residentCap > 0 && cfg.coldDir != "" && objects.ColdReuseEnabled() && snapColdToken == "" {
 			if bn, berr := snapshotManifestBlock(cfg.loadSnapshot); berr == nil {
 				ok, serr := commentStore.LoadColdSidecar(cfg.coldDir, bn)
 				if serr != nil {
@@ -842,7 +863,7 @@ func newApp(cfg flags) (*app, error) {
 			stateDB.Close()
 			return nil, fmt.Errorf("load-snapshot %s: %w", cfg.loadSnapshot, err)
 		}
-		if cfg.residentCap > 0 && cfg.coldDir != "" && !sidecarUsed && commentStore != nil {
+		if cfg.residentCap > 0 && cfg.coldDir != "" && !sidecarUsed && commentStore != nil && snapColdToken == "" {
 			// First run against this tier: bank the bookkeeping so the NEXT
 			// start can skip the scan.
 			if serr := commentStore.SaveColdSidecar(cfg.coldDir, man.BlockNum); serr != nil {
