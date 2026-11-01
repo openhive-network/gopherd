@@ -2,6 +2,8 @@ package objects
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -129,6 +131,69 @@ func TestColdKVCloseKeepsUnflushedRows(t *testing.T) {
 		v, ok := c2.get([]byte(k))
 		if !ok || string(v) != want {
 			t.Fatalf("after reopen %q: ok=%v v=%q, want %q", k, ok, v, want)
+		}
+	}
+}
+
+// TestColdKVCheckpointRestore: a checkpoint taken from a live tier restores
+// into another directory with every row, including rows still in the open
+// batch and the memtable at checkpoint time, and the checkpoint stays
+// loadable after the restored tier is written to.
+func TestColdKVCheckpointRestore(t *testing.T) {
+	base := t.TempDir()
+	live := filepath.Join(base, "cold")
+	c, err := openColdKV(live)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	k1 := tableKey(coldTableCommentPrimary, []byte("alice/one"))
+	k2 := tableKey(coldTableVotePrimary, []byte("bob/two"))
+	if err := c.set(k1, []byte("v1")); err != nil {
+		t.Fatal(err)
+	}
+	c.bset(k2, []byte("v2"))
+	ck := filepath.Join(base, "snap", "cold")
+	if err := os.MkdirAll(filepath.Dir(ck), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Checkpoint(ck); err != nil {
+		t.Fatalf("checkpoint: %v", err)
+	}
+	if !IsColdCheckpoint(ck) {
+		t.Fatal("IsColdCheckpoint false on a fresh checkpoint")
+	}
+	// The live tier moves on; the checkpoint must not see it.
+	if err := c.set(k1, []byte("changed")); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	for round := 0; round < 2; round++ {
+		if err := RestoreColdCheckpoint(ck, live); err != nil {
+			t.Fatalf("round %d restore: %v", round, err)
+		}
+		r, err := openColdKV(live)
+		if err != nil {
+			t.Fatalf("round %d open restored: %v", round, err)
+		}
+		for k, want := range map[string]string{string(k1): "v1", string(k2): "v2"} {
+			v, ok := r.get([]byte(k))
+			if !ok || string(v) != want {
+				t.Fatalf("round %d %q: ok=%v v=%q want %q", round, k, ok, v, want)
+			}
+		}
+		// Write through the restored tier and compact, which rewrites and
+		// deletes SSTs; the next round restores from the checkpoint again.
+		if err := r.set(k1, []byte("again")); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.db.Compact([]byte{0x00}, []byte{0xff}, true); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.Close(); err != nil {
+			t.Fatal(err)
 		}
 	}
 }
