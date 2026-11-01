@@ -228,6 +228,13 @@ func cmdReplay(args []string) int {
 					return 1
 				}
 				fmt.Printf("replay: cold tier %s %s\n", *coldDir, how)
+			} else if err == nil && *residentCap > 0 && *coldBackend == "pebble" && *coldDir != "" && !objects.ColdReuseEnabled() {
+				// Self-contained snapshot: the load rewrites every cold row, so
+				// start from an empty tier instead of upserting over the old one.
+				if err := os.RemoveAll(*coldDir); err != nil {
+					fmt.Fprintf(os.Stderr, "replay: clear cold tier %s: %v\n", *coldDir, err)
+					return 1
+				}
 			}
 		}
 	}

@@ -797,6 +797,19 @@ func newApp(cfg flags) (*app, error) {
 				return nil, fmt.Errorf("prepare cold tier: %w", perr)
 			}
 			fmt.Fprintf(os.Stderr, "gopherd node: cold tier %s %s (%s)\n", cfg.coldDir, how, snap.HumanDuration(time.Since(prepStart)))
+		} else if cfg.residentCap > 0 && cfg.coldBackend == "pebble" && !objects.ColdReuseEnabled() {
+			// A snapshot without a cold checkpoint streams every cold row and
+			// the load writes each one into the tier. Over the previous run's
+			// tier those writes are upserts onto rows already there: the LSM
+			// holds both copies until compaction (the dir peaked near 150 GB)
+			// and spends the load compacting them. Start from an empty tier.
+			// (GOPHERD_COLD_REUSE keeps the dir: it skips those writes.)
+			if wiped, werr := wipeScratchColdTier(cfg.coldDir, cfg.coldBackend); werr != nil {
+				stateDB.Close()
+				return nil, fmt.Errorf("clear cold tier %s before a self-contained snapshot load: %w", cfg.coldDir, werr)
+			} else if wiped {
+				fmt.Fprintf(os.Stderr, "gopherd node: cleared cold tier %s — the snapshot carries every cold row\n", cfg.coldDir)
+			}
 		}
 		if cfg.residentCap > 0 {
 			backendName := cfg.coldBackend
