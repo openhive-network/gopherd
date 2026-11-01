@@ -1272,7 +1272,7 @@ func (s *CommentStore) MarshalSnapshot(w io.Writer) error {
 
 // UnmarshalSnapshot rebuilds the primary map AND the byRoot secondary
 // index from r. Undo log cleared.
-func (s *CommentStore) UnmarshalSnapshot(r io.Reader) error {
+func (s *CommentStore) UnmarshalSnapshot(r io.Reader) (err error) {
 	br := asByteReader(r)
 	var magic [4]byte
 	if _, err := io.ReadFull(br, magic[:]); err != nil {
@@ -1352,6 +1352,20 @@ func (s *CommentStore) UnmarshalSnapshot(r io.Reader) error {
 				extra *= 2 // primary + by-root row per spilled comment
 			}
 			ec.ensureCapacity(extra)
+		}
+		// Pebble: build the spilled rows into SSTs and ingest them rather
+		// than pushing tens of GB through memtables and compaction (see
+		// coldkv_bulk.go). Skipped under GOPHERD_COLD_REUSE, which writes
+		// nothing.
+		if bl, ok := s.cold.(coldBulkLoader); ok && !coldReuseOnLoad {
+			if berr := bl.beginBulkLoad(); berr != nil {
+				return fmt.Errorf("comment_store: begin cold bulk load: %w", berr)
+			}
+			defer func() {
+				if eerr := bl.endBulkLoad(); eerr != nil && err == nil {
+					err = fmt.Errorf("comment_store: finish cold bulk load: %w", eerr)
+				}
+			}()
 		}
 	}
 	var recScratch []byte

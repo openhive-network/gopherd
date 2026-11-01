@@ -44,6 +44,10 @@ type coldKV struct {
 	// snapshot and the token stops counting (see Token).
 	token string
 	dirty bool
+	// opts are the options the tier was opened with (the bulk loader builds
+	// SSTs with matching writer options); bulk is non-nil during a bulk load.
+	opts *pebble.Options
+	bulk *coldBulk
 }
 
 // Cold-tier table prefixes. One shared Pebble instance, namespaced by a
@@ -101,7 +105,7 @@ func openColdKV(dir string) (*coldKV, error) {
 		}
 		token = t
 	}
-	db, err := pebble.Open(dir, &pebble.Options{
+	opts := &pebble.Options{
 		// Cache so promote-back reads hit memory; the cold tier is
 		// write-heavy at eviction and read on promotion. Sized by
 		// ColdCacheBytes: pebble keeps this in manually managed memory,
@@ -127,11 +131,12 @@ func openColdKV(dir string) (*coldKV, error) {
 		// GHIVE_COLD_COMPRESS=zstd|snappy overrides when disk is the
 		// constraint instead (a ~24G comment corpus zstd-compresses ~3x).
 		Levels: []pebble.LevelOptions{{Compression: coldCompression()}},
-	})
+	}
+	db, err := pebble.Open(dir, opts)
 	if err != nil {
 		return nil, err
 	}
-	return &coldKV{db: db, dir: dir, owned: owned, token: token}, nil
+	return &coldKV{db: db, dir: dir, owned: owned, token: token, opts: opts}, nil
 }
 
 // bset/bdel/flushBatch provide a batched write path for the eviction pass.
@@ -142,6 +147,10 @@ func openColdKV(dir string) (*coldKV, error) {
 // pass (a block boundary) before any subsequent promote-back read.
 func (c *coldKV) bset(key, val []byte) {
 	c.dirty = true
+	if c.bulk != nil && len(key) > 0 && key[0] == coldTableCommentPrimary {
+		c.bulkSet(key, val)
+		return
+	}
 	if c.wb == nil {
 		c.wb = c.db.NewBatch()
 	}
@@ -153,6 +162,7 @@ func (c *coldKV) bset(key, val []byte) {
 
 func (c *coldKV) bdel(key []byte) {
 	c.dirty = true
+	c.orderAfterBulk(key)
 	if c.wb == nil {
 		c.wb = c.db.NewBatch()
 	}
@@ -210,9 +220,7 @@ func tableKey(table byte, key []byte) []byte {
 // get returns the value for a full (table-prefixed) key. ok=false on miss.
 // The returned slice is a copy owned by the caller.
 func (c *coldKV) get(key []byte) ([]byte, bool) {
-	if c.wb != nil {
-		c.flushBatch() // make pending eviction writes visible to reads
-	}
+	c.syncReads()
 	v, closer, err := c.db.Get(key)
 	if err != nil {
 		if errors.Is(err, pebble.ErrNotFound) {
@@ -232,9 +240,7 @@ func (c *coldKV) get(key []byte) ([]byte, bool) {
 
 // has reports whether a full key exists without copying the value.
 func (c *coldKV) has(key []byte) bool {
-	if c.wb != nil {
-		c.flushBatch()
-	}
+	c.syncReads()
 	_, closer, err := c.db.Get(key)
 	if err != nil {
 		return false
@@ -243,21 +249,50 @@ func (c *coldKV) has(key []byte) bool {
 	return true
 }
 
+// syncReads makes every write so far visible to reads: the open batch is
+// applied and, during a bulk load, the pending SSTs are ingested.
+func (c *coldKV) syncReads() {
+	if c.bulk != nil {
+		if err := c.ingestRun(); err != nil {
+			c.failWrite(err)
+		}
+	}
+	if c.wb != nil {
+		c.flushBatch()
+	}
+}
+
+// orderAfterBulk keeps a non-bulk write to the bulk-loaded table ordered
+// after the bulk rows before it: pending SSTs are ingested first, or the
+// later ingest would sit above the write and undo it (resurrect a deleted
+// row, or put back an overwritten value). key nil means "any table".
+func (c *coldKV) orderAfterBulk(key []byte) {
+	if c.bulk == nil || (key != nil && (len(key) == 0 || key[0] != coldTableCommentPrimary)) {
+		return
+	}
+	if err := c.ingestRun(); err != nil {
+		c.failWrite(err)
+	}
+}
+
 // set writes a value for a full key (NoSync).
 func (c *coldKV) set(key, val []byte) error {
 	c.dirty = true
+	c.orderAfterBulk(key)
 	return c.db.Set(key, val, pebble.NoSync)
 }
 
 // del removes a full key (NoSync).
 func (c *coldKV) del(key []byte) error {
 	c.dirty = true
+	c.orderAfterBulk(key)
 	return c.db.Delete(key, pebble.NoSync)
 }
 
 // deletePrefix removes every key with the given (table-prefixed) prefix.
 func (c *coldKV) deletePrefix(prefix []byte) error {
 	c.dirty = true
+	c.orderAfterBulk(nil)
 	if c.wb != nil {
 		c.flushBatch()
 	}
@@ -268,9 +303,7 @@ func (c *coldKV) deletePrefix(prefix []byte) error {
 // ascending key order. fn returns false to stop. The key and value passed to
 // fn alias iterator-internal storage and MUST NOT be retained.
 func (c *coldKV) rangePrefix(prefix []byte, fn func(key, val []byte) bool) error {
-	if c.wb != nil {
-		c.flushBatch()
-	}
+	c.syncReads()
 	it, err := c.db.NewIter(&pebble.IterOptions{
 		LowerBound: prefix,
 		UpperBound: prefixUpperBound(prefix),
@@ -309,9 +342,7 @@ type coldIter struct {
 // newPrefixIter returns an iterator positioned before the first key with the
 // given prefix; call Next to advance. Caller must Close.
 func (c *coldKV) newPrefixIter(prefix []byte) (coldIterator, error) {
-	if c.wb != nil {
-		c.flushBatch()
-	}
+	c.syncReads()
 	it, err := c.db.NewIter(&pebble.IterOptions{
 		LowerBound: prefix,
 		UpperBound: prefixUpperBound(prefix),
@@ -351,6 +382,9 @@ func (c *coldKV) Flush() error {
 	if c == nil || c.db == nil {
 		return nil
 	}
+	if err := c.endBulkLoad(); err != nil {
+		return err
+	}
 	c.flushBatch()
 	if c.writeErr != nil {
 		return c.writeErr
@@ -376,6 +410,7 @@ func (c *coldKV) Close() error {
 	}
 	var ferr error
 	if c.owned {
+		_ = c.endBulkLoad()
 		c.flushBatch()
 	} else {
 		ferr = c.Flush()
