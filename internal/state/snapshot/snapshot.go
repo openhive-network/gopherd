@@ -665,6 +665,13 @@ func loadMem(db *state.Database, path, expectedSHA, hashAlgo string) error {
 	if err := state.ReadAllRows(db, r); err != nil {
 		return err
 	}
+	// Read the decompressed side to EOF first. The zstd stream decoder reads
+	// raw ahead on its own goroutine, and only once it has reported EOF has
+	// that goroutine stopped touching raw (and, through the tee, the hash);
+	// draining raw before then races it. loadSubsystem does the same.
+	if _, err := io.Copy(io.Discard, r); err != nil {
+		return fmt.Errorf("drain: %w", err)
+	}
 	// Pull any compressed tail bytes through the tee so the hash covers
 	// the whole file (the decoder may stop reading before raw EOF).
 	if _, err := io.Copy(io.Discard, raw); err != nil {
