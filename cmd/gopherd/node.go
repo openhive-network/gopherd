@@ -164,16 +164,7 @@ func wipeScratchColdTier(coldDir, coldBackend string) (bool, error) {
 	if coldDir == "" || coldBackend == "persist" {
 		return false, nil
 	}
-	if _, err := os.Stat(coldDir); err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
-		}
-		return false, err
-	}
-	if err := os.RemoveAll(coldDir); err != nil {
-		return false, err
-	}
-	return true, nil
+	return objects.RemoveColdTierDir(coldDir)
 }
 
 // wipePebbleFiles removes pebble's state files from dir while preserving

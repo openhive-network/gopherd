@@ -429,8 +429,22 @@ func TestApplyBlockHookIntegration(t *testing.T) {
 func TestWipeScratchColdTier(t *testing.T) {
 	dir := t.TempDir()
 	cold := filepath.Join(dir, "cold")
-	if err := os.MkdirAll(filepath.Join(cold, "x"), 0o755); err != nil {
+	if err := os.MkdirAll(cold, 0o755); err != nil {
 		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cold, "MANIFEST-000001"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A directory that is not a cold tier (a mistyped --cold-dir) is refused.
+	other := filepath.Join(dir, "other")
+	if err := os.MkdirAll(filepath.Join(other, "x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if wiped, err := wipeScratchColdTier(other, "pebble"); err == nil || wiped {
+		t.Fatalf("non-cold dir wiped: wiped=%v err=%v", wiped, err)
+	}
+	if _, err := os.Stat(filepath.Join(other, "x")); err != nil {
+		t.Fatal("non-cold dir removed")
 	}
 	if wiped, err := wipeScratchColdTier(cold, "persist"); err != nil || wiped {
 		t.Fatalf("persist cold tier touched: wiped=%v err=%v", wiped, err)

@@ -275,3 +275,35 @@ func (s *CommentStore) ColdToken() string {
 	}
 	return ""
 }
+
+// RemoveColdTierDir deletes a cold tier directory so it can be rebuilt. It
+// refuses a directory that does not look like a cold tier — a mistyped
+// --cold-dir must not be deleted recursively — and accepts an empty one, a
+// pebble tier (MANIFEST-*/OPTIONS-*, or a GOPHERD_COLD_ID stamp) and an mmap
+// tier (cold.dat). Reports whether anything was removed; a missing directory
+// is not an error.
+func RemoveColdTierDir(dir string) (bool, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	looksCold := len(entries) == 0
+	for _, e := range entries {
+		n := e.Name()
+		if strings.HasPrefix(n, "MANIFEST-") || strings.HasPrefix(n, "OPTIONS-") ||
+			n == ColdIDFile || n == "cold.dat" {
+			looksCold = true
+			break
+		}
+	}
+	if !looksCold {
+		return false, fmt.Errorf("%s does not look like a cold tier directory (no pebble MANIFEST/OPTIONS, no cold.dat); refusing to delete it", dir)
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		return false, err
+	}
+	return true, nil
+}
