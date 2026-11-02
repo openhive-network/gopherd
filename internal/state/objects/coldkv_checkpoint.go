@@ -240,7 +240,15 @@ func syncDir(dir string) error {
 // captures it for both.
 func (s *CommentStore) CheckpointCold(dir string) (string, error) {
 	c, ok := s.cold.(*coldKV)
-	if !ok || SnapshotForceSelfContained {
+	if !ok {
+		return "", nil
+	}
+	if SnapshotForceSelfContained {
+		// The comment and vote marshalers stream the tier concurrently, and
+		// every read applies the open eviction batch first: two of them doing
+		// that at once race on it. Apply it now, while the save is still
+		// single-threaded (a checkpoint's Flush does the same below).
+		c.flushBatch()
 		return "", nil
 	}
 	var raw [16]byte
