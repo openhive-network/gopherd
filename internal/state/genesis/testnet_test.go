@@ -166,8 +166,12 @@ func TestInitWitnessesAreRegistered(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := int(sch.NumScheduledWitnesses); got != 1+len(extra) {
-		t.Errorf("scheduled witnesses = %d, want %d", got, 1+len(extra))
+	// Registered, but not scheduled: hived's genesis schedule is initminer
+	// alone (database_init.cpp:308); the init witnesses join at the first
+	// schedule round.
+	if sch.NumScheduledWitnesses != 1 || len(sch.CurrentShuffledWitnesses) != 1 ||
+		sch.CurrentShuffledWitnesses[0] != auth.AccountName(MainnetInitminer) {
+		t.Errorf("schedule = %v (%d scheduled), want [initminer] alone", sch.CurrentShuffledWitnesses, sch.NumScheduledWitnesses)
 	}
 }
 
