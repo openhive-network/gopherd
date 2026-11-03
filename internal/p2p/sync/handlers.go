@@ -361,6 +361,11 @@ func (d *Delegate) handleFetchBlockchainItemIDs(p *node.Peer, body []byte) {
 	// isCatchingUp) — without this the node declined to push and then served the
 	// same unservable IDs when PULLED. The refusal is an EMPTY inventory, not
 	// silence: see replyNoSyncItems.
+	//
+	// A History (Config.History) would make the block_log part of a reply
+	// servable while catching up, but the gate stays as it is: the reply's
+	// newest ids still come from the ring, and a node that is behind is not
+	// the sync source to offer.
 	if d.isCatchingUp() {
 		d.syncIDsRefusedCatchup.Add(1)
 		d.replyNoSyncItems(p, body)
@@ -386,7 +391,7 @@ func (d *Delegate) handleFetchBlockchainItemIDs(p *node.Peer, body []byte) {
 		peerHeadID = block.ID(msg.BlockchainSynopsis[n-1])
 		for i := n - 1; i >= 0; i-- {
 			cand := block.ID(msg.BlockchainSynopsis[i])
-			if d.chain.RecentBlockBytesByID(cand) != nil {
+			if d.holdsBlockID(cand) {
 				peerHeadID = cand // common ancestor: answer from here
 				break
 			}
@@ -412,7 +417,14 @@ func (d *Delegate) handleFetchBlockchainItemIDs(p *node.Peer, body []byte) {
 	// Fetch our recent blocks AFTER peer's head. Read via the atomic
 	// hint instead of d.chain.HeadBlock() to avoid the applyMu.RLock
 	// contention with applyLoop's writer.
-	hashes := make([]proto.ItemHash, 0, d.cfg.MaxBlocksPerInv)
+	// With a History the reply can reach back into the block_log, so it
+	// carries more ids per round trip, as hived's does (see
+	// HistoryMaxBlocksPerInv). The ring alone holds MaxBlocksPerInv at most.
+	limit := d.cfg.MaxBlocksPerInv
+	if d.cfg.History != nil && limit < HistoryMaxBlocksPerInv {
+		limit = HistoryMaxBlocksPerInv
+	}
+	hashes := make([]proto.ItemHash, 0, limit)
 	myHead := d.headBlockHint.Load()
 	if myHead == 0 {
 		myHead, _ = d.chain.HeadBlock()
@@ -443,8 +455,8 @@ func (d *Delegate) handleFetchBlockchainItemIDs(p *node.Peer, body []byte) {
 	} else {
 		startNum = peerHeadNum + 1
 	}
-	for n := startNum; n <= myHead && len(hashes) < d.cfg.MaxBlocksPerInv; n++ {
-		id, ok := d.chain.RecentBlockIDForNum(n)
+	for n := startNum; n <= myHead && len(hashes) < limit; n++ {
+		id, ok := d.servableBlockIDForNum(n)
 		if !ok {
 			break
 		}
@@ -471,7 +483,7 @@ func (d *Delegate) handleFetchBlockchainItemIDs(p *node.Peer, body []byte) {
 		d.logf("blockchain_item_ids_inventory encode: %v", err)
 		return
 	}
-	if err := p.Send(proto.BlockchainItemIDsInventoryMessageType, encoded); err != nil {
+	if err := d.sendTo(p, proto.BlockchainItemIDsInventoryMessageType, encoded); err != nil {
 		d.logf("blockchain_item_ids_inventory send: %v", err)
 	}
 }
@@ -693,7 +705,9 @@ func (d *Delegate) handleFetchItems(p *node.Peer, body []byte) {
 		switch msg.ItemType {
 		case proto.ItemTypeBlock, proto.ItemTypeBlockCompressed:
 			bid := block.ID(h)
-			raw := d.chain.RecentBlockBytesByID(bid)
+			// Ring first, then the block_log when a History is configured.
+			// Both return exactly the block with this id or nothing.
+			raw := d.servableBlockBytes(bid)
 			// Intentionally NO num-based fallback: if peer asks for
 			// block ID X and our cache evicted X, returning OUR block
 			// at the embedded num would be a DIFFERENT block (different
@@ -710,7 +724,7 @@ func (d *Delegate) handleFetchItems(p *node.Peer, body []byte) {
 					},
 				}
 				enc, _ := notAvail.Marshal()
-				_ = p.Send(proto.ItemNotAvailableMessageType, enc)
+				_ = d.sendTo(p, proto.ItemNotAvailableMessageType, enc)
 				continue
 			}
 			out := proto.BlockMessage{
@@ -722,7 +736,7 @@ func (d *Delegate) handleFetchItems(p *node.Peer, body []byte) {
 				d.logf("block_message encode: %v", err)
 				continue
 			}
-			if err := p.Send(proto.BlockMessageType, enc); err != nil {
+			if err := d.sendTo(p, proto.BlockMessageType, enc); err != nil {
 				d.logf("block_message send: %v", err)
 				return
 			}
@@ -739,7 +753,7 @@ func (d *Delegate) handleFetchItems(p *node.Peer, body []byte) {
 					RequestedItem: proto.ItemID{ItemType: msg.ItemType, ItemHash: h},
 				}
 				enc, _ := notAvail.Marshal()
-				_ = p.Send(proto.ItemNotAvailableMessageType, enc)
+				_ = d.sendTo(p, proto.ItemNotAvailableMessageType, enc)
 				continue
 			}
 			if err := p.Send(proto.TrxMessageType, raw); err != nil {

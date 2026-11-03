@@ -242,6 +242,19 @@ func cmdNode(args []string) int {
 		fmt.Fprintln(os.Stderr, "gopherd node: --produce requires --fork-switching (a produced block must stay reversible so the node can reorg off it if the network chooses another block for that slot)")
 		return 2
 	}
+	if cfg.p2pServeHistory != 0 {
+		switch {
+		case cfg.p2pServeHistory < -1:
+			fmt.Fprintf(os.Stderr, "gopherd node: --p2p-serve-history=%d: want -1 (whole block_log), 0 (off) or N > 0 (latest N million-block parts)\n", cfg.p2pServeHistory)
+			return 2
+		case !cfg.p2pServe:
+			fmt.Fprintln(os.Stderr, "gopherd node: --p2p-serve-history requires --p2p-serve (a passive node serves nothing)")
+			return 2
+		case cfg.noBlockLog:
+			fmt.Fprintln(os.Stderr, "gopherd node: --p2p-serve-history serves from the local block_log, which --no-block-log turns off")
+			return 2
+		}
+	}
 	if cfg.produceReal && !cfg.p2pServe {
 		// A passive node never advertises inventory nor serves blocks (see
 		// Config.Serve), so a block it produces would be applied locally and
@@ -431,6 +444,12 @@ type flags struct {
 	// A safety default: an unfinished/slow node that advertises but can't
 	// serve promptly gets peers to drop it and can churn the network.
 	p2pServe bool
+	// p2pServeHistory extends serving past the 2048-block recent ring into the
+	// local block_log, so peers far behind (or syncing from genesis) can sync
+	// from this node, as they can from hived. Mirrors hived's block-log-split:
+	// 0 = ring only (default), -1 = the whole block_log, N > 0 = the
+	// million-block part holding the head plus the N full parts before it.
+	p2pServeHistory int
 	// logWorkTiming enables the periodic per-block apply "work" timing line.
 	logWorkTiming bool
 	// forkSwitching routes inbound blocks through the fork-choice engine
@@ -490,6 +509,7 @@ func parseNodeFlags(args []string) flags {
 	fs.IntVar(&f.maxPeers, "max-peers", defaultMaxPeers, "max TOTAL P2P connections (inbound + outbound); inbound is refused at the cap. 0 disables the cap, which leaves the node open to connection-exhaustion")
 	fs.IntVar(&f.maxConcurrentDials, "max-concurrent-dials", 0, "max in-flight dial attempts (0 = default 24)")
 	fs.BoolVar(&f.logAdaptiveBatch, "log-adaptive-batch", false, "log one trace per per-peer FetchBatch decision (peer X batch=N rate=Y bps)")
+	fs.IntVar(&f.p2pServeHistory, "p2p-serve-history", 0, "with --p2p-serve, also serve sync requests for blocks older than the recent ring from the local block_log, as hived does. Mirrors hived's block-log-split: 0 = recent ring only (default), -1 = the whole block_log, N = the million-block part holding the head plus the N full parts before it")
 	fs.BoolVar(&f.p2pServe, "p2p-serve", false, "advertise inventory + serve blocks to peers (default false = passive fetch-only; enable ONLY for a known-correct node that keeps up in real time)")
 	fs.BoolVar(&f.logWorkTiming, "log-work-timing", false, "log periodic per-block apply work-timing (avg/p50/p99/max ms) — comparable to hived's block-processing timing")
 	fs.BoolVar(&f.forkSwitching, "fork-switching", false, "route inbound blocks through the fork-choice engine (depth-1 tip reorg) instead of strictly-linear apply (default off)")
@@ -554,6 +574,12 @@ type app struct {
 	p2p          *p2pnode.Node
 	logger       *appLogger
 	blockLogPath string
+
+	// history serves sync requests below the recent ring from the block_log
+	// (--p2p-serve-history); historyLog is its reader. Both nil when off.
+	history    *p2psync.BlockLogHistory
+	historyLog *blocklog.Reader
+
 	// recoverFrom > 0 when the daemon detected a non-empty pebble or
 	// non-empty blocklog at startup; recover() will replay blocks
 	// 1..recoverFrom against the local blocklog before opening the
@@ -1149,6 +1175,10 @@ func (a *app) close() {
 		_ = a.writer.Close()
 		a.writer = nil
 	}
+	if a.historyLog != nil {
+		_ = a.historyLog.Close()
+		a.historyLog, a.history = nil, nil
+	}
 	if a.verify != nil {
 		_ = a.verify.Close()
 		a.verify = nil
@@ -1527,6 +1557,26 @@ func (a *app) run() error {
 		LogWorkTiming:    a.cfg.logWorkTiming,
 		ForkAware:        a.cfg.forkSwitching,
 	}
+	if a.cfg.p2pServeHistory != 0 {
+		// A second, read-only handle on the block_log the writer appends to;
+		// it follows the writer through Reader.Refresh.
+		r, err := blocklog.Open(a.blockLogPath)
+		if err != nil {
+			return fmt.Errorf("--p2p-serve-history: open block_log %s: %w", a.blockLogPath, err)
+		}
+		h, err := p2psync.NewBlockLogHistory(r, a.cfg.p2pServeHistory)
+		if err != nil {
+			r.Close()
+			return fmt.Errorf("--p2p-serve-history: %w", err)
+		}
+		a.historyLog, a.history = r, h
+		syncCfg.History = h
+		scope := "the whole block_log"
+		if a.cfg.p2pServeHistory > 0 {
+			scope = fmt.Sprintf("the head's million-block part plus %d before it", a.cfg.p2pServeHistory)
+		}
+		a.logger.printf("p2p: serving sync history from %s (%s; block_log head %d)", a.blockLogPath, scope, r.Head())
+	}
 	// Feed inbound transactions to the witness mempool. Supplying this also
 	// turns ON transaction fetching in the sync layer; without it we record tx
 	// inventory as known, never request the bodies, and every block we produce
@@ -1697,12 +1747,13 @@ func (a *app) run() error {
 					}
 				}
 				awN, awMean, awMax, awOver := a.chain.AdmitLockWaitStats()
-				a.logger.printf("STATS peers=%d qdepth=%d/%d inhibit=%v outstanding=%d distinct=%d inflight=%d throttled=%d qfull=%d reorderDrop=%d invIgnored=%d syncIDsRefused=%d syncIDsEmpty=%d invRx=%d tipStallKicks=%d tipSync=%d comp(rx=%d zstd=%d hit=%d err=%d) mempool(inv=%d fetch=%d acc=%d dup=%d rej=%d evict=%d ovf=%d depth=%d relay=%d served=%d unrequested=%d) admitWait(n=%d meanMs=%d maxMs=%d over100ms=%d) forkdb=%d rcStaleMax=%d",
+				hs := a.history.Stats() // zero when --p2p-serve-history is off
+				a.logger.printf("STATS peers=%d qdepth=%d/%d inhibit=%v outstanding=%d distinct=%d inflight=%d throttled=%d qfull=%d reorderDrop=%d invIgnored=%d syncIDsRefused=%d syncIDsEmpty=%d invRx=%d tipStallKicks=%d tipSync=%d comp(rx=%d zstd=%d hit=%d err=%d) mempool(inv=%d fetch=%d acc=%d dup=%d rej=%d evict=%d ovf=%d depth=%d relay=%d served=%d unrequested=%d) admitWait(n=%d meanMs=%d maxMs=%d over100ms=%d) forkdb=%d rcStaleMax=%d hist(ids=%d blocks=%d err=%d)",
 					s.PeerCount, s.QueueDepth, s.QueueCapacity, s.FetchInhibited, s.OutstandingTotal, s.DistinctOutstanding, s.GlobalInflight,
 					s.OutstandingThrottled, s.DroppedQueueFull, s.DroppedReorder, s.InvIgnoredCatchup, s.SyncIDsRefusedCatchup, s.EmptySyncIDsReplies, s.InvReceived, s.TipStallKicks, s.TipSyncHandshakes,
 					s.CompressedReceived, s.CompressedDecompressed, s.CompressedCacheHits, s.CompressedDecodeErrors,
 					s.TxInvOffered, s.TxFetched, s.TxAccepted, s.TxDuplicate, s.TxRejected, s.TxEvicted, s.TxOverflowed, s.MempoolDepth, s.TxRelayed, s.TxServed, s.TxUnrequested,
-					awN, awMean, awMax, awOver, a.chain.ForkDBLen(), objects.RCStaleMaxCount())
+					awN, awMean, awMax, awOver, a.chain.ForkDBLen(), objects.RCStaleMaxCount(), hs.IDsRead, hs.BlocksServed, hs.ReadErrors)
 			}
 		}
 	}()

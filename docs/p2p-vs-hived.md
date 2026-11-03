@@ -56,7 +56,7 @@ empty — i.e. every newly connected peer.
 | 5 | Advert dedup | two sets: advertised-to-peer + peer-advertised-to-us | one `st.known` set written by both paths | Equivalent |
 | 6 | Dedup expiry | time-based, 1 minute (`GRAPHENE_NET_MAX_INVENTORY_SIZE_IN_MINUTES`) | prune by `num <= head` | Divergent, benign |
 | 7 | Transaction inventory | advertises txs | never advertises txs (no mempool relay) | Divergent, safe |
-| 8 | Serving blocks | from block database | from 2048-block in-memory ring | Divergent, bounded |
+| 8 | Serving blocks | from block database (block log + fork db), as far back as `block-log-split` keeps | from the 2048-block in-memory ring; with `--p2p-serve-history`, older blocks from the local block_log, by exact id, over the same `block-log-split`-style range | Default divergent, bounded; **matches** with `--p2p-serve-history` |
 | 9 | Unknown item requested | `item_not_available` | `item_not_available`, **no** num-based fallback | Matches (ours explicitly safer) |
 | 10 | `fetch_blockchain_item_ids` we cannot serve | always answered; nothing to give = **empty** inventory (`on_fetch_blockchain_item_ids_message`, unreachable-fork branch) | was **silence** when passive or behind; hived drops an unanswered request after 6 s (`active_ignored_request_timeout`), so every peer churned ~10 s after handshake (334 drops in 6 min, 2026-10-28). Now an empty inventory, as hived | **Closed** (`replyNoSyncItems`) |
 
@@ -124,9 +124,19 @@ than the tip. That wording is why the defect survived two readings of
   entries at or below head. Both bound memory; neither affects what is offered.
 - **Transactions:** hived gossips tx inventory. We have no mempool relay and
   never advertise txs — strictly less traffic, no correctness impact.
-- **Serving:** hived serves from its block database; we serve only from the
-  2048-block recent ring (`RecentBlockBytesByID`) and answer
-  `item_not_available` otherwise. Since the advert watermark + 3s age gate mean
+- **Serving:** hived serves from its block database; by default we serve only
+  from the 2048-block recent ring (`RecentBlockBytesByID`) and answer
+  `item_not_available` otherwise. `--p2p-serve-history` adds the local
+  block_log behind the ring (`internal/p2p/sync/history.go`), mirroring
+  `fork_db_block_reader::get_block_ids` (ids below the fork db read from the
+  block log) and `block_log_wrapper::fetch_block_by_id` (read the block at the
+  id's number, return it only if its id matches). Its range follows
+  `block-log-split`: -1 the whole log, N the head's million-block part plus N
+  before it. Two differences remain: a reply lists at most 2000 ids, not
+  `DEFAULT_MAX_BLOCK_IDS_TO_FETCH` (10000), because our block_log has no id
+  column and each id is a block read and hash; and the catch-up gate (row 4)
+  still answers empty while we are behind, where hived serves from its log
+  regardless. Since the advert watermark + 3s age gate mean
   we only ever offer blocks we just applied, everything we advertise is in the
   ring. We deliberately do **not** fall back to serving by block number, because
   returning a different block at the requested height is exactly what earns
