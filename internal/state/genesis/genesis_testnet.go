@@ -107,7 +107,6 @@ func ApplyTestnet(db *state.Database, extraWitnesses []string) error {
 		vstMax[i] = 0xff
 	}
 	witnessNames := append([]string{MainnetInitminer}, extraWitnesses...)
-	scheduled := make([]auth.AccountName, 0, len(witnessNames))
 	for _, name := range witnessNames {
 		objects.PutAccount(s, &objects.Account{
 			Name:                 name,
@@ -136,7 +135,6 @@ func ApplyTestnet(db *state.Database, extraWitnesses []string) error {
 			VirtualScheduledTime: vstMax,
 			Schedule:             objects.WitnessScheduleMiner,
 		})
-		scheduled = append(scheduled, auth.AccountName(name))
 	}
 
 	// "steem": on testnet its authority carries the init key ALONGSIDE the
@@ -218,9 +216,17 @@ func ApplyTestnet(db *state.Database, extraWitnesses []string) error {
 		NextHardforkTime:       gt,
 	})
 
+	// The init witnesses get witness objects but NOT schedule slots: hived's
+	// init_genesis (database_init.cpp:308) creates the witness_schedule_object
+	// with current_shuffled_witnesses[0] = initminer and the default
+	// num_scheduled_witnesses of 1, and the init witnesses only enter the
+	// schedule at the first update_witness_schedule round (block 21 and on).
+	// A live hived testnet shows it: blocks 1..41 all by initminer, 3 s apart.
+	// Scheduling them all here made gopherd expect wit-b at block 2 and,
+	// since the slot check became strict (21a67c5), refuse hived's block 2.
 	objects.PutWitnessSchedule(s, &objects.WitnessSchedule{
-		NumScheduledWitnesses:    uint8(len(scheduled)),
-		CurrentShuffledWitnesses: scheduled,
+		NumScheduledWitnesses:    1,
+		CurrentShuffledWitnesses: []auth.AccountName{auth.AccountName(MainnetInitminer)},
 		MaxVotedWitnesses:        objects.MaxVotedWitnessesHF0,
 		MaxMinerWitnesses:        objects.MaxMinerWitnessesHF0,
 		NextShuffleBlockNum:      1,
