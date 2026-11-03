@@ -924,7 +924,22 @@ func newApp(cfg flags) (*app, error) {
 	// applied block's raw bytes back out and stream them into the writer.
 	// Without this, RecentBlockBytes returns nil and our block_log stays
 	// empty even though every block validates.
-	cdb.EnableRecentBlockCache(2048)
+	//
+	// GOPHERD_RECENT_BLOCK_CACHE overrides the 2048 entries, for tests: a
+	// testnet makes one block per 3 s, so exercising --p2p-serve-history
+	// (which serves what the ring no longer holds) against a 2048-block ring
+	// takes 100 minutes of chain. Values below 300 are refused: the ring must
+	// still cover a full advert list (MaxBlocksPerInv, 200) and the fork db.
+	ringSize := 2048
+	if v := config.Env("GOPHERD_RECENT_BLOCK_CACHE"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 300 {
+			stateDB.Close()
+			return nil, fmt.Errorf("GOPHERD_RECENT_BLOCK_CACHE=%q: want an integer >= 300", v)
+		}
+		ringSize = n
+	}
+	cdb.EnableRecentBlockCache(ringSize)
 	// Configure batched commits when running pebble — hides the per-block
 	// fsync cost behind a single batch fsync. Mem backend is already
 	// volatile so batching adds no value (fsync is a no-op on memBackend).
