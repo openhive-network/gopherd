@@ -293,6 +293,12 @@ type Config struct {
 	// the live head through micro-forks. The node must also wire
 	// SetOnBlockFinalized so block_log-append + eviction fire only on commit.
 	ForkAware bool
+
+	// History, when non-nil, serves sync requests for blocks older than the
+	// recent-block ring (fetch_blockchain_item_ids ids and fetch_items
+	// bodies), the way hived serves them from its block log. nil = the ring
+	// alone (the default). Only consulted when Serve is set.
+	History BlockHistory
 }
 
 // EnableAdaptiveFetchBatch is a setter for AdaptiveFetchBatch that
@@ -452,8 +458,9 @@ type Delegate struct {
 	// with an EMPTY inventory because this node is passive (Serve off) or
 	// behind the tip. See replyNoSyncItems.
 	emptySyncIDsReplies atomic.Uint64
-	// sendOverride, when set (tests only), receives every reply that
-	// replyNoSyncItems would otherwise write to the peer's transport.
+	// sendOverride, when set (tests only), receives every reply routed
+	// through sendTo (sync-id inventories, served blocks, item_not_available)
+	// instead of the peer's transport.
 	sendOverride func(p *node.Peer, typ proto.MessageType, body []byte) error
 
 	// syncIDsRefusedCatchup counts fetch_blockchain_item_ids requests refused by

@@ -113,6 +113,10 @@ type part struct {
 	// indexMem is non-nil when we rebuilt the index in memory because no
 	// sidecar was present. Each entry is the packed trailer (offset+flags).
 	indexMem []uint64
+
+	// clamped is set when a ".end" sidecar fixed the logical end of the
+	// file: Refresh must not grow such a part past it.
+	clamped bool
 }
 
 // Open opens a block_log given any path inside the data dir — either the
@@ -174,6 +178,7 @@ func Open(path string) (*Reader, error) {
 			var logical int64
 			if _, serr := fmt.Sscanf(strings.TrimSpace(string(endBytes)), "%d", &logical); serr == nil && logical > 0 && logical <= p.mainSize {
 				p.mainSize = logical
+				p.clamped = true
 			} else {
 				main.Close()
 				r.Close()
@@ -244,6 +249,46 @@ func (r *Reader) Close() error {
 
 // Head returns the last block number stored in the log.
 func (r *Reader) Head() uint32 { return r.headBlock }
+
+// Refresh picks up blocks appended to the log since Open (or the last
+// Refresh), for a reader that follows a log a Writer is still appending to.
+// Only the last part can grow, and only when it has an on-disk .index
+// sidecar (the Writer always keeps one) and no .end clamp.
+//
+// The index sidecar's length is read before the main file's size, and the
+// Writer writes a block's bytes before its index entry, so every block the
+// index counts is fully in the main file. The NEWEST indexed block's end is
+// a different matter: endOffset takes it from the main file's size, and the
+// main file may already hold part of the next block whose index entry has
+// not landed yet. A follower must therefore only read blocks below Head();
+// those end where the next block's indexed start says.
+//
+// Not safe for concurrent use with other Reader methods.
+func (r *Reader) Refresh() error {
+	if len(r.parts) == 0 {
+		return nil
+	}
+	p := r.parts[len(r.parts)-1]
+	if p.indexFile == nil || p.clamped || p.main == nil {
+		return nil
+	}
+	idxStat, err := p.indexFile.Stat()
+	if err != nil {
+		return fmt.Errorf("blocklog: refresh: stat index: %w", err)
+	}
+	mainStat, err := p.main.Stat()
+	if err != nil {
+		return fmt.Errorf("blocklog: refresh: stat main: %w", err)
+	}
+	count := uint32(idxStat.Size() / indexEntrySize)
+	if count <= p.count {
+		return nil
+	}
+	p.count = count
+	p.mainSize = mainStat.Size()
+	r.headBlock = p.first + p.count - 1
+	return nil
+}
 
 // Block reads the raw FC-binary bytes for blockNum. Compressed blocks are
 // transparently decompressed. Returned slice is owned by the caller.

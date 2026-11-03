@@ -28,7 +28,7 @@ transactions, making Hive a genuinely multi-client network.
 |---|---|
 | Replay genesis → head | Working. Full chain, 0 apply errors. |
 | P2P sync to live head | Working. Warm-start from a snapshot, catch up, follow the tip at gap 0. |
-| Serving blocks to peers | Working (`--p2p-serve`). See the safety note below. |
+| Serving blocks to peers | Working (`--p2p-serve`). See the safety note below. Recent blocks only by default; `--p2p-serve-history` also serves older ones from the block_log so peers can sync from genesis, as from hived. Not yet exercised against hived peers. |
 | Transaction relay / mempool | Working (`--relay-transactions`). |
 | JSON-RPC (read side) | 71 methods. Consensus-node scope only — see `docs/api-implementation-map.md`. |
 | Block production | Working. Dry run and real production both validated on mainnet; real production is key-gated. |
@@ -231,6 +231,16 @@ replays the local block_log only past it.
 - `--relay-transactions` — off by default. Without it the node only consumes
   transactions and sits at the end of every propagation chain.
 - `--p2p-serve` — off by default. Read the safety note first.
+- `--p2p-serve-history` — with `--p2p-serve`, also answers sync requests for
+  blocks older than the 2048-block recent ring from the local block_log, so a
+  peer far behind or syncing from genesis can sync from this node (what hived
+  seed nodes do). Mirrors hived's `block-log-split`: `0` = ring only (default),
+  `-1` = the whole block_log, `N` = the million-block part holding the head plus
+  the N full parts before it. A block is served only under its exact id. Each id
+  costs a block read and hash (no id column in our block_log), so a reply lists
+  at most 2000 ids instead of hived's 10000: ~0.3 s from a cold page cache in the
+  dense era. STATS `hist(ids= blocks= err=)` counts it. While the node is behind
+  the tip it still answers sync requests with an empty list.
 - `--pprof-addr=127.0.0.1:6060` — live heap/CPU profiling. Essential for
   diagnosing memory behaviour; `go tool pprof -base` over a **multi-hour** window
   is the only reliable read (see Operating notes).
