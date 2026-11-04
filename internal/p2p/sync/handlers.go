@@ -560,6 +560,12 @@ func (d *Delegate) sendTo(p *node.Peer, typ proto.MessageType, body []byte) erro
 // list. Queue fetch_items batches for those we don't already have,
 // honoring both per-peer and total in-flight caps.
 func (d *Delegate) handleBlockchainItemIDsInventory(p *node.Peer, body []byte) {
+	// Any inventory, even an empty or undecodable one, answers our
+	// outstanding request: clear it first so the walk-forward below (or the
+	// next kicker tick) may ask again.
+	if st := d.peerStateFor(p); st != nil {
+		st.idsRequestedAt.Store(0)
+	}
 	var msg proto.BlockchainItemIDsInventoryMessage
 	if err := msg.Unmarshal(body); err != nil {
 		d.logf("blockchain_item_ids_inventory decode: %v", err)
@@ -1008,8 +1014,24 @@ func (d *Delegate) peerStateFor(p *node.Peer) *peerState {
 	return d.peers[p]
 }
 
-// sendFetchBlockchainItemIDs encodes and sends the catch-up handshake.
+// sendFetchBlockchainItemIDs encodes and sends the catch-up handshake, unless
+// p still owes us the reply to the previous one (see peerState.idsRequestedAt):
+// then it is held, and the reply's own walk-forward or a later kicker tick
+// asks again.
 func (d *Delegate) sendFetchBlockchainItemIDs(p *node.Peer, headID block.ID) {
+	st := d.peerStateFor(p)
+	if st != nil {
+		now := time.Now().UnixNano()
+		prev := st.idsRequestedAt.Load()
+		if prev != 0 && now-prev < int64(idsRequestTimeout) {
+			d.syncIDsHeld.Add(1)
+			return
+		}
+		if !st.idsRequestedAt.CompareAndSwap(prev, now) {
+			d.syncIDsHeld.Add(1) // a concurrent caller just sent one
+			return
+		}
+	}
 	synopsis := d.buildSynopsis(headID)
 	msg := proto.FetchBlockchainItemIDsMessage{
 		ItemType:           proto.ItemTypeBlock,
@@ -1020,8 +1042,11 @@ func (d *Delegate) sendFetchBlockchainItemIDs(p *node.Peer, headID block.ID) {
 		d.logf("fetch_blockchain_item_ids encode: %v", err)
 		return
 	}
-	if err := p.Send(proto.FetchBlockchainItemIDsMessageType, enc); err != nil {
+	if err := d.sendTo(p, proto.FetchBlockchainItemIDsMessageType, enc); err != nil {
 		d.logf("fetch_blockchain_item_ids send: %v", err)
+		if st != nil {
+			st.idsRequestedAt.Store(0)
+		}
 	}
 }
 

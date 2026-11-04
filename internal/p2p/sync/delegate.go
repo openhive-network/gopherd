@@ -471,6 +471,12 @@ type Delegate struct {
 	// misfiring and we are refusing peers we could actually serve.
 	syncIDsRefusedCatchup atomic.Uint64
 
+	// syncIDsHeld counts fetch_blockchain_item_ids requests NOT sent because
+	// the same peer still owed us the reply to the previous one (see
+	// peerState.idsRequestedAt). Climbs during catch-up, where the 1 s kicker
+	// would otherwise stack a request per peer per second.
+	syncIDsHeld atomic.Uint64
+
 	// compressed-block accounting. compressedReceived counts every
 	// compressed_block_message that decoded cleanly (regardless of whether
 	// it was a duplicate of an already-applied block). compressedDecompressed
@@ -654,7 +660,27 @@ type peerState struct {
 	// it lock-free. Initialized to 0; the adaptive sizer treats 0 as
 	// "no sample yet, use baseline batch".
 	lastRate atomic.Uint32
+
+	// idsRequestedAt is when we sent this peer the fetch_blockchain_item_ids
+	// it has not answered yet (unix nanos), or 0 when none is outstanding.
+	// hived keeps at most one such request per peer (peer_connection::
+	// item_ids_requested_from_peer), and we must too: its reply is a real
+	// queued message of up to 200 KB (10000 ids), and hived hangs up on a
+	// peer whose send queue passes 1 MiB (GRAPHENE_NET_MAXIMUM_QUEUED_
+	// MESSAGES_IN_BYTES, peer_connection.cpp send_queueable_message) with no
+	// closing message. The catch-up kicker used to send one per peer every
+	// second regardless, so six unanswered requests behind a block stream
+	// were enough: every hived peer dropped us every ~10 s (2,200 drops an
+	// hour on the 2026-10-28 mainnet sync; 3 to 48 requests outstanding at
+	// each drop in a traced run).
+	idsRequestedAt atomic.Int64
 }
+
+// idsRequestTimeout is how long an unanswered fetch_blockchain_item_ids
+// blocks the next one to the same peer. After it the request is taken as
+// lost and a new one may go out. hived waits as long (its
+// active_ignored_request_timeout) before giving up on a peer's reply.
+const idsRequestTimeout = 6 * time.Second
 
 func newPeerState() *peerState {
 	st := &peerState{
@@ -1347,6 +1373,9 @@ type Stats struct {
 	// requests answered with an empty inventory (passive node, or behind the
 	// tip). One per peer handshake is normal; see replyNoSyncItems.
 	EmptySyncIDsReplies uint64
+	// SyncIDsHeld counts fetch_blockchain_item_ids requests held back
+	// because the peer had not answered the previous one yet.
+	SyncIDsHeld uint64
 
 	// TipStallKicks is the cumulative count of tip-stall re-seeds (head stuck
 	// with nothing in flight while at the tip). 0 on a healthy live node;
@@ -1413,6 +1442,7 @@ func (d *Delegate) Stats() Stats {
 		InvIgnoredCatchup:      d.invIgnoredCatchup.Load(),
 		SyncIDsRefusedCatchup:  d.syncIDsRefusedCatchup.Load(),
 		EmptySyncIDsReplies:    d.emptySyncIDsReplies.Load(),
+		SyncIDsHeld:            d.syncIDsHeld.Load(),
 		TipStallKicks:          d.tipStallKicks.Load(),
 		InvReceived:            d.invReceived.Load(),
 		TipSyncHandshakes:      d.tipSyncHandshakes.Load(),
