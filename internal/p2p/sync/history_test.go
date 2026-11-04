@@ -176,8 +176,11 @@ func TestSyncFromGenesisServedFromBlockLog(t *testing.T) {
 	plain.headBlockHint.Store(head)
 	fake, sent := captureReplies(plain)
 	plain.handleFetchBlockchainItemIDs(fake, reqBody)
-	if inv := decodeInventory(t, *sent); len(inv.ItemHashesAvailable) != 0 {
-		t.Fatalf("ring-only node listed %d ids for a genesis peer, want 0", len(inv.ItemHashesAvailable))
+	// It must also say nothing remains: "0 ids, N remaining" makes hived
+	// re-ask at once, for as long as the connection lasts.
+	if inv := decodeInventory(t, *sent); len(inv.ItemHashesAvailable) != 0 || inv.TotalRemainingItemCount != 0 {
+		t.Fatalf("ring-only node gave a genesis peer %d ids and %d remaining, want 0 and 0",
+			len(inv.ItemHashesAvailable), inv.TotalRemainingItemCount)
 	}
 
 	d := newWithChain(Config{Serve: true, MaxBlocksPerInv: 200, History: openHistory(t, path, -1)}, ring)
