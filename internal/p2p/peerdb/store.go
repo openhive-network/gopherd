@@ -407,9 +407,14 @@ func (s *Store) All() []Entry {
 
 // DialableNow returns endpoints whose dial back-off has elapsed and
 // which are NOT in the supplied skip set (typically the set of currently-
-// connected peers + our own endpoint). Sticky entries always appear,
-// even if their back-off has not elapsed (their Delay still applies, but
-// we sort them in front so the dial loop sees them first).
+// connected peers + our own endpoint). Sticky entries honour the back-off
+// like any other entry and are sorted in front so the dial loop sees them
+// first; sticky only means they are never forgotten.
+//
+// Seeds used to bypass the back-off, so a seed refusing us was redialled on
+// every dial-loop tick: ~3,500 refused dials an hour to hive-seed.arcange.eu
+// for 14 hours of the 2026-11-02 mainnet sync. hived backs seeds off like
+// any peer ((failures+1) x peer_connection_retry_timeout, node.cpp).
 //
 // Endpoints are returned in priority order: sticky first, then by
 // LastSeen descending (recently-active wins), with random shuffling
@@ -426,13 +431,9 @@ func (s *Store) DialableNow(skip map[string]struct{}) []string {
 		if _, blocked := skip[e.Endpoint]; blocked {
 			continue
 		}
-		// Honor back-off — but Sticky entries are never excluded for
-		// failure-count reasons, so they go through unconditionally.
-		if !e.Sticky {
-			delay := s.backoff.Delay(e.ConnFailures)
-			if delay > 0 && !e.LastAttempt.IsZero() && now.Sub(e.LastAttempt) < delay {
-				continue
-			}
+		delay := s.backoff.Delay(e.ConnFailures)
+		if delay > 0 && !e.LastAttempt.IsZero() && now.Sub(e.LastAttempt) < delay {
+			continue
 		}
 		cp := *e
 		if cp.Sticky {
