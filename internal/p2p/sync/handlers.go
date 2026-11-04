@@ -455,12 +455,25 @@ func (d *Delegate) handleFetchBlockchainItemIDs(p *node.Peer, body []byte) {
 	} else {
 		startNum = peerHeadNum + 1
 	}
+	added := 0
 	for n := startNum; n <= myHead && len(hashes) < limit; n++ {
 		id, ok := d.servableBlockIDForNum(n)
 		if !ok {
 			break
 		}
 		hashes = append(hashes, proto.ItemHash(id))
+		added++
+	}
+	// We have blocks past the peer but cannot serve the next one: it is
+	// below our ring, or below the block_log range we keep. Say "nothing
+	// to give" (empty, 0 remaining), not "0 ids, N remaining": hived answers
+	// the latter by asking the same peer again at once
+	// (on_blockchain_item_ids_inventory_message -> fetch_next_batch_of_
+	// item_ids_from_peer), which repeats for as long as the connection
+	// lasts. The empty reply makes it mark us up to date and sync elsewhere.
+	if added == 0 && startNum <= myHead {
+		d.replyNoSyncItems(p, body)
+		return
 	}
 
 	// remaining counts blocks beyond what this reply carries. The anchor entry
