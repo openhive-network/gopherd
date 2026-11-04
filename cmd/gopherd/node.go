@@ -1748,9 +1748,9 @@ func (a *app) run() error {
 				}
 				awN, awMean, awMax, awOver := a.chain.AdmitLockWaitStats()
 				hs := a.history.Stats() // zero when --p2p-serve-history is off
-				a.logger.printf("STATS peers=%d qdepth=%d/%d inhibit=%v outstanding=%d distinct=%d inflight=%d throttled=%d qfull=%d reorderDrop=%d invIgnored=%d syncIDsRefused=%d syncIDsEmpty=%d invRx=%d tipStallKicks=%d tipSync=%d comp(rx=%d zstd=%d hit=%d err=%d) mempool(inv=%d fetch=%d acc=%d dup=%d rej=%d evict=%d ovf=%d depth=%d relay=%d served=%d unrequested=%d) admitWait(n=%d meanMs=%d maxMs=%d over100ms=%d) forkdb=%d rcStaleMax=%d hist(ids=%d blocks=%d err=%d)",
+				a.logger.printf("STATS peers=%d qdepth=%d/%d inhibit=%v outstanding=%d distinct=%d inflight=%d throttled=%d qfull=%d reorderDrop=%d invIgnored=%d syncIDsRefused=%d syncIDsEmpty=%d syncIDsHeld=%d invRx=%d tipStallKicks=%d tipSync=%d comp(rx=%d zstd=%d hit=%d err=%d) mempool(inv=%d fetch=%d acc=%d dup=%d rej=%d evict=%d ovf=%d depth=%d relay=%d served=%d unrequested=%d) admitWait(n=%d meanMs=%d maxMs=%d over100ms=%d) forkdb=%d rcStaleMax=%d hist(ids=%d blocks=%d err=%d)",
 					s.PeerCount, s.QueueDepth, s.QueueCapacity, s.FetchInhibited, s.OutstandingTotal, s.DistinctOutstanding, s.GlobalInflight,
-					s.OutstandingThrottled, s.DroppedQueueFull, s.DroppedReorder, s.InvIgnoredCatchup, s.SyncIDsRefusedCatchup, s.EmptySyncIDsReplies, s.InvReceived, s.TipStallKicks, s.TipSyncHandshakes,
+					s.OutstandingThrottled, s.DroppedQueueFull, s.DroppedReorder, s.InvIgnoredCatchup, s.SyncIDsRefusedCatchup, s.EmptySyncIDsReplies, s.SyncIDsHeld, s.InvReceived, s.TipStallKicks, s.TipSyncHandshakes,
 					s.CompressedReceived, s.CompressedDecompressed, s.CompressedCacheHits, s.CompressedDecodeErrors,
 					s.TxInvOffered, s.TxFetched, s.TxAccepted, s.TxDuplicate, s.TxRejected, s.TxEvicted, s.TxOverflowed, s.MempoolDepth, s.TxRelayed, s.TxServed, s.TxUnrequested,
 					awN, awMean, awMax, awOver, a.chain.ForkDBLen(), objects.RCStaleMaxCount(), hs.IDsRead, hs.BlocksServed, hs.ReadErrors)
