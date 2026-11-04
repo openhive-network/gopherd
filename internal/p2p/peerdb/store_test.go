@@ -119,7 +119,9 @@ func TestStoreSkipSet(t *testing.T) {
 	}
 }
 
-func TestStoreStickyAlwaysDialable(t *testing.T) {
+// A failing seed backs off like any other entry (it is not redialled every
+// tick), then becomes dialable again: sticky only means never forgotten.
+func TestStoreStickyHonoursBackoff(t *testing.T) {
 	now := time.Date(2026, 5, 10, 12, 0, 0, 0, time.UTC)
 	clock := &fakeClock{t: now}
 	s := NewMemory(Options{
@@ -130,14 +132,19 @@ func TestStoreStickyAlwaysDialable(t *testing.T) {
 		Now: clock.Now,
 	})
 	s.AddSticky("seed:1")
-	// Drive its failure count up.
+	if got := s.DialableNow(nil); len(got) != 1 || got[0] != "seed:1" {
+		t.Fatalf("fresh sticky entry not dialable: %v", got)
+	}
 	for i := 0; i < 10; i++ {
 		s.MarkAttempt("seed:1")
 		s.MarkFailed("seed:1")
 	}
-	got := s.DialableNow(nil)
-	if len(got) != 1 || got[0] != "seed:1" {
-		t.Errorf("sticky entry should always be dialable: %v", got)
+	if got := s.DialableNow(nil); len(got) != 0 {
+		t.Errorf("failing sticky entry dialable inside its back-off: %v", got)
+	}
+	clock.t = clock.t.Add(time.Hour + time.Second)
+	if got := s.DialableNow(nil); len(got) != 1 || got[0] != "seed:1" {
+		t.Errorf("sticky entry not dialable after its back-off: %v", got)
 	}
 }
 
