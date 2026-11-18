@@ -685,6 +685,15 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 	scratch.visited = visited
 }
 
+// canonicalVersionNum is hived's canonical_version_num: a major 0 is spelled
+// major 1, except 0.0.0.
+func canonicalVersionNum(v uint32) uint32 {
+	if v&0xFF000000 == 0 && v != 0 {
+		return v | 0x01000000
+	}
+	return v
+}
+
 // updateWitnessSchedulePreHF4 ports the legacy update_witness_schedule
 // path at libraries/chain/witness_schedule.cpp:441-569. The differences
 // from update_witness_schedule_4:
@@ -695,15 +704,6 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 //     LAP_LENGTH2 (= 2^128-1) / (votes+1) post-HF2.
 //   - Pop ALL pow workers from the queue (not just one) up to
 //     HIVE_MAX_WITNESSES total active.
-// canonicalVersionNum is hived's canonical_version_num: a major 0 is spelled
-// major 1, except 0.0.0.
-func canonicalVersionNum(v uint32) uint32 {
-	if v&0xFF000000 == 0 && v != 0 {
-		return v | 0x01000000
-	}
-	return v
-}
-
 func updateWitnessSchedulePreHF4(s *state.Session, ws *objects.WitnessSchedule, dgpo *objects.DynamicGlobalProperty, blockNum uint32, hf hardfork.Set) {
 	zero33 := [33]byte{}
 	var active []auth.AccountName
