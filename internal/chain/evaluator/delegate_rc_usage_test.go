@@ -135,6 +135,9 @@ func TestEmbeddedDelegateRCUsageNotCharged(t *testing.T) {
 			RequiredPostingAuths: []auth.AccountName{"bob"}, ID: "rc",
 			JSON: `["delegate_rc",` + drcValue("alice", 2*drcMinDelegation, "carol") + `]`})},
 	} {
+		if tc.ctx == pre26 && hardfork.MainnetActivationBlock[hardfork.HF26] == 0 {
+			continue // testnet build: every hardfork is active from block 0
+		}
 		drcResetTxUsage(s)
 		if err := ApplyOp(tc.ctx, tc.o); err != nil {
 			t.Fatalf("%s: %v", tc.name, err)
