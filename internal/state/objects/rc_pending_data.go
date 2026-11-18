@@ -40,8 +40,10 @@ var rcPendingDataKey = []byte{0}
 // reset. PendingUsage / PendingCost are the running totals — usage is
 // in raw resource units (history_bytes…execution_time), cost is in RC.
 //
-// DifferentialUsage carries the per-tx (negative) state-bytes delta
-// computed by the per-op differential visitor. It is reset on every
+// DifferentialUsage is the per-tx usage collected before count_resources
+// (hived tx_info.usage): the (negative) state-bytes delta
+// computed by the per-op differential visitor, and what embedded custom
+// operations add while they run (AddTxUsage). It is reset on every
 // pre-apply tx hook and added into the count_resources output before
 // the cost is charged.
 type RCPendingData struct {
@@ -139,6 +141,16 @@ func (d *RCPendingData) ResetDifferentialUsage() {
 func (d *RCPendingData) AddDifferentialUsage(usage [RCNumResources]int64) {
 	for i := 0; i < RCNumResources; i++ {
 		d.DifferentialUsage[i] -= usage[i]
+	}
+}
+
+// AddTxUsage adds usage to the transaction's accumulator as it is: hived's
+// tx_info.usage, into which the "rc" custom_json interpreter puts the discount
+// (negative) and the extra usage (positive) of each embedded operation it runs
+// (handle_operation_discount, handle_custom_op_usage).
+func (d *RCPendingData) AddTxUsage(usage [RCNumResources]int64) {
+	for i := 0; i < RCNumResources; i++ {
+		d.DifferentialUsage[i] += usage[i]
 	}
 }
 

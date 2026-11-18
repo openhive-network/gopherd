@@ -581,7 +581,22 @@ func TestRCPluginDifferentialUsageOperations(t *testing.T) {
 	checkNegative("witness_update update")
 	clean()
 
-	// delegate_rc — first time (no row exists), diff empty.
+	// delegate_rc embedded in custom_json: its evaluator puts the discount
+	// AND its own usage (handle_custom_op_usage) into the transaction's
+	// accumulator, so what is left there is discount + usage: state
+	// 1927200 per delegatee (none when removing) and delegate_rc_time.
+	checkEmbedded := func(label string, wantState int64) {
+		t.Helper()
+		d := readRCPendingData(t, f).DifferentialUsage
+		want := [objects.RCNumResources]int64{}
+		want[objects.RCStateBytes] = wantState
+		want[objects.RCExecutionTime] = 75000
+		if d != want {
+			t.Fatalf("%s: tx usage before count_resources = %v, want %v", label, d, want)
+		}
+	}
+
+	// delegate_rc — first time (no row exists): no discount.
 	cj1 := op.CustomJSON{
 		RequiredPostingAuths: []auth.AccountName{"alice"},
 		ID:                   "rc",
@@ -590,10 +605,10 @@ func TestRCPluginDifferentialUsageOperations(t *testing.T) {
 	if err := f.ApplyOp(cj1); err != nil {
 		t.Fatalf("delegate_rc create: %v", err)
 	}
-	checkEmpty("delegate_rc create")
+	checkEmbedded("delegate_rc create", 1927200)
 	clean()
 
-	// delegate_rc — update existing row, diff should be negative.
+	// delegate_rc — update existing row: the discount cancels the new state.
 	cj2 := op.CustomJSON{
 		RequiredPostingAuths: []auth.AccountName{"alice"},
 		ID:                   "rc",
@@ -602,7 +617,7 @@ func TestRCPluginDifferentialUsageOperations(t *testing.T) {
 	if err := f.ApplyOp(cj2); err != nil {
 		t.Fatalf("delegate_rc update: %v", err)
 	}
-	checkNegative("delegate_rc update")
+	checkEmbedded("delegate_rc update", 0)
 	clean()
 
 	// delegate_rc with max_rc==0 — visitor declines diff (per C++ comment).
@@ -614,7 +629,7 @@ func TestRCPluginDifferentialUsageOperations(t *testing.T) {
 	if err := f.ApplyOp(cj3); err != nil {
 		t.Fatalf("delegate_rc zero: %v", err)
 	}
-	checkEmpty("delegate_rc zero_max_rc")
+	checkEmbedded("delegate_rc zero_max_rc", 0)
 }
 
 // TestRCPluginDifferentialUsageNegative mirrors rc_plugin_tests.cpp::

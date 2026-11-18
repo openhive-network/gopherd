@@ -334,7 +334,9 @@ func HasSufficientRC(s *state.Session, stx *tx.SignedTransaction, blockNum, bloc
 	// stricter than hived's, so gopherd's producers refused nearly every
 	// candidate with insufficient-rc and built near-empty blocks while the
 	// hived witnesses mined the same transactions.
-	var usage [objects.RCNumResources]int64
+	// Embedded delegate_rc operations add their usage while they run; there
+	// is no run here, so estimate it.
+	usage := embeddedRCUsageEstimate(stx, hardfork.SetForBlock(blockNum))
 	CountResources(stx, txSize, blockTime, &usage)
 	cost := rcCostOfUsage(s, usage)
 	if cost <= 0 {

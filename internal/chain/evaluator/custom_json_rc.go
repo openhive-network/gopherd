@@ -49,7 +49,12 @@ func (customJSONEvaluator) Apply(ctx *Context, opArg op.Op) error {
 			return nil
 		}
 		if ctx.InControl {
-			return applyRCCustomJSON(ctx, *cj)
+			usage, err := applyRCCustomJSON(ctx, *cj)
+			if err != nil {
+				return err
+			}
+			addRCTxUsage(ctx, usage)
+			return nil
 		}
 		// hive_evaluator.cpp:355-370: custom_json_evaluator catches every
 		// fc::exception the "rc" interpreter throws and rethrows it only
@@ -61,11 +66,22 @@ func (customJSONEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		// "same amount already exists" case. A block hived accepted with
 		// such a delegate_rc inside must not fail here.
 		sp := ctx.DB.Snapshot()
-		if err := applyRCCustomJSON(ctx, *cj); err != nil {
+		usage, err := applyRCCustomJSON(ctx, *cj)
+		if err != nil {
 			ctx.DB.Restore(sp)
+			// The RC usage the embedded operations collected before the
+			// failure is not in that undo session: hived keeps it in
+			// tx_info. REVERT_RC_USAGE_OF_FAILED_CUSTOM_OPS (HF29, hived
+			// rc_custom_operation_interpreter) restores tx_info; before
+			// HF29 the transaction pays it, discount of the failed
+			// operation included.
+			if !ctx.Hardforks.Has(hardfork.HF29) {
+				addRCTxUsage(ctx, usage)
+			}
 			return nil
 		}
 		ctx.DB.DiscardSavepoint(sp)
+		addRCTxUsage(ctx, usage)
 		return nil
 	}
 	// All other custom_json IDs are plugin-data only (no chain state
@@ -91,14 +107,23 @@ func (customJSONEvaluator) Apply(ctx *Context, opArg op.Op) error {
 //
 // Every failure is returned. customJSONEvaluator decides what it means: fatal
 // at admission and block production, a rolled-back no-op inside a block.
-func applyRCCustomJSON(ctx *Context, cj op.CustomJSON) error {
+//
+// It also returns the RC usage the operations collected, which hived puts in
+// tx_info as each delegate_rc_evaluator runs (rc_utility.cpp): the state
+// discount right before the operation, against the state left by the ones
+// before it, and the operation's own usage (DelegateRCUsage) only once it
+// succeeded. Nothing is collected for a payload that fails to parse, validate
+// or match its authorities, since no evaluator runs. On failure the usage up
+// to and including the failing operation's discount is returned with the
+// error; what happens to it is customJSONEvaluator's call.
+func applyRCCustomJSON(ctx *Context, cj op.CustomJSON) (usage [objects.RCNumResources]int64, err error) {
 	ops, err := ParseRCCustomJSON(cj.JSON, ctx.InControl)
 	if err != nil {
-		return err
+		return usage, err
 	}
 	for i := range ops {
 		if err := validateDelegateRC(&ops[i]); err != nil {
-			return err
+			return usage, err
 		}
 	}
 	posting := make(map[string]struct{}, len(cj.RequiredPostingAuths))
@@ -110,14 +135,30 @@ func applyRCCustomJSON(ctx *Context, cj op.CustomJSON) error {
 		inner[ops[i].From] = struct{}{}
 	}
 	if len(cj.RequiredAuths) != 0 || !sameAccountSet(inner, posting) {
-		return fmt.Errorf("delegate_rc: required authorities of the custom_json do not match its operations")
+		return usage, fmt.Errorf("delegate_rc: required authorities of the custom_json do not match its operations")
 	}
 	for i := range ops {
-		if err := applyDelegateRC(ctx, &ops[i]); err != nil {
-			return err
+		p := &ops[i]
+		usage[objects.RCStateBytes] -= DelegateRCStateDiscount(ctx.DB, p.From, p.Delegatees, p.MaxRC)
+		if err := applyDelegateRC(ctx, p); err != nil {
+			return usage, err
 		}
+		stateBytes, execTime := DelegateRCUsage(p.MaxRC, len(p.Delegatees))
+		usage[objects.RCStateBytes] += stateBytes
+		usage[objects.RCExecutionTime] += execTime
 	}
-	return nil
+	return usage, nil
+}
+
+// addRCTxUsage adds what embedded operations collected to the transaction's
+// RC usage, which applyRCForTx (chain/rc_phase5.go) starts counting from.
+func addRCTxUsage(ctx *Context, usage [objects.RCNumResources]int64) {
+	if usage == ([objects.RCNumResources]int64{}) {
+		return
+	}
+	pending := objects.GetRCPendingData(ctx.DB)
+	pending.AddTxUsage(usage)
+	objects.PutRCPendingData(ctx.DB, &pending)
 }
 
 func sameAccountSet(a, b map[string]struct{}) bool {

@@ -6,6 +6,7 @@ import (
 	"gopherd/internal/protocol/hardfork"
 	"gopherd/internal/protocol/op"
 	"gopherd/internal/protocol/tx"
+	"gopherd/internal/state/objects"
 )
 
 // HIVE_RC_NUM_RESOURCE_TYPES — 5 resource types: history_bytes,
@@ -298,28 +299,10 @@ func stateBytesForOp(o op.Op, now uint32) int64 {
 		d := o.AsDelegateRC()
 		s, _ := evaluator.DelegateRCUsage(d.MaxRC, len(d.SortedDelegatees()))
 		return s
-	case op.TagCustomJSON:
-		// delegate_rc rides in custom_json id "rc"; hived adds its state usage
-		// in handle_custom_op_usage (resource_count.cpp:548-553) once the
-		// payload was interpreted.
-		cj := o.AsCustomJSON()
-		if cj.ID == "rc" {
-			// Per interpreted operation, as handle_custom_op_usage runs from
-			// each delegate_rc's post-apply notification.
-			ops, err := evaluator.ParseRCCustomJSON(cj.JSON, false)
-			if err != nil {
-				return 0
-			}
-			var usage int64
-			for i := range ops {
-				if ops[i].MaxRC != 0 {
-					usage += rcDelegateRCBaseSize * int64(len(ops[i].Delegatees))
-				}
-			}
-			return usage
-		}
-		return 0
 	}
+	// custom_json "rc": the delegate_rc operations it carries are charged by
+	// their evaluator as they run (evaluator.applyRCCustomJSON), not here —
+	// hived's count_operation_visitor adds only custom_json_time for it.
 	return 0
 }
 
@@ -342,15 +325,34 @@ func extraExecTimeForOp(o op.Op) int64 {
 		// The regular form has no execTimeNS entry: delegate_rc_time is all
 		// hived charges for it (resource_count.cpp).
 		return rcDelegateRCTimeNS
-	case op.TagCustomJSON:
-		cj := o.AsCustomJSON()
-		if cj.ID == "rc" {
-			if ops, err := evaluator.ParseRCCustomJSON(cj.JSON, false); err == nil {
-				return rcDelegateRCTimeNS * int64(len(ops))
-			}
-		}
 	}
 	return 0
+}
+
+// embeddedRCUsageEstimate is the usage the delegate_rc operations of a
+// transaction's "rc" custom_jsons will add when they run (from HF26), for
+// HasSufficientRC, which prices a transaction without applying it. In control
+// every embedded operation must succeed or the transaction fails, so all are
+// counted; the state discount is left out, which can only overestimate.
+func embeddedRCUsageEstimate(stx *tx.SignedTransaction, hf hardfork.Set) (usage [objects.RCNumResources]int64) {
+	if !hf.Has(hardfork.HF26) {
+		return usage
+	}
+	for _, o := range stx.Operations {
+		if o.Tag != op.TagCustomJSON || o.AsCustomJSON().ID != "rc" {
+			continue
+		}
+		ops, err := evaluator.ParseRCCustomJSON(o.AsCustomJSON().JSON, true)
+		if err != nil {
+			continue
+		}
+		for i := range ops {
+			stateBytes, execTime := evaluator.DelegateRCUsage(ops[i].MaxRC, len(ops[i].Delegatees))
+			usage[objects.RCStateBytes] += stateBytes
+			usage[objects.RCExecutionTime] += execTime
+		}
+	}
+	return usage
 }
 
 // ComputeRCCost returns the total RC cost of `signedTx` at `blockNum`,

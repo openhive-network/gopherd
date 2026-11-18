@@ -123,11 +123,11 @@ func countDifferentialOp(s *state.Session, o op.Op) [objects.RCNumResources]int6
 		}
 		diff[objects.RCStateBytes] = evaluator.DelegateRCStateDiscount(s, string(d.From), delegatees, d.MaxRC)
 		return diff
-
-	case op.TagCustomJSON:
-		// delegate_rc is carried as a custom_json with id == "rc".
-		return countDifferentialCustomJSON(s, o)
 	}
+	// custom_json "rc" has no discount here: the delegate_rc operations it
+	// carries take theirs as each runs, against the state the ones before it
+	// left (evaluator.applyRCCustomJSON), as hived's delegate_rc_evaluator
+	// does.
 	return diff
 }
 
@@ -141,35 +141,4 @@ func countDifferentialOp(s *state.Session, o op.Op) [objects.RCNumResources]int6
 func authorityDynamicSizeReal(a *auth.Authority) int64 {
 	return authorityAccountMemberSize*int64(len(a.AccountAuths)) +
 		authorityKeyMemberSize*int64(len(a.KeyAuths))
-}
-
-// countDifferentialCustomJSON handles custom_json ops with id == "rc"
-// that wrap a delegate_rc payload. For each delegatee that already has
-// an rc_direct_delegation row, the existing per-row state cost is added
-// to the differential.
-//
-// Mirrors count_differential_operation_visitor::operator()
-// (delegate_rc_operation): max_rc == 0 → no diff; otherwise for each
-// (from, to) pair where a delegation row exists, add delegate_rc_base_size.
-func countDifferentialCustomJSON(s *state.Session, o op.Op) [objects.RCNumResources]int64 {
-	var diff [objects.RCNumResources]int64
-	cj := o.AsCustomJSON()
-	if cj.ID != "rc" {
-		return diff
-	}
-	// One visit per interpreted operation: hived runs the differential from
-	// on_pre_apply_custom_operation, which fires for each delegate_rc of a
-	// batched payload.
-	ops, err := evaluator.ParseRCCustomJSON(cj.JSON, false)
-	if err != nil {
-		return diff
-	}
-	for i := range ops {
-		diff[objects.RCStateBytes] += delegateRCDifferential(s, &ops[i])
-	}
-	return diff
-}
-
-func delegateRCDifferential(s *state.Session, p *evaluator.DelegateRCParams) int64 {
-	return evaluator.DelegateRCStateDiscount(s, p.From, p.Delegatees, p.MaxRC)
 }
