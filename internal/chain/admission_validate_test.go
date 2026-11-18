@@ -130,3 +130,21 @@ func TestAdmissionRefusesUnverifiableAuthority(t *testing.T) {
 		t.Fatal("tag lookup broken")
 	}
 }
+
+// reset_account and set_reset_account are never-enabled placeholders: hived
+// refuses them in validate(). They have no required authority here, so
+// without a validator an unsigned transaction carrying one was admitted.
+func TestAdmissionRefusesPlaceholderOps(t *testing.T) {
+	for _, o := range []op.Op{
+		op.FromOperation(&op.ResetAccount{ResetAccount: "alice", AccountToReset: "bob"}),
+		op.FromOperation(&op.SetResetAccount{Account: "alice"}),
+	} {
+		v, ok := o.Operation().(op.Validator)
+		if !ok {
+			t.Fatalf("%s has no validator", o.Tag.Name())
+		}
+		if err := v.Validate(); err == nil {
+			t.Fatalf("%s passed validation", o.Tag.Name())
+		}
+	}
+}

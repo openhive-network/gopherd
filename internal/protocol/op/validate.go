@@ -300,3 +300,17 @@ func (o LimitOrderCreate) Validate() error {
 	}
 	return nil
 }
+
+// --- reset_account / set_reset_account -----------------------------------
+
+// Placeholders that were never enabled: hived's validate() is FC_ASSERT(false)
+// for both (hive_operations.cpp). Without these, gopherd admitted them with no
+// required authority at all (the evaluators are no-op stubs), so an unsigned
+// transaction carrying one could reach a block of ours that hived refuses.
+func (ResetAccount) Validate() error {
+	return fmt.Errorf("reset_account: placeholder for potential new operation")
+}
+
+func (SetResetAccount) Validate() error {
+	return fmt.Errorf("set_reset_account: placeholder for potential new operation")
+}
