@@ -740,7 +740,15 @@ func (d *Delegate) handleFetchItems(p *node.Peer, body []byte) {
 		d.logf("fetch_items decode: %v", err)
 		return
 	}
+	// A repeated id is answered once (hived 7a52444f0). Without this, one
+	// fetch_items naming the same block thousands of times made us read and
+	// send it thousands of times.
+	seen := make(map[proto.ItemHash]struct{}, len(msg.ItemsToFetch))
 	for _, h := range msg.ItemsToFetch {
+		if _, dup := seen[h]; dup {
+			continue
+		}
+		seen[h] = struct{}{}
 		switch msg.ItemType {
 		case proto.ItemTypeBlock, proto.ItemTypeBlockCompressed:
 			bid := block.ID(h)

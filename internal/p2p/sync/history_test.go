@@ -264,6 +264,21 @@ func TestSyncFromGenesisServedFromBlockLog(t *testing.T) {
 	if (*sent)[3].typ != proto.ItemNotAvailableMessageType {
 		t.Fatalf("forged id: reply %v, want item_not_available", (*sent)[3].typ)
 	}
+
+	// The same id named many times is served once (hived 7a52444f0).
+	rep := proto.FetchItemsMessage{ItemType: proto.ItemTypeBlock}
+	for i := 0; i < 50; i++ {
+		rep.ItemsToFetch = append(rep.ItemsToFetch, proto.ItemHash(c.ids[1500]))
+	}
+	repBody, err := rep.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake, sent = captureReplies(d)
+	d.handleFetchItems(fake, repBody)
+	if len(*sent) != 1 {
+		t.Fatalf("fetch_items naming one block 50 times: %d replies, want 1", len(*sent))
+	}
 }
 
 func decodeInventory(t *testing.T, sent []capturedReply) proto.BlockchainItemIDsInventoryMessage {
