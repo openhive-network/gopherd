@@ -76,3 +76,8 @@ const (
 // after it tally witness versions and hardfork votes with major 0 counted as
 // major 1. testnet: always.
 const CanonicalVersionTallyTime uint32 = 0
+
+// MaxFeedDeviationFromMedian is how many times above or below the market
+// median a price feed this node takes in may be (hived 67a927815,
+// check_feed_near_median; testnet: configurable in hived, 0 (off) by default). Node policy, not a block rule.
+const MaxFeedDeviationFromMedian uint64 = 0

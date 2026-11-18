@@ -66,3 +66,8 @@ const (
 // after it tally witness versions and hardfork votes with major 0 counted as
 // major 1. 2026-11-12T00:00:00 UTC.
 const CanonicalVersionTallyTime uint32 = 1794441600
+
+// MaxFeedDeviationFromMedian is how many times above or below the market
+// median a price feed this node takes in may be (hived 67a927815,
+// check_feed_near_median; mainnet: 100×). Node policy, not a block rule.
+const MaxFeedDeviationFromMedian uint64 = 100

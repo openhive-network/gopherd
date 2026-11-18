@@ -317,6 +317,9 @@ func (witnessSetPropertiesEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		// Price serializes as base.amount(8) + base.symbol(8) +
 		// quote.amount(8) + quote.symbol(8) = 32 bytes minimum.
 		if p, perr := decodeFCPrice(exchangeVal); perr == nil {
+			if err := checkFeedNearMedian(ctx, p); err != nil {
+				return err
+			}
 			w.HBDExchangeRate = p
 			w.LastHBDExchangeUpdate = ctx.HeadBlockTime
 		}

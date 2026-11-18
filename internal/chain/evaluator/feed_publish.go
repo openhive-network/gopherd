@@ -2,9 +2,11 @@ package evaluator
 
 import (
 	"fmt"
+	"math/bits"
 
 	"gopherd/internal/protocol/asset"
 	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/protocol/network"
 	"gopherd/internal/protocol/op"
 	"gopherd/internal/state"
 	"gopherd/internal/state/objects"
@@ -40,6 +42,9 @@ func (feedPublishEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	if ctx.Hardforks.Has(hardfork.HF20) &&
 		(fp.ExchangeRate.Base.Symbol.Num != asset.HbdSymbol || fp.ExchangeRate.Quote.Symbol.Num != asset.HiveSymbol) {
 		return fmt.Errorf("feed_publish: price feed must be a HBD/HIVE price")
+	}
+	if err := checkFeedNearMedian(ctx, fp.ExchangeRate); err != nil {
+		return err
 	}
 	w.HBDExchangeRate = fp.ExchangeRate
 	w.LastHBDExchangeUpdate = ctx.HeadBlockTime
@@ -111,4 +116,50 @@ func (declineVotingRightsEvaluator) Apply(ctx *Context, opArg op.Op) error {
 func init() {
 	register(op.TagFeedPublish, feedPublishEvaluator{})
 	register(op.TagDeclineVotingRights, declineVotingRightsEvaluator{})
+}
+
+// maxFeedDeviationFromMedian is hived's max_deviation in
+// check_feed_near_median (67a927815). A variable so tests can turn it on in a
+// testnet build.
+var maxFeedDeviationFromMedian = network.MaxFeedDeviationFromMedian
+
+// checkFeedNearMedian refuses a price feed more than
+// maxFeedDeviationFromMedian times above or below the market median of the
+// feed history, most likely a wrong source or a typo. Node policy, as in
+// hived: only for what this node takes in or produces (InControl), never for
+// other producers' blocks, so block validity does not change.
+func checkFeedNearMedian(ctx *Context, feed asset.Price) error {
+	if maxFeedDeviationFromMedian == 0 || !ctx.InControl {
+		return nil
+	}
+	h, err := objects.GetFeedHistory(ctx.DB)
+	if err != nil {
+		return nil
+	}
+	m := h.MarketMedianHistory
+	if m.Base.Amount <= 0 || m.Quote.Amount <= 0 || feed.Base.Amount <= 0 || feed.Quote.Amount <= 0 {
+		return nil // null median; non-positive feeds are refused by validation
+	}
+	// feed/median through cross products, which fit in 128 bits.
+	fHi, fLo := bits.Mul64(uint64(feed.Base.Amount), uint64(m.Quote.Amount))
+	mHi, mLo := bits.Mul64(uint64(m.Base.Amount), uint64(feed.Quote.Amount))
+	if !le128(div128(fHi, fLo, maxFeedDeviationFromMedian), mHi, mLo) ||
+		!le128(div128(mHi, mLo, maxFeedDeviationFromMedian), fHi, fLo) {
+		return fmt.Errorf("price feed %d/%d is more than %d times above or below the market median %d/%d; "+
+			"this node does not take it (a check of this node, not a rule for blocks)",
+			feed.Base.Amount, feed.Quote.Amount, maxFeedDeviationFromMedian, m.Base.Amount, m.Quote.Amount)
+	}
+	return nil
+}
+
+// div128 is (hi:lo) / d as a 128-bit (hi, lo) pair.
+func div128(hi, lo, d uint64) [2]uint64 {
+	qHi := hi / d
+	qLo, _ := bits.Div64(hi%d, lo, d)
+	return [2]uint64{qHi, qLo}
+}
+
+// le128 reports a <= (hi:lo).
+func le128(a [2]uint64, hi, lo uint64) bool {
+	return a[0] < hi || (a[0] == hi && a[1] <= lo)
 }
