@@ -260,5 +260,8 @@ func ApplyTestnet(db *state.Database, extraWitnesses []string) error {
 		HardforkRequiredWitnesses:     17,
 	})
 
+	// Collector of state stamps (hived e78bfabd1, init_genesis).
+	objects.PutStateStampData(s, &objects.StateStampData{})
+
 	return s.Commit(true)
 }

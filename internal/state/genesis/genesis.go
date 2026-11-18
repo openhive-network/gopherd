@@ -239,5 +239,10 @@ func Apply(db *state.Database) error {
 		MedianHBDInterestRate:    1000,
 	})
 
+	// Collector of state stamps (hived e78bfabd1, init_genesis): stamps are
+	// published from the start, blocks carry them only since HF29, so the
+	// first block after HF29 commits everything published before it.
+	objects.PutStateStampData(s, &objects.StateStampData{})
+
 	return s.Commit(true)
 }

@@ -249,6 +249,10 @@ func finalizeRCStats(s *state.Session, blockNum uint32) {
 		pending = objects.RCStats{}
 	}
 	objects.FoldRCStats(s, &pending)
+	// The closed stamp is published as consensus state regardless of report
+	// settings and before HF29 too (hived a5edbbf29): the first block after
+	// HF29 commits every stamp published since HF20.
+	publishStateStamp(s, blockNum, pending.Stamp)
 	objects.PutRCStats(s, objects.RCStatsIDArchive, &pending)
 
 	pool, err := objects.GetRCPool(s)

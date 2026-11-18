@@ -50,6 +50,7 @@ var allTableIDs = map[string]state.TableID{
 	"rc_direct_delegation":          RCDirectDelegationTable,
 	"liquidity_reward_balance":      LiquidityRewardBalanceTable,
 	"reward_fund":                   RewardFundTable,
+	"state_stamp_data":              StateStampDataTable,
 }
 
 // TestTableIDsUnique pins the fix for three id collisions found by diffing a
