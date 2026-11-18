@@ -2,6 +2,7 @@ package sync
 
 import (
 	"errors"
+	"fmt"
 	"time"
 
 	"gopherd/internal/crypto"
@@ -465,14 +466,17 @@ func (d *Delegate) handleFetchBlockchainItemIDs(p *node.Peer, body []byte) {
 		added++
 	}
 	// We have blocks past the peer but cannot serve the next one: it is
-	// below our ring, or below the block_log range we keep. Say "nothing
-	// to give" (empty, 0 remaining), not "0 ids, N remaining": hived answers
-	// the latter by asking the same peer again at once
-	// (on_blockchain_item_ids_inventory_message -> fetch_next_batch_of_
-	// item_ids_from_peer), which repeats for as long as the connection
-	// lasts. The empty reply makes it mark us up to date and sync elsewhere.
+	// below our ring, or below the block_log range we keep. "0 ids, N
+	// remaining" made hived ask the same peer again at once, forever; the
+	// empty "nothing to give" reply (be205e1) stopped that but made both
+	// sides treat each other as in sync. hived 7ae0cbdfb disconnects such a
+	// peer with closing_due_to_error, which makes it record the failure and
+	// sync from its other peers before coming back; do the same.
 	if added == 0 && startNum <= myHead {
-		d.replyNoSyncItems(p, body)
+		tail := d.ServableTail()
+		d.logf("disconnecting %s at block #%d: it needs blocks older than #%d, which we do not serve",
+			peerLabel(p), startNum-1, tail)
+		d.disconnect(p, fmt.Sprintf("I can't help you sync: blocks older than #%d have been pruned on this node", tail))
 		return
 	}
 
@@ -561,6 +565,22 @@ func (d *Delegate) replyNoSyncItems(p *node.Peer, body []byte) {
 
 // sendTo routes a reply through the test seam when one is installed, else to
 // the peer's transport.
+// disconnect drops p over an error it caused (closing_connection with
+// closing_due_to_error). Under a test send hook it only records the message.
+func (d *Delegate) disconnect(p *node.Peer, reason string) {
+	if p == nil {
+		return
+	}
+	if d.sendOverride != nil {
+		msg := proto.ClosingConnectionMessage{ReasonForClosing: reason, ClosingDueToError: true}
+		if body, err := msg.Marshal(); err == nil {
+			_ = d.sendOverride(p, proto.ClosingConnectionMessageType, body)
+		}
+		return
+	}
+	p.Disconnect(reason)
+}
+
 func (d *Delegate) sendTo(p *node.Peer, typ proto.MessageType, body []byte) error {
 	if d.sendOverride != nil {
 		return d.sendOverride(p, typ, body)
@@ -912,9 +932,7 @@ func (d *Delegate) handleBlockBytesWire(p *node.Peer, signedBlockBytes []byte, b
 	if reason := d.chain.CheckBlockBody(signedBlockBytes, bid); reason != "" {
 		d.blocksBadBody.Add(1)
 		d.logf("refusing block %d from %s: %s", bid.Num(), peerLabel(p), reason)
-		if p != nil {
-			p.Disconnect("sent a block whose body does not match its header")
-		}
+		d.disconnect(p, "sent a block whose body does not match its header")
 		return
 	}
 

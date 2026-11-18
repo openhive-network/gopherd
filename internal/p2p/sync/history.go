@@ -136,6 +136,13 @@ func (h *BlockLogHistory) BlockBytesByID(id block.ID) []byte {
 	return raw
 }
 
+// Tail is the lowest block number the history serves now.
+func (h *BlockLogHistory) Tail() uint32 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.lowestServed(h.r.Head())
+}
+
 // HistoryStats is a snapshot of BlockLogHistory's counters.
 type HistoryStats struct {
 	IDsRead      uint64 // block ids read from the block_log (sync-id replies, ancestor checks)
@@ -191,4 +198,35 @@ func (d *Delegate) servableBlockBytes(id block.ID) []byte {
 		return nil
 	}
 	return d.cfg.History.BlockBytesByID(id)
+}
+
+// HelloHead implements node.HandshakeView: our head for hello user_data.
+func (d *Delegate) HelloHead() (uint32, [20]byte, uint32, bool) {
+	num, err := d.chain.HeadBlock()
+	if err != nil || num == 0 {
+		return 0, [20]byte{}, 0, false
+	}
+	id, err := d.chain.HeadBlockID()
+	if err != nil {
+		return 0, [20]byte{}, 0, false
+	}
+	return num, id, blockTimestamp(d.chain.RecentBlockBytes(num)), true
+}
+
+// ServableTail implements node.HandshakeView: the lowest block number a
+// syncing peer can get from us, from the recent ring or the History. 0 when
+// we hold nothing yet, so a fresh node refuses no one.
+func (d *Delegate) ServableTail() uint32 {
+	tail := uint32(0)
+	for _, n := range d.chain.RecentBlockNums() {
+		if tail == 0 || n < tail {
+			tail = n
+		}
+	}
+	if t, ok := d.cfg.History.(interface{ Tail() uint32 }); ok {
+		if ht := t.Tail(); ht != 0 && (tail == 0 || ht < tail) {
+			tail = ht
+		}
+	}
+	return tail
 }

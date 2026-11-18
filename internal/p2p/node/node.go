@@ -263,6 +263,7 @@ func (n *Node) buildHelloPayload(c *transport.Conn) ([]byte, error) {
 	ud.Set("graphene_git_revision_unix_timestamp", proto.NewVariantUint64(uint64(time.Now().Unix())))
 	ud.Set("platform", proto.NewVariantString(runtime.GOOS))
 	ud.Set("bitness", proto.NewVariantUint64(64))
+	n.setHelloHead(ud)
 	// last_available_zstd_compression_dictionary_number tells the peer the
 	// highest dictionary number we can decompress with. Hived consults this
 	// when deciding whether to ship a block as compressed_block_message
@@ -332,6 +333,7 @@ func (n *Node) buildLegacyHelloPayload(c *transport.Conn) ([]byte, error) {
 	ud.Set("graphene_git_revision_unix_timestamp", proto.NewVariantUint64(uint64(time.Now().Unix())))
 	ud.Set("platform", proto.NewVariantString(runtime.GOOS))
 	ud.Set("bitness", proto.NewVariantUint64(64))
+	n.setHelloHead(ud)
 	if last, ok := zstd.LastAvailableDictNumber(); ok {
 		ud.Set("last_available_zstd_compression_dictionary_number", proto.NewVariantUint64(uint64(last)))
 	}
@@ -602,6 +604,7 @@ func (n *Node) handleNewConn(c *transport.Conn, dir Direction, dialEndpoint stri
 	}
 
 	peer := newPeer(c, dir, n.cfg.UserAgent, n.buildHelloPayload, n.buildLegacyHelloPayload)
+	peer.prunedRejection = n.prunedRejection
 	info := &peerInfo{endpoint: dialEndpoint, dir: dir}
 	n.mu.Lock()
 	// Shutdown race: Stop() closes the peers it can SEE, then waits on the
@@ -659,9 +662,13 @@ func (n *Node) handleNewConn(c *transport.Conn, dir Direction, dialEndpoint stri
 		},
 	}, n)
 	peer.run(n.ctx, wrapped)
-	if dialEndpoint != "" && !activated.Load() {
-		// Handshake never completed — rejected, or dropped before accept.
-		// Counting it lets the backoff schedule do its job.
+	if dialEndpoint != "" && (!activated.Load() || peer.closedDueToError.Load()) {
+		// Handshake never completed (rejected, or dropped before accept), or
+		// the connection ended over an error. Counting it lets the backoff
+		// schedule do its job. The second case is new with hived 7ae0cbdfb:
+		// a pruned hived drops a peer it cannot help with
+		// closing_due_to_error after the handshake, and without counting
+		// that we redialled it every second.
 		n.peerdb.MarkFailed(dialEndpoint)
 	}
 
@@ -971,4 +978,54 @@ func (a *activationDelegate) OnAddressesReceived(p *Peer, addrs []proto.AddressI
 }
 func (a *activationDelegate) BuildAddressReply(p *Peer) []proto.AddressInfo {
 	return a.inner.BuildAddressReply(p)
+}
+
+// HandshakeView is implemented by a delegate that can describe the local
+// chain to the handshake.
+type HandshakeView interface {
+	// HelloHead is our head block: number, id and timestamp.
+	HelloHead() (num uint32, id [20]byte, ts uint32, ok bool)
+	// ServableTail is the lowest block number we can serve a syncing peer,
+	// or 0 when there is no such limit worth refusing peers over.
+	ServableTail() uint32
+}
+
+// PrunedTailGraceBlocks is GRAPHENE_NET_PRUNED_TAIL_GRACE_BLOCKS.
+const PrunedTailGraceBlocks = 20
+
+// PeerNeedsBlocksWePruned is hived's peer_needs_blocks_we_pruned.
+func PeerNeedsBlocksWePruned(peerHead, ourTail uint32) bool {
+	return uint64(peerHead)+PrunedTailGraceBlocks < uint64(ourTail)
+}
+
+// setHelloHead adds last_known_block_hash/_number/_time to hello user_data,
+// as hived's generate_hello_user_data does. A pruned hived reads the number
+// to refuse, at the handshake, a peer it cannot help sync; without it, it
+// accepted us and then dropped us on our first sync request.
+func (n *Node) setHelloHead(ud *proto.VarObject) {
+	cv, ok := n.delegate.(HandshakeView)
+	if !ok {
+		return
+	}
+	num, id, ts, ok := cv.HelloHead()
+	if !ok {
+		return
+	}
+	ud.Set("last_known_block_hash", proto.NewVariantString(hex.EncodeToString(id[:])))
+	ud.Set("last_known_block_number", proto.NewVariantUint64(uint64(num)))
+	ud.Set("last_known_block_time", proto.NewVariantString(time.Unix(int64(ts), 0).UTC().Format("2006-01-02T15:04:05")))
+}
+
+// prunedRejection is the reason to refuse a peer at peerHead that needs
+// blocks older than any we serve, or "" (hived 7ae0cbdfb).
+func (n *Node) prunedRejection(peerHead uint32) string {
+	cv, ok := n.delegate.(HandshakeView)
+	if !ok {
+		return ""
+	}
+	tail := cv.ServableTail()
+	if !PeerNeedsBlocksWePruned(peerHead, tail) {
+		return ""
+	}
+	return fmt.Sprintf("I can't help you sync: blocks older than #%d have been pruned on this node and you are at block #%d", tail, peerHead)
 }

@@ -183,6 +183,15 @@ type Peer struct {
 	// userAgent is OUR agent string, carried so the handshake can fill in a
 	// connection_rejected_message without reaching back into the node.
 	userAgent string
+	// closedDueToError is set when either side ended the connection over an
+	// error (closing_connection with closing_due_to_error, or our own
+	// Disconnect). The node counts that as a failed dial even after a
+	// completed handshake, as hived does since 125882c23, so it backs off
+	// instead of redialling a peer that keeps dropping us.
+	closedDueToError atomic.Bool
+	// prunedRejection, when set, returns a non-empty reason to refuse a peer
+	// whose hello says it is at peerHead (see Node.prunedRejection).
+	prunedRejection func(peerHead uint32) string
 
 	mu              sync.Mutex
 	lastHeartbeatRX time.Time
@@ -261,6 +270,7 @@ func (p *Peer) CloseErr() error {
 // closing_due_to_error set, as hived's disconnect_from_peer does for a peer
 // that sent something invalid) and then tears the connection down.
 func (p *Peer) Disconnect(reason string) {
+	p.closedDueToError.Store(true)
 	msg := proto.ClosingConnectionMessage{ReasonForClosing: reason, ClosingDueToError: true}
 	if body, err := msg.Marshal(); err == nil {
 		_ = p.Send(proto.ClosingConnectionMessageType, body)
@@ -367,17 +377,20 @@ func (p *Peer) run(ctx context.Context, delegate Delegate) {
 			// block-id inventory (see coreProtocolVersion). A hello we cannot
 			// parse leaves it 0, which callers treat as "withhold".
 			parsedVersion := false
+			var userData *proto.VarObject
 			if typeTag == proto.HelloMessageType {
 				var hm proto.HelloMessage
 				if err := hm.Unmarshal(body); err == nil {
 					p.coreProtocolVersion.Store(hm.CoreProtocolVersion)
 					parsedVersion = true
+					userData = hm.UserData
 				}
 			} else {
 				var lhm proto.LegacyHelloMessage
 				if err := lhm.Unmarshal(body); err == nil {
 					p.coreProtocolVersion.Store(lhm.CoreProtocolVersion)
 					parsedVersion = true
+					userData = lhm.UserData
 				}
 			}
 			// Minimum protocol version (hived eb556e22d). Checked once the
@@ -404,6 +417,24 @@ func (p *Peer) run(ctx context.Context, delegate Delegate) {
 					delegate.OnPeerDisconnected(p, err)
 				}
 				return
+			}
+			// A peer that needs blocks older than any we can serve cannot
+			// sync from us; refuse it at the hello instead of taking a slot
+			// (hived 7ae0cbdfb). Unlike a disconnect after the handshake, a
+			// rejection makes it wait before dialling us again.
+			if p.prunedRejection != nil && p.State() != StateActive {
+				if head, ok := helloLastKnownBlock(userData); ok {
+					if reason := p.prunedRejection(head); reason != "" {
+						p.reject(proto.RejectUnspecified, reason)
+						err := fmt.Errorf("rejected: %s", reason)
+						p.tracef("REJECTING: %v", err)
+						p.close(err)
+						if delegate != nil {
+							delegate.OnPeerDisconnected(p, err)
+						}
+						return
+					}
+				}
 			}
 			// Inbound peer sent its hello after we sent ours. Accept it.
 			// Hived sends both 5018 and 5006 on every dial; the second
@@ -588,6 +619,7 @@ func (p *Peer) run(ctx context.Context, delegate Delegate) {
 			var err error
 			if dErr := cc.Unmarshal(body); dErr == nil {
 				if cc.ClosingDueToError {
+					p.closedDueToError.Store(true)
 					err = fmt.Errorf("peer closing connection due to error: %s", cc.ReasonForClosing)
 				} else {
 					err = fmt.Errorf("peer closing connection: %s", cc.ReasonForClosing)
@@ -741,13 +773,18 @@ func readVarUint(b []byte) (uint64, int, error) {
 // peer identified as IPv6-aware, and a peer below version 106 predates both
 // branches of that choice; it also predates every client still on the network.
 func (p *Peer) rejectTooOld(reported uint32) {
+	p.reject(proto.RejectClientTooOld, fmt.Sprintf(
+		"Your p2p protocol version (%d) is older than the minimum this node accepts (%d), please upgrade",
+		reported, proto.MinimumProtocolVersion))
+}
+
+// reject sends connection_rejected with code and reason.
+func (p *Peer) reject(code proto.RejectionReasonCode, reason string) {
 	rej := proto.ConnectionRejectedMessage{
 		UserAgent:           p.userAgent,
 		CoreProtocolVersion: proto.CoreProtocolVersion,
-		ReasonCode:          proto.RejectClientTooOld,
-		ReasonString: fmt.Sprintf(
-			"Your p2p protocol version (%d) is older than the minimum this node accepts (%d), please upgrade",
-			reported, proto.MinimumProtocolVersion),
+		ReasonCode:          code,
+		ReasonString:        reason,
 	}
 	if ap, err := netip.ParseAddrPort(p.conn.RemoteAddr().String()); err == nil {
 		rej.RemoteEndpoint = proto.Endpoint{Addr: ap}
@@ -757,4 +794,27 @@ func (p *Peer) rejectTooOld(reported uint32) {
 		return
 	}
 	_ = p.Send(proto.ConnectionRejectedMessageType, body)
+}
+
+// helloLastKnownBlock reads last_known_block_number from a hello's user_data.
+// hived writes it as a uint32 variant; accept any integer form.
+func helloLastKnownBlock(ud *proto.VarObject) (uint32, bool) {
+	if ud == nil {
+		return 0, false
+	}
+	v, ok := ud.Get("last_known_block_number")
+	if !ok {
+		return 0, false
+	}
+	switch v.Type {
+	case proto.VariantUint64:
+		if v.Uint <= 0xFFFFFFFF {
+			return uint32(v.Uint), true
+		}
+	case proto.VariantInt64:
+		if v.Int >= 0 && v.Int <= 0xFFFFFFFF {
+			return uint32(v.Int), true
+		}
+	}
+	return 0, false
 }

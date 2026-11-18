@@ -170,17 +170,23 @@ func TestSyncFromGenesisServedFromBlockLog(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Ring only: a peer at genesis gets an empty list (the ring starts at
-	// head-199), which is the gap this feature closes.
+	// Ring only: the ring starts at head-199, so a peer at genesis cannot
+	// sync from us. As hived 7ae0cbdfb does, we drop it with
+	// closing_due_to_error so it records the failure and syncs elsewhere
+	// ("0 ids, N remaining" made hived re-ask at once, forever).
 	plain := newWithChain(Config{Serve: true, MaxBlocksPerInv: 200}, ring)
 	plain.headBlockHint.Store(head)
 	fake, sent := captureReplies(plain)
 	plain.handleFetchBlockchainItemIDs(fake, reqBody)
-	// It must also say nothing remains: "0 ids, N remaining" makes hived
-	// re-ask at once, for as long as the connection lasts.
-	if inv := decodeInventory(t, *sent); len(inv.ItemHashesAvailable) != 0 || inv.TotalRemainingItemCount != 0 {
-		t.Fatalf("ring-only node gave a genesis peer %d ids and %d remaining, want 0 and 0",
-			len(inv.ItemHashesAvailable), inv.TotalRemainingItemCount)
+	if len(*sent) != 1 || (*sent)[0].typ != proto.ClosingConnectionMessageType {
+		t.Fatalf("ring-only node answered a genesis peer with %v, want one closing_connection", *sent)
+	}
+	var cc proto.ClosingConnectionMessage
+	if err := cc.Unmarshal((*sent)[0].body); err != nil || !cc.ClosingDueToError {
+		t.Fatalf("closing_connection %+v (err %v): want closing_due_to_error", cc, err)
+	}
+	if tail := plain.ServableTail(); tail != head-199 {
+		t.Fatalf("ServableTail=%d, want %d", tail, head-199)
 	}
 
 	d := newWithChain(Config{Serve: true, MaxBlocksPerInv: 200, History: openHistory(t, path, -1)}, ring)
