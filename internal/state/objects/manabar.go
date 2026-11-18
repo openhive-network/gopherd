@@ -346,7 +346,10 @@ const hf21StallBlock uint32 = 35922615
 // The manabar is in VESTS units post-HF20 — at HF20 activation hived
 // reinterprets the stored pre-HF20 percent value as VESTS without
 // migration.
-func UpdateVotingManabar(a *Account, now uint32, downvotePoolPercent uint16, newMana int64, blockNum uint32) {
+//
+// preventDownvoteOverflow is HIVE_HARDFORK_1_29_DOWNVOTE_MANA_OVERFLOW (hived
+// 366bc0533): see downvoteManaDelta.
+func UpdateVotingManabar(a *Account, now uint32, downvotePoolPercent uint16, newMana int64, blockNum uint32, preventDownvoteOverflow bool) {
 	maxMana := a.EffectiveVestingSharesExclWithdraw()
 	regen := ManabarParams{MaxMana: maxMana, RegenTime: VotingManaRegenSec}
 	cur, newUpdate := RegenerateMana(a.VotingManaCurrent, a.VotingManaLastUpdate, regen, now, false)
@@ -372,9 +375,34 @@ func UpdateVotingManabar(a *Account, now uint32, downvotePoolPercent uint16, new
 		}
 		dvRegen := ManabarParams{MaxMana: dvMax, RegenTime: VotingManaRegenSec}
 		newDV, newDVUpdate := RegenerateMana(a.DownvoteManaCurrent, a.DownvoteManaLastUpdate, dvRegen, now, false)
-		a.DownvoteManaCurrent = UseMana(newDV, (-newMana*int64(downvotePoolPercent))/10000, 0)
+		a.DownvoteManaCurrent = UseMana(newDV, downvoteManaDelta(newMana, downvotePoolPercent, preventDownvoteOverflow), 0)
 		a.DownvoteManaLastUpdate = newDVUpdate
 	}
+}
+
+// downvoteManaDelta is the mana use_mana takes off the downvote bar for a
+// change of newMana vests: -newMana × pool_pct / 10000 (negative, a credit,
+// for added vests). hived calculate_downvote_manabar (util/manabar.cpp).
+//
+// Before HF29 the product is an int64 multiply that wraps for
+// |newMana| × pct > 2^63 (about 3.7e15 VESTS-satoshi at 25 %), and history
+// keeps that: Go's int64 arithmetic wraps the same way, and the division
+// truncates toward zero as C++'s does. From HF29 the magnitude is taken in
+// 128 bits and the sign applied after, so it can no longer wrap.
+func downvoteManaDelta(newMana int64, pct uint16, preventOverflow bool) int64 {
+	if !preventOverflow {
+		return (-newMana * int64(pct)) / 10000
+	}
+	abs := uint64(newMana)
+	if newMana < 0 {
+		abs = uint64(0) - uint64(newMana)
+	}
+	hi, lo := bits.Mul64(abs, uint64(pct))
+	q, _ := bits.Div64(hi, lo, 10000) // pct <= 10000, so q fits in int64
+	if newMana < 0 {
+		return int64(q)
+	}
+	return -int64(q)
 }
 
 // u128MulDiv10000 computes v×pct/10000 in 128-bit like C++'s post-stall

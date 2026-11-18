@@ -65,13 +65,14 @@ func clearExpiredDelegations(s *state.Session, blockTime uint32, d *Database) {
 			return true, nil
 		})
 
-	var hf20 bool
+	var hf20, hf29 bool
 	var dvPoolPct uint16
 	var headBlockNum uint32
 	if len(ready) > 0 {
 		if dgpoNow, derr := objects.GetDGPO(s); derr == nil {
 			headBlockNum = dgpoNow.HeadBlockNumber
-			hf20 = hardfork.SetForBlock(headBlockNum).Has(hardfork.HF20)
+			hfs := hardfork.SetForBlock(headBlockNum)
+			hf20, hf29 = hfs.Has(hardfork.HF20), hfs.Has(hardfork.HF29)
 			dvPoolPct = dgpoNow.DownvotePoolPercent
 		}
 	}
@@ -108,7 +109,7 @@ func clearExpiredDelegations(s *state.Session, blockTime uint32, d *Database) {
 		// (database.cpp:3143-3151), before delegated_vesting shrinks.
 		if hf20 {
 			objects.RegenerateRCMana(&a, blockTime)
-			objects.UpdateVotingManabar(&a, blockTime, dvPoolPct, exp.VestingShares, headBlockNum)
+			objects.UpdateVotingManabar(&a, blockTime, dvPoolPct, exp.VestingShares, headBlockNum, hf29)
 		}
 		a.DelegatedVestingShares -= exp.VestingShares
 		if a.DelegatedVestingShares < 0 {

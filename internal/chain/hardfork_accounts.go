@@ -153,7 +153,7 @@ func clearAccount(s *state.Session, name string, d *Database) error {
 			// ran ~0.6% hot → rollie1212/0ppkt12xw1g net_rshares +15,504,515
 			// → viktory88's curation share 1 sat-HIVE low → claim_reward
 			// short 1,958,106 VESTS at 41,905,867).
-			objects.UpdateVotingManabar(&da, blockTime, dvPoolPct, 0, clearBlockNum)
+			objects.UpdateVotingManabar(&da, blockTime, dvPoolPct, 0, clearBlockNum, false)
 			da.ReceivedVestingShares -= dp.vests
 			if da.ReceivedVestingShares < 0 {
 				da.ReceivedVestingShares = 0
@@ -226,7 +226,7 @@ func clearAccount(s *state.Session, name string, d *Database) error {
 		// @41,984,169 et al.). Regenerate at the still-full cap (vesting
 		// not yet zeroed) so the timestamp lands; the value is discarded
 		// by the current_mana = 0 below.
-		objects.UpdateVotingManabar(&account, blockTime, dvPoolPct, 0, clearBlockNum)
+		objects.UpdateVotingManabar(&account, blockTime, dvPoolPct, 0, clearBlockNum, false)
 		hiveValue := vestsToHive(account.VestingShares, &dgpo)
 		dgpo.TotalVestingFundHive -= hiveValue
 		vestsConverted += account.VestingShares

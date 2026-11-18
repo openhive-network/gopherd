@@ -160,11 +160,13 @@ func createVestingImpl(s *state.Session, accountName string, hiveSatoshi int64, 
 	// with the regen cap taken from PRE-credit effective shares — so the
 	// update runs inside the mutate closure before the balance change
 	// (mirrors adjust_account_vesting_balance, database.cpp:1028-1031).
-	manabarHF20 := false
+	manabarHF20, manabarHF29 := false, false
 	var dvPoolPct uint16
 	if !toReward && dgpoRef != nil {
-		if hardfork.SetForBlock(dgpoRef.HeadBlockNumber).Has(hardfork.HF20) {
+		hfs := hardfork.SetForBlock(dgpoRef.HeadBlockNumber)
+		if hfs.Has(hardfork.HF20) {
 			manabarHF20 = true
+			manabarHF29 = hfs.Has(hardfork.HF29)
 			dvPoolPct = dgpoRef.DownvotePoolPercent
 		}
 	}
@@ -187,7 +189,7 @@ func createVestingImpl(s *state.Session, accountName string, hiveSatoshi int64, 
 				// pre-change regeneration here was 99 % of the "not regenerated
 				// prior to VEST change" count, and under HF29 hived asserts it.
 				objects.RegenerateRCMana(a, dgpoRef.Time)
-				objects.UpdateVotingManabar(a, dgpoRef.Time, dvPoolPct, vestsAmount, dgpoRef.HeadBlockNumber)
+				objects.UpdateVotingManabar(a, dgpoRef.Time, dvPoolPct, vestsAmount, dgpoRef.HeadBlockNumber, manabarHF29)
 			}
 			a.VestingShares += vestsAmount
 			// Gaining VESTS raises max_rc, and hived credits that increase to
