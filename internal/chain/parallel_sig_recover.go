@@ -70,7 +70,7 @@ func RecoverBlockTxSignerKeys(rawBlock []byte, blockNum uint32) RecoveredBlockSi
 	}
 
 	r := fcraw.NewReader(rawBlock[hdrLen:])
-	txCount, err := r.ReadVarUint()
+	txCount, err := tx.ReadBlockTxCount(r)
 	if err != nil {
 		return RecoveredBlockSigs{}
 	}

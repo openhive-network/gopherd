@@ -37,6 +37,28 @@ import (
 // (fc::ecc::compact_signature = fc::array<unsigned char, 65>).
 const SignatureSize = 65
 
+// MinSignedTxSize is the smallest encoding of a signed_transaction:
+// ref_block_num (2) + ref_block_prefix (4) + expiration (4) and one-byte
+// counts for operations, extensions and signatures. hived uses the same bound
+// (full_block.cpp, 30b411b94) to refuse a block whose transaction count cannot
+// fit in its remaining bytes before it sizes anything from that count.
+const MinSignedTxSize = 13
+
+// ReadBlockTxCount reads a block body's transaction count and refuses one the
+// remaining bytes cannot hold. The count is peer-controlled: without the check
+// a 5-byte varint declaring 4,294,967,295 transactions made callers that size
+// a slice from it die with a fatal out-of-memory before decoding anything.
+func ReadBlockTxCount(r *fcraw.Reader) (uint32, error) {
+	count, err := r.ReadVarUint()
+	if err != nil {
+		return 0, err
+	}
+	if err := r.CheckCount(count, MinSignedTxSize); err != nil {
+		return 0, fmt.Errorf("block transactions: %w", err)
+	}
+	return count, nil
+}
+
 // Transaction is hive::protocol::transaction.
 type Transaction struct {
 	RefBlockNum    uint16
@@ -173,6 +195,10 @@ func readTransactionBody(r *fcraw.Reader) (Transaction, error) {
 	count, err := r.ReadVarUint()
 	if err != nil {
 		return t, fmt.Errorf("tx.operations count: %w", err)
+	}
+	// An operation is at least its one-byte tag.
+	if err := r.CheckCount(count, 1); err != nil {
+		return t, fmt.Errorf("tx.operations: %w", err)
 	}
 	t.Operations = make([]op.Op, 0, count)
 	for i := uint32(0); i < count; i++ {

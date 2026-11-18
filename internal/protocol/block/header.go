@@ -64,6 +64,9 @@ func ParseHeaderExtensions(raw []byte) ([]HeaderExtension, error) {
 	if count == 0 {
 		return nil, nil
 	}
+	if err := r.CheckCount(count, 1); err != nil {
+		return nil, fmt.Errorf("ParseHeaderExtensions: %w", err)
+	}
 	out := make([]HeaderExtension, 0, count)
 	for i := uint32(0); i < count; i++ {
 		tag, err := r.ReadVarUint()

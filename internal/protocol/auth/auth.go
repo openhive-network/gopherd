@@ -67,6 +67,10 @@ func ReadAuthority(r *fcraw.Reader) (Authority, error) {
 	if err != nil {
 		return a, fmt.Errorf("auth.ReadAuthority account_auths count: %w", err)
 	}
+	// name (at least a one-byte length) + uint16 weight.
+	if err := r.CheckCount(count, 3); err != nil {
+		return a, fmt.Errorf("auth.ReadAuthority account_auths: %w", err)
+	}
 	a.AccountAuths = make([]AccountAuth, 0, count)
 	for i := uint32(0); i < count; i++ {
 		name, err := r.ReadString()
@@ -83,6 +87,10 @@ func ReadAuthority(r *fcraw.Reader) (Authority, error) {
 	count, err = r.ReadVarUint()
 	if err != nil {
 		return a, fmt.Errorf("auth.ReadAuthority key_auths count: %w", err)
+	}
+	// 33-byte key + uint16 weight.
+	if err := r.CheckCount(count, 35); err != nil {
+		return a, fmt.Errorf("auth.ReadAuthority key_auths: %w", err)
 	}
 	a.KeyAuths = make([]KeyAuth, 0, count)
 	for i := uint32(0); i < count; i++ {

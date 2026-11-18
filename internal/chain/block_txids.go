@@ -33,7 +33,7 @@ func BlockTransactionBodies(rawBlock []byte) ([][]byte, error) {
 		return nil, err
 	}
 	r := fcraw.NewReader(rawBlock[hdrLen:])
-	txCount, err := r.ReadVarUint()
+	txCount, err := tx.ReadBlockTxCount(r)
 	if err != nil || txCount == 0 {
 		return nil, err
 	}
@@ -55,7 +55,7 @@ func BlockTransactionIDs(rawBlock []byte) [][20]byte {
 		return nil
 	}
 	r := fcraw.NewReader(rawBlock[hdrLen:])
-	txCount, err := r.ReadVarUint()
+	txCount, err := tx.ReadBlockTxCount(r)
 	if err != nil || txCount == 0 {
 		return nil
 	}

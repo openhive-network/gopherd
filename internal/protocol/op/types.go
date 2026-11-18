@@ -18,6 +18,9 @@ func readStringSlice(r *fcraw.Reader, label string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s count: %w", label, err)
 	}
+	if err := r.CheckCount(count, 1); err != nil {
+		return nil, fmt.Errorf("%s: %w", label, err)
+	}
 	out := make([]string, 0, count)
 	for i := uint32(0); i < count; i++ {
 		s, err := r.ReadString()
@@ -69,6 +72,10 @@ func readAuthoritySlice(r *fcraw.Reader, label string) ([]auth.Authority, error)
 	count, err := r.ReadVarUint()
 	if err != nil {
 		return nil, fmt.Errorf("%s count: %w", label, err)
+	}
+	// weight_threshold (4) + two empty one-byte counts.
+	if err := r.CheckCount(count, 6); err != nil {
+		return nil, fmt.Errorf("%s: %w", label, err)
 	}
 	out := make([]auth.Authority, 0, count)
 	for i := uint32(0); i < count; i++ {

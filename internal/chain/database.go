@@ -922,7 +922,7 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	d.txReader.Reset(rawBlock[hdrLen:])
 	r := &d.txReader
 	op.ResetVoteSlab(r)
-	txCount, err := r.ReadVarUint()
+	txCount, err := tx.ReadBlockTxCount(r)
 	if err != nil {
 		return objects.DynamicGlobalProperty{}, fmt.Errorf("apply_block %d tx_count: %w", blockNum, err)
 	}

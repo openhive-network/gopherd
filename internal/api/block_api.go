@@ -159,7 +159,7 @@ func parseBlock(raw []byte) (block.SignedHeader, []tx.SignedTransaction, int, er
 		return sh, nil, 0, err
 	}
 	r := fcraw.NewReader(raw[hdrLen:])
-	count, err := r.ReadVarUint()
+	count, err := tx.ReadBlockTxCount(r)
 	if err != nil {
 		return sh, nil, hdrLen, err
 	}

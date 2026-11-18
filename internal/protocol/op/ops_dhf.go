@@ -18,6 +18,9 @@ func readSortedInt64Set(r *fcraw.Reader, label string) ([]int64, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s count: %w", label, err)
 	}
+	if err := r.CheckCount(count, 8); err != nil {
+		return nil, fmt.Errorf("%s: %w", label, err)
+	}
 	out := make([]int64, 0, count)
 	for i := uint32(0); i < count; i++ {
 		v, err := r.ReadInt64()

@@ -17,6 +17,9 @@ func readSortedAccountSet(r *fcraw.Reader, label string) ([]auth.AccountName, er
 	if err != nil {
 		return nil, fmt.Errorf("%s count: %w", label, err)
 	}
+	if err := r.CheckCount(count, 1); err != nil {
+		return nil, fmt.Errorf("%s: %w", label, err)
+	}
 	out := make([]auth.AccountName, 0, count)
 	for i := uint32(0); i < count; i++ {
 		name, err := r.ReadString()

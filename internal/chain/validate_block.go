@@ -191,7 +191,7 @@ func CheckMerkleRoot(rawBlock []byte, blockNum uint32) error {
 func validateMerkleRoot(hdr *block.SignedHeader, rawBlock []byte, hdrLen int, blockNum uint32) error {
 	body := rawBlock[hdrLen:]
 	r := fcraw.NewReader(body)
-	count, err := r.ReadVarUint()
+	count, err := tx.ReadBlockTxCount(r)
 	if err != nil {
 		return fmt.Errorf("validate_block %d: tx count: %w", blockNum, err)
 	}
