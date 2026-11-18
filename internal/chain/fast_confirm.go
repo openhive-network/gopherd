@@ -108,6 +108,19 @@ func (d *Database) ProcessFastConfirm(raw []byte) error {
 		return nil // not on the schedule: ignored
 	}
 	id := block.ID(approve.BlockID)
+	// hived 86e15d046: an approval of a block more than 3 above the head is
+	// refused (neither stored nor relayed) unless the node holds that block.
+	// Stored, it stood for the witness's vote, and blocked the witness's
+	// later approvals here, until the LIB passed its number, which for a
+	// block that never arrives is never. hived also accepts one for a block
+	// buffered in its fork database; ours is owned by the apply loop and not
+	// safe to read here, and nothing applied can be above the head, so we
+	// refuse those too. Approvals only move our local LIB, so this changes
+	// no block's validity.
+	if id.Num() > dgpo.HeadBlockNumber+maxBlocksAheadOfUnknownApprovedBlock {
+		return fmt.Errorf("fast-confirm from %s for block #%d, which this node doesn't have, more than %d blocks above its head #%d",
+			witness, id.Num(), maxBlocksAheadOfUnknownApprovedBlock, dgpo.HeadBlockNumber)
+	}
 	d.fcMu.Lock()
 	defer d.fcMu.Unlock()
 	if prev, ok := d.fcApproved[witness]; ok && id.Num() <= prev.Num() {
@@ -228,3 +241,7 @@ func (d *Database) dropSettledApprovals(lib uint32) {
 		}
 	}
 }
+
+// maxBlocksAheadOfUnknownApprovedBlock is hived's
+// max_blocks_ahead_of_unknown_approved_block.
+const maxBlocksAheadOfUnknownApprovedBlock = 3
