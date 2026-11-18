@@ -123,6 +123,10 @@ type Node struct {
 	// localAddrPorts caches the parsed forms of cfg.Endpoint so
 	// self-dial protection is cheap.
 	selfEndpoints map[string]struct{}
+	// ownKeys maps the local ephemeral key of each live connection, which
+	// our hello sends as node_public_key, to the endpoint it dialled ("" for
+	// inbound). A hello carrying one of them is our own (see isOwnHello).
+	ownKeys map[crypto.PublicKey]string
 }
 
 // peerInfo carries discovery-loop-specific state about an active peer:
@@ -152,6 +156,7 @@ func New(cfg Config, ch ChainView, delegate Delegate) *Node {
 		activeEndpoints: make(map[string]*Peer),
 		pendingDials:    make(map[string]struct{}),
 		selfEndpoints:   make(map[string]struct{}),
+		ownKeys:         make(map[crypto.PublicKey]string),
 	}
 	n.populateSelfEndpoints()
 	return n
@@ -605,6 +610,7 @@ func (n *Node) handleNewConn(c *transport.Conn, dir Direction, dialEndpoint stri
 
 	peer := newPeer(c, dir, n.cfg.UserAgent, n.buildHelloPayload, n.buildLegacyHelloPayload)
 	peer.prunedRejection = n.prunedRejection
+	peer.isOwnHello = n.isOwnHello
 	info := &peerInfo{endpoint: dialEndpoint, dir: dir}
 	n.mu.Lock()
 	// Shutdown race: Stop() closes the peers it can SEE, then waits on the
@@ -627,6 +633,7 @@ func (n *Node) handleNewConn(c *transport.Conn, dir Direction, dialEndpoint stri
 		return
 	}
 	n.peers[peer] = info
+	n.ownKeys[c.LocalPublicKey()] = dialEndpoint
 	if dialEndpoint != "" {
 		n.activeEndpoints[dialEndpoint] = peer
 		delete(n.pendingDials, dialEndpoint)
@@ -674,6 +681,7 @@ func (n *Node) handleNewConn(c *transport.Conn, dir Direction, dialEndpoint stri
 
 	n.mu.Lock()
 	delete(n.peers, peer)
+	delete(n.ownKeys, c.LocalPublicKey())
 	if dialEndpoint != "" {
 		delete(n.activeEndpoints, dialEndpoint)
 	}
@@ -1028,4 +1036,23 @@ func (n *Node) prunedRejection(peerHead uint32) string {
 		return ""
 	}
 	return fmt.Sprintf("I can't help you sync: blocks older than #%d have been pruned on this node and you are at block #%d", tail, peerHead)
+}
+
+// isOwnHello reports whether a hello's node_public_key is the key of one of
+// our own live connections, i.e. we dialled ourselves: through our public
+// address, a NAT, or an endpoint a peer advertised back to us. The loopback
+// and configured-endpoint checks cannot see those. The endpoint that reached
+// us is remembered as ours so it is never dialled again (hived 5af1b8a9c
+// keeps the node's own endpoints out of dials the same way).
+func (n *Node) isOwnHello(key [33]byte) bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	ep, ok := n.ownKeys[crypto.PublicKey(key)]
+	if !ok {
+		return false
+	}
+	if ep != "" {
+		n.selfEndpoints[ep] = struct{}{}
+	}
+	return true
 }

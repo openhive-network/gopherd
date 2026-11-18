@@ -192,6 +192,9 @@ type Peer struct {
 	// prunedRejection, when set, returns a non-empty reason to refuse a peer
 	// whose hello says it is at peerHead (see Node.prunedRejection).
 	prunedRejection func(peerHead uint32) string
+	// isOwnHello, when set, reports whether a hello's node_public_key is one
+	// of our own connections' keys (Node.isOwnHello).
+	isOwnHello func(key [33]byte) bool
 
 	mu              sync.Mutex
 	lastHeartbeatRX time.Time
@@ -378,12 +381,14 @@ func (p *Peer) run(ctx context.Context, delegate Delegate) {
 			// parse leaves it 0, which callers treat as "withhold".
 			parsedVersion := false
 			var userData *proto.VarObject
+			var nodeKey [33]byte
 			if typeTag == proto.HelloMessageType {
 				var hm proto.HelloMessage
 				if err := hm.Unmarshal(body); err == nil {
 					p.coreProtocolVersion.Store(hm.CoreProtocolVersion)
 					parsedVersion = true
 					userData = hm.UserData
+					nodeKey = hm.NodePublicKey
 				}
 			} else {
 				var lhm proto.LegacyHelloMessage
@@ -391,7 +396,20 @@ func (p *Peer) run(ctx context.Context, delegate Delegate) {
 					p.coreProtocolVersion.Store(lhm.CoreProtocolVersion)
 					parsedVersion = true
 					userData = lhm.UserData
+					nodeKey = lhm.NodePublicKey
 				}
+			}
+			// A hello carrying the key of one of our own connections is
+			// ourselves; hived refuses that with connected_to_self.
+			if parsedVersion && p.isOwnHello != nil && p.State() != StateActive && p.isOwnHello(nodeKey) {
+				p.reject(proto.RejectConnectedToSelf, "I'm connecting to myself")
+				err := fmt.Errorf("connected to self")
+				p.tracef("REJECTING: %v", err)
+				p.close(err)
+				if delegate != nil {
+					delegate.OnPeerDisconnected(p, err)
+				}
+				return
 			}
 			// Minimum protocol version (hived eb556e22d). Checked once the
 			// version is recorded and before we accept the connection, so a
