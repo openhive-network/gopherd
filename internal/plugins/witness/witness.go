@@ -1554,6 +1554,26 @@ func (p *Plugin) headerVersionExtensions(s *state.Session, witnessName string) [
 	return exts
 }
 
+// headerStateStamp mirrors block_producer::add_state_stamp (hived 18045a0ee):
+// from HF29, when state stamps are pending, the block carries their merkle
+// root, which applying it then consumes (chain.processHeaderExtensions).
+// Before HF29 the extension is refused, so stamps just keep accumulating and
+// the first block after HF29 activation carries all of them.
+//
+// A state that cannot compute the root (its stamp list predates gopherd
+// keeping one) is an error: a block without the stamp, or with a wrong one,
+// would be refused by every node, ours included.
+func headerStateStamp(s *state.Session, blockNum uint32) (*block.HeaderExtension, error) {
+	if !hardfork.SetForBlock(blockNum).Has(hardfork.HF29) {
+		return nil, nil
+	}
+	root, pending, err := chain.PendingStateStampRoot(s)
+	if err != nil || !pending {
+		return nil, err
+	}
+	return &block.HeaderExtension{Tag: block.HeaderExtStateStamp, StateMerkleRoot: root}, nil
+}
+
 func (p *Plugin) buildBlockParts(prod *Producer, dgpo objects.DynamicGlobalProperty, blockTime uint32) ([]byte, int, error) {
 	if blockTime == 0 || prod == nil {
 		return nil, 0, errors.New("buildBlock: invalid args")
@@ -1562,18 +1582,30 @@ func (p *Plugin) buildBlockParts(prod *Producer, dgpo objects.DynamicGlobalPrope
 	// Empty (the bare 0x00 marker) in the steady state, which is almost every
 	// block — see headerVersionExtensions for what puts an entry in.
 	var exts []block.HeaderExtension
+	var stampErr error
+	headerExts := func(s *state.Session) {
+		exts = p.headerVersionExtensions(s, string(prod.Account))
+		var stamp *block.HeaderExtension
+		stamp, stampErr = headerStateStamp(s, dgpo.HeadBlockNumber+1)
+		if stamp != nil {
+			exts = append(exts, *stamp)
+		}
+	}
 	if p.Chain != nil {
 		// Through the chain accessor, not a bare state.NewSession: this read
 		// decides what the block we are about to sign says about our version
 		// position, and applyMu is what makes it consistent against the single
-		// ApplyBlock writer. Two small keyed reads, so the RLock is held for
+		// ApplyBlock writer. A few small keyed reads, so the RLock is held for
 		// microseconds — not the kind of scan that stalls the applier.
 		_ = p.Chain.WithReadSession(func(s *state.Session) error {
-			exts = p.headerVersionExtensions(s, string(prod.Account))
+			headerExts(s)
 			return nil
 		})
 	} else if p.State != nil {
-		exts = p.headerVersionExtensions(state.NewSession(p.State), string(prod.Account))
+		headerExts(state.NewSession(p.State))
+	}
+	if stampErr != nil {
+		return nil, 0, fmt.Errorf("buildBlock: state stamp: %w", stampErr)
 	}
 	hdr := block.Header{
 		Previous:   dgpo.HeadBlockID,
