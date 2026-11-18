@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"gopherd/internal/chain/evaluator"
 	"gopherd/internal/crypto"
@@ -726,6 +727,9 @@ func applyCustomOpBlockLimit(counts map[auth.AccountName]uint8, signed *tx.Signe
 	return nil
 }
 
+// nowUnix is the wall clock ApplyBlock reads; a variable so tests can move it.
+var nowUnix = func() int64 { return time.Now().Unix() }
+
 // ApplyBlock runs every transaction's operations through their registered
 // evaluators against a fresh state.Session, then commits. Returns the
 // post-apply DGPO so callers can chain quickly without re-fetching.
@@ -740,6 +744,18 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	hdr, hdrLen, err := block.UnmarshalSignedHeader(rawBlock)
 	if err != nil {
 		return objects.DynamicGlobalProperty{}, fmt.Errorf("apply_block %d header: %w", blockNum, err)
+	}
+
+	// Skipping the duplicate check also skips the records it consults later,
+	// so a node fresh from `gopherd replay` took a transaction that is
+	// already in a block, until it expired, while every live node refuses
+	// it. Keep the check, and the records, for blocks whose transactions can
+	// still be unexpired: a transaction expires at most
+	// HIVE_MAX_TIME_UNTIL_SIGNATURE_EXPIRATION after its block, plus an hour
+	// of margin for the clock (hived c8fd68ff5). Valid history passes it, so
+	// replays end in the same state.
+	if opts.SkipDedupAndTaPOS && int64(hdr.Timestamp) > nowUnix()-int64(maxTimeUntilSignatureExpirationSec+maxTimeUntilExpirationSec) {
+		opts.SkipDedupAndTaPOS = false
 	}
 
 	// ADMISSION AUDIT — the ground truth for "is our mempool filter too strict".

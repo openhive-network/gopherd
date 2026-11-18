@@ -135,3 +135,26 @@ func TestApplyBlockCheckPrevious(t *testing.T) {
 		t.Fatal("block 2 that does not build on block 1 applied with CheckPrevious")
 	}
 }
+
+// hived c8fd68ff5: a block recent enough that its transactions may still be
+// unexpired keeps the duplicate check and its records even when the caller
+// (gopherd replay) asked to skip them.
+func TestRecentBlocksKeepDedupRecordsUnderSkip(t *testing.T) {
+	c := newForkTestChain(t)
+	gid, _ := c.HeadBlockID()
+	st := aliceToBob(10)
+	r1, _ := forkTestBlock(t, 1, network.GenesisTimeUnix+3, gid, []tx.SignedTransaction{st}, []tx.SignedTransaction{st})
+	id := tx.IDFromDigest(tx.DigestFromBytes(tx.AppendTransactionBody(nil, &st.Transaction)))
+
+	old := nowUnix
+	defer func() { nowUnix = old }()
+	nowUnix = func() int64 { return int64(network.GenesisTimeUnix) + 3600 } // the block is an hour old
+
+	opts := ApplyOptions{SkipTransactionSignatures: true, SkipBlockSignature: true, SkipDedupAndTaPOS: true}
+	if _, err := c.ApplyBlock(r1, 1, opts, nil); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := objects.HasTransaction(c.session, id); !ok {
+		t.Fatal("no duplicate-check record for a transaction of a recent block applied with SkipDedupAndTaPOS")
+	}
+}
