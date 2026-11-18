@@ -71,6 +71,14 @@ func (d *Database) PushLiveBlock(raw []byte, num uint32, opts ApplyOptions) (Pus
 	if _, dup := d.fork.get(id); dup {
 		return PushDuplicate, nil
 	}
+	// The DAG is keyed by the header id, and a header does not cover the
+	// transactions except through the merkle root. A copy with a genuine
+	// header and a different body stored here first made every genuine copy a
+	// duplicate, and the head stopped at that block (hive#982; hived checks
+	// the root before fork_db since 536d41ea6). Nothing enters unchecked.
+	if err := validateMerkleRoot(&sh, raw, hdrLen, num); err != nil {
+		return 0, fmt.Errorf("push_live_block %d: %w", num, err)
+	}
 	if num <= d.committedNum() {
 		// At/below the irreversible head: record for topology, can't act on it.
 		d.fork.add(id, sh.Previous, num, raw)
@@ -265,6 +273,11 @@ func (d *Database) applyReversibleExtend(node *forkNode, opts ApplyOptions) erro
 	}
 	opts.Reversible = true
 	if _, err := d.ApplyBlock(node.raw, node.num, opts, nil); err != nil {
+		// A block that failed to apply must not stay in the DAG: it would be
+		// retried on every push and would answer for its id, so another
+		// copy could never be tried (hived removes it the same way in
+		// _push_block).
+		d.fork.remove(node.id)
 		return fmt.Errorf("push_live_block: apply %d: %w", node.num, err)
 	}
 	d.fork.setHead(node.id)
@@ -302,6 +315,7 @@ func (d *Database) tryReorg(opts ApplyOptions) (bool, error) {
 		}
 		if _, err := d.ApplyBlock(bn.raw, bn.num, optsForOther(opts), nil); err != nil {
 			d.UndoReversible()
+			d.fork.remove(bn.id)
 			return false, fmt.Errorf("push_live_block: reorg apply %d: %w", bn.num, err)
 		}
 		if i < len(branch)-1 {

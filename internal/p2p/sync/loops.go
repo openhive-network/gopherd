@@ -660,6 +660,7 @@ func (d *Delegate) applyLoop() {
 				SkipTransactionSignatures: historical,
 				SkipBlockSignature:        historical,
 				TolerateFailingOps:        historical,
+				CheckPrevious:             true,
 				PreVerifiedBlockSigner:    job.preVerifiedSigner,
 				PreRecoveredTxKeys:        job.preRecoveredTxKeys,
 				CompressedPayload:         job.wire.payload(),
@@ -750,6 +751,7 @@ func (d *Delegate) applyLoop() {
 			// a specific reason instead of being rejected by peers.
 			ValidateOwnBlock:       job.local,
 			TolerateFailingOps:     historical,
+			CheckPrevious:          true,
 			PreVerifiedBlockSigner: job.preVerifiedSigner,
 			PreRecoveredTxKeys:     job.preRecoveredTxKeys,
 			CompressedPayload:      job.wire.payload(),

@@ -257,6 +257,17 @@ func (p *Peer) CloseErr() error {
 	return nil
 }
 
+// Disconnect tells the peer why we are dropping it (closing_connection, with
+// closing_due_to_error set, as hived's disconnect_from_peer does for a peer
+// that sent something invalid) and then tears the connection down.
+func (p *Peer) Disconnect(reason string) {
+	msg := proto.ClosingConnectionMessage{ReasonForClosing: reason, ClosingDueToError: true}
+	if body, err := msg.Marshal(); err == nil {
+		_ = p.Send(proto.ClosingConnectionMessageType, body)
+	}
+	p.close(fmt.Errorf("disconnected: %s", reason))
+}
+
 // close is internal: it tears the conn down once and stores the cause.
 func (p *Peer) close(cause error) {
 	p.closeOnce.Do(func() {

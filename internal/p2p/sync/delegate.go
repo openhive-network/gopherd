@@ -137,6 +137,9 @@ type Chain interface {
 	RecentBlockBytesByID(id block.ID) []byte
 	RecentBlockNums() []uint32
 	RecentBlockIDForNum(blockNum uint32) (block.ID, bool)
+	// CheckBlockBody reports why a received block cannot be the block id
+	// names ("" when it can). See checkBlockBody.
+	CheckBlockBody(rawBlock []byte, id block.ID) string
 }
 
 // chainAdapter wraps a real *chain.Database in our narrow Chain
@@ -155,6 +158,9 @@ func (c *chainAdapter) RecentBlockIDForNum(n uint32) (block.ID, bool) {
 }
 func (c *chainAdapter) ApplyBlock(raw []byte, n uint32, opts chain.ApplyOptions, stats *chain.Stats) (interface{}, error) {
 	return c.db.ApplyBlock(raw, n, opts, stats)
+}
+func (c *chainAdapter) CheckBlockBody(raw []byte, id block.ID) string {
+	return checkBlockBody(raw, id)
 }
 func (c *chainAdapter) PushLiveBlock(raw []byte, n uint32, opts chain.ApplyOptions) (chain.PushOutcome, error) {
 	return c.db.PushLiveBlock(raw, n, opts)
@@ -444,8 +450,12 @@ type Delegate struct {
 	blocksHeld atomic.Uint64
 	// opsTolerated counts operations that failed inside a historical block
 	// and were skipped under TolerateFailingOps (logged per block).
-	opsTolerated         atomic.Uint64
-	blocksRefusedFuture  atomic.Uint64
+	opsTolerated        atomic.Uint64
+	blocksRefusedFuture atomic.Uint64
+	// blocksBadBody counts blocks refused because their transactions do not
+	// hash to the header's merkle root (or the bytes do not hash to the id
+	// they were sent under).
+	blocksBadBody        atomic.Uint64
 	inhibitedFetches     atomic.Uint64
 	outstandingThrottled atomic.Uint64
 	// invIgnoredCatchup counts item_ids_inventory_message adverts dropped by
@@ -1346,6 +1356,9 @@ type Stats struct {
 	// was occupied, which only happens under a flood).
 	BlocksHeld          uint64
 	BlocksRefusedFuture uint64
+	// BlocksBadBody counts blocks refused because their body does not match
+	// their header; each one also drops the peer that sent it.
+	BlocksBadBody uint64
 	// TxInvOffered / TxFetched bracket the step before admission — see the
 	// delegate fields for why all four are needed to localise a fault.
 	TxInvOffered uint64
@@ -1459,6 +1472,7 @@ func (d *Delegate) Stats() Stats {
 		MempoolDepth:           mempoolDepth,
 		BlocksHeld:             d.blocksHeld.Load(),
 		BlocksRefusedFuture:    d.blocksRefusedFuture.Load(),
+		BlocksBadBody:          d.blocksBadBody.Load(),
 	}
 }
 

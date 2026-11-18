@@ -48,6 +48,7 @@ func TestPushLiveBlockReorg(t *testing.T) {
 		}
 		hdr := block.SignedHeader{Header: block.Header{
 			Timestamp: ts, Witness: "initminer", Previous: prev, Extensions: []byte{0x00},
+			TransactionMerkleRoot: testMerkleRoot(txs...),
 		}}
 		out := block.MarshalSignedHeader(nil, &hdr)
 		out = append(out, byte(len(txs)))
@@ -135,7 +136,8 @@ func TestPushLiveBlockOutOfOrder(t *testing.T) {
 			Operations: op.Ops(op.Transfer{From: "alice", To: "bob", Amount: hiveAsset(amount), Memo: "m"}),
 			Expiration: network.GenesisTimeUnix + 600,
 		}}
-		hdr := block.SignedHeader{Header: block.Header{Timestamp: ts, Witness: "initminer", Previous: prev, Extensions: []byte{0x00}}}
+		hdr := block.SignedHeader{Header: block.Header{Timestamp: ts, Witness: "initminer", Previous: prev, Extensions: []byte{0x00},
+			TransactionMerkleRoot: testMerkleRoot(st)}}
 		out := block.MarshalSignedHeader(nil, &hdr)
 		out = append(out, 1)
 		out = tx.AppendSignedTransaction(out, &st)
@@ -194,7 +196,8 @@ func TestPushLiveBlockDrainKeepsOwnCompressedForm(t *testing.T) {
 			Operations: op.Ops(op.Transfer{From: "alice", To: "bob", Amount: hiveAsset(amount), Memo: "m"}),
 			Expiration: network.GenesisTimeUnix + 600,
 		}}
-		hdr := block.SignedHeader{Header: block.Header{Timestamp: ts, Witness: "initminer", Previous: prev, Extensions: []byte{0x00}}}
+		hdr := block.SignedHeader{Header: block.Header{Timestamp: ts, Witness: "initminer", Previous: prev, Extensions: []byte{0x00},
+			TransactionMerkleRoot: testMerkleRoot(st)}}
 		out := block.MarshalSignedHeader(nil, &hdr)
 		out = append(out, 1)
 		out = tx.AppendSignedTransaction(out, &st)

@@ -899,6 +899,25 @@ func (d *Delegate) handleBlockBytesWire(p *node.Peer, signedBlockBytes []byte, b
 		return
 	}
 
+	// Bind the body to the header before anything keyed by the block id sees
+	// it: the signer and tx-key caches, the apply queue and the fork database
+	// all trust that one id means one block. A header is all a block id
+	// commits to, so any peer could pair a genuine header with a different
+	// body. In the fork database that copy then shadowed the genuine one
+	// (same id, so it came back a duplicate) and wedged the head until restart
+	// (hive#982, fixed in hived by 536d41ea6); in catch-up, where the block
+	// checks are skipped, it was simply applied. hived checks the merkle root
+	// on every block it receives, synced or live; so do we, here on the
+	// sender's own receive goroutine, and drop the sender as hived does.
+	if reason := d.chain.CheckBlockBody(signedBlockBytes, bid); reason != "" {
+		d.blocksBadBody.Add(1)
+		d.logf("refusing block %d from %s: %s", bid.Num(), peerLabel(p), reason)
+		if p != nil {
+			p.Disconnect("sent a block whose body does not match its header")
+		}
+		return
+	}
+
 	// Pre-recover the witness signing key on THIS goroutine. handleBlock
 	// runs on the per-peer receive goroutine — with N peers we get N-way
 	// parallel sig recovery for free, and applyLoop never blocks on the

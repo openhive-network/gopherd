@@ -458,6 +458,11 @@ type ApplyOptions struct {
 	// (treating the op as a no-op). Default false; with the stub registry in
 	// place every op is registered, so this should rarely be needed.
 	SkipUnknownOps bool
+	// CheckPrevious enforces header.previous == head block id even when
+	// SkipBlockSignature skips validateBlock (which checks it too). Set by
+	// the p2p apply paths; a block_log replay trusts its file and leaves it
+	// off.
+	CheckPrevious bool
 	// PreVerifiedBlockSigner, when non-zero, is the public key recovered
 	// from the witness block signature OUTSIDE of ApplyBlock by a
 	// look-ahead worker pool (see internal/p2p/sync/sigverify.go). When
@@ -810,9 +815,19 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	// to evaluators so they match C++.
 	headBlockTime := hdr.Timestamp
 	prevCurrentAslot := uint64(0)
+	var headID [20]byte
 	if dgpoRef, ok := objects.GetDGPORef(session); ok {
 		headBlockTime = dgpoRef.Time
 		prevCurrentAslot = dgpoRef.CurrentAslot
+		headID = dgpoRef.HeadBlockID
+	}
+	// Chain continuity, for callers that ask for it even when the block
+	// checks below are skipped (p2p catch-up skips them for speed). Without
+	// it the apply path took any block numbered head+1, so a block from
+	// another chain, or a header pointing anywhere, applied as the next one.
+	if opts.CheckPrevious && blockNum > 1 && headID != ([20]byte{}) && hdr.Previous != headID {
+		return objects.DynamicGlobalProperty{}, fmt.Errorf("apply_block %d: previous %x is not the head block %x",
+			blockNum, hdr.Previous[:8], headID[:8])
 	}
 
 	// Witness-scheduling assert + block-level invariants (chain

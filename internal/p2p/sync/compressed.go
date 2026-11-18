@@ -1,6 +1,9 @@
 package sync
 
 import (
+	"fmt"
+
+	"gopherd/internal/chain"
 	"gopherd/internal/p2p/node"
 	"gopherd/internal/p2p/proto"
 	"gopherd/internal/protocol/block"
@@ -153,4 +156,32 @@ func blockIDFromRaw(rawBlock []byte) (block.ID, bool) {
 	}
 	blockNum := sh.Previous.Num() + 1
 	return block.ConstructID(rawBlock[:hdrLen], blockNum), true
+}
+
+// checkBlockBody reports why a received block cannot be the block bid names,
+// or "" when it can: its header must hash to bid (when the sender supplied
+// one) and its transactions must hash to the header's merkle root.
+func checkBlockBody(rawBlock []byte, bid block.ID) string {
+	got, ok := blockIDFromRaw(rawBlock)
+	if !ok {
+		return "undecodable header"
+	}
+	if bid != (block.ID{}) && got != bid {
+		return fmt.Sprintf("header hashes to %x, not the id %x it was sent as", got[:8], bid[:8])
+	}
+	if err := chain.CheckMerkleRoot(rawBlock, got.Num()); err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
+// peerLabel names a peer for a log line.
+func peerLabel(p *node.Peer) string {
+	if p == nil {
+		return "local"
+	}
+	if c := p.Conn(); c != nil && c.RemoteAddr() != nil {
+		return c.RemoteAddr().String()
+	}
+	return "unknown peer"
 }

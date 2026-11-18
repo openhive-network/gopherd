@@ -148,3 +148,16 @@ func TestEvaluatorCoverageIsComplete(t *testing.T) {
 		t.Fatalf("evaluator coverage = %d, want >= %d (every regular op)", len(tags), op.TagFirstVirtual)
 	}
 }
+
+// testMerkleRoot is the header merkle root for txs, so blocks built in tests
+// pass the body check PushLiveBlock makes before the fork DAG.
+func testMerkleRoot(txs ...tx.SignedTransaction) block.ID {
+	if len(txs) == 0 {
+		return block.ID{}
+	}
+	ds := make([]tx.Digest, len(txs))
+	for i := range txs {
+		ds[i] = tx.MerkleDigestFromBytes(tx.AppendSignedTransaction(nil, &txs[i]))
+	}
+	return block.ID(tx.MerkleRoot(ds))
+}

@@ -40,6 +40,16 @@ func (f *forkDB) add(id, prev block.ID, num uint32, raw []byte) *forkNode {
 	return n
 }
 
+// remove drops one node, so a block that failed to apply stops answering for
+// its id. Its descendants stay until they are pruned; with their parent gone
+// they can no longer be reached from the head. The head itself is never
+// removed.
+func (f *forkDB) remove(id block.ID) {
+	if id != f.head {
+		delete(f.byID, id)
+	}
+}
+
 func (f *forkDB) get(id block.ID) (*forkNode, bool) { n, ok := f.byID[id]; return n, ok }
 
 // setHead marks id as the node's applied head. id should already be add()ed.

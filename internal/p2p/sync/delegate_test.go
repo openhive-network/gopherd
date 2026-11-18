@@ -59,6 +59,11 @@ func (s *stubChain) RecentBlockNums() []uint32 {
 	copy(out, s.order)
 	return out
 }
+
+// CheckBlockBody accepts everything: the stub chain's blocks are synthetic
+// byte patterns, not signed blocks with a merkle root.
+func (s *stubChain) CheckBlockBody([]byte, block.ID) string { return "" }
+
 func (s *stubChain) RecentBlockIDForNum(n uint32) (block.ID, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
