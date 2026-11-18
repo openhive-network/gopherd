@@ -84,6 +84,13 @@ func headerExtensionsJSON(raw []byte, legacy bool) ([]interface{}, error) {
 				"hf_version": versionString(e.HardforkVersion),
 				"hf_time":    timeString(e.HardforkVersionTime),
 			}
+		case block.HeaderExtStateStamp:
+			// FC_REFLECT(state_stamp, (merkle_root)); checksum_type renders as
+			// hex. hived 18045a0ee added state_stamp to condenser's
+			// legacy_block_header_extensions at the same tag.
+			name, value = "state_stamp", map[string]interface{}{
+				"merkle_root": hex.EncodeToString(e.StateMerkleRoot[:]),
+			}
 		default:
 			return nil, fmt.Errorf("unknown block header extension tag %d", e.Tag)
 		}

@@ -930,7 +930,7 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	// BEFORE the tx loop so witness running_version + hardfork_version_vote
 	// reflect the current block when downstream evaluators or the HF5+
 	// witness-version assertion read them.
-	if err := processHeaderExtensions(session, &hdr); err != nil {
+	if err := processHeaderExtensions(session, &hdr, hf); err != nil {
 		return objects.DynamicGlobalProperty{}, fmt.Errorf("apply_block %d header_extensions: %w", blockNum, err)
 	}
 	// HF5+ running-version check fires AFTER the extension has had a

@@ -31,6 +31,31 @@ func TestHeaderExtensionsJSONMatchesHived(t *testing.T) {
 			t.Errorf("legacy=%v:\n got %s\nwant %s", c.legacy, b, c.want)
 		}
 	}
+	// HF29 state_stamp (tag 3): FC_REFLECT(state_stamp, (merkle_root)) with
+	// the ripemd160 in hex; condenser's legacy variant lists it at tag 3 too.
+	var root [20]byte
+	for i := range root {
+		root[i] = byte(i + 1)
+	}
+	raw = block.AppendHeaderExtensions(nil, []block.HeaderExtension{
+		{Tag: block.HeaderExtStateStamp, StateMerkleRoot: root},
+	})
+	for _, c := range []struct {
+		legacy bool
+		want   string
+	}{
+		{false, `[{"type":"state_stamp","value":{"merkle_root":"0102030405060708090a0b0c0d0e0f1011121314"}}]`},
+		{true, `[[3,{"merkle_root":"0102030405060708090a0b0c0d0e0f1011121314"}]]`},
+	} {
+		got, err := headerExtensionsJSON(raw, c.legacy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := json.Marshal(got)
+		if string(b) != c.want {
+			t.Errorf("state_stamp legacy=%v:\n got %s\nwant %s", c.legacy, b, c.want)
+		}
+	}
 	// The common case: an empty set renders [], not null.
 	got, err := headerExtensionsJSON([]byte{0}, true)
 	if err != nil {

@@ -22,13 +22,19 @@ func BlockSigningDigest(headerBytes []byte) [32]byte {
 	return sha256.Sum256(headerBytes)
 }
 
-// block_header_extensions is a flat_set<static_variant<void_t, version, hardfork_version_vote>>.
+// block_header_extensions is a
+// flat_set<static_variant<void_t, version, hardfork_version_vote, state_stamp>>.
 // Wire size of each variant body, indexed by tag:
 //
 //	tag 0 = void_t                  → 0 bytes
 //	tag 1 = version                 → 4 bytes (uint32 v_num LE)
 //	tag 2 = hardfork_version_vote   → 8 bytes (uint32 v_num LE + uint32 time_point_sec LE)
-var blockHeaderExtensionBodySize = [...]int{0, 4, 8}
+//	tag 3 = state_stamp             → 20 bytes (checksum_type merkle_root, ripemd160)
+//
+// state_stamp was added by hived 18045a0ee (HF29 state stamps). Before it a
+// tag-3 entry was unparseable to hived as well; whether one is ALLOWED in a
+// block is a consensus rule (chain.processHeaderExtensions), not a wire one.
+var blockHeaderExtensionBodySize = [...]int{0, 4, 8, 20}
 
 // HeaderExtensionTag enumerates the static_variant tags inside
 // block_header_extensions.
@@ -38,6 +44,7 @@ const (
 	HeaderExtVoid                HeaderExtensionTag = 0
 	HeaderExtVersion             HeaderExtensionTag = 1
 	HeaderExtHardforkVersionVote HeaderExtensionTag = 2
+	HeaderExtStateStamp          HeaderExtensionTag = 3
 )
 
 // HeaderExtension is a typed view of one entry in block_header_extensions.
@@ -47,11 +54,24 @@ type HeaderExtension struct {
 	Version             uint32 // packed v_num for HeaderExtVersion
 	HardforkVersion     uint32 // packed v_num for HeaderExtHardforkVersionVote
 	HardforkVersionTime uint32 // time_point_sec for HeaderExtHardforkVersionVote
+	// StateMerkleRoot is state_stamp.merkle_root for HeaderExtStateStamp: the
+	// merkle root of the state stamps published since the previous
+	// stamp-carrying block.
+	StateMerkleRoot [20]byte
 }
 
 // ParseHeaderExtensions decodes the opaque Extensions byte range into
 // typed entries. Returns nil for the empty case (the common 0x00 marker).
 // Mirrors hive::protocol::block_header_extensions static_variant decode.
+//
+// The result is what hived holds in memory after unpacking, not the wire
+// list: fc unpacks a flat_set by insert()ing each element, and
+// static_variant's operator< and operator== compare the tag ONLY
+// (fc/static_variant.hpp). So entries come back sorted by tag and a repeated
+// tag is dropped, the FIRST occurrence winning. That is why hived's
+// "Duplicate state stamp block extension" assertion can never fire (its own
+// comment in database_witness.cpp says so): a block whose wire list carries
+// two state stamps is processed as if it carried only the first.
 func ParseHeaderExtensions(raw []byte) ([]HeaderExtension, error) {
 	if len(raw) == 0 {
 		return nil, nil
@@ -98,21 +118,40 @@ func ParseHeaderExtensions(raw []byte) ([]HeaderExtension, error) {
 			}
 			ext.HardforkVersion = v
 			ext.HardforkVersionTime = t
+		case HeaderExtStateStamp:
+			if err := r.ReadInto(ext.StateMerkleRoot[:]); err != nil {
+				return nil, fmt.Errorf("ParseHeaderExtensions state_stamp merkle_root: %w", err)
+			}
 		}
-		out = append(out, ext)
+		out = insertHeaderExt(out, ext)
 	}
 	return out, nil
+}
+
+// insertHeaderExt is flat_set::insert under static_variant's tag-only
+// ordering: keep set sorted by tag, and do nothing if the tag is present.
+func insertHeaderExt(set []HeaderExtension, e HeaderExtension) []HeaderExtension {
+	i := sort.Search(len(set), func(i int) bool { return set[i].Tag >= e.Tag })
+	if i < len(set) && set[i].Tag == e.Tag {
+		return set
+	}
+	set = append(set, HeaderExtension{})
+	copy(set[i+1:], set[i:])
+	set[i] = e
+	return set
 }
 
 // AppendHeaderExtensions encodes exts as a block_header_extensions field:
 // a varint count followed by one varint tag + fixed-size body per entry.
 //
 // hived's extensions member is a flat_set< block_header_extensions >, i.e.
-// SORTED and DEDUPED, and static_variant orders by tag before value. Callers
-// build the set in whatever order the rules read best, so sorting and
-// deduping happens here — emitting them out of order would produce a header
-// that round-trips through our own parser but differs byte-for-byte from the
-// one hived would have signed for the same content.
+// SORTED and DEDUPED, and static_variant compares by tag alone (see
+// ParseHeaderExtensions), so a second entry with a tag already present is
+// dropped exactly as flat_set::insert would drop it. Callers build the set in
+// whatever order the rules read best, so sorting and deduping happens here —
+// emitting them out of order would produce a header that round-trips through
+// our own parser but differs byte-for-byte from the one hived would have
+// signed for the same content.
 //
 // An empty set encodes as the single 0x00 byte every extension-less block on
 // the chain carries.
@@ -120,15 +159,9 @@ func AppendHeaderExtensions(dst []byte, exts []HeaderExtension) []byte {
 	if len(exts) == 0 {
 		return append(dst, 0)
 	}
-	sorted := make([]HeaderExtension, len(exts))
-	copy(sorted, exts)
-	sort.Slice(sorted, func(i, j int) bool { return headerExtLess(sorted[i], sorted[j]) })
-	// Dedupe adjacent equals, which is what flat_set::insert would have done.
-	out := sorted[:1]
-	for _, e := range sorted[1:] {
-		if e != out[len(out)-1] {
-			out = append(out, e)
-		}
+	out := make([]HeaderExtension, 0, len(exts))
+	for _, e := range exts {
+		out = insertHeaderExt(out, e)
 	}
 
 	dst = fcraw.AppendVarUint(dst, uint32(len(out)))
@@ -142,27 +175,11 @@ func AppendHeaderExtensions(dst []byte, exts []HeaderExtension) []byte {
 		case HeaderExtHardforkVersionVote:
 			dst = appendU32LE(dst, e.HardforkVersion)
 			dst = appendU32LE(dst, e.HardforkVersionTime)
+		case HeaderExtStateStamp:
+			dst = append(dst, e.StateMerkleRoot[:]...)
 		}
 	}
 	return dst
-}
-
-// headerExtLess orders entries the way std::less over a static_variant does:
-// by tag, then by the variant's own value.
-func headerExtLess(a, b HeaderExtension) bool {
-	if a.Tag != b.Tag {
-		return a.Tag < b.Tag
-	}
-	switch a.Tag {
-	case HeaderExtVersion:
-		return a.Version < b.Version
-	case HeaderExtHardforkVersionVote:
-		if a.HardforkVersion != b.HardforkVersion {
-			return a.HardforkVersion < b.HardforkVersion
-		}
-		return a.HardforkVersionTime < b.HardforkVersionTime
-	}
-	return false
 }
 
 func appendU32LE(dst []byte, v uint32) []byte {
@@ -244,7 +261,7 @@ func UnmarshalSignedHeader(src []byte) (SignedHeader, int, error) {
 		return sh, 0, fmt.Errorf("block.UnmarshalSignedHeader merkle_root: %w", err)
 	}
 
-	// Extensions: a flat_set<static_variant<void_t, version, hardfork_version_vote>>.
+	// Extensions: a flat_set<static_variant<void_t, version, hardfork_version_vote, state_stamp>>.
 	// Wire format: varint(count) || (varint(tag) || body) repeated.
 	// We capture the raw byte range so re-marshalling is bit-identical;
 	// for ID computation we don't need the typed values.
