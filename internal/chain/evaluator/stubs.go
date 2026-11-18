@@ -11,7 +11,7 @@ package evaluator
 //     side effects live in custom_operation_interpreter plugins, not
 //     the chain. State-level no-op is correct.
 //   witness_block_approve              — pre-HF1 only, never used since.
-//   reset_account, set_reset_account   — historic placeholders; never
+//   set_reset_account                  — historic placeholder; never
 //     used in real mainnet activity.
 //
 // Every other tag has a real evaluator registered elsewhere; the
@@ -26,7 +26,7 @@ import (
 
 // noopStub returns nil for every op — used for tags whose state effects
 // live in plugins (custom*) or are pre-HF1 placeholders that never fire
-// on real mainnet (witness_block_approve, reset_account, set_reset_account).
+// on real mainnet (witness_block_approve, set_reset_account).
 //
 // All registered stubs were previously paired with a noValidate function;
 // no surviving stub needs body validation, so the prior validate-callback
@@ -62,6 +62,5 @@ func init() {
 	// post-HF22). It registers itself separately.
 	register(op.TagCustomBinary, EvaluatorFunc(customBinaryEvaluator))
 	register(op.TagWitnessBlockApprove, EvaluatorFunc(noopStub))
-	register(op.TagResetAccount, EvaluatorFunc(noopStub))
 	register(op.TagSetResetAccount, EvaluatorFunc(noopStub))
 }

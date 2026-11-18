@@ -5,6 +5,7 @@ import (
 
 	"encoding/binary"
 	"fmt"
+	"sort"
 
 	"gopherd/internal/fcraw"
 	"gopherd/internal/protocol/asset"
@@ -667,34 +668,65 @@ func readDeclineVotingRights(r *fcraw.Reader) (Op, error) {
 	return OpFromPtr(TagDeclineVotingRights, unsafe.Pointer(&o)), nil
 }
 
-// ---- 37 reset_account ---------------------------------------------------
+// ---- 37 delegate_rc -----------------------------------------------------
 
-type ResetAccount struct {
-	ResetAccount      auth.AccountName
-	AccountToReset    auth.AccountName
-	NewOwnerAuthority auth.Authority
+// DelegateRC is delegate_rc_operation. It took tag 37 from reset_account, a
+// placeholder that never had an evaluator (hived 7cc13d0af), and is a regular
+// operation from HF29; before that it exists only embedded in a custom_json
+// with id "rc", which carries it as JSON, not in this binary form.
+//
+// FC_REFLECT order: from, delegatees, max_rc, extensions
+// (hive_operations.hpp). delegatees is a flat_set<account_name_type>: on the
+// wire a varint count and the names. It is kept in wire order so the
+// operation re-serializes to the same bytes; SortedDelegatees gives the
+// deduplicated, sorted set hived's unpack builds.
+type DelegateRC struct {
+	From       auth.AccountName
+	Delegatees []auth.AccountName
+	MaxRC      int64
+	Extensions []byte
 }
 
-func (ResetAccount) OpTag() Tag { return TagResetAccount }
-func (o ResetAccount) AppendFCBody(dst []byte) []byte {
-	dst = appendString(dst, o.ResetAccount)
-	dst = appendString(dst, o.AccountToReset)
-	return auth.AppendAuthority(dst, o.NewOwnerAuthority)
+func (DelegateRC) OpTag() Tag { return TagDelegateRC }
+func (o DelegateRC) AppendFCBody(dst []byte) []byte {
+	dst = appendString(dst, o.From)
+	dst = appendSortedAccountSet(dst, o.Delegatees)
+	dst = binary.LittleEndian.AppendUint64(dst, uint64(o.MaxRC))
+	return appendRawExtensions(dst, o.Extensions)
 }
 
-func readResetAccount(r *fcraw.Reader) (Op, error) {
-	var o ResetAccount
+func readDelegateRC(r *fcraw.Reader) (Op, error) {
+	var o DelegateRC
 	var err error
-	if o.ResetAccount, err = r.ReadString(); err != nil {
+	if o.From, err = r.ReadString(); err != nil {
 		return Op{}, err
 	}
-	if o.AccountToReset, err = r.ReadString(); err != nil {
+	if o.Delegatees, err = readSortedAccountSet(r, "delegate_rc.delegatees"); err != nil {
 		return Op{}, err
 	}
-	if o.NewOwnerAuthority, err = auth.ReadAuthority(r); err != nil {
+	if o.MaxRC, err = r.ReadInt64(); err != nil {
 		return Op{}, err
 	}
-	return OpFromPtr(TagResetAccount, unsafe.Pointer(&o)), nil
+	if o.Extensions, err = readExtensionsRaw(r, "delegate_rc.extensions", futureExtensionsTags); err != nil {
+		return Op{}, err
+	}
+	return OpFromPtr(TagDelegateRC, unsafe.Pointer(&o)), nil
+}
+
+// SortedDelegatees returns the delegatees as the flat_set hived holds them:
+// sorted and without duplicates (fc's unpack inserts each name into the set).
+func (o DelegateRC) SortedDelegatees() []auth.AccountName {
+	out := make([]auth.AccountName, len(o.Delegatees))
+	copy(out, o.Delegatees)
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	n := 0
+	for i, d := range out {
+		if i == 0 || d != out[n-1] {
+			out[n] = d
+			n++
+		}
+	}
+	return out[:n]
 }
 
 // ---- 38 set_reset_account -----------------------------------------------
@@ -852,7 +884,7 @@ func init() {
 	register(TagTransferFromSavings, readTransferFromSavings)
 	register(TagCancelTransferFromSavings, readCancelTransferFromSavings)
 	register(TagDeclineVotingRights, readDeclineVotingRights)
-	register(TagResetAccount, readResetAccount)
+	register(TagDelegateRC, readDelegateRC)
 	register(TagSetResetAccount, readSetResetAccount)
 	register(TagClaimRewardBalance, readClaimRewardBalance)
 	register(TagDelegateVestingShares, readDelegateVestingShares)

@@ -112,6 +112,18 @@ func countDifferentialOp(s *state.Session, o op.Op) [objects.RCNumResources]int6
 				witnessUpdateURLCharSize*int64(len(w.URL))
 		return diff
 
+	case op.TagDelegateRC:
+		// The regular form (HF29): database::apply_operation takes the
+		// discount of every regular operation right before its evaluator.
+		d := o.AsDelegateRC()
+		names := d.SortedDelegatees()
+		delegatees := make([]string, len(names))
+		for i, n := range names {
+			delegatees[i] = string(n)
+		}
+		diff[objects.RCStateBytes] = evaluator.DelegateRCStateDiscount(s, string(d.From), delegatees, d.MaxRC)
+		return diff
+
 	case op.TagCustomJSON:
 		// delegate_rc is carried as a custom_json with id == "rc".
 		return countDifferentialCustomJSON(s, o)
@@ -159,23 +171,5 @@ func countDifferentialCustomJSON(s *state.Session, o op.Op) [objects.RCNumResour
 }
 
 func delegateRCDifferential(s *state.Session, p *evaluator.DelegateRCParams) int64 {
-	if p.MaxRC == 0 {
-		return 0
-	}
-	if has, _ := objects.HasAccount(s, auth.AccountName(p.From)); !has {
-		return 0
-	}
-	var usage int64
-	for _, to := range p.Delegatees {
-		if has, _ := objects.HasAccount(s, auth.AccountName(to)); !has {
-			// C++ returns false (no diff) if any delegatee missing.
-			return 0
-		}
-		// Existing delegation row contributes its full size to diff.
-		if _, err := objects.GetRCDirectDelegation(s,
-			auth.AccountName(p.From), auth.AccountName(to)); err == nil {
-			usage += rcDirectDelegationNodeSize * lastingStateByte
-		}
-	}
-	return usage
+	return evaluator.DelegateRCStateDiscount(s, p.From, p.Delegatees, p.MaxRC)
 }

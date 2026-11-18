@@ -301,16 +301,47 @@ func (o LimitOrderCreate) Validate() error {
 	return nil
 }
 
-// --- reset_account / set_reset_account -----------------------------------
+// --- delegate_rc / set_reset_account --------------------------------------
 
-// Placeholders that were never enabled: hived's validate() is FC_ASSERT(false)
-// for both (hive_operations.cpp). Without these, gopherd admitted them with no
-// required authority at all (the evaluators are no-op stubs), so an unsigned
-// transaction carrying one could reach a block of ours that hived refuses.
-func (ResetAccount) Validate() error {
-	return fmt.Errorf("reset_account: placeholder for potential new operation")
+// MaxAccountsPerDelegationOp is HIVE_RC_MAX_ACCOUNTS_PER_DELEGATION_OP.
+const MaxAccountsPerDelegationOp = 100
+
+// Validate is delegate_rc_operation::validate (hive_operations.cpp), the same
+// for the regular operation (tag 37, HF29) and the form embedded in an "rc"
+// custom_json. It replaces reset_account's always-failing placeholder, whose
+// slot delegate_rc took (hived 7cc13d0af). The checks run on the flat_set hived
+// unpacks, so duplicate delegatees count once.
+func (o DelegateRC) Validate() error {
+	if err := validateAccountName("delegate_rc.from", string(o.From)); err != nil {
+		return err
+	}
+	delegatees := o.SortedDelegatees()
+	if len(delegatees) == 0 {
+		return errors.New("delegate_rc: must provide at least one account")
+	}
+	if len(delegatees) > MaxAccountsPerDelegationOp {
+		return fmt.Errorf("delegate_rc: provided %d accounts, cannot delegate to more than %d accounts in one operation",
+			len(delegatees), MaxAccountsPerDelegationOp)
+	}
+	for _, d := range delegatees {
+		if err := validateAccountName("delegate_rc.delegatees", string(d)); err != nil {
+			return err
+		}
+		if d == o.From {
+			return fmt.Errorf("delegate_rc: cannot delegate rc to yourself (%s)", d)
+		}
+	}
+	if o.MaxRC < 0 {
+		return errors.New("delegate_rc: amount of rc delegated cannot be negative")
+	}
+	return nil
 }
 
+// set_reset_account is a placeholder that was never enabled: hived's
+// validate() is FC_ASSERT(false) (hive_operations.cpp). Without this, gopherd
+// admitted it with no required authority at all (the evaluator is a no-op
+// stub), so an unsigned transaction carrying one could reach a block of ours
+// that hived refuses.
 func (SetResetAccount) Validate() error {
 	return fmt.Errorf("set_reset_account: placeholder for potential new operation")
 }

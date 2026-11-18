@@ -44,7 +44,7 @@ func nowSec() uint32 { return uint32(time.Now().Unix()) }
 //	witness_block_approve     a fast-confirm message, never valid inside a block
 //	custom_binary             rejected from HF20 onward
 //	recover_account           needs a request + the old key, a multi-step dance
-//	reset_account             the reset flow was never enabled on mainnet
+//	delegate_rc               tag 37 (formerly reset_account) is valid only from HF29
 //	decline_voting_rights     one-way and irreversible: it would permanently
 //	                          remove a bot from governance, shrinking coverage
 //	                          for the rest of the run

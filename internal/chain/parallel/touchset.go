@@ -213,8 +213,16 @@ func Extract(t *TouchSet, o op.Op) {
 	case op.TagChangeRecoveryAccount:
 		t.Accounts.Add(o.AsChangeRecoveryAccount().AccountToRecover)
 		t.Accounts.Add(o.AsChangeRecoveryAccount().NewRecoveryAccount)
-	case op.TagResetAccount:
-		t.Accounts.Add(o.AsResetAccount().AccountToReset)
+	case op.TagDelegateRC:
+		// RC mana and delegations of the delegator and every delegatee;
+		// it also feeds the per-transaction RC accumulator, a global
+		// object, so widen like custom_json "rc" does.
+		d := o.AsDelegateRC()
+		t.Accounts.Add(d.From)
+		for _, name := range d.Delegatees {
+			t.Accounts.Add(name)
+		}
+		t.FundsTouched = true
 	case op.TagClaimAccount:
 		t.Accounts.Add(o.AsClaimAccount().Creator)
 		t.FundsTouched = true

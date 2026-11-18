@@ -55,7 +55,7 @@ func (o Op) AsCustomBinary() *CustomBinary { return (*CustomBinary)(o.ptr) }
 func (o Op) AsDeclineVotingRights() *DeclineVotingRights {
 	return (*DeclineVotingRights)(o.ptr)
 }
-func (o Op) AsResetAccount() *ResetAccount             { return (*ResetAccount)(o.ptr) }
+func (o Op) AsDelegateRC() *DelegateRC                 { return (*DelegateRC)(o.ptr) }
 func (o Op) AsSetResetAccount() *SetResetAccount       { return (*SetResetAccount)(o.ptr) }
 func (o Op) AsClaimRewardBalance() *ClaimRewardBalance { return (*ClaimRewardBalance)(o.ptr) }
 func (o Op) AsDelegateVestingShares() *DelegateVestingShares {
@@ -116,7 +116,7 @@ func init() {
 	opAsIface[TagCancelTransferFromSavings] = func(p unsafe.Pointer) Operation { return *(*CancelTransferFromSavings)(p) }
 	opAsIface[TagCustomBinary] = func(p unsafe.Pointer) Operation { return *(*CustomBinary)(p) }
 	opAsIface[TagDeclineVotingRights] = func(p unsafe.Pointer) Operation { return *(*DeclineVotingRights)(p) }
-	opAsIface[TagResetAccount] = func(p unsafe.Pointer) Operation { return *(*ResetAccount)(p) }
+	opAsIface[TagDelegateRC] = func(p unsafe.Pointer) Operation { return *(*DelegateRC)(p) }
 	opAsIface[TagSetResetAccount] = func(p unsafe.Pointer) Operation { return *(*SetResetAccount)(p) }
 	opAsIface[TagClaimRewardBalance] = func(p unsafe.Pointer) Operation { return *(*ClaimRewardBalance)(p) }
 	opAsIface[TagDelegateVestingShares] = func(p unsafe.Pointer) Operation { return *(*DelegateVestingShares)(p) }

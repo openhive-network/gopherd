@@ -69,6 +69,10 @@ func RequiredAuthorities(signedTx *tx.SignedTransaction) map[AuthorityLevel]map[
 			add(AuthorityPosting, string(o.AsCommentOptions().Author))
 		case op.TagDeleteComment:
 			add(AuthorityPosting, string(o.AsDeleteComment().Author))
+		// delegate_rc_operation (tag 37, HF29): posting of `from`
+		// (hive_operations.hpp get_required_posting_authorities).
+		case op.TagDelegateRC:
+			add(AuthorityPosting, string(o.AsDelegateRC().From))
 		case op.TagClaimRewardBalance:
 			// hive_operations.hpp:claim_reward_balance is posting-level
 			// (added via add_authorities(posting)).

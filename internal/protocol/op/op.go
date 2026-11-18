@@ -67,7 +67,7 @@ const (
 	TagCancelTransferFromSavings   Tag = 34
 	TagCustomBinary                Tag = 35
 	TagDeclineVotingRights         Tag = 36
-	TagResetAccount                Tag = 37
+	TagDelegateRC                  Tag = 37 // formerly the never-enabled reset_account placeholder
 	TagSetResetAccount             Tag = 38
 	TagClaimRewardBalance          Tag = 39
 	TagDelegateVestingShares       Tag = 40
@@ -207,7 +207,7 @@ var tagNames = [TagFirstVirtual]string{
 	TagCancelTransferFromSavings:   "cancel_transfer_from_savings",
 	TagCustomBinary:                "custom_binary",
 	TagDeclineVotingRights:         "decline_voting_rights",
-	TagResetAccount:                "reset_account",
+	TagDelegateRC:                  "delegate_rc",
 	TagSetResetAccount:             "set_reset_account",
 	TagClaimRewardBalance:          "claim_reward_balance",
 	TagDelegateVestingShares:       "delegate_vesting_shares",

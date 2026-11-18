@@ -328,30 +328,29 @@ func isJSONArray(raw json.RawMessage) bool {
 	return false
 }
 
-// validateDelegateRC is delegate_rc_operation::validate
-// (hive_custom_operations.cpp:12-32).
+// validateDelegateRC is delegate_rc_operation::validate, shared with the
+// regular operation (op.DelegateRC.Validate).
 func validateDelegateRC(p *DelegateRCParams) error {
-	if !auth.IsValidAccountName(p.From) {
-		return fmt.Errorf("delegate_rc: invalid from account name %q", p.From)
+	return p.asOp().Validate()
+}
+
+// asOp is the operation p was decoded from, in its regular form.
+func (p *DelegateRCParams) asOp() op.DelegateRC {
+	d := op.DelegateRC{From: auth.AccountName(p.From), MaxRC: p.MaxRC}
+	for _, n := range p.Delegatees {
+		d.Delegatees = append(d.Delegatees, auth.AccountName(n))
 	}
-	if len(p.Delegatees) == 0 {
-		return fmt.Errorf("delegate_rc: must provide at least one delegatee")
+	return d
+}
+
+// delegateRCParamsOf is the regular delegate_rc_operation as the parameters
+// the shared apply path takes; delegatees become the flat_set hived unpacks.
+func delegateRCParamsOf(d *op.DelegateRC) DelegateRCParams {
+	p := DelegateRCParams{From: string(d.From), MaxRC: d.MaxRC}
+	for _, n := range d.SortedDelegatees() {
+		p.Delegatees = append(p.Delegatees, string(n))
 	}
-	if len(p.Delegatees) > maxAccountsPerDelegationOp {
-		return fmt.Errorf("delegate_rc: cannot delegate to more than %d accounts", maxAccountsPerDelegationOp)
-	}
-	for _, d := range p.Delegatees {
-		if !auth.IsValidAccountName(d) {
-			return fmt.Errorf("delegate_rc: invalid delegatee account name %q", d)
-		}
-		if d == p.From {
-			return fmt.Errorf("delegate_rc: cannot delegate to self %q", d)
-		}
-	}
-	if p.MaxRC < 0 {
-		return fmt.Errorf("delegate_rc: max_rc cannot be negative")
-	}
-	return nil
+	return p
 }
 
 // rcRegenSeconds — HIVE_RC_REGEN_TIME, 5 days. Mirrors C++.
@@ -381,9 +380,6 @@ func safeAddRC(a, b int64) (int64, error) {
 	}
 	return sum, nil
 }
-
-// maxAccountsPerDelegationOp — HIVE_RC_MAX_ACCOUNTS_PER_DELEGATION_OP.
-const maxAccountsPerDelegationOp = 100
 
 // maximumRC returns the effective max RC mana for an account, mirroring
 // account_object::get_maximum_rc(only_delegable). Currently we treat
@@ -440,29 +436,48 @@ func mul128Div64(a, b, c uint64) uint64 {
 }
 
 // applyDelegateRC applies one validated delegate_rc_operation: set the
-// delegation from p.From to each delegatee to p.MaxRC. Mirrors
-// delegate_rc_evaluator::do_apply (libraries/chain/rc/rc_utility.cpp).
+// delegation from p.From to each delegatee to p.MaxRC. It is hived's
+// do_delegate_rc (libraries/chain/rc/rc_utility.cpp), the part shared by the
+// form embedded in an "rc" custom_json and the regular operation (HF29).
 //
-// Checks (FC_ASSERT in C++), after validateDelegateRC and the authority check
-// in applyRCCustomJSON:
-//  3. min_delegation check: if max_rc != 0 and is_in_control,
-//     max_rc >= (account_creation_fee/3) * vesting_share_price.
-//  4. All delegatees must exist.
-//  5. Creating delegation with max_rc==0 is forbidden.
-//  6. Setting delegation to the same value is forbidden.
-//  7. Total delta cannot exceed from_delegable_rc.
+// Checks (FC_ASSERT in C++), after validateDelegateRC and, for the embedded
+// form, the authority check in applyRCCustomJSON:
+//  3. min_delegation: max_rc != 0 → max_rc >= (account_creation_fee/3) *
+//     vesting_share_price. STRICT_RC_DELEGATION_RULES (see below).
+//  4. No excess delegations of `from` still being removed (an
+//     rc_expired_delegation row). STRICT_RC_DELEGATION_RULES.
+//  5. All delegatees must exist.
+//  6. Creating delegation with max_rc==0 is forbidden.
+//  7. Setting delegation to the same value is forbidden.
+//  8. The increase for one delegatee must not overflow its maximum RC, nor
+//     the running total (1311a2389: reported as insufficient RC).
+//  9. Total delta cannot exceed from_delegable_rc.
 //
-// Inside a block a failure here is not fatal: hived's custom_json_evaluator
-// swallows the exception and the interpreter's undo session reverts the whole
-// custom_json (see customJSONEvaluator.Apply). Proof on mainnet: block
-// 69,612,950 carries a delegatee "ogechukwu-martha\t" with a trailing tab —
-// hived included the tx as a no-op.
+// STRICT_RC_DELEGATION_RULES (hived 7cc13d0af): 3 and 4 were checked only in
+// control before HF29, so blocks carry effective delegations that break them;
+// from HF29 they hold in blocks too.
+//
+// 6, 7 and 9 are unconditional in hived. gopherd skips them in a block before
+// HF29 (see the comments at each, and A15 in docs/hived-parity-review-2026-10.md):
+// RC was not consensus then, a hived witness produced the block in control,
+// and re-checking against our own mana could only turn a delegation hived
+// applied into a no-op. From HF29 RC is consensus, a regular delegate_rc that
+// fails invalidates its block, and every check runs as hived runs it.
+//
+// Inside a block a failure of the EMBEDDED form is not fatal: hived's
+// custom_json_evaluator swallows the exception and the interpreter's undo
+// session reverts the whole custom_json (see customJSONEvaluator.Apply). Proof
+// on mainnet: block 69,612,950 carries a delegatee "ogechukwu-martha\t" with a
+// trailing tab — hived included the tx as a no-op.
 func applyDelegateRC(ctx *Context, p *DelegateRCParams) error {
-	// 3. min_delegation check — C++ gates it on `_db.is_in_control()`
-	// (rc_utility.cpp:49-55): enforced only when a tx is first admitted
-	// at the head. Blocks legitimately contain below-minimum delegations
-	// (first at 68,676,609, ~100 blocks after HF26); replay accepts them.
-	if ctx.InControl && p.MaxRC != 0 {
+	strictRules := hf29Rule(ctx, hardfork.HF29) // STRICT_RC_DELEGATION_RULES
+	enforceAll := ctx.InControl || ctx.Hardforks.Has(hardfork.HF29)
+
+	// 3. min_delegation check. Before HF29 hived gates it on
+	// `is_in_control()`: blocks legitimately contain below-minimum
+	// delegations (first at 68,676,609, ~100 blocks after HF26); replay
+	// accepts them.
+	if strictRules && p.MaxRC != 0 {
 		minDelegation, merr := computeMinRCDelegation(ctx)
 		if merr == nil && p.MaxRC < minDelegation {
 			return fmt.Errorf("delegate_rc: cannot delegate less than %d rc", minDelegation)
@@ -486,6 +501,12 @@ func applyDelegateRC(ctx *Context, p *DelegateRCParams) error {
 		from.RCManaLastUpdate = now
 	}
 	regenerateRCMana(&from, now)
+
+	// 4. Not while excess delegations of `from` are still being removed
+	// (rc_expired_delegation row, see objects.CheckRCDelegationOverflow).
+	if strictRules && objects.HasRCExpiredDelegation(ctx.DB, from.Name) {
+		return fmt.Errorf("delegate_rc: cannot delegate RC while processing of previous delegation has not finished")
+	}
 
 	deltaTotal := int64(0)
 	// Pre-load all delegatees so a missing one fails the whole op.
@@ -531,7 +552,7 @@ func applyDelegateRC(ctx *Context, p *DelegateRCParams) error {
 				// partial RC model can lack a delegation hived kept
 				// (clip divergence, jarvie 68,769,486): in replay a
 				// delete-of-missing is a convergent no-op.
-				if ctx.InControl {
+				if enforceAll {
 					return fmt.Errorf("delegate_rc: cannot create delegation to %q with max_rc=0", dn)
 				}
 				continue
@@ -547,7 +568,7 @@ func applyDelegateRC(ctx *Context, p *DelegateRCParams) error {
 				// hived applied this op, ITS prior amount differed; our
 				// row disagreeing means our clip/state diverged — treat
 				// the (identical-amount) update as a no-op.
-				if ctx.InControl {
+				if enforceAll {
 					return fmt.Errorf("delegate_rc: delegation to %q with same amount already exists", dn)
 				}
 				continue
@@ -561,6 +582,15 @@ func applyDelegateRC(ctx *Context, p *DelegateRCParams) error {
 					DelegatedRC: uint64(p.MaxRC),
 				})
 			}
+		}
+		// 8. hived 7baaad338/1311a2389: the increase is added to the
+		// delegatee's mana, received RC and maximum RC, and the maximum is
+		// the largest of them, so this is exactly where those share_type
+		// additions would overflow. Unconditional, like the overflow it
+		// stands for.
+		if delta > 0 && delta > math.MaxInt64-maximumRC(to, false) {
+			return fmt.Errorf("delegate_rc: account %q has insufficient RC (needs %d for %s): %w",
+				p.From, delta, dn, ErrRCOverflow)
 		}
 		// update_account_after_rc_delegation: mutate to's mana, last_max_rc, received_rc.
 		// received_rc and current_mana are share_type in hived — overflow throws
@@ -592,7 +622,8 @@ func applyDelegateRC(ctx *Context, p *DelegateRCParams) error {
 		deltaTotal = newTotal
 	}
 
-	// 7. After-the-fact delta_total check — enforced only InControl.
+	// 9. After-the-fact delta_total check — before HF29 enforced only
+	// InControl.
 	// C++'s `from_delegable_rc >= delta_total` assert (rc_utility.cpp:107)
 	// is unconditional, and inside a block its failure is swallowed by
 	// custom_json_evaluator (the op becomes a no-op). But a hived witness
@@ -604,9 +635,9 @@ func applyDelegateRC(ctx *Context, p *DelegateRCParams) error {
 	// 68,691,291 — Go said 626G available, hived's state allowed 1T).
 	// Applying it unconditionally in a block is therefore the convergent
 	// choice, and the same reasoning covers the create-with-0 and
-	// same-amount skips above. Revisit once a post-HF26 paired replay
-	// shows the RC state matching.
-	if ctx.InControl {
+	// same-amount skips above. From HF29 RC is consensus, so the assert
+	// runs in blocks as it does in hived.
+	if enforceAll {
 		fromDelegableMax := maximumRC(&from, true)
 		fromDelegable := fromDelegableMax
 		if from.RCManaCurrent < fromDelegable {
@@ -672,8 +703,30 @@ func computeMinRCDelegation(ctx *Context) (int64, error) {
 	return int64(q), nil
 }
 
+// delegateRCEvaluator is delegate_rc_operation_evaluator (hived 7cc13d0af):
+// delegate_rc used directly in a transaction, under tag 37. It is refused
+// before HF29 (DELEGATE_RC_OPERATION) in control and in blocks alike — there
+// is no is_in_control half to this gate, the slot was reset_account's and no
+// block before HF29 can carry it. From HF29 it runs the same apply as the
+// embedded form, but a failure fails the transaction (and so the block)
+// instead of being swallowed. Its RC — state discount and cost — is
+// collected like any other regular operation's (rc_differential.go,
+// rc_cost.go), not by the evaluator.
+func delegateRCEvaluator(ctx *Context, opArg op.Op) error {
+	if !ctx.Hardforks.Has(hardfork.HF29) {
+		return fmt.Errorf("delegate_rc_operation is not enabled as regular operation until hardfork 29, use custom_json_operation with id 'rc'")
+	}
+	d := opArg.AsDelegateRC()
+	if err := d.Validate(); err != nil {
+		return err
+	}
+	p := delegateRCParamsOf(d)
+	return applyDelegateRC(ctx, &p)
+}
+
 func init() {
 	register(op.TagCustomJSON, customJSONEvaluator{})
+	register(op.TagDelegateRC, EvaluatorFunc(delegateRCEvaluator))
 }
 
 // applyOneRCDelegation applies a single (from → to) delegation update,

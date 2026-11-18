@@ -131,12 +131,14 @@ func TestAdmissionRefusesUnverifiableAuthority(t *testing.T) {
 	}
 }
 
-// reset_account and set_reset_account are never-enabled placeholders: hived
-// refuses them in validate(). They have no required authority here, so
-// without a validator an unsigned transaction carrying one was admitted.
+// set_reset_account is a never-enabled placeholder: hived refuses it in
+// validate(). It has no required authority here, so without a validator an
+// unsigned transaction carrying one was admitted. Tag 37, reset_account's old
+// slot, is delegate_rc now and has delegate_rc's validator; an empty one fails
+// it.
 func TestAdmissionRefusesPlaceholderOps(t *testing.T) {
 	for _, o := range []op.Op{
-		op.FromOperation(&op.ResetAccount{ResetAccount: "alice", AccountToReset: "bob"}),
+		op.FromOperation(&op.DelegateRC{From: "alice"}),
 		op.FromOperation(&op.SetResetAccount{Account: "alice"}),
 	} {
 		v, ok := o.Operation().(op.Validator)

@@ -191,7 +191,7 @@ func tagName(tag uint8) string {
 		"change_recovery_account", "escrow_transfer", "escrow_dispute",
 		"escrow_release", "pow2", "escrow_approve", "transfer_to_savings",
 		"transfer_from_savings", "cancel_transfer_from_savings", "custom_binary",
-		"decline_voting_rights", "reset_account", "set_reset_account",
+		"decline_voting_rights", "delegate_rc", "set_reset_account",
 		"claim_reward_balance", "delegate_vesting_shares",
 		"account_create_with_delegation", "witness_set_properties",
 		"account_update2", "create_proposal", "update_proposal_votes",

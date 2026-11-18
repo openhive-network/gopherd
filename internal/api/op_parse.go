@@ -25,7 +25,7 @@ var opProtos = []op.Operation{
 	op.CreateClaimedAccount{}, op.RequestAccountRecovery{}, op.RecoverAccount{}, op.ChangeRecoveryAccount{},
 	op.EscrowTransfer{}, op.EscrowDispute{}, op.EscrowRelease{}, op.EscrowApprove{},
 	op.TransferToSavings{}, op.TransferFromSavings{}, op.CancelTransferFromSavings{},
-	op.DeclineVotingRights{}, op.ResetAccount{}, op.SetResetAccount{}, op.ClaimRewardBalance{},
+	op.DeclineVotingRights{}, op.DelegateRC{}, op.SetResetAccount{}, op.ClaimRewardBalance{},
 	op.DelegateVestingShares{}, op.CreateProposal{}, op.UpdateProposal{}, op.UpdateProposalVotes{},
 	op.RemoveProposal{}, op.RecurrentTransfer{},
 }

@@ -81,12 +81,11 @@ const (
 	rcRecurrentTransferBaseSize     = 200 * temporaryStateByte
 	rcRecurrentTransferMemoCharSize = temporaryStateByte
 	// direct rc delegation: × number of delegatees
-	rcDelegateRCBaseSize = 88 * lastingStateByte
+	rcDelegateRCBaseSize = evaluator.DelegateRCBaseStateSize // 88 × lastingStateByte
 
 	// Node sizes the differential visitor (rc_differential.go) refers to by
 	// name.
 	witnessIndexNodeSize       int64 = 544
-	rcDirectDelegationNodeSize int64 = 88
 	ownerAuthHistoryObjectSize int64 = 168
 	witnessUpdateURLCharSize         = rcWitnessUpdateURLCharSize
 	authorityAccountMemberSize       = rcAuthorityAccountMemberSize
@@ -96,8 +95,8 @@ const (
 // Execution-time pieces hived keeps outside the per-op table
 // (resource_sizes.cpp:225-227).
 const (
-	rcRecurrentTransferProcessingTimeNS int64 = 14347 // × executions
-	rcDelegateRCTimeNS                  int64 = 75000 // on top of custom_json_time
+	rcRecurrentTransferProcessingTimeNS int64 = 14347                          // × executions
+	rcDelegateRCTimeNS                        = evaluator.DelegateRCExecTimeNS // 75000
 )
 
 // Execution times (in nanoseconds) from resource_sizes.cpp's
@@ -293,6 +292,12 @@ func stateBytesForOp(o op.Op, now uint32) int64 {
 		// Charged even when the subsidy applies; the subsidy zeroes the whole
 		// transaction afterwards (resource_count.cpp:534-546).
 		return authorityDynamicSize(&o.AsRecoverAccount().NewOwnerAuthority) + rcOwnerAuthorityHistoryObjectSize
+	case op.TagDelegateRC:
+		// The regular form (HF29), counted like any regular operation; the
+		// same visitor overload serves the embedded form.
+		d := o.AsDelegateRC()
+		s, _ := evaluator.DelegateRCUsage(d.MaxRC, len(d.SortedDelegatees()))
+		return s
 	case op.TagCustomJSON:
 		// delegate_rc rides in custom_json id "rc"; hived adds its state usage
 		// in handle_custom_op_usage (resource_count.cpp:548-553) once the
@@ -333,6 +338,10 @@ func extraExecTimeForOp(o op.Op) int64 {
 	switch o.Tag {
 	case op.TagRecurrentTransfer:
 		return rcRecurrentTransferProcessingTimeNS * int64(o.AsRecurrentTransfer().Executions)
+	case op.TagDelegateRC:
+		// The regular form has no execTimeNS entry: delegate_rc_time is all
+		// hived charges for it (resource_count.cpp).
+		return rcDelegateRCTimeNS
 	case op.TagCustomJSON:
 		cj := o.AsCustomJSON()
 		if cj.ID == "rc" {
@@ -441,6 +450,9 @@ func PayerOf(o op.Op) string {
 		return string(o.AsClaimRewardBalance().Account)
 	case op.TagDeclineVotingRights:
 		return string(o.AsDeclineVotingRights().Account)
+	case op.TagDelegateRC:
+		// posting authority of `from`, the only one it requires
+		return string(o.AsDelegateRC().From)
 	case op.TagCreateProposal:
 		return string(o.AsCreateProposal().Creator)
 	case op.TagUpdateProposalVotes:
