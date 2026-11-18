@@ -30,6 +30,8 @@ var opProtos = []op.Operation{
 	op.RemoveProposal{}, op.RecurrentTransfer{},
 }
 
+var recurrentTransferType = reflect.TypeOf(op.RecurrentTransfer{})
+
 var opTypeByName = func() map[string]reflect.Type {
 	m := make(map[string]reflect.Type, len(opProtos))
 	for _, p := range opProtos {
@@ -81,6 +83,14 @@ func buildOp(name string, fieldsRaw json.RawMessage) (op.Op, error) {
 		}
 		raw, present := fields[snakeCase(f.Name)]
 		if !present {
+			continue
+		}
+		if t == recurrentTransferType && f.Name == "Extensions" {
+			b, err := parseRecurrentTransferExt(raw)
+			if err != nil {
+				return op.Op{}, fmt.Errorf("%s.%s: %w", name, f.Name, err)
+			}
+			sv.Field(i).SetBytes(b)
 			continue
 		}
 		if err := setField(sv.Field(i), raw); err != nil {

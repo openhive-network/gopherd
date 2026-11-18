@@ -19,17 +19,25 @@ import (
 // controls asset rendering ("1.000 HIVE" vs NAI object).
 func opToJSON(o op.Op, legacy bool) interface{} {
 	name := o.Tag.Name()
-	val := reflect.ValueOf(o.Operation())
-	return []interface{}{name, structToMapNamed(val, legacy, opFieldNameOverrides[o.Tag])}
+	return []interface{}{name, opFields(o, legacy)}
 }
 
 // opToVariant renders the modern appbase form {"type":"transfer_operation","value":{...}}.
 func opToVariant(o op.Op, legacy bool) interface{} {
-	val := reflect.ValueOf(o.Operation())
 	return map[string]interface{}{
 		"type":  o.Tag.Name() + "_operation",
-		"value": structToMapNamed(val, legacy, opFieldNameOverrides[o.Tag]),
+		"value": opFields(o, legacy),
 	}
+}
+
+// opFields renders an operation's fields, with the per-operation fixes the
+// reflection walk cannot know about.
+func opFields(o op.Op, legacy bool) map[string]interface{} {
+	m := structToMapNamed(reflect.ValueOf(o.Operation()), legacy, opFieldNameOverrides[o.Tag])
+	if o.Tag == op.TagRecurrentTransfer {
+		m["extensions"] = recurrentTransferExtJSON(o.AsRecurrentTransfer().Extensions, legacy)
+	}
+	return m
 }
 
 // opFieldNameOverrides fixes the operation fields whose JSON names are NOT the
