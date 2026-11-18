@@ -13,9 +13,10 @@ import (
 	"gopherd/internal/state/objects"
 )
 
-// firstRCReportBlock is the first RC stats report after HF20 (26,256,743) on
-// mainnet: 912 * 28800.
-const firstRCReportBlock uint32 = 26_265_600
+// firstRCReportBlock is the first RC stats report after HF20: on mainnet
+// (HF20 at 26,256,743) 912 * 28800 = 26,265,600; on a testnet build, where
+// every scheduled fork is active from genesis, 28800.
+var firstRCReportBlock = (hardfork.MainnetActivationBlock[hardfork.HF20]/rcStatsReportFreqBlocks + 1) * rcStatsReportFreqBlocks
 
 func stampList(t *testing.T, s *state.Session) objects.StateStampData {
 	t.Helper()
