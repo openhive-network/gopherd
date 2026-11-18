@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/protocol/tx"
 	"gopherd/internal/state"
 	"gopherd/internal/state/objects"
 )
@@ -45,4 +46,75 @@ func isFirstRCStatsReport(blockNum uint32) bool {
 		return true
 	}
 	return !hardfork.SetForBlock(blockNum - rcStatsReportFreqBlocks).Has(hardfork.HF20)
+}
+
+// StateStampRoot is state_stamp_data_object::finalize: the merkle root of
+// the stamps in publication order, by hived's calculate_merkle_root
+// (libraries/protocol/merkle.cpp, 1cf2455d8), which is the very routine
+// that computes a block's transaction_merkle_root: pairwise SHA-256 of
+// 64-byte concatenations, an odd layer's last digest carried up unchanged,
+// then RIPEMD-160 of the last digest. The empty list gives the zero
+// checksum, but a block never carries the root of an empty list.
+func StateStampRoot(stamps [][32]byte) [20]byte {
+	digests := make([]tx.Digest, len(stamps))
+	for i := range stamps {
+		digests[i] = tx.Digest(stamps[i])
+	}
+	return tx.MerkleRoot(digests)
+}
+
+// errIncompleteStateStamps explains a state that cannot take part in HF29
+// state stamping: it lacks stamps published before it learned to keep them.
+func errIncompleteStateStamps() error {
+	return fmt.Errorf("state stamp list is incomplete: this state was written by a gopherd that did not keep "+
+		"the stamps published since HF20, so it cannot compute the root HF29 blocks carry; "+
+		"replay from before HF20 (block %d) to rebuild it", hardfork.MainnetActivationBlock[hardfork.HF20])
+}
+
+// PendingStateStampRoot returns the root the next block has to carry under
+// HF29, and whether it has to carry one at all (stamps are pending). This is
+// what hived's block_producer::add_state_stamp reads. It fails for a state
+// whose list is missing or Incomplete.
+func PendingStateStampRoot(s *state.Session) (root [20]byte, pending bool, err error) {
+	d, ok, err := objects.GetStateStampData(s)
+	if err != nil {
+		return root, false, fmt.Errorf("state_stamp_data: %w", err)
+	}
+	if !ok || d.Incomplete {
+		return root, false, errIncompleteStateStamps()
+	}
+	if len(d.Stamps) == 0 {
+		return root, false, nil
+	}
+	return StateStampRoot(d.Stamps), true, nil
+}
+
+// checkStateStampExtension is the HF29 half of hived's
+// process_header_extensions (18045a0ee): every node has collected the same
+// stamps since the previous stamp-carrying block, so a block must carry
+// their root exactly when some are pending, the root must be theirs, and
+// once it is accepted the list starts over.
+//
+// stamp is the block's state_stamp extension, nil when it has none. The
+// pre-HF29 refusal of the extension and the (unreachable, see
+// block.ParseHeaderExtensions) duplicate check happen in the caller.
+func checkStateStampExtension(s *state.Session, stamp *[20]byte) error {
+	expected, pending, err := PendingStateStampRoot(s)
+	if err != nil {
+		return err
+	}
+	if !pending {
+		if stamp != nil {
+			return fmt.Errorf("Unexpected state stamp block extension")
+		}
+		return nil
+	}
+	if stamp == nil {
+		return fmt.Errorf("Block is missing the required state stamp block extension")
+	}
+	if *stamp != expected {
+		return fmt.Errorf("State stamp mismatch - node diverged on stamped consensus state, got %x, expected %x", *stamp, expected)
+	}
+	objects.PutStateStampData(s, &objects.StateStampData{})
+	return nil
 }

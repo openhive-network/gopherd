@@ -17,29 +17,52 @@ import (
 // position.
 //
 // The state_stamp extension (tag 3, hived 18045a0ee) is refused before HF29
-// ("State stamp block extension is not allowed before HF29").
+// ("State stamp block extension is not allowed before HF29"); from HF29 the
+// block must carry it exactly when state stamps are pending, with their
+// merkle root, after which the pending list is reset (checkStateStampExtension).
+// hived runs this before the block's transactions and before
+// rc finalize_block publishes, so a stamp published in block N is carried
+// by block N+1 at the earliest.
 //
 // hf is the hardfork set the block is applied under (has_hardfork at this
 // block: a fork activating at the end of this block is not in it).
 func processHeaderExtensions(s *state.Session, hdr *block.SignedHeader, hf hardfork.Set) error {
-	if len(hdr.Extensions) == 0 {
-		return nil
-	}
 	exts, err := block.ParseHeaderExtensions(hdr.Extensions)
 	if err != nil {
 		return fmt.Errorf("process_header_extensions: %w", err)
 	}
-	if len(exts) == 0 {
-		return nil
-	}
 
-	for _, ext := range exts {
-		if ext.Tag == block.HeaderExtStateStamp && !hf.Has(hardfork.HF29) {
-			return fmt.Errorf("process_header_extensions: State stamp block extension is not allowed before HF29")
+	// ParseHeaderExtensions already dropped every repeated tag, as hived's
+	// flat_set does, so at most one state stamp survives here.
+	var stamp *[20]byte
+	for i := range exts {
+		if exts[i].Tag == block.HeaderExtStateStamp {
+			if !hf.Has(hardfork.HF29) {
+				return fmt.Errorf("process_header_extensions: State stamp block extension is not allowed before HF29")
+			}
+			stamp = &exts[i].StateMerkleRoot
 		}
 	}
 
-	w, err := objects.GetWitness(s, hdr.Witness)
+	if err := applyWitnessVersionExtensions(s, hdr.Witness, exts); err != nil {
+		return err
+	}
+
+	if hf.Has(hardfork.HF29) {
+		if err := checkStateStampExtension(s, stamp); err != nil {
+			return fmt.Errorf("process_header_extensions: %w", err)
+		}
+	}
+	return nil
+}
+
+// applyWitnessVersionExtensions records the producer's version and
+// hardfork vote from the block's extensions.
+func applyWitnessVersionExtensions(s *state.Session, witness string, exts []block.HeaderExtension) error {
+	if len(exts) == 0 {
+		return nil
+	}
+	w, err := objects.GetWitness(s, witness)
 	if err != nil {
 		// Witness not found is non-fatal here — the schedule check
 		// upstream will surface it. Skip the update silently rather
