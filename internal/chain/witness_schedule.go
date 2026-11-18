@@ -11,6 +11,7 @@ import (
 	"gopherd/internal/math128"
 	"gopherd/internal/protocol/auth"
 	"gopherd/internal/protocol/hardfork"
+	"gopherd/internal/protocol/network"
 	"gopherd/internal/state"
 	"gopherd/internal/state/objects"
 )
@@ -536,6 +537,14 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 		// next_hardfork(_time) could flip a round earlier or later than hived
 		// at a 16/17-of-21 vote, which is exactly where a hardfork vote
 		// hovers.
+		// From CanonicalVersionTallyTime hived tallies in one spelling: 0.N
+		// counts as 1.N (0.0.0, never reported, stays), and the results are
+		// stored in the 1.N spelling (857016bfc). Earlier rounds keep the
+		// raw values, so history replays unchanged.
+		canon := func(v uint32) uint32 { return v }
+		if dgpo.Time >= network.CanonicalVersionTallyTime {
+			canon = canonicalVersionNum
+		}
 		tallied := ws.CurrentShuffledWitnesses
 		if n := int(ws.NumScheduledWitnesses); n < len(tallied) {
 			tallied = tallied[:n]
@@ -545,18 +554,19 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 			if !ok {
 				continue
 			}
+			running := canon(w.RunningVersion)
 			found := false
 			for i := range vers {
-				if vers[i].version == w.RunningVersion {
+				if vers[i].version == running {
 					vers[i].count++
 					found = true
 					break
 				}
 			}
 			if !found {
-				vers = append(vers, verCount{version: w.RunningVersion, count: 1})
+				vers = append(vers, verCount{version: running, count: 1})
 			}
-			k := hfvKey{version: w.HardforkVersionVote, t: w.HardforkTimeVote}
+			k := hfvKey{version: canon(w.HardforkVersionVote), t: w.HardforkTimeVote}
 			hfvCounts[k]++
 		}
 		// Sort vers by version DESC.
@@ -685,6 +695,15 @@ func updateWitnessSchedule4(s *state.Session, ws *objects.WitnessSchedule, dgpo 
 //     LAP_LENGTH2 (= 2^128-1) / (votes+1) post-HF2.
 //   - Pop ALL pow workers from the queue (not just one) up to
 //     HIVE_MAX_WITNESSES total active.
+// canonicalVersionNum is hived's canonical_version_num: a major 0 is spelled
+// major 1, except 0.0.0.
+func canonicalVersionNum(v uint32) uint32 {
+	if v&0xFF000000 == 0 && v != 0 {
+		return v | 0x01000000
+	}
+	return v
+}
+
 func updateWitnessSchedulePreHF4(s *state.Session, ws *objects.WitnessSchedule, dgpo *objects.DynamicGlobalProperty, blockNum uint32, hf hardfork.Set) {
 	zero33 := [33]byte{}
 	var active []auth.AccountName

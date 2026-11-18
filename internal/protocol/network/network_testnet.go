@@ -70,3 +70,9 @@ const (
 	BlockchainVersionHardfork = 29
 	BlockchainVersionRevision = 0
 )
+
+// CanonicalVersionTallyTime is hived's canonical_version_tally_time()
+// (witness_schedule.cpp, 857016bfc): rounds whose head block time is at or
+// after it tally witness versions and hardfork votes with major 0 counted as
+// major 1. testnet: always.
+const CanonicalVersionTallyTime uint32 = 0
