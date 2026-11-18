@@ -41,8 +41,10 @@ const GlobalRemoveThreshold int16 = 200
 // BlockchainVersion mirrors HIVE_BLOCKCHAIN_VERSION for the live network
 // (config.hpp:139, mainnet branch). hived defines it in THREE places —
 // mainnet, testnet and mirrornet — and the mainnet one moves with each
-// release: 1.28.7 (dab219074, 2026-07-10, the p2p fork-tolerance fixes) and
-// 1.28.8 (4f1961fe3, 2026-10-05). The testnet definition is 1.29.0.
+// release: 1.28.7 (dab219074, 2026-07-10, the p2p fork-tolerance fixes),
+// 1.28.8 (4f1961fe3, 2026-10-05) and 1.28.9 (150a8dc67, 2026-11-14, which
+// remove_proposal's majority_version gate keys on). The testnet definition is
+// 1.29.0.
 //
 // This must move to 1.29.x together with the HF29 activation work:
 // database.cpp:2304 rejects a block whose witness.running_version is below
@@ -56,5 +58,5 @@ const GlobalRemoveThreshold int16 = 200
 const (
 	BlockchainVersionMajor    = 1
 	BlockchainVersionHardfork = 28
-	BlockchainVersionRevision = 8
+	BlockchainVersionRevision = 9
 )

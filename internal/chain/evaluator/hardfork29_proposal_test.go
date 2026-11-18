@@ -213,3 +213,55 @@ func TestRemoveProposalHF29RejectsAlreadyFlagged(t *testing.T) {
 		}
 	})
 }
+
+func setMajorityVersion(t *testing.T, s *state.Session, v uint32) {
+	t.Helper()
+	ws, _ := objects.GetWitnessSchedule(s)
+	ws.MajorityVersion = v
+	objects.PutWitnessSchedule(s, &ws)
+}
+
+// hived 1.28.9 (f4da286a3) closes the past-budget ownership hole before HF29
+// in two cases: for what the node takes in or produces (in control), and in
+// blocks once majority_version has reached 1.28.9. Below that majority the
+// old leniency stays (TestRemoveProposalOwnerCheckSkippedPastBudget).
+func TestRemoveProposalChecksEveryIDFromMajority1289(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		inControl bool
+		majority  uint32
+		wantErr   bool
+	}{
+		{"block, majority 1.28.8", false, 1<<24 | 28<<16 | 8, false},
+		{"block, majority 1.28.9", false, 1<<24 | 28<<16 | 9, true},
+		{"in control, majority 1.28.8", true, 1<<24 | 28<<16 | 8, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := seedProposals(t, []string{"alice", "bob"}, []int{removeBudget, 0})
+			setMajorityVersion(t, s, tc.majority)
+			ctx := &Context{DB: s, Hardforks: preHF29Set(), HeadBlockTime: proposalTestHeadTime, InControl: tc.inControl}
+			err := Apply(ctx, removeProposalOp("alice", 0, 1))
+			if tc.wantErr != errors.Is(err, ErrProposalNotOwnedByYou) {
+				t.Fatalf("got %v, want owner error=%v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// hived looks a proposal up by the low 32 bits of the id. Under the check an
+// id outside 0..2^32-1 is refused; without it, it names that proposal.
+func TestRemoveProposalIDRange(t *testing.T) {
+	s := seedProposals(t, []string{"alice"}, []int{0})
+	alias := int64(1)<<32 | 0 // low 32 bits name proposal 0
+	ctx := &Context{DB: s, Hardforks: preHF29Set(), HeadBlockTime: proposalTestHeadTime, InControl: true}
+	if err := Apply(ctx, removeProposalOp("alice", alias)); err == nil {
+		t.Fatal("in control, an out-of-range id was accepted")
+	}
+	ctx.InControl = false
+	if err := Apply(ctx, removeProposalOp("alice", alias)); err != nil {
+		t.Fatalf("in a pre-1.28.9 block the id names proposal 0, as in hived: %v", err)
+	}
+	if _, err := objects.GetProposal(s, 0); err == nil {
+		t.Fatal("proposal 0 should have been removed through its 2^32 alias")
+	}
+}

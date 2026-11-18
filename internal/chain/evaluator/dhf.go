@@ -3,6 +3,7 @@ package evaluator
 import (
 	"errors"
 	"fmt"
+	"math"
 
 	"gopherd/internal/protocol/asset"
 	"gopherd/internal/protocol/hardfork"
@@ -275,9 +276,26 @@ func (removeProposalEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	newEndDate := ctx.HeadBlockTime - objects.ProposalMaintenanceCleanupSec
 	guard := objects.NewRemoveGuard(network.GlobalRemoveThreshold)
 	validateAll := ctx.Hardforks.Has(hardfork.HF29)
+	// hived 1.28.9 (f4da286a3) checks every id against its owner, and its
+	// range, ahead of HF29: for what the node takes in or produces, and in
+	// blocks of any round in which the schedule's majority_version has
+	// reached 1.28.9. Rounds before that keep the old leniency, so history
+	// replays unchanged.
+	checkAllIDs := ctx.InControl || validateAll
+	if !checkAllIDs {
+		if ws, err := objects.GetWitnessSchedule(ctx.DB); err == nil && ws.MajorityVersion >= removeProposalCheckAllIDsVersion {
+			checkAllIDs = true
+		}
+	}
 
 	for _, id := range rp.ProposalIDs {
-		p, err := objects.GetProposal(ctx.DB, id)
+		if checkAllIDs && (id < 0 || id > math.MaxUint32) {
+			return fmt.Errorf("remove_proposal: proposal id %d is out of range", id)
+		}
+		// hived looks the id up as a 32-bit object id, so it names the
+		// proposal of its low 32 bits; outside the range above that is the
+		// proposal another id names.
+		p, err := objects.GetProposal(ctx.DB, int64(uint32(id)))
 		if err != nil {
 			if err == state.ErrNotFound {
 				// HIVE_HARDFORK_1_28_DONT_TRY_REMOVE_NONEXISTENT_PROPOSAL:
@@ -294,10 +312,10 @@ func (removeProposalEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		if validateAll && p.Removed {
 			return fmt.Errorf("%w: id=%d (already flagged for removal)", ErrProposalNotFound, id)
 		}
-		// Pre-HF29 the ownership check is skipped once the budget is spent —
-		// an accident of the old two-loop shape that HF29 turns into a rule.
-		// Do not "fix" it early: history contains blocks that rely on it.
-		if validateAll || !guard.Done() {
+		// Without checkAllIDs the ownership check is skipped once the budget
+		// is spent, an accident of the old two-loop shape. Do not "fix" it
+		// for those rounds: history contains blocks that rely on it.
+		if checkAllIDs || !guard.Done() {
 			if p.Creator != rp.ProposalOwner {
 				return fmt.Errorf("%w: id=%d", ErrProposalNotOwnedByYou, id)
 			}
@@ -313,6 +331,10 @@ func (removeProposalEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	}
 	return nil
 }
+
+// removeProposalCheckAllIDsVersion is hived's remove_proposal_check_all_ids_version,
+// 1.28.9 packed as a v_num.
+const removeProposalCheckAllIDsVersion uint32 = 1<<24 | 28<<16 | 9
 
 type updateProposalEvaluator struct{}
 
