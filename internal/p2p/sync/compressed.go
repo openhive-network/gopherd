@@ -6,6 +6,7 @@ import (
 	"gopherd/internal/chain"
 	"gopherd/internal/p2p/node"
 	"gopherd/internal/p2p/proto"
+	"gopherd/internal/protocol/auth"
 	"gopherd/internal/protocol/block"
 )
 
@@ -165,6 +166,9 @@ func checkBlockBody(rawBlock []byte, bid block.ID) string {
 	got, ok := blockIDFromRaw(rawBlock)
 	if !ok {
 		return "undecodable header"
+	}
+	if sh, _, err := block.UnmarshalSignedHeader(rawBlock); err == nil && len(sh.Witness) > auth.MaxAccountNameLength {
+		return fmt.Sprintf("producer name of %d characters is longer than %d", len(sh.Witness), auth.MaxAccountNameLength)
 	}
 	if bid != (block.ID{}) && got != bid {
 		return fmt.Sprintf("header hashes to %x, not the id %x it was sent as", got[:8], bid[:8])

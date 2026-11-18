@@ -3,6 +3,7 @@ package chain
 import (
 	"fmt"
 	"gopherd/internal/crypto"
+	"gopherd/internal/protocol/auth"
 
 	"gopherd/internal/protocol/block"
 )
@@ -78,6 +79,13 @@ func (d *Database) PushLiveBlock(raw []byte, num uint32, opts ApplyOptions) (Pus
 	// the root before fork_db since 536d41ea6). Nothing enters unchecked.
 	if err := validateMerkleRoot(&sh, raw, hdrLen, num); err != nil {
 		return 0, fmt.Errorf("push_live_block %d: %w", num, err)
+	}
+	// hived 64af0744d refuses an over-long producer name before fork_db: no
+	// such account can exist, so the block can only be invalid. The state
+	// key encoding truncates names to 16 bytes, so letting it in would also
+	// look up a different, real witness.
+	if len(sh.Witness) > auth.MaxAccountNameLength {
+		return 0, fmt.Errorf("push_live_block %d: producer name of %d characters is longer than %d", num, len(sh.Witness), auth.MaxAccountNameLength)
 	}
 	if num <= d.committedNum() {
 		// At/below the irreversible head: record for topology, can't act on it.

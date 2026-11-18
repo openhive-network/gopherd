@@ -158,3 +158,22 @@ func TestRecentBlocksKeepDedupRecordsUnderSkip(t *testing.T) {
 		t.Fatal("no duplicate-check record for a transaction of a recent block applied with SkipDedupAndTaPOS")
 	}
 }
+
+// hived 64af0744d: a producer name longer than any account can be refused
+// before the fork DAG.
+func TestPushLiveBlockRefusesOverlongProducer(t *testing.T) {
+	c := newForkTestChain(t)
+	gid, _ := c.HeadBlockID()
+	hdr := block.SignedHeader{Header: block.Header{
+		Timestamp: network.GenesisTimeUnix + 3, Witness: "initminer-but-too-long", Previous: gid, Extensions: []byte{0x00},
+	}}
+	raw := append(block.MarshalSignedHeader(nil, &hdr), 0)
+	_, hdrLen, _ := block.UnmarshalSignedHeader(raw)
+	id := block.ConstructID(raw[:hdrLen], 1)
+	if _, err := c.PushLiveBlock(raw, 1, ApplyOptions{SkipTransactionSignatures: true, SkipBlockSignature: true}); err == nil {
+		t.Fatal("block with a 22-character producer accepted")
+	}
+	if _, ok := c.fork.get(id); ok {
+		t.Fatal("block with an over-long producer reached the fork DAG")
+	}
+}
