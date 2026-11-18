@@ -458,6 +458,11 @@ func applyHardfork(s *state.Session, id hardfork.ID, d *Database) {
 		// scanning DeclineVotingRightsRequest history; we approximate
 		// by walking all accounts and checking VoteRevoked.
 		removeProposalVotesForRevokedAccounts(s)
+	case hardfork.HF29:
+		// database_hardfork.cpp HIVE_HARDFORK_1_29 (86d893b0b): clamp every
+		// proposal's daily_pay so the bounded maintenance payment holds for
+		// all state, not only for proposals created after the cap.
+		objects.ClampProposalDailyPays(s)
 	}
 	// Per-HF effects done — now bump processed_hardforks /
 	// last_hardfork / current_hardfork_version. Mirrors C++ ordering

@@ -178,6 +178,30 @@ func ProposalIDFromEndDateKey(key []byte) (endDate uint32, id int64, ok bool) {
 	return endDate, int64(u ^ (1 << 63)), true
 }
 
+// ProposalMaxDailyPay is HIVE_PROPOSAL_MAX_DAILY_PAY: INT64_MAX / (365 ×
+// 86400) HBD-satoshi, so a full year of maintenance catch-up cannot overflow
+// the int64 payment multiply. About 292.5M HBD a day, above mainnet's return
+// proposal #0.
+const ProposalMaxDailyPay int64 = 292471208677
+
+// ClampProposalDailyPays lowers every proposal's daily_pay to
+// ProposalMaxDailyPay, as hived's HF29 apply_hardfork does (proposal #0
+// included; no virtual operation). Returns how many it changed.
+func ClampProposalDailyPays(s *state.Session) int {
+	var over []Proposal
+	_ = s.Range(ProposalTable, state.PrimaryIndex, nil, func(_, v []byte) (bool, error) {
+		if p, err := ReadProposal(v); err == nil && p.DailyPay > ProposalMaxDailyPay {
+			over = append(over, p)
+		}
+		return true, nil
+	})
+	for i := range over {
+		over[i].DailyPay = ProposalMaxDailyPay
+		PutProposal(s, &over[i]) // end_date and removed unchanged: index keys stay
+	}
+	return len(over)
+}
+
 // PutProposal stores p AND maintains the by-end-date secondary index.
 // Callers updating an existing proposal's EndDate (uncommon) must
 // DeleteProposalByEndDate at the OLD endDate first.

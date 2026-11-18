@@ -82,6 +82,12 @@ func (createProposalEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	if cp.DailyPay.Amount < 0 {
 		return ErrTransferAmountNotPos
 	}
+	// HIVE_HARDFORK_1_29_FIX_DHF_DAILY_PAY_OVERFLOW (hived 86d893b0b): a
+	// daily_pay above the cap would overflow the maintenance payment, so it is
+	// refused in control now and in blocks from HF29.
+	if (ctx.InControl || ctx.Hardforks.Has(hardfork.HF29)) && cp.DailyPay.Amount > objects.ProposalMaxDailyPay {
+		return fmt.Errorf("create_proposal: daily_pay %d is too high (max %d)", cp.DailyPay.Amount, objects.ProposalMaxDailyPay)
+	}
 	// end_date must be in the future of head_block_time
 	// (dhf_evaluator.cpp:43). start_date can predate head_time slightly.
 	if cp.EndDate <= ctx.HeadBlockTime {
