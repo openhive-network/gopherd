@@ -63,11 +63,12 @@ func (transferToVestingEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		toName = tv.From
 	}
 
-	// HF20+: refresh sender's RC manabar before any vesting changes,
-	// so a stale cap from a previous block doesn't leak through.
-	if ctx.Hardforks.Has(hardfork.HF20) {
-		objects.RegenerateRCMana(&from, ctx.HeadBlockTime)
-	}
+	// No RC regeneration for the sender: its VESTS do not change, and
+	// hived's transfer_to_vesting regenerates only the receiver (inside
+	// adjust_account_vesting_balance). A sender that is not the
+	// transaction's payer would otherwise get a regeneration hived never
+	// does; regeneration rounds down, so splitting one interval in two
+	// can leave its mana a unit below hived's.
 	from.Balance -= tv.Amount.Amount
 	objects.PutAccount(ctx.DB, &from)
 
