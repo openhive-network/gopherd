@@ -13,6 +13,10 @@ func TestSnakeCase(t *testing.T) {
 		"From": "from", "RequestID": "request_id", "JSONMetadata": "json_metadata",
 		"HBDAmount": "hbd_amount", "URL": "url", "Amount": "amount", "MemoKey": "memo_key",
 		"WeightThreshold": "weight_threshold",
+		// A plural acronym keeps its s: this used to give proposal_i_ds, so
+		// update_proposal_votes and remove_proposal rendered a field hived
+		// does not have and a broadcast's proposal_ids was ignored.
+		"ProposalIDs": "proposal_ids", "MaxRC": "max_rc", "TrxID": "trx_id",
 	}
 	for in, want := range cases {
 		if got := snakeCase(in); got != want {
