@@ -70,6 +70,16 @@ func (withdrawVestingEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		objects.DeleteVestingWithdrawalSchedule(ctx.DB, a.NextVestingWithdrawal, w.Account)
 	}
 
+	// hive_evaluator_transfer.cpp:356-357: regenerate RC before the power
+	// down changes, on both paths. A new power down lowers max_rc (the
+	// next withdrawal leaves effective VESTS) and a cancel raises it; the
+	// time since the last update must be credited against the maximum
+	// that held during it. update_account_after_vest_change below does
+	// not regenerate, so without this the elapsed time was later credited
+	// at the new maximum and the account's mana drifted from hived's.
+	if ctx.Hardforks.Has(hardfork.HF20) {
+		objects.RegenerateRCMana(&a, ctx.HeadBlockTime)
+	}
 	if w.VestingShares.Amount == 0 {
 		// HIVE_HARDFORK_1_28_FIX_CANCEL_POWER_DOWN (hive_evaluator_transfer.cpp:389):
 		// HF28+ rejects a 0-share cancel when there is no active power-down —
@@ -83,8 +93,10 @@ func (withdrawVestingEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		a.NextVestingWithdrawal = 0
 		a.ToWithdraw = 0
 		a.Withdrawn = 0
+		// hived ends both paths with update_account_after_vest_change(
+		// account, now, false, true) (hive_evaluator_transfer.cpp:399).
 		if ctx.Hardforks.Has(hardfork.HF20) {
-			objects.UpdateAccountAfterVestChange(&a, ctx.HeadBlockTime, false)
+			objects.UpdateAccountAfterVestChangeChecked(ctx.DB, &a, ctx.HeadBlockTime, false)
 		}
 		objects.PutAccount(ctx.DB, &a)
 		return nil
