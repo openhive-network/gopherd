@@ -139,8 +139,19 @@ func clearAccount(s *state.Session, name string, d *Database) error {
 	})
 	dvPoolPct := dgpo.DownvotePoolPercent
 	clearBlockNum := dgpo.HeadBlockNumber
+	// database.cpp:1517: regenerate the cleared account's RC while its
+	// VESTS still count; update_account_after_vest_change after they are
+	// zeroed (below) does not regenerate.
+	if account.VestingShares > 0 {
+		objects.RegenerateRCMana(&account, blockTime)
+	}
 	for _, dp := range delegations {
 		if da, derr := objects.GetAccount(s, string(dp.delegatee)); derr == nil {
+			// database.cpp:1532,1548: the delegatee's RC is regenerated at
+			// the maximum that still includes this delegation and refreshed
+			// once it is gone. The delegatees are live accounts whose mana
+			// feeds the RC stamps of every later transaction they pay for.
+			objects.RegenerateRCMana(&da, blockTime)
 			// Mirror hived clear_account (database.cpp:1523-1534): regenerate
 			// the delegatee's manabars (with the cap STILL including this
 			// delegation), drop the received vesting, then CONSUME mana equal
@@ -167,6 +178,7 @@ func clearAccount(s *state.Session, name string, d *Database) error {
 				dvCost, _ := bits.Div64(dvHi, dvLo, 10000)
 				da.DownvoteManaCurrent = objects.UseMana(da.DownvoteManaCurrent, int64(dvCost), 0)
 			}
+			objects.UpdateAccountAfterVestChangeChecked(s, &da, blockTime, true)
 			objects.PutAccount(s, &da)
 		}
 		objects.DeleteVestingDelegation(s, account.Name, dp.delegatee)
@@ -245,6 +257,8 @@ func clearAccount(s *state.Session, name string, d *Database) error {
 			account.DelayedVotes = nil
 			account.SumDelayedVotes = 0
 		}
+		// database.cpp:1586.
+		objects.UpdateAccountAfterVestChangeChecked(s, &account, blockTime, true)
 	}
 
 	// --- ESCROWS where from == account: refund into account.
