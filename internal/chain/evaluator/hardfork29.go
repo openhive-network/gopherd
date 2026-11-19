@@ -51,11 +51,11 @@ func hf29Rule(ctx *Context, id hardfork.ID) bool {
 //
 // The two missing ones assert on gopherd's OWN bookkeeping rather than on
 // anything in a block, and hived's source carries an FC_TODO saying they need
-// to be checked against a replay before going unconditional. gopherd's
-// RegenerateRCMana silently REPAIRS the first condition, so it has never been
-// observed here; enabling a throw we have never measured would be a wedge
-// waiting for the fork to land. objects.RCStaleMaxCount() counts it instead,
-// and the replay summary prints it — see the comment on RegenerateRCMana.
+// to be checked against a replay before going unconditional; enabling a throw
+// we have not measured to zero would be a wedge waiting for the fork to land.
+// objects.RCStaleMaxCount() and RCNotRegeneratedCount() count both conditions
+// instead, and the replay summary prints them with their call sites under
+// GOPHERD_RC_ATTRIBUTION=1 — see the comment on RegenerateRCMana.
 // FIX_OPEN_AUTHORITY, below, is NOT an upstream HF29 rule: it exists only on
 // howo's fix/586-erased-authority-test branch (hived 741d7326f) and is absent
 // from 1.29.0-rc2. It is kept because the behaviour is right, not because the

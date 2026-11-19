@@ -1066,7 +1066,7 @@ func RemoveRCDelegations(s *state.Session, overflow *int64, from auth.AccountNam
 func UpdateAccountAfterRCDelegation(a *Account, now uint32, delta int64, regenerate bool) {
 	maxRC := a.MaximumRC()
 	if regenerate {
-		RegenerateRCMana(a, now)
+		regenerateRCManabar(a, maxRC, now)
 	}
 	a.RCManaCurrent += delta
 	if a.RCManaCurrent < 0 {

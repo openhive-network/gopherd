@@ -6,11 +6,11 @@ import "testing"
 // "max RC changed without triggering an op" NOTIFYALERT (rc_utility.cpp:353),
 // which HF29's RC_IS_CONSENSUS promotes to a throw.
 //
-// gopherd cannot port that assertion honestly yet: RegenerateRCMana REPAIRS
-// last_max_rc rather than complaining, so the condition has never been
-// observed here, and hived's own FC_TODO says it "needs to be checked with
-// replay" before it goes unconditional. Counting is what makes that check
-// possible — a clean replay reporting 0 is the evidence required.
+// hived only warns and leaves last_max_rc stale until the next
+// update_account_after_vest_change, which credits new_max - last_max_rc;
+// gopherd counts the condition and, like hived, does not repair it. hived's
+// own FC_TODO says the assertion "needs to be checked with replay" before it
+// goes unconditional; the count is that check.
 func TestRegenerateRCManaCountsStaleMax(t *testing.T) {
 	before := RCStaleMaxCount()
 
@@ -32,9 +32,23 @@ func TestRegenerateRCManaCountsStaleMax(t *testing.T) {
 	if got := RCStaleMaxCount() - before; got != 1 {
 		t.Errorf("stale-max count: got +%d, want +1", got)
 	}
-	// The repair still happens — behaviour is unchanged, only visibility.
-	if a.LastMaxRC != a.MaximumRC() {
-		t.Errorf("LastMaxRC not refreshed: got %d, want %d", a.LastMaxRC, a.MaximumRC())
+	// Left stale, as hived leaves it: the next vest-change refresh credits
+	// the difference from the stale value.
+	if a.LastMaxRC != 12_345 {
+		t.Errorf("LastMaxRC rewritten to %d, want it left at 12345", a.LastMaxRC)
+	}
+	mana := a.RCManaCurrent
+	UpdateAccountAfterVestChange(a, 1_600_000_100, true)
+	if want := min(mana+a.MaximumRC()-12_345, a.MaximumRC()); a.RCManaCurrent != want {
+		t.Errorf("mana after the refresh %d, want %d", a.RCManaCurrent, want)
+	}
+
+	// The payer's regeneration neither counts nor touches last_max_rc.
+	before = RCStaleMaxCount()
+	payer := &Account{Name: "dave", VestingShares: 1_000_000, LastMaxRC: 12_345, RCManaLastUpdate: 1_600_000_000}
+	RegenerateRCManabar(payer, 1_600_000_100)
+	if got := RCStaleMaxCount() - before; got != 0 || payer.LastMaxRC != 12_345 {
+		t.Errorf("RegenerateRCManabar counted +%d and left last_max_rc %d, want +0 and 12345", got, payer.LastMaxRC)
 	}
 
 	// An untouched account (LastMaxRC == 0) is not stale, it is uninitialised:

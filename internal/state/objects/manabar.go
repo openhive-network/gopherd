@@ -159,10 +159,14 @@ func RegenerateRCMana(a *Account, now uint32) {
 	//
 	// The condition means an operation changed an account's VESTS (or its RC
 	// delegations) without updating last_max_rc — a bug in the RC bookkeeping,
-	// not in the block. gopherd quietly REPAIRS it below by assigning maxRC,
-	// which is why nothing here has ever surfaced. Count it instead, so the
-	// replay evidence hived's own FC_TODO asks for ("needs to be checked with
-	// replay") can actually be gathered before the assertion is turned on.
+	// not in the block. Count it, so the replay evidence hived's own FC_TODO
+	// asks for ("needs to be checked with replay") can be gathered before the
+	// assertion is turned on.
+	//
+	// hived only warns: last_max_rc stays as it was until the next
+	// update_account_after_vest_change, which credits new_max - last_max_rc.
+	// gopherd used to overwrite it with maxRC here, a "quiet repair" that
+	// changed how much mana that later update hands out.
 	if a.LastMaxRC != maxRC && a.LastMaxRC != 0 {
 		rcStaleMaxCount.Add(1)
 		if rcAttributionEnabled {
@@ -171,11 +175,22 @@ func RegenerateRCMana(a *Account, now uint32) {
 			noteRCStaleCaller(2)
 		}
 	}
+	regenerateRCManabar(a, maxRC, now)
+}
+
+// RegenerateRCManabar regenerates the RC manabar against the account's
+// current maximum without looking at or touching last_max_rc. It is
+// rc_manabar.regenerate_mana<true>( get_maximum_rc() ) called directly, as
+// hived does when charging a transaction's payer (use_account_rcs,
+// rc_utility.cpp:527) and in update_account_after_rc_delegation; neither
+// warns about a stale last_max_rc.
+func RegenerateRCManabar(a *Account, now uint32) {
+	regenerateRCManabar(a, a.MaximumRC(), now)
+}
+
+func regenerateRCManabar(a *Account, maxRC int64, now uint32) {
 	params := ManabarParams{MaxMana: maxRC, RegenTime: RCRegenTimeSec}
-	newMana, newUpdate := RegenerateMana(a.RCManaCurrent, a.RCManaLastUpdate, params, now, true)
-	a.RCManaCurrent = newMana
-	a.RCManaLastUpdate = newUpdate
-	a.LastMaxRC = maxRC
+	a.RCManaCurrent, a.RCManaLastUpdate = RegenerateMana(a.RCManaCurrent, a.RCManaLastUpdate, params, now, true)
 }
 
 // rcStaleMaxCount counts how often an account reached RegenerateRCMana with a
