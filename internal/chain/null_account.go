@@ -102,6 +102,20 @@ func clearNullAccountBalance(s *state.Session, blockNum uint32, d *Database) {
 	// adjustment, then zero. The HIVE released from the vesting fund
 	// must also leave the supply since the null account "burns" it.
 	if a.VestingShares > 0 {
+		// database.cpp:1245-1254: regenerate null's RC before its VESTS
+		// go and refresh last_max_rc after, as for any VEST change. Without
+		// the refresh null kept the max of VESTS it no longer held, and the
+		// next transfer_to_vesting to null regenerated against a stale
+		// last_max_rc, which HF29's RC_IS_CONSENSUS refuses.
+		// The DGPO already carries this block's time (hived runs
+		// update_global_dynamic_data first).
+		var rcNow uint32
+		if dgpoRef, ok := objects.GetDGPORef(s); ok && hf.Has(hardfork.HF20) {
+			rcNow = dgpoRef.Time
+		}
+		if rcNow != 0 {
+			objects.RegenerateRCMana(&a, rcNow)
+		}
 		dgpo, err := objects.GetDGPO(s)
 		if err == nil && dgpo.TotalVestingShares > 0 {
 			// vesting_shares_hive_value = vesting_shares * fund / shares
@@ -122,6 +136,9 @@ func clearNullAccountBalance(s *state.Session, blockNum uint32, d *Database) {
 		a.VestingShares = 0
 		a.SumDelayedVotes = 0
 		a.DelayedVotes = nil
+		if rcNow != 0 {
+			objects.UpdateAccountAfterVestChange(&a, rcNow, true)
+		}
 	}
 
 	// Mirror C++ database.cpp:1239-1253: when a reward-pending account is
