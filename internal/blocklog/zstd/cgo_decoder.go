@@ -88,6 +88,7 @@ import (
 	"fmt"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 )
 
@@ -106,6 +107,34 @@ type cgoDecoder struct {
 	// most of the GC load. A decoder is used by one goroutine at a time
 	// (pooled per dictionary), so the buffer can simply live here.
 	scratch []byte
+	// cleanup frees dctx if the decoder is dropped without free: sync.Pool
+	// discards idle entries at every GC, and the C context is invisible to
+	// the Go collector. Without it each GC leaked the pooled DCtxs; a
+	// from-genesis replay reached 3.2 GB of C heap by block 22M and was
+	// OOM-killed under a 20 GB cap near 58M.
+	cleanup runtime.Cleanup
+}
+
+// liveDCtxs counts DCtxs created and not yet freed, for tests.
+var liveDCtxs atomic.Int64
+
+// newCGODecoder wraps dctx and arranges for it to be freed with the wrapper.
+func newCGODecoder(dctx *C.ZSTD_DCtx, dictKeep []byte) *cgoDecoder {
+	liveDCtxs.Add(1)
+	d := &cgoDecoder{dctx: dctx, dictKeep: dictKeep}
+	d.cleanup = runtime.AddCleanup(d, func(p *C.ZSTD_DCtx) {
+		C.go_free_dctx(p)
+		liveDCtxs.Add(-1)
+	}, dctx)
+	return d
+}
+
+// free releases the DCtx now; the decoder must not be used afterwards.
+func (d *cgoDecoder) free() {
+	d.cleanup.Stop()
+	C.go_free_dctx(d.dctx)
+	d.dctx = nil
+	liveDCtxs.Add(-1)
 }
 
 // cgoDecoderPool holds a per-Decompressor cache of cgoDecoders.
@@ -119,8 +148,9 @@ type cgoDecoderPool struct {
 }
 
 // cgoDictPool is the per-dict shard. It uses a sync.Pool so idle
-// DCtxs get reaped over time, and dictKeep stays alive on the parent
-// so DCtxs that hold a by-reference dict pointer remain valid.
+// DCtxs get reaped over time (each decoder's cleanup frees its DCtx when
+// the pool drops it), and dictKeep stays alive on the parent so DCtxs
+// that hold a by-reference dict pointer remain valid.
 type cgoDictPool struct {
 	num      uint8
 	dictKeep []byte
@@ -140,7 +170,7 @@ func (p *cgoDecoderPool) close() {
 			if v == nil {
 				break
 			}
-			C.go_free_dctx(v.(*cgoDecoder).dctx)
+			v.(*cgoDecoder).free()
 		}
 		delete(p.pools, k)
 	}
@@ -180,7 +210,7 @@ func (p *cgoDecoderPool) decoderFor(num uint8) (*cgoDecoder, error) {
 		return nil, fmt.Errorf("blocklog/zstd: ZSTD_createDCtx (dict %d): %s",
 			num, C.GoString(C.go_zstd_err_name(errCode)))
 	}
-	return &cgoDecoder{dctx: dctx, dictKeep: dp.dictKeep}, nil
+	return newCGODecoder(dctx, dp.dictKeep), nil
 }
 
 // release returns a decoder to its per-dict pool for reuse. Called by
@@ -190,7 +220,7 @@ func (p *cgoDecoderPool) release(num uint8, d *cgoDecoder) {
 	dp, ok := p.pools[num]
 	p.mu.Unlock()
 	if !ok {
-		C.go_free_dctx(d.dctx)
+		d.free()
 		return
 	}
 	dp.pool.Put(d)
