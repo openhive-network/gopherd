@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("\x00\x05world\tdantheman how-to-maximize-curation-rewards\x10'")

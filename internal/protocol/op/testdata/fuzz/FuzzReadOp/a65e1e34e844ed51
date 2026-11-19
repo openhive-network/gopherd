@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("\x14\fproctologic4\vproctologic\x10'\x01")

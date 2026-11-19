@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("\r\nhamster08e\x05fydel")

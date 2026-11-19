@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("+\rfootballfacts\x00\x00\x00\x00\x00\xcd\x01{\"profile\":{\"profile_image\":\"https://cdn.steemitimages.com/DQmV2imohxrdvXJTGrqpJCGKG9TgS3vo7AAk5juQ9cL9A6j/Football-Facts-and-Streaks-91.jpg\",\"about\":\"help for betting\",\"location\":\"worldwide\",\"version\":2}}\x00")

@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("\x01\vtuck-fheman\x16tucks-yard-life--day-1\vtuck-fheman9re-tuck-fheman-tucks-yard-life--day-1-20160430t183851424z\x003These are my images, so fuck you content Nazi's! =b\x02{}")

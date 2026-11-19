@@ -249,4 +249,3 @@ func AdjustSavingsHBDBalance(s *state.Session, a *Account, blockTime uint32, del
 	}
 	a.SavingsHBDBalance += delta
 }
-
