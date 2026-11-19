@@ -144,7 +144,11 @@ func New(t *testing.T) *Fixture {
 	if err != nil {
 		t.Fatalf("testfixture: open state: %v", err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("testfixture: close state: %v", err)
+		}
+	})
 	if err := genesis.Apply(db); err != nil {
 		t.Fatalf("testfixture: genesis: %v", err)
 	}

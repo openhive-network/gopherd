@@ -973,10 +973,10 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	// where speculative transactions run on worker goroutines (parallel.go
 	// drops evaluator vops the same way).
 	if !useParallel {
-		objects.OnInterestPaid = func(owner string, interest int64, saved bool) {
+		session.OnInterestPaid = func(owner string, interest int64, saved bool) {
 			d.pushVOp(op.Interest{Owner: auth.AccountName(owner), Interest: vopHbd(interest), IsSavedIntoHbdBalance: saved})
 		}
-		defer func() { objects.OnInterestPaid = nil }()
+		defer func() { session.OnInterestPaid = nil }()
 	}
 	if useParallel {
 		var perr error

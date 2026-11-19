@@ -28,6 +28,17 @@ type Session struct {
 	// (serial) check, so serial behavior is unchanged.
 	Spec *SpecContext
 
+	// OnInterestPaid, when set, is called every time an HBD interest payout
+	// is credited through this Session (liquid HBD before HF25, savings HBD
+	// always) with the owner, the HBD amount and hived's
+	// is_saved_into_hbd_balance flag (true for the liquid balance, false for
+	// savings). hived pushes interest_operation from inside adjust_balance
+	// (database.cpp:3265, :3340); the objects package has no virtual-op sink,
+	// so chain.ApplyBlock installs one for the duration of a block. It lives
+	// on the Session rather than in a package variable so that two databases
+	// applying blocks in one process cannot route each other's vops.
+	OnInterestPaid func(owner string, interest int64, savedIntoHbdBalance bool)
+
 	db *Database
 	// snapshotGen is incremented every Snapshot() and reset to 0 on
 	// Commit/Undo. Overlay entries record the gen at which they were
