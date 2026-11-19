@@ -347,6 +347,16 @@ func (delegateVestingSharesEvaluator) Apply(ctx *Context, opArg op.Op) error {
 		}
 	}
 
+	// hive_evaluator_transfer.cpp:736-740: regenerate both sides' RC
+	// before the delegation moves their effective VESTS; the refresh at
+	// the end (update_account_after_vest_change) does not regenerate, so
+	// without this the time since each side's last update was credited
+	// at the post-delegation maximum.
+	if ctx.Hardforks.Has(hardfork.HF20) {
+		objects.RegenerateRCMana(&delegator, ctx.HeadBlockTime)
+		objects.RegenerateRCMana(&delegatee, ctx.HeadBlockTime)
+	}
+
 	var dvPoolPct int64 // dgpo.downvote_pool_percent — 0 until HF21
 	if ctx.Hardforks.Has(hardfork.HF20) {
 		if dgpoRef, ok := objects.GetDGPORef(ctx.DB); ok {
