@@ -201,6 +201,12 @@ func snakeCase(s string) string {
 			prev := rs[i-1]
 			prevLower := prev >= 'a' && prev <= 'z' || prev >= '0' && prev <= '9'
 			nextLower := i+1 < len(rs) && (rs[i+1] >= 'a' && rs[i+1] <= 'z')
+			// A plural acronym ("IDs") ends in a lowercase s that belongs to
+			// it: ProposalIDs is proposal_ids, not proposal_i_ds.
+			prevUpper := prev >= 'A' && prev <= 'Z'
+			if nextLower && prevUpper && rs[i+1] == 's' && (i+2 == len(rs) || rs[i+2] >= 'A' && rs[i+2] <= 'Z') {
+				nextLower = false
+			}
 			if prevLower || nextLower {
 				b.WriteByte('_')
 			}
