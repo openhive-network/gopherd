@@ -6,6 +6,8 @@ package auth
 import (
 	"encoding/binary"
 	"fmt"
+	"slices"
+	"strings"
 
 	"gopherd/internal/crypto"
 	"gopherd/internal/fcraw"
@@ -104,7 +106,51 @@ func ReadAuthority(r *fcraw.Reader) (Authority, error) {
 		}
 		a.KeyAuths = append(a.KeyAuths, KeyAuth{Key: k, Weight: Weight(w)})
 	}
-	return a, nil
+	return a.Canonical(), nil
+}
+
+// Canonical returns a as hived holds it after decoding. account_auths and
+// key_auths are flat_maps, and fc unpacks a flat_map by inserting each pair
+// (fc/container/flat.hpp): the result is sorted by key and a key that
+// appears again keeps its FIRST weight. Every decoder of an authority, binary
+// or JSON, must return this form; otherwise a transaction listing a key
+// twice would be stored with both entries here and one in hived, and the
+// key's weight counted twice when signatures are checked.
+//
+// Keys order as fc compares them: public keys by memcmp of the 33 bytes,
+// account names as their zero-padded 16-byte big-endian value, which is
+// plain string order for names of at most 16 bytes without NUL.
+func (a Authority) Canonical() Authority {
+	if !needsCanonical(len(a.AccountAuths), func(i int) int {
+		return strings.Compare(a.AccountAuths[i-1].Account, a.AccountAuths[i].Account)
+	}) && !needsCanonical(len(a.KeyAuths), func(i int) int {
+		return compareKeys(a.KeyAuths[i-1].Key[:], a.KeyAuths[i].Key[:])
+	}) {
+		return a
+	}
+	out := Authority{WeightThreshold: a.WeightThreshold}
+	if len(a.AccountAuths) > 0 {
+		aa := slices.Clone(a.AccountAuths)
+		slices.SortStableFunc(aa, func(x, y AccountAuth) int { return strings.Compare(x.Account, y.Account) })
+		out.AccountAuths = slices.CompactFunc(aa, func(x, y AccountAuth) bool { return x.Account == y.Account })
+	}
+	if len(a.KeyAuths) > 0 {
+		ka := slices.Clone(a.KeyAuths)
+		slices.SortStableFunc(ka, func(x, y KeyAuth) int { return compareKeys(x.Key[:], y.Key[:]) })
+		out.KeyAuths = slices.CompactFunc(ka, func(x, y KeyAuth) bool { return x.Key == y.Key })
+	}
+	return out
+}
+
+// needsCanonical reports whether a sequence of n entries is not already in
+// strictly ascending order under cmp(i) = compare(entry i-1, entry i).
+func needsCanonical(n int, cmp func(i int) int) bool {
+	for i := 1; i < n; i++ {
+		if cmp(i) >= 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // AppendAuthority writes a to dst in FC binary form.

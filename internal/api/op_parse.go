@@ -211,7 +211,8 @@ func parseAuthority(raw json.RawMessage) (auth.Authority, error) {
 		}
 		out.KeyAuths = append(out.KeyAuths, auth.KeyAuth{Key: k, Weight: auth.Weight(w)})
 	}
-	return out, nil
+	// fc's from_variant for a flat_map inserts each pair, as its unpack does.
+	return out.Canonical(), nil
 }
 
 // parseTransaction builds a tx.SignedTransaction from hived's JSON form.

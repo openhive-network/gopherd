@@ -38,7 +38,8 @@ func TestAuthorityRoundTripWithAccountAndKeyAuths(t *testing.T) {
 	// Use the mainnet HIVE_INIT_PUBLIC_KEY twice (different "owners").
 	const initKey = "STM8GC13uCZbP44HzMLV6zPZGwVQ8Nt4Kji8PapsPiNq1BK153XTX"
 	k1 := mustKey(initKey)
-	// Make a second distinct key by tweaking byte 0.
+	// Make a second distinct key by tweaking byte 0. k1 starts 0x03, so k2
+	// (0x02) sorts first; a decoded flat_map is in key order.
 	k2 := k1
 	k2[0] ^= 0x01
 
@@ -49,8 +50,8 @@ func TestAuthorityRoundTripWithAccountAndKeyAuths(t *testing.T) {
 			{Account: "bob", Weight: 1},
 		},
 		KeyAuths: []KeyAuth{
-			{Key: k1, Weight: 1},
 			{Key: k2, Weight: 2},
+			{Key: k1, Weight: 1},
 		},
 	}
 	wire := AppendAuthority(nil, a)
@@ -70,7 +71,7 @@ func TestAuthorityRoundTripWithAccountAndKeyAuths(t *testing.T) {
 	if len(got.KeyAuths) != 2 {
 		t.Fatalf("key_auths count: %d", len(got.KeyAuths))
 	}
-	if got.KeyAuths[0].Key != k1 || got.KeyAuths[1].Key != k2 {
+	if got.KeyAuths[0].Key != k2 || got.KeyAuths[1].Key != k1 {
 		t.Errorf("key auths order/value")
 	}
 
