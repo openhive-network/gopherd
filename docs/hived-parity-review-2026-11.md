@@ -66,3 +66,18 @@ commits that needed nothing.
 | abfd619a5, ebd9dd933 | Block-source deprioritisation: gopherd keeps no peer after a body mismatch. |
 | f5dedae63 | Deferred tx adverts: gopherd stays far below hived's per-peer limit as a sender. |
 | 5e5a1631d, 63143202a | peers.json is not persisted by `gopherd node` (no `PeerDBPath`); make `peerdb.loadFromDisk` record-by-record before wiring it. |
+
+## Replay check (2026-11-20)
+
+A from-genesis `gopherd replay` with every change above (452ddfb, pebble cold
+store, `--mem-limit-gib=12`, invariants every 1M blocks, cgroup `MemoryMax=20G`)
+reached the block_log head 62,251,407 in 5 h 36 min: 0 block errors, 0
+invariant failures, status PASS.
+
+The first attempt was OOM-killed near 58.2M. A `state.Session` that ran `Range`
+and was dropped without `Commit` kept its pooled pebble iterator, which pins
+every memtable alive at its creation (128 MiB each); off-heap memory grew about
+0.15 GB per million blocks. 452ddfb closes the iterator on `Session.Close` and
+when the GC drops the session. In the passing run pebble held at most one
+zombie memtable (its normal recycled one) and no zombie sstables, and off-heap
+memory (anon minus Go HeapSys) stayed at 2.0-2.2 GiB from 28M to the head.
