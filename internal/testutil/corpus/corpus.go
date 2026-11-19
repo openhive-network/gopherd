@@ -18,7 +18,13 @@ import (
 // does not exist.
 func Load(t testing.TB, target string) [][]byte {
 	t.Helper()
-	dir := filepath.Join("testdata", "fuzz", target)
+	return LoadDir(t, filepath.Join("testdata", "fuzz", target))
+}
+
+// LoadDir is Load for an explicit corpus directory, for a fuzz target seeded
+// from another package's corpus.
+func LoadDir(t testing.TB, dir string) [][]byte {
+	t.Helper()
 	entries, err := os.ReadDir(dir)
 	if os.IsNotExist(err) {
 		return nil

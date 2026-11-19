@@ -83,7 +83,7 @@ func LegacyHIVE(amount int64) asset.LegacyHiveAsset {
 // Fixture is the test scaffold. Each test gets its own Fixture with a
 // fresh state.Database; the temp dir is cleaned up via t.Cleanup.
 type Fixture struct {
-	t *testing.T
+	t testing.TB
 
 	State            *state.Database
 	Chain            *chain.Database
@@ -129,6 +129,20 @@ func New(t *testing.T) *Fixture {
 	t.Helper()
 	skipIfTestnetSemantics(t)
 	t.Parallel()
+	return newFixture(t)
+}
+
+// NewShared is New for a caller that is not a single test: a fuzz target's
+// *testing.F or a benchmark builds one fixture and reuses its state across
+// many inputs. It does not mark anything parallel.
+func NewShared(tb testing.TB) *Fixture {
+	tb.Helper()
+	skipIfTestnetSemantics(tb)
+	return newFixture(tb)
+}
+
+func newFixture(t testing.TB) *Fixture {
+	t.Helper()
 	// Mainnet HIVE_OWNER_AUTH_HISTORY_TRACKING_START_BLOCK_NUM = 3,186,477
 	// would prevent any fixture starting at block 1 from ever writing
 	// owner_authority_history rows — the recover_account tests would
@@ -215,7 +229,7 @@ func (f *Fixture) HardforksUpTo(hf hardfork.ID) {
 // chain.processHardforks-equivalent activation logic. We can't import
 // chain's private applyHardfork, so we synthesize the same effect by
 // running processHardforks transitions one HF at a time.
-func applyHardforkInTest(t *testing.T, s *state.Session, id hardfork.ID) {
+func applyHardforkInTest(t testing.TB, s *state.Session, id hardfork.ID) {
 	// processHardforks compares previous-block HardforkSet to current.
 	// Simulate one HF at a time by passing block num = activation+1
 	// for `id` and activation for `id-1`.
@@ -456,7 +470,7 @@ func (f *Fixture) actorPostingKey(name string) *crypto.PrivateKey {
 
 // derivePrivateKey returns sha256(seed)-derived PrivateKey, mirroring
 // hived's generate_private_key seed convention.
-func derivePrivateKey(t *testing.T, seed string) *crypto.PrivateKey {
+func derivePrivateKey(t testing.TB, seed string) *crypto.PrivateKey {
 	t.Helper()
 	digest := sha256.Sum256([]byte(seed))
 	k, err := crypto.PrivateKeyFromBytes(digest[:])

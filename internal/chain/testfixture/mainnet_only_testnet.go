@@ -20,7 +20,7 @@ import (
 //
 // Skipping is the honest outcome — these tests validate mainnet parity, which
 // is exercised by the untagged build where they all run.
-func skipIfTestnetSemantics(t *testing.T) {
+func skipIfTestnetSemantics(t testing.TB) {
 	t.Helper()
 	if hardfork.MainnetActivationBlock[hardfork.HF20] == 0 {
 		t.Skip("mainnet-semantics fixture: testnet build starts at the latest hardfork")

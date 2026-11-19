@@ -20,7 +20,7 @@ import (
 // CurrentMinHistory) to the same value, matching the C++ helper. Does
 // NOT touch DGPO — tests that need print-rate / HBD interest tweaks
 // should poke those separately.
-func (f *Fixture) SetPriceFeed(t *testing.T, p asset.Price) {
+func (f *Fixture) SetPriceFeed(t testing.TB, p asset.Price) {
 	t.Helper()
 	s := state.NewSession(f.State)
 	fh, _ := objects.GetFeedHistory(s)
