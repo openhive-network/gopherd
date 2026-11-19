@@ -216,6 +216,9 @@ func mulDiv(a, b, c int64) int64 {
 		return 1<<63 - 1
 	}
 	q, _ := bits.Div64(hi, lo, cu)
+	if neg && q == 1<<63 {
+		return -1 << 63 // exactly MinInt64: in range, though its magnitude is not
+	}
 	if q > 1<<63-1 {
 		if neg {
 			return -(1 << 62)

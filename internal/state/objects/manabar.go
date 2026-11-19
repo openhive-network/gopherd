@@ -111,7 +111,15 @@ func RegenerateMana(current int64, lastUpdate uint32, params ManabarParams, now 
 	// (post-HF1 vesting); dt ≤ 5 days = 432000s. 1e17 × 432000 = 4.3e22
 	// which overflows int64 (max 9.2e18). Use math/bits 128-bit
 	// multiply + divide.
-	hi, lo := bits.Mul64(uint64(params.MaxMana), uint64(dt))
+	// hived multiplies max(max_mana, 0) (manabar.hpp:60). Converting a
+	// negative maximum straight to uint64 made it enormous, so the
+	// regeneration saturated and the bar jumped to the maximum where hived
+	// leaves it where it is.
+	maxForRegen := uint64(0)
+	if params.MaxMana > 0 {
+		maxForRegen = uint64(params.MaxMana)
+	}
+	hi, lo := bits.Mul64(maxForRegen, uint64(dt))
 	if hi >= uint64(params.RegenTime) {
 		// Quotient would overflow uint64 — saturate.
 		newMana := saturatedAdd(current, int64Max)
