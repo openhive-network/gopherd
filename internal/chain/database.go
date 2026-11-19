@@ -1705,14 +1705,26 @@ func updateWitnessMissedBlocks(s *state.Session, blockWitness auth.AccountName, 
 	// boundary, matching hived's get_slot_at_time).
 	dgpoForAslot, _ := objects.GetDGPO(s)
 	currentAslot := dgpoForAslot.CurrentAslot
+	// One loop iteration per missed slot, as in hived, but each witness is
+	// read once and written once: a Put per slot allocated a fresh row
+	// every time, and a chain resuming after a long pause (a testnet left
+	// down for a quarter has ~2.6M missed slots) needed gigabytes for it.
+	missed := map[string]*objects.Witness{}
+	var order []string
 	for i := uint32(0); i < missedBlocks; i++ {
 		missedName := ws.ScheduledWitnessForSlotAslot(currentAslot, i+1)
 		if missedName == "" || missedName == blockWitness {
 			continue
 		}
-		w, err := objects.GetWitness(s, missedName)
-		if err != nil {
-			continue
+		w, ok := missed[missedName]
+		if !ok {
+			got, err := objects.GetWitness(s, missedName)
+			if err != nil {
+				continue
+			}
+			w = &got
+			missed[missedName] = w
+			order = append(order, missedName)
 		}
 		w.TotalMissedBlocks++
 		if hf.Has(hardfork.HF14) && !hf.Has(hardfork.HF20) {
@@ -1732,7 +1744,9 @@ func updateWitnessMissedBlocks(s *state.Session, blockWitness auth.AccountName, 
 			// Emitted for EVERY missed witness, shutdown or not.
 			d.pushVOp(op.ProducerMissed{Producer: missedName})
 		}
-		objects.PutWitness(s, &w)
+	}
+	for _, name := range order {
+		objects.PutWitness(s, missed[name])
 	}
 }
 
