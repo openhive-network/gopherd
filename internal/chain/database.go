@@ -272,7 +272,9 @@ func (d *Database) State() *state.Database { return d.state }
 func (d *Database) WithReadSession(fn func(s *state.Session) error) error {
 	d.applyMu.RLock()
 	defer d.applyMu.RUnlock()
-	return fn(state.NewSession(d.state))
+	s := state.NewSession(d.state)
+	defer s.Close()
+	return fn(s)
 }
 
 // WithApplyLock runs fn while holding the apply write lock. The chain

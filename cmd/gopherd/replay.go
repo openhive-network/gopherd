@@ -533,6 +533,7 @@ func cmdReplay(args []string) int {
 		if invEvery != 0 && uint64(n)%invEvery == 0 {
 			chkSess := state.NewSession(stateDB)
 			r, cerr := chain.CheckInvariants(chkSess)
+			chkSess.Close()
 			if cerr != nil {
 				fmt.Fprintf(os.Stderr, "block %d invariants: %v\n", n, cerr)
 			} else if !r.OK() {

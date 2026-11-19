@@ -2,6 +2,7 @@ package state
 
 import (
 	"errors"
+	"runtime"
 
 	"github.com/tidwall/btree"
 )
@@ -58,13 +59,20 @@ type Session struct {
 	// per-Put allocation churn from the binary.AppendUintXX growslice
 	// path (one of the largest replay allocators).
 	SerScratch []byte
-	// iter is a pooled backend iterator reused across Range calls within
+	// ib holds a pooled backend iterator reused across Range calls within
 	// this Session. Lazily allocated on first Range; closed by Commit or
-	// Undo. Reusing the iterator avoids the per-call NewIter cost and is
+	// Close. Reusing the iterator avoids the per-call NewIter cost and is
 	// safe because a Session never writes to the backend until Commit
 	// (so the snapshot pinned at iter creation is always consistent
 	// with what subsequent overlay-or-backend reads expect).
-	iter Iter
+	//
+	// A pebble iterator pins every memtable and sstable live when it was
+	// made until it is closed, and has no finalizer. The holder carries a
+	// cleanup that closes it when a Session that was never committed or
+	// closed is collected: replay's invariant check left one such Session
+	// per million blocks, each pinning a 128 MiB memtable, and a
+	// from-genesis replay was OOM-killed near block 58M.
+	ib *iterHolder
 	// readCache memoizes Pebble Get results within this Session — the
 	// same row is often re-read several times per block (FeedHistory,
 	// DGPO, WitnessSchedule, hot witness rows). Invalidated whenever
@@ -485,12 +493,34 @@ func (s *Session) Commit(sync bool) error {
 	// governance-vote sweep ranging proposal_vote rows). memIter doesn't
 	// have this issue, but always-close-on-Commit keeps the contract
 	// uniform across backends. The next Range allocates a fresh iter.
-	if s.iter != nil {
-		_ = s.iter.Close()
-		s.iter = nil
-	}
+	s.closeIter()
 	return nil
 }
+
+// iterHolder owns a Session's pooled iterator, so a cleanup can close it
+// without keeping the Session reachable.
+type iterHolder struct{ it Iter }
+
+func closeIterHolder(h *iterHolder) {
+	if h.it != nil {
+		_ = h.it.Close()
+		h.it = nil
+	}
+}
+
+// closeIter closes the pooled iterator, if any; the next Range opens a new one.
+func (s *Session) closeIter() {
+	if s.ib != nil {
+		closeIterHolder(s.ib)
+	}
+}
+
+// Close releases the backend resources a Session holds outside its overlay:
+// the pooled iterator, which otherwise pins pebble memtables. A Session that
+// is only read from (an invariant check, an API call) never reaches Commit;
+// it should be closed when done. Uncommitted writes are left in the overlay.
+// The Session stays usable; a later Range opens a new iterator.
+func (s *Session) Close() { s.closeIter() }
 
 // Undo discards the overlay without writing to Pebble.
 func (s *Session) Undo() {
@@ -697,16 +727,20 @@ func (s *Session) rangeBounds(lower, upper []byte, fn func(body, value []byte) (
 	// Pooled Pebble iterator: allocate once per Session, reuse via
 	// SetBounds for all subsequent Ranges. Avoids the per-call NewIter
 	// cost (which dominated CPU under the per-block hook hot path).
-	if s.iter == nil {
+	if s.ib == nil {
+		s.ib = &iterHolder{}
+		runtime.AddCleanup(s, closeIterHolder, s.ib)
+	}
+	if s.ib.it == nil {
 		it, err := s.db.rawIter(lower, upper)
 		if err != nil {
 			return err
 		}
-		s.iter = it
+		s.ib.it = it
 	} else {
-		s.iter.SetBounds(lower, upper)
+		s.ib.it.SetBounds(lower, upper)
 	}
-	iter := s.iter
+	iter := s.ib.it
 
 	// Merge backend + overlay entries in physical-key (sort) order so the
 	// caller sees the same ordering chainbase does: every limit-order
