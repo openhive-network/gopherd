@@ -65,7 +65,9 @@ func TestDroppedSessionReleasesPooledIterator(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	settleCleanups()
 	base := pebblemem.OpenIters.Load()
+	leakBase := pebblemem.LeakedIters.Load()
 	const sessions = 20
 	for i := 0; i < sessions; i++ {
 		rangeWithOverlay(t, NewSession(db))
@@ -80,5 +82,81 @@ func TestDroppedSessionReleasesPooledIterator(t *testing.T) {
 	}
 	if got := pebblemem.OpenIters.Load() - base; got != 0 {
 		t.Fatalf("%d pooled iterators still open after their Sessions were collected", got)
+	}
+	if got := pebblemem.LeakedIters.Load() - leakBase; got != sessions {
+		t.Fatalf("%d iterators counted as closed by the GC, want %d", got, sessions)
+	}
+}
+
+// TestReadOnlyRangeOpensNoPooledIterator pins that a Range with nothing of
+// the Session's own in the ranged prefix scans with a short-lived iterator
+// and leaves none open, so a Session that only reads pins no memtables even
+// if its caller forgets Close.
+func TestReadOnlyRangeOpensNoPooledIterator(t *testing.T) {
+	db := openTempDB(t)
+	seed := NewSession(db)
+	seed.Put(0x0100, 0, []byte("b"), []byte("2"))
+	if err := seed.Commit(false); err != nil {
+		t.Fatal(err)
+	}
+
+	base := pebblemem.OpenIters.Load()
+	s := NewSession(db)
+	// An overlay entry in another table must not pull this Range onto the
+	// merge path either.
+	s.Put(0x0200, 0, []byte("x"), []byte("9"))
+	n := 0
+	if err := s.Range(0x0100, 0, nil, func(body, value []byte) (bool, error) {
+		n++
+		return true, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("range saw %d rows, want 1", n)
+	}
+	if got := pebblemem.OpenIters.Load() - base; got != 0 {
+		t.Fatalf("%d pooled iterators open after a read-only Range, want 0", got)
+	}
+}
+
+// TestClosedSessionIsNotCountedAsLeaked pins that LeakedIters counts only
+// Sessions the GC had to clean up, so it can be read as "missing Close".
+func TestClosedSessionIsNotCountedAsLeaked(t *testing.T) {
+	db := openTempDB(t)
+	seed := NewSession(db)
+	seed.Put(0x0100, 0, []byte("b"), []byte("2"))
+	if err := seed.Commit(false); err != nil {
+		t.Fatal(err)
+	}
+
+	// Earlier tests drop Sessions too; let their cleanups run first.
+	settleCleanups()
+	leakBase := pebblemem.LeakedIters.Load()
+	for i := 0; i < 20; i++ {
+		s := NewSession(db)
+		rangeWithOverlay(t, s)
+		s.Close()
+	}
+	settleCleanups()
+	if got := pebblemem.LeakedIters.Load() - leakBase; got != 0 {
+		t.Fatalf("%d closed Sessions counted as leaked", got)
+	}
+}
+
+// settleCleanups runs the GC until the cleanup count stops moving, so a
+// baseline is not disturbed by Sessions earlier tests dropped.
+func settleCleanups() {
+	prev, still := int64(-1), 0
+	for i := 0; i < 100 && still < 3; i++ {
+		runtime.GC()
+		time.Sleep(10 * time.Millisecond)
+		n := pebblemem.LeakedIters.Load()
+		if n == prev {
+			still++
+		} else {
+			still = 0
+		}
+		prev = n
 	}
 }

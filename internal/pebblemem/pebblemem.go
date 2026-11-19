@@ -7,8 +7,12 @@
 package pebblemem
 
 import (
+	"bufio"
 	"fmt"
+	"os"
+	"runtime/metrics"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,6 +29,11 @@ var (
 // pins the memtables live when it was made, so a count that only rises means
 // a Session is being dropped without Commit or Close.
 var OpenIters atomic.Int64
+
+// LeakedIters counts pooled iterators closed by the GC rather than by Commit
+// or Close: each pinned pebble memtables until its Session was collected.
+// Anything above zero names a missing Close.
+var LeakedIters atomic.Int64
 
 // Register adds db under name until Unregister; a later Register with the
 // same name replaces it.
@@ -69,8 +78,51 @@ func Report() string {
 			m.Compact.NumInProgress, mib(uint64(m.Compact.InProgressBytes)),
 			m.TableIters, m.Table.ZombieCount, m.Snapshots.Count)
 	}
-	fmt.Fprintf(&b, "pebble state pooled iterators open: %d\n", OpenIters.Load())
+	fmt.Fprintf(&b, "pebble state pooled iterators open: %d, closed by GC: %d\n", OpenIters.Load(), LeakedIters.Load())
+	if anon, ok := rssAnon(); ok {
+		goRes := goResident()
+		fmt.Fprintf(&b, "process memory: anon %s, Go runtime %s, outside Go %s\n",
+			mib(anon), mib(goRes), mib(anon-min(anon, goRes)))
+	}
 	return b.String()
+}
+
+// rssAnon reads the process's resident anonymous memory from
+// /proc/self/status. ok is false where that file does not exist.
+func rssAnon() (uint64, bool) {
+	f, err := os.Open("/proc/self/status")
+	if err != nil {
+		return 0, false
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := sc.Text()
+		if rest, found := strings.CutPrefix(line, "RssAnon:"); found {
+			kb, err := strconv.ParseUint(strings.TrimSuffix(strings.TrimSpace(rest), " kB"), 10, 64)
+			if err != nil {
+				return 0, false
+			}
+			return kb << 10, true
+		}
+	}
+	return 0, false
+}
+
+// goResident is the memory the Go runtime has mapped and not returned to the
+// OS: heap, stacks and runtime metadata. What anon holds beyond it is cgo
+// allocations, pebble's above all. It is an upper bound (free heap the runtime
+// has not yet returned may not be resident), so "outside Go" errs low.
+func goResident() uint64 {
+	s := []metrics.Sample{
+		{Name: "/memory/classes/total:bytes"},
+		{Name: "/memory/classes/heap/released:bytes"},
+	}
+	metrics.Read(s)
+	if s[0].Value.Kind() != metrics.KindUint64 || s[1].Value.Kind() != metrics.KindUint64 {
+		return 0
+	}
+	return s[0].Value.Uint64() - s[1].Value.Uint64()
 }
 
 func mib(n uint64) string { return fmt.Sprintf("%dM", n>>20) }

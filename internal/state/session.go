@@ -5,6 +5,8 @@ import (
 	"runtime"
 
 	"github.com/tidwall/btree"
+
+	"gopherd/internal/pebblemem"
 )
 
 // Session is an in-memory overlay over Database that buffers reads/writes
@@ -508,6 +510,17 @@ func closeIterHolder(h *iterHolder) {
 	}
 }
 
+// cleanupIterHolder is the GC fallback for a Session dropped with its
+// iterator open. It counts each one, because until the GC gets to it that
+// iterator pinned pebble memtables: a count that rises means some caller is
+// missing a Close or Commit.
+func cleanupIterHolder(h *iterHolder) {
+	if h.it != nil {
+		pebblemem.LeakedIters.Add(1)
+	}
+	closeIterHolder(h)
+}
+
 // closeIter closes the pooled iterator, if any; the next Range opens a new one.
 func (s *Session) closeIter() {
 	if s.ib != nil {
@@ -724,24 +737,6 @@ func (s *Session) RangeFrom(table TableID, index IndexID, lowerBody []byte, fn f
 // physical key range [lower, upper) merging the backend with this Session's
 // overlay.
 func (s *Session) rangeBounds(lower, upper []byte, fn func(body, value []byte) (bool, error)) error {
-	// Pooled Pebble iterator: allocate once per Session, reuse via
-	// SetBounds for all subsequent Ranges. Avoids the per-call NewIter
-	// cost (which dominated CPU under the per-block hook hot path).
-	if s.ib == nil {
-		s.ib = &iterHolder{}
-		runtime.AddCleanup(s, closeIterHolder, s.ib)
-	}
-	if s.ib.it == nil {
-		it, err := s.db.rawIter(lower, upper)
-		if err != nil {
-			return err
-		}
-		s.ib.it = it
-	} else {
-		s.ib.it.SetBounds(lower, upper)
-	}
-	iter := s.ib.it
-
 	// Merge backend + overlay entries in physical-key (sort) order so the
 	// caller sees the same ordering chainbase does: every limit-order
 	// matching pass needs an opposite-side order placed THIS BLOCK to
@@ -791,6 +786,26 @@ func (s *Session) rangeBounds(lower, upper []byte, fn func(body, value []byte) (
 			return ok, nil
 		})
 	}
+	// Pooled Pebble iterator: allocate once per Session, reuse via
+	// SetBounds for all subsequent merged Ranges. Avoids the per-call
+	// NewIter cost (which dominated CPU under the per-block hook hot
+	// path). Opened only here: the backend-only path above scans with its
+	// own short-lived iterator, so a Session that never writes (an API
+	// read, an invariant check) never holds one.
+	if s.ib == nil {
+		s.ib = &iterHolder{}
+		runtime.AddCleanup(s, cleanupIterHolder, s.ib)
+	}
+	if s.ib.it == nil {
+		it, err := s.db.rawIter(lower, upper)
+		if err != nil {
+			return err
+		}
+		s.ib.it = it
+	} else {
+		s.ib.it.SetBounds(lower, upper)
+	}
+	iter := s.ib.it
 	emit := func(body, value []byte) error {
 		ok, err := fn(body, value)
 		if err != nil {
