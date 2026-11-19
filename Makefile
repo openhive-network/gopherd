@@ -4,9 +4,11 @@ GO ?= go
 BIN_DIR := $(CURDIR)/bin
 # Per-target fuzzing time for `make fuzz` (go test -fuzztime syntax).
 FUZZTIME ?= 30s
-# Package-level parallelism for the race run; each race-built test binary can
-# take several GB (the chain fixtures peak around 8 GB).
-RACE_P ?= 2
+# Parallelism for the race run. Race-built tests take 5-10x their normal
+# memory: the chain fixture package peaks at 6.5 GB even one test at a time,
+# so the defaults run one package and one test at a time (about 7 GB).
+RACE_P ?= 1
+RACE_PARALLEL ?= 1
 
 all: build
 
@@ -23,7 +25,7 @@ test:
 	$(GO) test ./...
 
 test-race:
-	$(GO) test -race -p $(RACE_P) ./...
+	$(GO) test -race -p $(RACE_P) -parallel $(RACE_PARALLEL) ./...
 
 # What every change must pass before it is pushed; CI runs the same.
 check: fmt-check vet tidy-check test

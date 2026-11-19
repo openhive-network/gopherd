@@ -1,0 +1,110 @@
+# gopherd CI. Every job runs the same make targets a contributor runs locally
+# (docs/testing.md); none needs a block_log or network access beyond modules.
+#
+# Pipelines on merge requests and master run lint, unit tests, the race
+# detector, a fuzz smoke pass and the build. A scheduled pipeline (CI/CD >
+# Schedules, any branch) additionally fuzzes every target for FUZZTIME_LONG.
+
+stages:
+  - check
+  - test
+  - build
+
+default:
+  image: golang:1.26-bookworm
+  tags:
+    - public-runner-docker
+  before_script:
+    # The block_log zstd decoder binds libzstd through cgo.
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends libzstd-dev pkg-config >/dev/null
+    - go version
+  cache:
+    key: go-$CI_COMMIT_REF_SLUG
+    paths:
+      - .cache/go-build
+      - .cache/go-mod
+  interruptible: true
+
+variables:
+  GOCACHE: $CI_PROJECT_DIR/.cache/go-build
+  GOMODCACHE: $CI_PROJECT_DIR/.cache/go-mod
+  GOFLAGS: -buildvcs=false
+  FUZZTIME_SMOKE: 15s
+  FUZZTIME_LONG: 10m
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+lint:
+  stage: check
+  script:
+    - make fmt-check vet tidy-check
+
+unit:
+  stage: test
+  script:
+    - go test -count=1 -coverprofile=coverage.txt ./...
+    - go tool cover -func=coverage.txt | tail -1
+  coverage: '/total:\s+\(statements\)\s+(\d+\.\d+)%/'
+  artifacts:
+    when: always
+    paths:
+      - coverage.txt
+    expire_in: 2 weeks
+
+testnet:
+  stage: test
+  script:
+    # The testnet build flips hardfork and chain constants; it must keep
+    # compiling and its tests passing.
+    - go vet -tags testnet ./...
+    - go test -count=1 -tags testnet ./...
+  allow_failure: true # TestHardforkReleaseConsistency is known to fail (docs/hived-parity-review-2026-11.md)
+
+race:
+  stage: test
+  script:
+    # One package and one test at a time: race-built, the chain fixture
+    # package alone peaks at 6.5 GB. The runner needs about 7 GB.
+    - make test-race
+
+fuzz-smoke:
+  stage: test
+  rules:
+    - if: $CI_PIPELINE_SOURCE != "schedule"
+  script:
+    # Replays every checked-in corpus (also part of `unit`) and fuzzes each
+    # target briefly; a failure leaves the input under testdata/fuzz.
+    - make fuzz FUZZTIME=$FUZZTIME_SMOKE
+  artifacts:
+    when: on_failure
+    paths:
+      - "**/testdata/fuzz/**"
+    expire_in: 2 weeks
+
+fuzz-long:
+  stage: test
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+  timeout: 6h
+  script:
+    - make fuzz FUZZTIME=$FUZZTIME_LONG
+  artifacts:
+    when: on_failure
+    paths:
+      - "**/testdata/fuzz/**"
+    expire_in: 4 weeks
+
+build:
+  stage: build
+  script:
+    - make build
+    - ./bin/gopherd version
+  artifacts:
+    paths:
+      - bin/gopherd
+    expire_in: 1 week

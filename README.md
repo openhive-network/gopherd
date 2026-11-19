@@ -125,15 +125,17 @@ The rate depends on the era, not on how far along the replay is (average per
 ## Installation
 
 ```sh
-git clone git@gitlab.syncad.com:hive/gopherd.git
+git clone https://gitlab.syncad.com/hive/gopherd.git
 cd gopherd
 make            # builds bin/gopherd
-make test       # all tests
-make vet        # static analysis
+make check      # gofmt, vet, go mod tidy and all tests: run before every push
+make test-race  # the race detector (~7 GB RAM)
+make fuzz       # every fuzz target for 30 s each
 ```
 
 `make` writes `bin/gopherd`. There is a single binary; every tool is a
-subcommand (`gopherd help` lists them).
+subcommand (`gopherd help` lists them). `docs/testing.md` describes the test
+tiers, the fuzz targets and what each one protects.
 
 > Build straight to `bin/` (`go build -o bin/gopherd ./cmd/gopherd`). Plain
 > `go build ./...` compiles but does **not** refresh `bin/gopherd`, which makes
