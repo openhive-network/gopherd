@@ -71,4 +71,3 @@ func TestWithdrawVestingRegeneratesRCFirst(t *testing.T) {
 		})
 	}
 }
-
