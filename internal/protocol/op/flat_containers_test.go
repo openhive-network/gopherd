@@ -63,3 +63,22 @@ func TestFlatContainersDecodeLikeFC(t *testing.T) {
 		t.Errorf("witness_set_properties props %+v, want %+v", ws.Props, want)
 	}
 }
+
+// TestCommentOptionsKeepsFirstBeneficiaries pins that a second
+// comment_payout_beneficiaries extension is dropped as fc's flat_set insert
+// drops it (static_variant compares by tag), instead of being appended.
+func TestCommentOptionsKeepsFirstBeneficiaries(t *testing.T) {
+	ext := []byte{2} // two extensions, both tag 0
+	for _, b := range []struct {
+		name string
+		w    uint16
+	}{{"bob", 1000}, {"carol", 2000}} {
+		ext = append(ext, 0, 1) // tag 0, one beneficiary
+		ext = appendString(ext, b.name)
+		ext = append(ext, byte(b.w), byte(b.w>>8))
+	}
+	o := decode(t, &CommentOptions{Author: "alice", Permlink: "p", AllowVotes: true, RawExtensions: ext}).AsCommentOptions()
+	if want := []CommentBeneficiary{{Account: "bob", Weight: 1000}}; !reflect.DeepEqual(o.Beneficiaries, want) {
+		t.Errorf("beneficiaries %+v, want %+v", o.Beneficiaries, want)
+	}
+}

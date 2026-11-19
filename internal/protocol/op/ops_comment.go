@@ -162,6 +162,10 @@ func readCommentOptions(r *fcraw.Reader) (Op, error) {
 	if err != nil {
 		return Op{}, fmt.Errorf("comment_options.extensions count: %w", err)
 	}
+	// The set is a flat_set of static_variant, which compares by tag alone,
+	// and fc decodes it by inserting: a second beneficiaries extension is
+	// dropped, not appended to the first. Its bytes are still consumed.
+	haveBeneficiaries := false
 	for i := uint32(0); i < count; i++ {
 		tag, err := r.ReadVarUint()
 		if err != nil {
@@ -174,6 +178,10 @@ func readCommentOptions(r *fcraw.Reader) (Op, error) {
 			if err != nil {
 				return Op{}, fmt.Errorf("beneficiaries count: %w", err)
 			}
+			if err := r.CheckCount(n, 3); err != nil {
+				return Op{}, fmt.Errorf("beneficiaries: %w", err)
+			}
+			var list []CommentBeneficiary
 			for j := uint32(0); j < n; j++ {
 				name, err := r.ReadString()
 				if err != nil {
@@ -183,7 +191,10 @@ func readCommentOptions(r *fcraw.Reader) (Op, error) {
 				if err != nil {
 					return Op{}, fmt.Errorf("beneficiary[%d] weight: %w", j, err)
 				}
-				o.Beneficiaries = append(o.Beneficiaries, CommentBeneficiary{Account: name, Weight: w})
+				list = append(list, CommentBeneficiary{Account: name, Weight: w})
+			}
+			if !haveBeneficiaries {
+				o.Beneficiaries, haveBeneficiaries = list, true
 			}
 		default:
 			return Op{}, fmt.Errorf("comment_options.extensions[%d]: unknown variant tag %d", i, tag)
