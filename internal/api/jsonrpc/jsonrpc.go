@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"runtime/debug"
 	"sync"
 )
 
@@ -65,6 +66,18 @@ type Handler func(ctx context.Context, params json.RawMessage) (interface{}, err
 type Registry struct {
 	mu      sync.RWMutex
 	methods map[string]Handler
+	// panicHook, when set, is told about a handler that panicked before
+	// Dispatch turns the panic into an error response.
+	panicHook func(method string, p any, stack []byte)
+}
+
+// SetPanicHook installs fn to be called with the method, the panic value and
+// the stack whenever a handler panics. Tests use it to fail on what Dispatch
+// would otherwise answer as an internal error; a node can log it.
+func (r *Registry) SetPanicHook(fn func(method string, p any, stack []byte)) {
+	r.mu.Lock()
+	r.panicHook = fn
+	r.mu.Unlock()
 }
 
 func NewRegistry() *Registry { return &Registry{methods: make(map[string]Handler, 128)} }
@@ -133,7 +146,7 @@ func (r *Registry) Dispatch(ctx context.Context, req Request) Response {
 		resp.Error = Errorf(CodeMethodNotFound, "method %q not found", method)
 		return resp
 	}
-	res, err := h(ctx, params)
+	res, err := r.call(ctx, method, h, params)
 	if err != nil {
 		if e, isErr := err.(*Error); isErr {
 			resp.Error = e
@@ -160,4 +173,24 @@ func unwrapCall(params json.RawMessage) (method string, args json.RawMessage, ok
 		args = arr[2]
 	}
 	return api + "." + m, args, true
+}
+
+// call runs h, turning a panic into an error. net/http would recover a
+// panicking handler too, but only after unwinding through whatever it held:
+// a read session left open or a mutex left locked would outlive the request.
+// Recovering here answers the request with an internal error instead, and
+// reports the panic through the hook, since it is always a bug.
+func (r *Registry) call(ctx context.Context, method string, h Handler, params json.RawMessage) (res interface{}, err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			r.mu.RLock()
+			hook := r.panicHook
+			r.mu.RUnlock()
+			if hook != nil {
+				hook(method, p, debug.Stack())
+			}
+			res, err = nil, Errorf(CodeInternalError, "internal error in %s", method)
+		}
+	}()
+	return h(ctx, params)
 }

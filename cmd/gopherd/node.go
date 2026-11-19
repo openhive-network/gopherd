@@ -1496,6 +1496,9 @@ func (a *app) run() error {
 			n := apiSrv.RestrictForPublicEndpoint()
 			a.logger.printf("api: non-loopback endpoint %q — disabled %d unbounded-scan methods (DoS guard)", a.cfg.apiEndpoint, n)
 		}
+		apiSrv.Registry().SetPanicHook(func(method string, p any, stack []byte) {
+			a.logger.printf("api: BUG: %s panicked: %v\n%s", method, p, stack)
+		})
 		httpSrv := &http.Server{Addr: a.cfg.apiEndpoint, Handler: apiSrv.Registry().HTTPHandler()}
 		go func() {
 			a.logger.printf("api: serving JSON-RPC on http://%s (%d methods)", a.cfg.apiEndpoint, len(apiSrv.Registry().Names()))
