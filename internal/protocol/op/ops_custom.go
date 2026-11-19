@@ -1,6 +1,8 @@
 package op
 
 import (
+	"slices"
+	"strings"
 	"unsafe"
 
 	"encoding/binary"
@@ -28,7 +30,21 @@ func readSortedAccountSet(r *fcraw.Reader, label string) ([]auth.AccountName, er
 		}
 		out = append(out, name)
 	}
-	return out, nil
+	return canonicalAccountSet(out), nil
+}
+
+// canonicalAccountSet returns names as fc decodes a flat_set of account
+// names: by inserting each one, so sorted (fixed_string order, which is
+// string order for valid names) with repeats dropped. The custom operations'
+// required-auth sets are read this way, so a name listed twice counts once
+// against HIVE_MAX_AUTHORITY_MEMBERSHIP, as in hived.
+func canonicalAccountSet(names []auth.AccountName) []auth.AccountName {
+	if slices.IsSortedFunc(names, strings.Compare) && len(slices.Compact(slices.Clone(names))) == len(names) {
+		return names
+	}
+	out := slices.Clone(names)
+	slices.SortFunc(out, strings.Compare)
+	return slices.Compact(out)
 }
 
 func appendSortedAccountSet(dst []byte, names []auth.AccountName) []byte {

@@ -7,6 +7,7 @@ import (
 	"reflect"
 
 	"gopherd/internal/crypto"
+	"gopherd/internal/fcraw"
 	"gopherd/internal/protocol/asset"
 	"gopherd/internal/protocol/auth"
 	"gopherd/internal/protocol/op"
@@ -97,7 +98,17 @@ func buildOp(name string, fieldsRaw json.RawMessage) (op.Op, error) {
 			return op.Op{}, fmt.Errorf("%s.%s: %w", name, f.Name, err)
 		}
 	}
-	return op.FromOperation(sv.Interface().(op.Operation)), nil
+	// Pass the operation once through the binary codec. fc's from_variant
+	// decodes flat_sets and flat_maps by inserting, as its unpack does, and
+	// the binary readers mirror that; this gives JSON input the same sorted,
+	// first-wins form without a second implementation per field.
+	built := op.FromOperation(sv.Interface().(op.Operation))
+	r := fcraw.NewReader(op.AppendOp(nil, built))
+	o, err := op.ReadOp(r)
+	if err != nil {
+		return op.Op{}, fmt.Errorf("%s: %w", name, err)
+	}
+	return o, nil
 }
 
 // setField populates one struct field from its JSON value, inverting the

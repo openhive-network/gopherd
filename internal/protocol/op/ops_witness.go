@@ -1,6 +1,8 @@
 package op
 
 import (
+	"slices"
+	"strings"
 	"unsafe"
 
 	"encoding/binary"
@@ -102,6 +104,12 @@ func readWitnessSetProperties(r *fcraw.Reader) (Op, error) {
 		}
 		o.Props = append(o.Props, WitnessProperty{Key: k, Value: v})
 	}
+	// props is a flat_map<string, vector<char>>, which fc unpacks by
+	// inserting: sorted by key, and a repeated key keeps its FIRST value.
+	// The evaluator and the authority check both read "key"; with repeats
+	// left in, they could each see a different signing key.
+	slices.SortStableFunc(o.Props, func(a, b WitnessProperty) int { return strings.Compare(a.Key, b.Key) })
+	o.Props = slices.CompactFunc(o.Props, func(a, b WitnessProperty) bool { return a.Key == b.Key })
 	if o.Extensions, err = readExtensionsRaw(r, "witness_set_properties.extensions", futureExtensionsTags); err != nil {
 		return Op{}, err
 	}

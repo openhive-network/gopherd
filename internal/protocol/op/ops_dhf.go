@@ -1,6 +1,7 @@
 package op
 
 import (
+	"slices"
 	"unsafe"
 
 	"encoding/binary"
@@ -29,7 +30,12 @@ func readSortedInt64Set(r *fcraw.Reader, label string) ([]int64, error) {
 		}
 		out = append(out, v)
 	}
-	return out, nil
+	// flat_set_ex<int64_t> unpacks as a flat_set: by inserting, so sorted
+	// with repeats dropped. remove_proposal [5, 5] removes proposal 5 once
+	// in hived; read as received, the second 5 then failed HF28's
+	// nonexistent-proposal assert here.
+	slices.Sort(out)
+	return slices.Compact(out), nil
 }
 
 func appendSortedInt64Set(dst []byte, ids []int64) []byte {
