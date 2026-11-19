@@ -53,7 +53,14 @@ func TestPooledDCtxFreedWhenDropped(t *testing.T) {
 		t.Fatalf("%d DCtxs still live after %d pool drops; dropped decoders are not freed", n, rounds)
 	}
 
+	// Close frees the pooled DCtxs at once; a decoder the pool dropped
+	// before Close may still be waiting for its cleanup.
 	d.Close()
+	deadline = time.Now().Add(10 * time.Second)
+	for liveDCtxs.Load() != base && time.Now().Before(deadline) {
+		runtime.GC()
+		time.Sleep(10 * time.Millisecond)
+	}
 	if n := liveDCtxs.Load() - base; n != 0 {
 		t.Fatalf("%d DCtxs live after Close", n)
 	}
