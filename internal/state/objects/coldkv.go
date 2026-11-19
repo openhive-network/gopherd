@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"gopherd/internal/config"
+	"gopherd/internal/pebblemem"
 	"os"
 	"path/filepath"
 
@@ -136,6 +137,7 @@ func openColdKV(dir string) (*coldKV, error) {
 	if err != nil {
 		return nil, err
 	}
+	pebblemem.Register("cold", db)
 	return &coldKV{db: db, dir: dir, owned: owned, token: token, opts: opts}, nil
 }
 
@@ -416,6 +418,7 @@ func (c *coldKV) Close() error {
 		ferr = c.Flush()
 	}
 	tok := c.Token()
+	pebblemem.Unregister("cold", c.db)
 	err := c.db.Close()
 	if err == nil {
 		err = ferr

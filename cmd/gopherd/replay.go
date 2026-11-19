@@ -28,6 +28,7 @@ import (
 
 	"gopherd/internal/blocklog"
 	"gopherd/internal/chain"
+	"gopherd/internal/pebblemem"
 	"gopherd/internal/protocol/hardfork"
 	"gopherd/internal/protocol/network"
 	"gopherd/internal/state"
@@ -547,6 +548,7 @@ func cmdReplay(args []string) int {
 			rate := float64(applied) / elapsed.Seconds()
 			fmt.Printf("  block %d ok — %.0f blocks/s, %d applied, %d ops_applied, %d ops_skipped\n",
 				n, rate, applied, stats.OpsApplied, stats.OpsSkipped)
+			fmt.Print(pebblemem.Report())
 		}
 		if *saveSnapshotAt != 0 && n == uint32(*saveSnapshotAt) && *saveSnapshotTo != "" {
 			if err := stateDB.SaveSnapshot(*saveSnapshotTo, n); err != nil {

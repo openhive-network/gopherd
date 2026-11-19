@@ -4,6 +4,8 @@ import (
 	"errors"
 
 	"github.com/cockroachdb/pebble"
+
+	"gopherd/internal/pebblemem"
 )
 
 // pebbleBackend is the production backend backed by a Pebble LSM store.
@@ -35,6 +37,7 @@ func openPebble(path string, cacheSize int64) (*pebbleBackend, error) {
 	if err != nil {
 		return nil, err
 	}
+	pebblemem.Register("state", db)
 	return &pebbleBackend{db: db}, nil
 }
 
@@ -42,6 +45,7 @@ func (b *pebbleBackend) Close() error {
 	if b.db == nil {
 		return nil
 	}
+	pebblemem.Unregister("state", b.db)
 	err := b.db.Close()
 	b.db = nil
 	return err
@@ -79,6 +83,7 @@ func (b *pebbleBackend) rawIter(lower, upper []byte) (Iter, error) {
 	if err != nil {
 		return nil, err
 	}
+	pebblemem.OpenIters.Add(1)
 	return &pebbleIter{it: it}, nil
 }
 
@@ -192,4 +197,7 @@ func (p *pebbleIter) Next() bool                    { return p.it.Next() }
 func (p *pebbleIter) Key() []byte                   { return p.it.Key() }
 func (p *pebbleIter) ValueAndErr() ([]byte, error)  { return p.it.ValueAndErr() }
 func (p *pebbleIter) Error() error                  { return p.it.Error() }
-func (p *pebbleIter) Close() error                  { return p.it.Close() }
+func (p *pebbleIter) Close() error {
+	pebblemem.OpenIters.Add(-1)
+	return p.it.Close()
+}
