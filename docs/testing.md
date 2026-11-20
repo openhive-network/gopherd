@@ -124,7 +124,9 @@ reports pebble's memory use, the number of sessions the GC had to clean up
 steadily, look at it before it causes an OOM. `GOPHERD_RC_ATTRIBUTION=1` breaks
 the summary's RC diagnostics (`rc stale max`, `rc not-regen`) down by call
 site. Those counters measure where gopherd's RC bookkeeping order differs from
-hived's.
+hived's. Both must stay 0: a full replay to block 62,251,407 (commit ecc10a3,
+6 h 11 min, about 14 GB resident) reported neither, with 0 invariant failures
+and 0 sessions cleaned up by the GC. A non-zero count is a regression.
 
 ## CI
 
