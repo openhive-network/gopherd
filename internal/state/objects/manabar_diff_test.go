@@ -1,6 +1,7 @@
 package objects
 
 import (
+	"errors"
 	"math"
 	"math/big"
 	"testing"
@@ -50,10 +51,12 @@ func hivedRegenerateMana(current int64, last uint32, maxMana int64, regen uint32
 	return next, now, true
 }
 
-// FuzzRegenerateManaMatchesHived compares RegenerateMana with hived's
-// regenerate_mana on every input hived accepts. The two must agree exactly:
-// voting and RC mana feed vote weights and the RC stamps, so a one-unit
-// difference is a fork.
+// FuzzRegenerateManaMatchesHived compares RegenerateManaChecked with hived's
+// regenerate_mana on every input. Where hived returns, the two must agree
+// exactly: voting and RC mana feed vote weights and the RC stamps, so a
+// one-unit difference is a fork. Where hived throws on an overflowing
+// regeneration, gopherd must return ErrManaRegenOverflow and leave the bar
+// alone, so the transaction (or block) fails on both.
 func FuzzRegenerateManaMatchesHived(f *testing.F) {
 	f.Add(int64(50), uint32(1000), int64(100), uint32(432000), uint32(87400), true)
 	f.Add(int64(0), uint32(0), int64(100_000_000_000_000_000), uint32(432000), uint32(1_600_000_000), true)
@@ -64,18 +67,82 @@ func FuzzRegenerateManaMatchesHived(f *testing.F) {
 			return // manabar_params::validate rejects regen_time 0
 		}
 		want, wantUpdate, ok := hivedRegenerateMana(current, last, maxMana, regen, now, skipCap)
+		got, gotUpdate, err := RegenerateManaChecked(current, last, ManabarParams{MaxMana: maxMana, RegenTime: regen}, now, skipCap)
 		if !ok {
-			// hived throws; gopherd keeps the old bar (now < last) or
-			// saturates (a regeneration above INT64_MAX, reachable only by
-			// an RC bar of ~1e17 left untouched for over 2.5 years). hived
-			// cannot put such a transaction in a block, so applying blocks
-			// never meets it; a gopherd witness admitting one would.
+			if now < last {
+				// hived asserts now >= last_update_time; gopherd keeps the
+				// bar. No caller passes a time before the bar's own stamp.
+				return
+			}
+			if !errors.Is(err, ErrManaRegenOverflow) || got != current || gotUpdate != last {
+				t.Fatalf("RegenerateManaChecked(cur=%d last=%d max=%d regen=%d now=%d skip=%v) = (%d, %d, %v), hived throws",
+					current, last, maxMana, regen, now, skipCap, got, gotUpdate, err)
+			}
 			return
 		}
-		got, gotUpdate := RegenerateMana(current, last, ManabarParams{MaxMana: maxMana, RegenTime: regen}, now, skipCap)
-		if got != want || gotUpdate != wantUpdate {
-			t.Fatalf("RegenerateMana(cur=%d last=%d max=%d regen=%d now=%d skip=%v) = (%d, %d), hived (%d, %d)",
-				current, last, maxMana, regen, now, skipCap, got, gotUpdate, want, wantUpdate)
+		if err != nil || got != want || gotUpdate != wantUpdate {
+			t.Fatalf("RegenerateManaChecked(cur=%d last=%d max=%d regen=%d now=%d skip=%v) = (%d, %d, %v), hived (%d, %d)",
+				current, last, maxMana, regen, now, skipCap, got, gotUpdate, err, want, wantUpdate)
+		}
+		if g, u := RegenerateMana(current, last, ManabarParams{MaxMana: maxMana, RegenTime: regen}, now, skipCap); g != got || u != gotUpdate {
+			t.Fatalf("RegenerateMana = (%d, %d), RegenerateManaChecked (%d, %d)", g, u, got, gotUpdate)
 		}
 	})
+}
+
+// dormantRCOverflowAge returns the shortest idle time, in seconds, after which
+// regenerating an RC bar with maximum maxRC overflows in hived: the smallest
+// dt with maxRC * dt / 432000 > INT64_MAX.
+func dormantRCOverflowAge(maxRC int64) uint32 {
+	n := new(big.Int).Mul(new(big.Int).Add(big.NewInt(math.MaxInt64), big.NewInt(1)), big.NewInt(int64(RCRegenTimeSec)))
+	q, r := new(big.Int).QuoRem(n, big.NewInt(maxRC), new(big.Int))
+	if r.Sign() != 0 {
+		q.Add(q, big.NewInt(1))
+	}
+	return uint32(q.Int64())
+}
+
+// TestRegenerateRCManaOverflowFailsAsHived pins hived's u_regen <= INT64_MAX
+// assertion for an account-sized case: 100 billion VESTS (1e17 raw) left
+// untouched for about 461 days. One second earlier the bar regenerates to its
+// maximum; from then on hived throws, so gopherd must refuse rather than
+// saturate (which accepted a transaction every hived node rejects).
+func TestRegenerateRCManaOverflowFailsAsHived(t *testing.T) {
+	const now = uint32(1_700_000_000)
+	a := Account{Name: "whale", VestingShares: 100_000_000_000_000_000}
+	maxRC := a.MaximumRC()
+	age := dormantRCOverflowAge(maxRC)
+	if age < 365*86400 || age > 2*365*86400 {
+		t.Fatalf("overflow age %d s for max %d: the fixture is not the case described", age, maxRC)
+	}
+	a.LastMaxRC = maxRC
+
+	a.RCManaCurrent, a.RCManaLastUpdate = 0, now-(age-1)
+	if err := RegenerateRCMana(&a, now); err != nil {
+		t.Fatalf("idle %d s: %v, want a full bar", age-1, err)
+	}
+	if a.RCManaCurrent != maxRC || a.RCManaLastUpdate != now {
+		t.Fatalf("idle %d s: mana %d @%d, want %d @%d", age-1, a.RCManaCurrent, a.RCManaLastUpdate, maxRC, now)
+	}
+
+	a.RCManaCurrent, a.RCManaLastUpdate = 0, now-age
+	err := RegenerateRCMana(&a, now)
+	if !errors.Is(err, ErrManaRegenOverflow) {
+		t.Fatalf("idle %d s: err %v, want ErrManaRegenOverflow", age, err)
+	}
+	if a.RCManaCurrent != 0 || a.RCManaLastUpdate != now-age {
+		t.Errorf("failed regeneration changed the bar to %d @%d", a.RCManaCurrent, a.RCManaLastUpdate)
+	}
+	if err := RegenerateRCManabar(&a, now); !errors.Is(err, ErrManaRegenOverflow) {
+		t.Errorf("RegenerateRCManabar: err %v, want ErrManaRegenOverflow", err)
+	}
+	if err := UpdateAccountAfterRCDelegation(&a, now, 1, true); !errors.Is(err, ErrManaRegenOverflow) {
+		t.Errorf("UpdateAccountAfterRCDelegation: err %v, want ErrManaRegenOverflow", err)
+	}
+
+	// A full bar returns before the multiplication, as in hived.
+	a.RCManaCurrent, a.RCManaLastUpdate = maxRC, now-age
+	if err := RegenerateRCMana(&a, now); err != nil {
+		t.Errorf("full bar idle %d s: %v", age, err)
+	}
 }

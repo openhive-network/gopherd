@@ -389,9 +389,18 @@ func (f *Fixture) Actor(name string) {
 	if has, _ := objects.HasAccount(s, name); has {
 		return
 	}
+	// From HF20 on, account creation stamps the RC bar
+	// (InitRCManabarWithAdjustment); before it, HF20 stamps every account.
+	// Left at 0, the first uncapped regeneration counts from 1970 and
+	// overflows for a funded actor, as it would in hived.
+	var rcStamp uint32
+	if hardfork.SetForBlock(f.BlockNum + 1).Has(hardfork.HF20) {
+		rcStamp = f.HeadBlockTime()
+	}
 	objects.PutAccount(s, &objects.Account{
 		Name:                 name,
 		Created:              f.HeadBlockTime(),
+		RCManaLastUpdate:     rcStamp,
 		VotingManaCurrent:    10000,
 		VotingManaLastUpdate: f.HeadBlockTime(),
 		// Fixture accounts use "steem" as recovery_account by default

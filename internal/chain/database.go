@@ -1455,6 +1455,14 @@ func (d *Database) ApplyBlock(rawBlock []byte, blockNum uint32, opts ApplyOption
 	}
 	d.updateLastIrreversibleBlock(session)
 
+	// A per-block hook that reached a check hived makes by throwing (an RC
+	// regeneration overflow, objects.ErrManaRegenOverflow) recorded it on
+	// the session. In hived the exception aborts apply_block, so the block
+	// is invalid.
+	if err := session.Fault(); err != nil {
+		return objects.DynamicGlobalProperty{}, fmt.Errorf("apply_block %d: %w", blockNum, err)
+	}
+
 	// Re-read dgpo so the returned value reflects per-block hook
 	// updates (supply, vesting fund, etc.).
 	var dgpo objects.DynamicGlobalProperty

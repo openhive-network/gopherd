@@ -257,7 +257,9 @@ func processOneWithdrawal(s *state.Session, accountName string, scheduledTime, b
 	// which it must: if the two disagree the refresh sees a manabar stamped
 	// at a different instant and counts as un-regenerated regardless.
 	if hfWithdraw.Has(hardfork.HF20) {
-		objects.RegenerateRCMana(&a, blockTime)
+		if err := objects.RegenerateRCMana(&a, blockTime); err != nil {
+			s.Fail(err)
+		}
 	}
 	// database_vesting.cpp:252-255 — the remainder that converts to HIVE is a
 	// fill_vesting_withdraw from the account to itself, pushed before the
@@ -430,7 +432,9 @@ func processWithdrawRoutes(s *state.Session, fromAccount string, toWithdraw int6
 				// before their vests change, for the same reason as the payer
 				// above: the regeneration belongs to the old ceiling.
 				if dgpoRegen, _ := objects.GetDGPO(s); hardfork.SetForBlock(dgpoRegen.HeadBlockNumber).Has(hardfork.HF20) {
-					objects.RegenerateRCMana(&to, now)
+					if err := objects.RegenerateRCMana(&to, now); err != nil {
+						s.Fail(err)
+					}
 				}
 				to.VestingShares += toDeposit
 				objects.PutAccount(s, &to)

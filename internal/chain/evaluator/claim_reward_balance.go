@@ -69,7 +69,9 @@ func (claimRewardBalanceEvaluator) Apply(ctx *Context, opArg op.Op) error {
 
 	// HF20+: refresh RC manabar BEFORE any vesting change.
 	if ctx.Hardforks.Has(hardfork.HF20) {
-		objects.RegenerateRCMana(&a, ctx.HeadBlockTime)
+		if err := objects.RegenerateRCMana(&a, ctx.HeadBlockTime); err != nil {
+			return err
+		}
 	}
 	a.RewardHive -= cr.RewardHive.Amount
 	a.Balance += cr.RewardHive.Amount

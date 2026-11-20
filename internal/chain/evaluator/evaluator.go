@@ -117,6 +117,12 @@ func ApplyOp(ctx *Context, o op.Op) error {
 	if err := dispatch[tag].Apply(ctx, o); err != nil {
 		return fmt.Errorf("%s: %w", tag.Name(), err)
 	}
+	// A check hived makes by throwing, reached from code with no error
+	// return (deep RC bookkeeping), fails the operation here; the
+	// transaction's savepoint restore then clears it.
+	if err := ctx.DB.Fault(); err != nil {
+		return fmt.Errorf("%s: %w", tag.Name(), err)
+	}
 	return nil
 }
 

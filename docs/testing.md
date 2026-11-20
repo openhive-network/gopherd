@@ -55,7 +55,7 @@ arithmetic that consensus depends on:
 | `FuzzDecompress` | blocklog/zstd | No crash in libzstd, and output never exceeds the 16 MiB cap. |
 | `FuzzApplyOp` | chain/testfixture | Any operation applied to a funded state, under five hardfork eras: no evaluator panics, and a valid operation conserves HIVE, HBD and VESTS. |
 | `FuzzAPIDispatch`, `FuzzAPIBody` | api | Arbitrary parameters to every JSON-RPC method, and arbitrary request bodies: nothing panics. |
-| `FuzzRegenerateManaMatchesHived` | state/objects | Matches a `math/big` transcription of hived's `regenerate_mana` exactly. |
+| `FuzzRegenerateManaMatchesHived` | state/objects | Matches a `math/big` transcription of hived's `regenerate_mana` exactly, and fails with `ErrManaRegenOverflow` wherever hived throws on an overflowing regeneration. |
 | `FuzzMulDivExact` | chain | Matches the exact truncated quotient whenever the result fits in int64. |
 | `FuzzU128MatchesBig`, `FuzzApproxSqrt` | math128 | Every 128-bit operation matches `math/big`. The square root stays within fc's bounds. |
 
@@ -146,10 +146,8 @@ These are the most valuable places to add tests:
 - **Evaluator coverage** is about 25% of statements. `FuzzApplyOp` reaches
   many more paths, but it only checks for panics and conservation, not for
   behaviour.
-- **`regenerate_mana` where hived throws.** For a regeneration above
-  INT64_MAX, gopherd saturates where hived throws. This is reachable only by an
-  RC bar of about 1e17 that is untouched for over 2.5 years. Applying blocks
-  never meets it, but a gopherd witness could admit such a transaction.
+- **`regenerate_mana` when `now` is before the bar's last update.** hived
+  asserts; gopherd leaves the bar unchanged. No call site passes such a time.
 - **`fixed_string` account names.** hived truncates names at an embedded NUL
   and refuses names longer than 16 bytes when it decodes them. gopherd keeps
   them as strings and relies on later validation.

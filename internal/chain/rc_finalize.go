@@ -179,7 +179,9 @@ func rcHandleExpiredDelegations(s *state.Session, now uint32) {
 			if delegator.DelegatedRCOut < 0 {
 				delegator.DelegatedRCOut = 0
 			}
-			objects.RegenerateRCMana(&delegator, now)
+			if err := objects.RegenerateRCMana(&delegator, now); err != nil {
+				s.Fail(err)
+			}
 			objects.PutAccount(s, &delegator)
 		}
 		objects.DeleteRCDelegationExpiration(s, &e.row)

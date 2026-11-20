@@ -317,12 +317,16 @@ func (accountCreateWithDelegationEvaluator) Apply(ctx *Context, opArg op.Op) err
 	// from fee) are in place.
 	if ctx.Hardforks.Has(hardfork.HF20) {
 		if a, err := objects.GetAccount(ctx.DB, ac.NewAccountName); err == nil {
-			objects.RegenerateRCMana(&a, ctx.HeadBlockTime)
+			if err := objects.RegenerateRCMana(&a, ctx.HeadBlockTime); err != nil {
+				return err
+			}
 			objects.PutAccount(ctx.DB, &a)
 		}
 		// Creator's effective_vests went down → refresh creator too.
 		if creator, err := objects.GetAccount(ctx.DB, ac.Creator); err == nil {
-			objects.RegenerateRCMana(&creator, ctx.HeadBlockTime)
+			if err := objects.RegenerateRCMana(&creator, ctx.HeadBlockTime); err != nil {
+				return err
+			}
 			objects.PutAccount(ctx.DB, &creator)
 		}
 	}

@@ -78,7 +78,9 @@ func (withdrawVestingEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	// not regenerate, so without this the elapsed time was later credited
 	// at the new maximum and the account's mana drifted from hived's.
 	if ctx.Hardforks.Has(hardfork.HF20) {
-		objects.RegenerateRCMana(&a, ctx.HeadBlockTime)
+		if err := objects.RegenerateRCMana(&a, ctx.HeadBlockTime); err != nil {
+			return err
+		}
 	}
 	if w.VestingShares.Amount == 0 {
 		// HIVE_HARDFORK_1_28_FIX_CANCEL_POWER_DOWN (hive_evaluator_transfer.cpp:389):
@@ -353,8 +355,12 @@ func (delegateVestingSharesEvaluator) Apply(ctx *Context, opArg op.Op) error {
 	// without this the time since each side's last update was credited
 	// at the post-delegation maximum.
 	if ctx.Hardforks.Has(hardfork.HF20) {
-		objects.RegenerateRCMana(&delegator, ctx.HeadBlockTime)
-		objects.RegenerateRCMana(&delegatee, ctx.HeadBlockTime)
+		if err := objects.RegenerateRCMana(&delegator, ctx.HeadBlockTime); err != nil {
+			return err
+		}
+		if err := objects.RegenerateRCMana(&delegatee, ctx.HeadBlockTime); err != nil {
+			return err
+		}
 	}
 
 	var dvPoolPct int64 // dgpo.downvote_pool_percent — 0 until HF21

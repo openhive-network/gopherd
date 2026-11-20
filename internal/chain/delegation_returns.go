@@ -108,7 +108,9 @@ func clearExpiredDelegations(s *state.Session, blockTime uint32, d *Database) {
 		// regen at the pre-return cap, bump by the returned amount
 		// (database.cpp:3143-3151), before delegated_vesting shrinks.
 		if hf20 {
-			objects.RegenerateRCMana(&a, blockTime)
+			if err := objects.RegenerateRCMana(&a, blockTime); err != nil {
+				s.Fail(err)
+			}
 			objects.UpdateVotingManabar(&a, blockTime, dvPoolPct, exp.VestingShares, headBlockNum, hf29)
 		}
 		a.DelegatedVestingShares -= exp.VestingShares

@@ -103,6 +103,8 @@ func clearAccount(s *state.Session, name string, d *Database) error {
 			Created:              blockTime,
 			VotingManaCurrent:    10000,
 			VotingManaLastUpdate: blockTime,
+			// See the HF21 creation of steem.dao (hardforks.go).
+			RCManaLastUpdate: blockTime,
 		}
 	}
 
@@ -143,7 +145,9 @@ func clearAccount(s *state.Session, name string, d *Database) error {
 	// VESTS still count; update_account_after_vest_change after they are
 	// zeroed (below) does not regenerate.
 	if account.VestingShares > 0 {
-		objects.RegenerateRCMana(&account, blockTime)
+		if err := objects.RegenerateRCMana(&account, blockTime); err != nil {
+			return err
+		}
 	}
 	for _, dp := range delegations {
 		if da, derr := objects.GetAccount(s, string(dp.delegatee)); derr == nil {
@@ -151,7 +155,9 @@ func clearAccount(s *state.Session, name string, d *Database) error {
 			// the maximum that still includes this delegation and refreshed
 			// once it is gone. The delegatees are live accounts whose mana
 			// feeds the RC stamps of every later transaction they pay for.
-			objects.RegenerateRCMana(&da, blockTime)
+			if err := objects.RegenerateRCMana(&da, blockTime); err != nil {
+				return err
+			}
 			// Mirror hived clear_account (database.cpp:1523-1534): regenerate
 			// the delegatee's manabars (with the cap STILL including this
 			// delegation), drop the received vesting, then CONSUME mana equal
@@ -596,6 +602,8 @@ func consolidateTreasuryBalance(s *state.Session, blockTime uint32, d *Database)
 			Created:              blockTime,
 			VotingManaCurrent:    10000,
 			VotingManaLastUpdate: blockTime,
+			// See the HF21 creation of steem.dao (hardforks.go).
+			RCManaLastUpdate: blockTime,
 		}
 		// database_hardfork.cpp:527-530 — the new treasury is created at HF24
 		// and announced with account_created( name, name, 0, 0 ).

@@ -454,8 +454,8 @@ func maximumRC(a *objects.Account, onlyDelegable bool) int64 {
 //	regen = max * dt / HIVE_RC_REGEN_TIME
 //	current = sat_add(current, regen), clamped to max
 //	last_update = now
-func regenerateRCMana(a *objects.Account, now uint32) {
-	objects.RegenerateRCMana(a, now)
+func regenerateRCMana(a *objects.Account, now uint32) error {
+	return objects.RegenerateRCMana(a, now)
 }
 
 // mul128Div64 computes (a * b) / c with a 128-bit intermediate via
@@ -541,7 +541,9 @@ func applyDelegateRC(ctx *Context, p *DelegateRCParams) error {
 		from.RCManaCurrent = from.LastMaxRC
 		from.RCManaLastUpdate = now
 	}
-	regenerateRCMana(&from, now)
+	if err := regenerateRCMana(&from, now); err != nil {
+		return err
+	}
 
 	// 4. Not while excess delegations of `from` are still being removed
 	// (rc_expired_delegation row, see objects.CheckRCDelegationOverflow).
@@ -583,7 +585,9 @@ func applyDelegateRC(ctx *Context, p *DelegateRCParams) error {
 			to.RCManaCurrent = to.LastMaxRC
 			to.RCManaLastUpdate = now
 		}
-		regenerateRCMana(to, now)
+		if err := regenerateRCMana(to, now); err != nil {
+			return err
+		}
 
 		delta := p.MaxRC - pr.prev
 		if !pr.has {

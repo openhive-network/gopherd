@@ -358,6 +358,13 @@ func applyHardfork(s *state.Session, id hardfork.ID, d *Database) {
 					Created:              dgpo.Time,
 					VotingManaCurrent:    10000,
 					VotingManaLastUpdate: dgpo.Time,
+					// hived creates the treasuries at genesis, so HF20 stamps their RC
+					// bar (database_hardfork.cpp:399-410); an unstamped bar would make
+					// the next uncapped regeneration count from 1970 and overflow
+					// (objects.ErrManaRegenOverflow) for a treasury with large
+					// received delegations. Stamping at creation, which is after
+					// HF20, never idles the bar longer than hived's.
+					RCManaLastUpdate: dgpo.Time,
 				})
 				// database_hardfork.cpp:427-430 — account_created( name, name, 0, 0 ).
 				if d != nil {

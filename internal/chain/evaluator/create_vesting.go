@@ -188,7 +188,9 @@ func createVestingImpl(s *state.Session, accountName string, hiveSatoshi int64, 
 				// (below) then hands out the new headroom once. Skipping the
 				// pre-change regeneration here was 99 % of the "not regenerated
 				// prior to VEST change" count, and under HF29 hived asserts it.
-				objects.RegenerateRCMana(a, dgpoRef.Time)
+				if err := objects.RegenerateRCMana(a, dgpoRef.Time); err != nil {
+					s.Fail(err) // fails the operation, or the block (automatic processing)
+				}
 				objects.UpdateVotingManabar(a, dgpoRef.Time, dvPoolPct, vestsAmount, dgpoRef.HeadBlockNumber, manabarHF29)
 			}
 			a.VestingShares += vestsAmount

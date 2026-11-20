@@ -109,6 +109,14 @@ type Session struct {
 	// committed before this Session started, which is now stale
 	// relative to the surviving overlay state.
 	mistrustDBAux bool
+	// fault is the first error recorded by Fail: a consensus check that
+	// hived makes by throwing, reached from code that has no error return
+	// (per-block hooks, deep RC bookkeeping). A Savepoint captures it and
+	// Restore puts it back, so a transaction that faults and is rolled back
+	// leaves no fault behind, exactly as hived's undo session unwinds the
+	// exception's effects. Whatever is still set when the block ends fails
+	// the block.
+	fault error
 	// undoLog records overlay pre-images for every Put/Delete made
 	// while at least one Savepoint is OUTSTANDING (incremented by
 	// Snapshot, decremented by Restore). Restore replays the relevant
@@ -452,6 +460,7 @@ func (s *Session) SoftCommit() {
 	s.db.UndoEnabled = false
 	s.mistrustDBAux = false
 	s.snapshotGen = 0
+	s.fault = nil
 	s.db.commitAll()
 }
 
@@ -497,6 +506,7 @@ func (s *Session) Commit(sync bool) error {
 	s.db.UndoEnabled = false
 	s.mistrustDBAux = false
 	s.snapshotGen = 0
+	s.fault = nil
 	s.db.commitAll()
 	// Drop the cached pebble/mem iter: Pebble iterators take a snapshot at
 	// creation time and SetBounds re-positions WITHIN that snapshot — they
@@ -564,8 +574,22 @@ func (s *Session) Undo() {
 	s.db.UndoEnabled = false
 	s.mistrustDBAux = false
 	s.snapshotGen = 0
+	s.fault = nil
 	s.db.undoAll()
 }
+
+// Fail records err as the session's fault unless one is already set; the
+// first fault wins. Use it where hived throws but the Go code path has no
+// error return. evaluator.ApplyOp turns a fault into the operation's error,
+// and block application refuses a block that ends with one.
+func (s *Session) Fail(err error) {
+	if err != nil && s.fault == nil {
+		s.fault = err
+	}
+}
+
+// Fault returns the error recorded by Fail, or nil.
+func (s *Session) Fault() error { return s.fault }
 
 // Empty reports whether the session has any pending modifications.
 func (s *Session) Empty() bool { return len(s.overlay) == 0 }
@@ -587,6 +611,7 @@ type Savepoint struct {
 	undoLogLen   int
 	dirtyKeysLen int
 	preCommitLen int
+	fault        error
 	// subsystemPoints captures the SnapshotPoint() of each registered
 	// state.Database subsystem (typed in-memory containers like
 	// objects.WitnessStore). Restore replays each subsystem's undo
@@ -617,6 +642,7 @@ func (s *Session) Snapshot() Savepoint {
 		undoLogLen:      len(s.undoLog),
 		dirtyKeysLen:    len(s.dirtyKeys),
 		preCommitLen:    len(s.preCommit),
+		fault:           s.fault,
 		subsystemPoints: subPts,
 	}
 }
@@ -677,6 +703,7 @@ func (s *Session) Restore(sp Savepoint) {
 	if sp.preCommitLen >= 0 && sp.preCommitLen <= len(s.preCommit) {
 		s.preCommit = s.preCommit[:sp.preCommitLen]
 	}
+	s.fault = sp.fault
 	if s.snapshotDepth > 0 {
 		s.snapshotDepth--
 	}

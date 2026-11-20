@@ -114,7 +114,9 @@ func clearNullAccountBalance(s *state.Session, blockNum uint32, d *Database) {
 			rcNow = dgpoRef.Time
 		}
 		if rcNow != 0 {
-			objects.RegenerateRCMana(&a, rcNow)
+			if err := objects.RegenerateRCMana(&a, rcNow); err != nil {
+				s.Fail(err)
+			}
 		}
 		dgpo, err := objects.GetDGPO(s)
 		if err == nil && dgpo.TotalVestingShares > 0 {

@@ -1,6 +1,8 @@
 package objects
 
 import (
+	"errors"
+	"fmt"
 	"math/bits"
 	"sync/atomic"
 )
@@ -89,19 +91,41 @@ func (a *Account) MaximumRC() int64 {
 // current_mana refill all the way even after a long absence.
 //
 // Returns the updated current_mana and last_update_time (the caller
-// is expected to write them back to the account).
+// is expected to write them back to the account). Where hived throws, it
+// returns them unchanged; only an uncapped (RC) regeneration can reach that,
+// and the RC paths use RegenerateManaChecked to see it.
 func RegenerateMana(current int64, lastUpdate uint32, params ManabarParams, now uint32, skipCapRegen bool) (int64, uint32) {
+	m, u, err := RegenerateManaChecked(current, lastUpdate, params, now, skipCapRegen)
+	if err != nil {
+		return current, lastUpdate
+	}
+	return m, u
+}
+
+// ErrManaRegenOverflow is hived's
+// FC_ASSERT( u_regen <= INT64_MAX ) in regenerate_mana (manabar.hpp:62-63).
+// With the elapsed time capped at regen_time the regeneration never exceeds
+// max_mana, so only RC's uncapped regeneration (skip_cap_regen=true,
+// rc_utility.cpp:365, 379, 528) can fail it: max_rc x seconds idle /
+// 432000 above INT64_MAX, e.g. a maximum of 5e16 idle for 2.5 years. hived
+// rethrows from every one of those sites, so the transaction, or the block
+// whose automatic processing reached it, is invalid.
+var ErrManaRegenOverflow = errors.New("manabar regeneration overflows int64")
+
+// RegenerateManaChecked is RegenerateMana that reports hived's overflow
+// assertion as ErrManaRegenOverflow instead of leaving the bar unchanged.
+func RegenerateManaChecked(current int64, lastUpdate uint32, params ManabarParams, now uint32, skipCapRegen bool) (int64, uint32, error) {
 	if params.RegenTime == 0 {
-		return current, now
+		return current, now, nil
 	}
 	// C++ clamps current to max BEFORE the dt==0 check — this is also the
 	// path that zeroes a stale manabar when effective vests drop to 0
 	// (max_mana=0), so it must not be short-circuited for MaxMana<=0.
 	if current >= params.MaxMana {
-		return params.MaxMana, now
+		return params.MaxMana, now, nil
 	}
 	if now <= lastUpdate {
-		return current, lastUpdate
+		return current, lastUpdate, nil
 	}
 	dt := now - lastUpdate
 	if !skipCapRegen && dt > params.RegenTime {
@@ -120,23 +144,20 @@ func RegenerateMana(current int64, lastUpdate uint32, params ManabarParams, now 
 		maxForRegen = uint64(params.MaxMana)
 	}
 	hi, lo := bits.Mul64(maxForRegen, uint64(dt))
+	// hi >= regen_time means the quotient does not fit uint64 (hived's
+	// uint128_to_uint64 throws); otherwise it must still fit int64.
 	if hi >= uint64(params.RegenTime) {
-		// Quotient would overflow uint64 — saturate.
-		newMana := saturatedAdd(current, int64Max)
-		if newMana > params.MaxMana {
-			newMana = params.MaxMana
-		}
-		return newMana, now
+		return current, lastUpdate, ErrManaRegenOverflow
 	}
 	regen, _ := bits.Div64(hi, lo, uint64(params.RegenTime))
 	if regen > uint64(int64Max) {
-		regen = uint64(int64Max)
+		return current, lastUpdate, ErrManaRegenOverflow
 	}
 	newMana := saturatedAdd(current, int64(regen))
 	if newMana > params.MaxMana {
 		newMana = params.MaxMana
 	}
-	return newMana, now
+	return newMana, now, nil
 }
 
 // UseMana subtracts `cost` from `current`, saturating at minMana.
@@ -156,8 +177,9 @@ func UseMana(current, cost, minMana int64) int64 {
 // Mirrors resource_credits::regenerate_rc_mana (rc_utility.cpp:318).
 //
 // Caller is responsible for HF gating (this is HF20+ only) and for
-// writing the account back via PutAccount.
-func RegenerateRCMana(a *Account, now uint32) {
+// writing the account back via PutAccount, and for failing the operation
+// (or the block) on an ErrManaRegenOverflow error.
+func RegenerateRCMana(a *Account, now uint32) error {
 	maxRC := a.MaximumRC()
 	// hived warns here and, once HF29 lands, throws:
 	//
@@ -183,7 +205,7 @@ func RegenerateRCMana(a *Account, now uint32) {
 			noteRCStaleCaller(2)
 		}
 	}
-	regenerateRCManabar(a, maxRC, now)
+	return regenerateRCManabar(a, maxRC, now)
 }
 
 // RegenerateRCManabar regenerates the RC manabar against the account's
@@ -192,13 +214,19 @@ func RegenerateRCMana(a *Account, now uint32) {
 // hived does when charging a transaction's payer (use_account_rcs,
 // rc_utility.cpp:527) and in update_account_after_rc_delegation; neither
 // warns about a stale last_max_rc.
-func RegenerateRCManabar(a *Account, now uint32) {
-	regenerateRCManabar(a, a.MaximumRC(), now)
+func RegenerateRCManabar(a *Account, now uint32) error {
+	return regenerateRCManabar(a, a.MaximumRC(), now)
 }
 
-func regenerateRCManabar(a *Account, maxRC int64, now uint32) {
+func regenerateRCManabar(a *Account, maxRC int64, now uint32) error {
 	params := ManabarParams{MaxMana: maxRC, RegenTime: RCRegenTimeSec}
-	a.RCManaCurrent, a.RCManaLastUpdate = RegenerateMana(a.RCManaCurrent, a.RCManaLastUpdate, params, now, true)
+	m, u, err := RegenerateManaChecked(a.RCManaCurrent, a.RCManaLastUpdate, params, now, true)
+	if err != nil {
+		return fmt.Errorf("account %s RC (max %d, last update %d, now %d): %w",
+			a.Name, maxRC, a.RCManaLastUpdate, now, err)
+	}
+	a.RCManaCurrent, a.RCManaLastUpdate = m, u
+	return nil
 }
 
 // rcStaleMaxCount counts how often an account reached RegenerateRCMana with a

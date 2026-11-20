@@ -166,7 +166,11 @@ func applyRCForTx(s *state.Session, stx *tx.SignedTransaction, blockNum, blockTi
 	info.Max = a.MaximumRC()
 	// use_account_rcs regenerates the manabar directly: no stale
 	// last_max_rc warning and no write to it (rc_utility.cpp:527).
-	objects.RegenerateRCManabar(&a, blockTime)
+	if err := objects.RegenerateRCManabar(&a, blockTime); err != nil {
+		// use_account_rcs rethrows (rc_utility.cpp:609) whether or not RC
+		// is enforced: the transaction is invalid.
+		return err
+	}
 	// util::manabar::use_mana (manabar.hpp:87-95) saturates at min_mana,
 	// and rc_utility.cpp:604 calls it with the default, i.e. 0. There is no
 	// HIVE_RC_MAX_NEGATIVE_PERCENT anywhere in hived; the 10 % negative
@@ -355,7 +359,9 @@ func HasSufficientRC(s *state.Session, stx *tx.SignedTransaction, blockNum, bloc
 		return nil // unknown payer: let the apply path produce the canonical error
 	}
 	// Regenerate on a COPY: this must not persist.
-	objects.RegenerateRCManabar(&a, blockTime)
+	if err := objects.RegenerateRCManabar(&a, blockTime); err != nil {
+		return err
+	}
 	if a.RCManaCurrent < cost {
 		return fmt.Errorf("%w: account %q has %d RC, needs %d RC",
 			ErrInsufficientRC, payer, a.RCManaCurrent, cost)

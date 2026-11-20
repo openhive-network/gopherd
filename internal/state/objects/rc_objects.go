@@ -1051,7 +1051,10 @@ func RemoveRCDelegations(s *state.Session, overflow *int64, from auth.AccountNam
 		if to, err := GetAccount(s, d.To); err == nil {
 			// The recipient was not part of the operation, so its mana is
 			// regenerated before the delegation changes.
-			UpdateAccountAfterRCDelegation(&to, now, -delta, true)
+			if err := UpdateAccountAfterRCDelegation(&to, now, -delta, true); err != nil {
+				s.Fail(err)
+				return
+			}
 			PutAccount(s, &to)
 		}
 		*overflow -= delta
@@ -1063,10 +1066,12 @@ func RemoveRCDelegations(s *state.Session, overflow *int64, from auth.AccountNam
 // the recipient's received RC moves by delta, and so do its current mana
 // (floored at zero) and last_max_rc, which is the maximum before the change
 // plus delta.
-func UpdateAccountAfterRCDelegation(a *Account, now uint32, delta int64, regenerate bool) {
+func UpdateAccountAfterRCDelegation(a *Account, now uint32, delta int64, regenerate bool) error {
 	maxRC := a.MaximumRC()
 	if regenerate {
-		regenerateRCManabar(a, maxRC, now)
+		if err := regenerateRCManabar(a, maxRC, now); err != nil {
+			return err
+		}
 	}
 	a.RCManaCurrent += delta
 	if a.RCManaCurrent < 0 {
@@ -1074,6 +1079,7 @@ func UpdateAccountAfterRCDelegation(a *Account, now uint32, delta int64, regener
 	}
 	a.LastMaxRC = maxRC + delta
 	a.DelegatedRCIn += delta
+	return nil
 }
 
 // ProcessRCExpiredDelegations is resource_credits::handle_expired_delegations
